@@ -72,7 +72,9 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True):
         state = send({"cmd": "start_run", "character": character, "seed": seed})
 
         step = 0
-        max_steps = 2000  # Safety limit
+        max_steps = 500  # Safety limit
+        stuck_count = 0
+        last_state_key = None
 
         while step < max_steps:
             step += 1
@@ -82,6 +84,20 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True):
                 break
 
             decision = state.get("decision", "")
+
+            # Stuck detection
+            state_key = f"{decision}:{state.get('round')}:{state.get('player',{}).get('hp')}"
+            if state_key == last_state_key:
+                stuck_count += 1
+                if stuck_count > 15:
+                    print(f"  STUCK after {step} steps, forcing quit")
+                    return {"victory": False, "seed": seed, "steps": step,
+                            "act": state.get("act"), "floor": state.get("floor"),
+                            "hp": state.get("player", {}).get("hp"),
+                            "max_hp": state.get("player", {}).get("max_hp")}
+            else:
+                stuck_count = 0
+                last_state_key = state_key
 
             if decision == "game_over":
                 victory = state.get("victory", False)

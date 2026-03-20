@@ -772,23 +772,40 @@ public class RunSimulator
 
     private Dictionary<string, object?> ShopState(MerchantRoom merchantRoom, Player player)
     {
-        // In TestMode, auto-handle shop — just leave
+        // Auto-skip shop — force enter map room
         Log("Shop room — auto-leaving in headless mode");
-        // Exit shop by entering map
-        RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
-        WaitForActionExecutor();
-        return DetectDecisionPoint();
+        try
+        {
+            RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult();
+            for (int i = 0; i < 20; i++) { _syncCtx.Pump(); Thread.Sleep(20); }
+        }
+        catch (Exception ex)
+        {
+            Log($"Skip shop failed: {ex.Message}");
+        }
+        return MapSelectState();
     }
 
     private Dictionary<string, object?> TreasureState(TreasureRoom treasureRoom)
     {
-        // In TestMode, treasures are auto-handled
+        // Auto-handle treasure room and proceed to map
         Log("Treasure room — auto-proceeding");
-        treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
-        treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
-        RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
-        WaitForActionExecutor();
-        return DetectDecisionPoint();
+        try
+        {
+            treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
+            _syncCtx.Pump();
+            treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
+            _syncCtx.Pump();
+        }
+        catch (Exception ex) { Log($"Treasure rewards: {ex.Message}"); }
+
+        try
+        {
+            RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult();
+            for (int i = 0; i < 20; i++) { _syncCtx.Pump(); Thread.Sleep(20); }
+        }
+        catch (Exception ex) { Log($"Skip treasure failed: {ex.Message}"); }
+        return MapSelectState();
     }
 
     private Dictionary<string, object?> GameOverState(bool isVictory)
