@@ -846,14 +846,21 @@ public class RunSimulator
         // Check if there's a pending card selection (upgrade, remove, transform, bundle)
         if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
         {
-            var opts = _cardSelector.PendingOptions.Select((card, i) => new Dictionary<string, object?>
+            var opts = _cardSelector.PendingOptions.Select((card, i) =>
             {
-                ["index"] = i,
-                ["id"] = card.Id.ToString(),
-                ["name"] = _loc.Card(card.Id.Entry),
-                ["cost"] = card.EnergyCost?.GetResolved() ?? 0,
-                ["type"] = card.Type.ToString(),
-                ["upgraded"] = card.IsUpgraded,
+                var stats = new Dictionary<string, object?>();
+                try { foreach (var dv in card.DynamicVars.Values) stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
+                return new Dictionary<string, object?>
+                {
+                    ["index"] = i,
+                    ["id"] = card.Id.ToString(),
+                    ["name"] = _loc.Card(card.Id.Entry),
+                    ["cost"] = card.EnergyCost?.GetResolved() ?? 0,
+                    ["type"] = card.Type.ToString(),
+                    ["upgraded"] = card.IsUpgraded,
+                    ["stats"] = stats.Count > 0 ? stats : null,
+                    ["description"] = _loc.Bilingual("cards", card.Id.Entry + ".description"),
+                };
             }).ToList();
 
             return new Dictionary<string, object?>

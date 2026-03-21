@@ -635,7 +635,17 @@ def play(character="Ironclad", seed=None, auto=False):
                 cards = state.get("cards", [])
                 for cd in cards:
                     up = c("⬆", "green") if cd.get("upgraded") else ""
-                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')}")
+                    stats = cd.get("stats") or {}
+                    stat_parts = []
+                    if "damage" in stats: stat_parts.append(c(f"{stats['damage']}dmg", "red"))
+                    if "block" in stats: stat_parts.append(c(f"{stats['block']}blk", "blue"))
+                    for k, v in stats.items():
+                        if k not in ("damage", "block"): stat_parts.append(f"{v}{k}")
+                    stat_str = " ".join(stat_parts)
+                    card_desc = desc(cd.get("description", {}))
+                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')} {stat_str}")
+                    if card_desc:
+                        print(f"      {c(card_desc, 'dim')}")
 
                 valid = {str(cd["index"]): cd for cd in cards}
                 if min_sel == 0:
