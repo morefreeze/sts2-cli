@@ -695,7 +695,8 @@ public class RunSimulator
             if (localEvent != null && !localEvent.IsFinished)
             {
                 var options = localEvent.CurrentOptions;
-                if (optionIndex >= 0 && optionIndex < options.Count)
+                var optCountBefore = options?.Count ?? 0;
+                if (options != null && optionIndex >= 0 && optionIndex < options.Count)
                 {
                     try
                     {
@@ -703,6 +704,15 @@ public class RunSimulator
                         _syncCtx.Pump();
                     }
                     catch (Exception ex) { Log($"Event choose: {ex.Message}"); }
+                }
+
+                // If event didn't advance (same options count, not finished),
+                // force-finish it to prevent infinite loop
+                var optCountAfter = localEvent.CurrentOptions?.Count ?? 0;
+                if (!localEvent.IsFinished && optCountAfter == optCountBefore && optCountAfter > 0)
+                {
+                    Log($"Event {localEvent.GetType().Name} didn't advance after choose, force-finishing");
+                    ForceToMap();
                 }
             }
         }
