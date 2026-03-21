@@ -183,8 +183,9 @@
       "bases:Create new base": false
     }
   },
-  "active": "aaeefdc2ca1ffeca",
+  "active": "9607fca0d5fe0557",
   "lastOpenFiles": [
+    "learning.md",
     "python/play.py",
     "localization_eng/vfx.json",
     "localization_eng/timeline.json",
@@ -194,7 +195,6 @@
     "localization_eng/run_history.json",
     "localization_eng/rich_presence.json",
     "localization_eng/rest_site_ui.json",
-    "localization_eng/relics.json",
-    "localization_eng/relic_collection.json"
+    "localization_eng/relics.json"
   ]
 }

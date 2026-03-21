@@ -192,8 +192,10 @@ public class RunSimulator
             RunManager.Instance.SetUpTest(_runState, netService);
             LocalContext.NetId = netService.NetId;
 
-            // Skip Neow event — it requires complex multi-page interaction.
-            // Non-Neow events (which have simpler option structures) work with our loc patches.
+            // Neow event gives 3 blessing options at the start.
+            // But our loc patches cause Neow's GenerateInitialOptions to fail silently.
+            // Disable Neow for now — the blessings are relics and would need
+            // proper loc data to display option descriptions.
             _runState.ExtraFields.StartedWithNeow = false;
 
             // Generate rooms for all acts
