@@ -621,6 +621,30 @@ def play(character="Ironclad", seed=None, auto=False):
                     state = send({"cmd": "action", "action": "select_card_reward",
                                  "args": {"card_index": int(choice)}})
 
+            elif dec == "bundle_select":
+                print(f"\n{'─' * 60}")
+                ctx = state.get("context", {})
+                if ctx:
+                    print(f"  {c(n(ctx.get('act_name','?')), 'dim')} Floor {ctx.get('floor','?')}")
+                print(f"  {c('Choose a card pack', 'bold')}")
+                show_player(state.get("player", {}))
+                print()
+                bundles = state.get("bundles", [])
+                for b in bundles:
+                    print(f"  {c(f'Pack [{b[\"index\"]}]:', 'yellow')}")
+                    for cd in b.get("cards", []):
+                        card_desc = desc(cd.get("description", {}))
+                        print(f"    {n(cd['name'])} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')}")
+                        if card_desc:
+                            print(f"      {c(card_desc, 'dim')}")
+                valid = {str(b["index"]): b for b in bundles}
+                if auto:
+                    choice = "0"
+                else:
+                    choice = get_input("Choose pack [index]", set(valid.keys()), state=state)
+                state = send({"cmd": "action", "action": "select_bundle",
+                             "args": {"bundle_index": int(choice)}})
+
             elif dec == "card_select":
                 # Card selection prompt (upgrade, remove, transform, bundle pick)
                 print(f"\n{'─' * 60}")

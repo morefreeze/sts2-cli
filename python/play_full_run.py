@@ -212,6 +212,10 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True):
                 else:
                     state = send({"cmd": "action", "action": "skip_card_reward"})
 
+            elif decision == "bundle_select":
+                state = send({"cmd": "action", "action": "select_bundle",
+                             "args": {"bundle_index": 0}})
+
             elif decision == "card_select":
                 # Auto-select first card
                 cards = state.get("cards", [])

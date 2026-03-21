@@ -167,6 +167,9 @@ public class RunSimulator
     private CardReward? _pendingCardReward;
     private bool _rewardsProcessed;
     private readonly HeadlessCardSelector _cardSelector = new();
+    // Pending bundle selection (Scroll Boxes: pick 1 of N packs)
+    private IReadOnlyList<IReadOnlyList<CardModel>>? _pendingBundles;
+    private TaskCompletionSource<int>? _pendingBundleTcs;
 
     public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null)
     {
@@ -218,6 +221,7 @@ public class RunSimulator
 
             // Register card selector for cards that need player choice
             CardSelectCmd.UseSelector(_cardSelector);
+            LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
             return DetectDecisionPoint();
@@ -259,6 +263,8 @@ public class RunSimulator
                     return DoBuyPotion(player, args);
                 case "remove_card":
                     return DoRemoveCard(player);
+                case "select_bundle":
+                    return DoSelectBundle(player, args);
                 case "select_cards":
                     return DoSelectCards(player, args);
                 case "skip_select":
@@ -581,6 +587,26 @@ public class RunSimulator
         return DetectDecisionPoint();
     }
 
+    private Dictionary<string, object?> DoSelectBundle(Player player, Dictionary<string, object?>? args)
+    {
+        if (_pendingBundleTcs == null || _pendingBundles == null)
+            return Error("No pending bundle selection");
+        if (args == null || !args.ContainsKey("bundle_index"))
+            return Error("select_bundle requires 'bundle_index'");
+
+        var idx = Convert.ToInt32(args["bundle_index"]);
+        Log($"Bundle selection: pack {idx}");
+        _pendingBundleTcs.TrySetResult(idx);
+        _pendingBundles = null;
+        _pendingBundleTcs = null;
+
+        // Wait for the rest of the event to complete
+        Thread.Sleep(100);
+        _syncCtx.Pump();
+        WaitForActionExecutor();
+        return DetectDecisionPoint();
+    }
+
     private Dictionary<string, object?> DoSelectCards(Player player, Dictionary<string, object?>? args)
     {
         if (!_cardSelector.HasPending)
@@ -843,7 +869,32 @@ public class RunSimulator
             return GameOverState(false);
         }
 
-        // Check if there's a pending card selection (upgrade, remove, transform, bundle)
+        // Check if there's a pending bundle selection (Scroll Boxes: pick 1 of N packs)
+        if (_pendingBundles != null && _pendingBundleTcs != null && !_pendingBundleTcs.Task.IsCompleted)
+        {
+            var bundles = _pendingBundles.Select((bundle, i) => new Dictionary<string, object?>
+            {
+                ["index"] = i,
+                ["cards"] = bundle.Select(card => new Dictionary<string, object?>
+                {
+                    ["name"] = _loc.Card(card.Id.Entry),
+                    ["cost"] = card.EnergyCost?.GetResolved() ?? 0,
+                    ["type"] = card.Type.ToString(),
+                    ["description"] = _loc.Bilingual("cards", card.Id.Entry + ".description"),
+                }).ToList(),
+            }).ToList();
+
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "decision",
+                ["decision"] = "bundle_select",
+                ["context"] = RunContext(),
+                ["bundles"] = bundles,
+                ["player"] = PlayerSummary(player),
+            };
+        }
+
+        // Check if there's a pending card selection (upgrade, remove, transform)
         if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
         {
             var opts = _cardSelector.PendingOptions.Select((card, i) =>
@@ -1994,42 +2045,43 @@ public class RunSimulator
         }
 
         /// <summary>
-        /// Intercept bundle selection screen — flatten bundles into one card list
-        /// and use the CardSelectCmd.Selector (HeadlessCardSelector) to pick.
+        /// Intercept bundle selection — store bundles and wait for player to pick a pack index.
         /// </summary>
         public static bool BundleScreenPrefix(
             MegaCrit.Sts2.Core.Entities.Players.Player player,
             IReadOnlyList<IReadOnlyList<CardModel>> bundles,
             ref Task<IEnumerable<CardModel>> __result)
         {
-            var selector = MegaCrit.Sts2.Core.Commands.CardSelectCmd.Selector;
-            if (selector != null && bundles.Count > 0)
+            if (bundles.Count == 0)
             {
-                // Present all cards from all bundles, grouped
-                // The selector picks cards from the combined list
-                // Then we return the bundle that contains those cards
-                var allCards = new List<CardModel>();
-                foreach (var bundle in bundles)
-                    allCards.AddRange(bundle);
-
-                __result = selector.GetSelectedCards(allCards, 1, allCards.Count)
-                    .ContinueWith(t =>
-                    {
-                        var selected = t.Result?.ToList() ?? new List<CardModel>();
-                        // Find which bundle the first selected card belongs to
-                        foreach (var bundle in bundles)
-                        {
-                            if (selected.Any(s => bundle.Contains(s)))
-                                return (IEnumerable<CardModel>)bundle;
-                        }
-                        return (IEnumerable<CardModel>)(bundles.Count > 0 ? bundles[0] : Array.Empty<CardModel>());
-                    });
-                return false; // skip original
+                __result = Task.FromResult<IEnumerable<CardModel>>(Array.Empty<CardModel>());
+                return false;
             }
-            // No selector — auto-pick first bundle
-            __result = Task.FromResult<IEnumerable<CardModel>>(bundles.Count > 0 ? bundles[0] : Array.Empty<CardModel>());
+
+            // Store pending bundles for the main loop to present
+            var sim = _bundleSimRef;
+            if (sim != null)
+            {
+                sim._pendingBundles = bundles;
+                sim._pendingBundleTcs = new TaskCompletionSource<int>();
+                Console.Error.WriteLine($"[SIM] Bundle selection pending: {bundles.Count} packs");
+
+                __result = sim._pendingBundleTcs.Task.ContinueWith(t =>
+                {
+                    var idx = t.Result;
+                    if (idx >= 0 && idx < bundles.Count)
+                        return (IEnumerable<CardModel>)bundles[idx];
+                    return (IEnumerable<CardModel>)bundles[0];
+                });
+                return false;
+            }
+
+            __result = Task.FromResult<IEnumerable<CardModel>>(bundles[0]);
             return false;
         }
+
+        // Static reference so Harmony patch can access the simulator instance
+        internal static RunSimulator? _bundleSimRef;
 
         public static bool GetLocStringsWithPrefixPrefix(ref IReadOnlyList<LocString> __result)
         {
