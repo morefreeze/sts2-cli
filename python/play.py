@@ -197,8 +197,12 @@ def show_combat(state):
                 intent_parts.append(c(t("🛡DEF","🛡防御"), "blue"))
             elif itype in ("Buff", "Heal"):
                 intent_parts.append(c(t(f"⬆{itype}",f"⬆{'增益' if itype=='Buff' else '回复'}"), "magenta"))
-            elif itype in ("Debuff", "DebuffStrong", "CardDebuff", "StatusCard"):
-                intent_parts.append(c(t(f"⬇{itype}","⬇减益"), "yellow"))
+            elif itype == "Debuff":
+                intent_parts.append(c(t("⬇Debuff","⬇减益"), "yellow"))
+            elif itype == "DebuffStrong":
+                intent_parts.append(c(t("⬇Strong","⬇强减益"), "yellow"))
+            elif itype in ("CardDebuff", "StatusCard"):
+                intent_parts.append(c(t("⬇Cards","⬇塞牌"), "yellow"))
             elif itype == "DeathBlow":
                 if dmg is not None:
                     intent_parts.append(c(f"💀{dmg}", "red"))
