@@ -13,17 +13,20 @@ Headless Slay the Spire 2 CLI. Play the full game from a terminal — no GPU, no
 ## Quick Start
 
 ```bash
-# Build (requires ARM64 .NET SDK + game DLLs in lib/)
-~/.dotnet-arm64/dotnet build Sts2Headless/Sts2Headless.csproj
+# 1. Setup: copy game DLLs + apply IL patches + build
+./setup.sh
 
-# Play interactively
+# 2. Play interactively (Chinese by default)
 python3 python/play.py
+
+# Play in English
+python3 python/play.py --lang en
 
 # Auto-play (simple AI)
 python3 python/play.py --auto --seed test123
 
-# Run 100 games with random agent
-python3 python/play_full_run.py 100 Ironclad
+# Run 100 games with smart agent
+python3 python/smart_agent.py 100
 ```
 
 ## Interactive Mode
@@ -39,25 +42,35 @@ Character: Ironclad  Seed: random
   The Ironclad(铁甲战士)  HP ████████████████████ 80/80  Gold 99  Deck 10
   Relics: Burning Blood(燃烧之血)
 
-  [3,0] ⚔ Monster
-  [2,1] ⚔ Monster
-  [5,1] ❓ Unknown
+     0   1   2   3   4   5   6
+  ──────────────────────────────
+  15|  R           R           R
+  14|  ?       E   M   E
+   ...
+   1|      M       M           M
+  ──────────────────────────────
+  M=怪 E=英 R=休 $=店 T=宝 ?=事 [x]=你 x=可选
 
-> Choose node (col,row): 3,0
+  可选路径:
+    [0] ⚔ 怪物
+    [1] ⚔ 怪物
+    [2] ⚔ 怪物
+
+> 选择路径 [编号]: 0
 
 ──────────────────────────────────────────────────
-  Round 1  Energy 3/3  Draw 5  Discard 0
+  回合 1  能量3/3  抽牌5  弃牌0
+  铁甲战士  HP ████████████████████ 80/80  金99  牌组10
 
-  [0] Nibbit(小啃兽)  ████████████████████ 44/44  ⚔ ATK
+  [0] 小啃兽  ████████████████████ 44/44  ⚔12
 
-  ● [0] Defend(防御) (1) Skill
-  ● [1] Strike(打击) (1) Attack  → AnyEnemy
-  ● [2] Strike(打击) (1) Attack  → AnyEnemy
-  ● [3] Defend(防御) (1) Skill
-  ● [4] Bash(痛击)   (2) Attack  → AnyEnemy
+  ● [0] 防御 (1) 5挡
+  ● [1] 打击 (1) 6伤  →
+  ● [2] 打击 (1) 6伤  →
+  ● [3] 防御 (1) 5挡
+  ● [4] 痛击 (2) 8伤  →
 
-> Play card [index] or (e)nd turn: 4
-> Target enemy [index]: 0
+> 出牌 [编号], (e)结束回合, (p0)药水: 4
 ```
 
 ## JSON Protocol
@@ -199,9 +212,11 @@ Bilingual localization data extracted from the game:
 
 ## Prerequisites
 
-- ARM64 .NET 9+ SDK at `~/.dotnet-arm64/`
-- Game DLLs in `lib/` (from Steam installation of STS2)
-- Python 3.9+ (for play.py)
+- **Slay the Spire 2** installed via Steam
+- **.NET 9+ SDK** ([download](https://dotnet.microsoft.com/download))
+- **Python 3.9+** (for play.py)
+
+Run `./setup.sh` to automatically copy game DLLs, apply IL patches, and build.
 
 ## Characters
 

@@ -38,11 +38,14 @@ class Program
             if (File.Exists(path))
                 return ctx.LoadFromAssemblyPath(Path.GetFullPath(path));
 
-            // Also check game directory
-            var gameDir = "/Users/haowu/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64";
-            path = Path.Combine(gameDir, name.Name + ".dll");
-            if (File.Exists(path))
-                return ctx.LoadFromAssemblyPath(path);
+            // Also check game directory (via STS2_GAME_DIR env var)
+            var gameDir = Environment.GetEnvironmentVariable("STS2_GAME_DIR") ?? "";
+            if (!string.IsNullOrEmpty(gameDir))
+            {
+                path = Path.Combine(gameDir, name.Name + ".dll");
+                if (File.Exists(path))
+                    return ctx.LoadFromAssemblyPath(path);
+            }
 
             return null;
         };
