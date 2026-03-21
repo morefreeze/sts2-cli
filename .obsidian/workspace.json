@@ -185,16 +185,16 @@
   },
   "active": "aaeefdc2ca1ffeca",
   "lastOpenFiles": [
-    "Sts2Headless/obj/Debug/net9.0/Sts2Headless.csproj.FileListAbsolute.txt",
-    "Sts2Headless/bin/Debug/net9.0/Sts2Headless.pdb",
-    "Sts2Headless/obj/Debug/net9.0/ref/Sts2Headless.dll",
-    "Sts2Headless/bin/Debug/net9.0/Sts2Headless.dll",
-    "Sts2Headless/bin/Debug/net9.0/Sts2Headless.runtimeconfig.json",
-    "Sts2Headless/obj/Debug/net9.0/Sts2Headless.genruntimeconfig.cache",
-    "Sts2Headless/bin/Debug/net9.0/Sts2Headless.deps.json",
-    "Sts2Headless/bin/Debug/net9.0/Sts2Headless",
-    "Sts2Headless/obj/Debug/net9.0/Sts2Head.62972CA1.Up2Date",
-    "Sts2Headless/bin/Debug/net9.0/GodotSharp.pdb",
-    "Sts2Headless/bin/Debug/net9.0/GodotSharp.dll"
+    "localization_eng/vfx.json",
+    "localization_eng/timeline.json",
+    "localization_eng/stats_screen.json",
+    "localization_eng/static_hover_tips.json",
+    "localization_eng/settings_ui.json",
+    "localization_eng/run_history.json",
+    "localization_eng/rich_presence.json",
+    "localization_eng/rest_site_ui.json",
+    "localization_eng/relics.json",
+    "localization_eng/relic_collection.json",
+    "localization_eng/powers.json"
   ]
 }

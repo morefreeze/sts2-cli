@@ -85,6 +85,70 @@ internal class InlineSynchronizationContext : SynchronizationContext
 }
 
 /// <summary>
+/// Bilingual localization lookup — loads eng/zhs JSON files for display names.
+/// </summary>
+internal class LocLookup
+{
+    private readonly Dictionary<string, Dictionary<string, string>> _eng = new();
+    private readonly Dictionary<string, Dictionary<string, string>> _zhs = new();
+
+    public LocLookup()
+    {
+        var baseDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
+        Load(Path.Combine(baseDir, "localization_eng"), _eng);
+        Load(Path.Combine(baseDir, "localization_zhs"), _zhs);
+    }
+
+    private static void Load(string dir, Dictionary<string, Dictionary<string, string>> target)
+    {
+        if (!Directory.Exists(dir)) return;
+        foreach (var file in Directory.GetFiles(dir, "*.json"))
+        {
+            try
+            {
+                var name = Path.GetFileNameWithoutExtension(file);
+                var data = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(file));
+                if (data != null) target[name] = data;
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>Get bilingual name: "English / 中文" or just the key if not found.</summary>
+    public string Name(string table, string key)
+    {
+        var en = _eng.GetValueOrDefault(table)?.GetValueOrDefault(key);
+        var zh = _zhs.GetValueOrDefault(table)?.GetValueOrDefault(key);
+        if (en != null && zh != null && en != zh) return $"{en} / {zh}";
+        return en ?? zh ?? key;
+    }
+
+    public string? En(string table, string key) => _eng.GetValueOrDefault(table)?.GetValueOrDefault(key);
+    public string? Zh(string table, string key) => _zhs.GetValueOrDefault(table)?.GetValueOrDefault(key);
+
+    /// <summary>Return {en, zh} dict for JSON output.</summary>
+    public Dictionary<string, string?> Bilingual(string table, string key)
+    {
+        return new Dictionary<string, string?>
+        {
+            ["en"] = _eng.GetValueOrDefault(table)?.GetValueOrDefault(key) ?? key,
+            ["zh"] = _zhs.GetValueOrDefault(table)?.GetValueOrDefault(key),
+        };
+    }
+
+    // Convenience helpers using ModelId
+    public Dictionary<string, string?> Card(string entry) => Bilingual("cards", entry + ".title");
+    public Dictionary<string, string?> Monster(string entry) => Bilingual("monsters", entry + ".name");
+    public Dictionary<string, string?> Relic(string entry) => Bilingual("relics", entry + ".title");
+    public Dictionary<string, string?> Potion(string entry) => Bilingual("potions", entry + ".title");
+    public Dictionary<string, string?> Power(string entry) => Bilingual("powers", entry + ".title");
+    public Dictionary<string, string?> Event(string entry) => Bilingual("events", entry + ".title");
+    public Dictionary<string, string?> Act(string entry) => Bilingual("acts", entry + ".title");
+
+    public bool IsLoaded => _eng.Count > 0;
+}
+
+/// <summary>
 /// Full run simulator — manages the game lifecycle from character selection
 /// through map navigation, combat, events, rest sites, shops, and act transitions.
 /// Drives the engine forward until it hits a "decision point" requiring external input.
@@ -96,11 +160,12 @@ public class RunSimulator
     private static readonly InlineSynchronizationContext _syncCtx = new();
     private readonly ManualResetEventSlim _turnStarted = new(false);
     private readonly ManualResetEventSlim _combatEnded = new(false);
+    private static readonly LocLookup _loc = new();
 
     // Pending rewards for card selection (populated after combat, before proceeding)
     private List<Reward>? _pendingRewards;
     private CardReward? _pendingCardReward;
-    private bool _rewardsProcessed; // prevents re-generating rewards after card selection
+    private bool _rewardsProcessed;
 
     public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null)
     {
@@ -759,6 +824,7 @@ public class RunSimulator
             ["choices"] = choices,
             ["player"] = PlayerSummary(_runState!.Players[0]),
             ["act"] = _runState.CurrentActIndex + 1,
+            ["act_name"] = _loc.Act(_runState.Act?.Id.Entry ?? "OVERGROWTH"),
             ["floor"] = _runState.ActFloor,
         };
     }
@@ -772,11 +838,12 @@ public class RunSimulator
         {
             ["index"] = i,
             ["id"] = c.Id.ToString(),
-            ["name"] = c.GetType().Name,
+            ["name"] = _loc.Card(c.Id.Entry),
             ["cost"] = c.EnergyCost?.GetResolved() ?? 0,
             ["type"] = c.Type.ToString(),
             ["can_play"] = c.CanPlay(out _, out _),
             ["target_type"] = c.TargetType.ToString(),
+            ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
         }).ToList() ?? new();
 
         var enemies = combatState?.Enemies?
@@ -784,7 +851,7 @@ public class RunSimulator
             .Select((e, i) => new Dictionary<string, object?>
             {
                 ["index"] = i,
-                ["name"] = e.Monster?.GetType().Name ?? "Unknown",
+                ["name"] = _loc.Monster(e.Monster?.Id.Entry ?? "UNKNOWN"),
                 ["hp"] = e.CurrentHp,
                 ["max_hp"] = e.MaxHp,
                 ["block"] = e.Block,
@@ -881,9 +948,10 @@ public class RunSimulator
         {
             ["index"] = i,
             ["id"] = c.Id.ToString(),
-            ["name"] = c.GetType().Name,
+            ["name"] = _loc.Card(c.Id.Entry),
             ["type"] = c.Type.ToString(),
             ["rarity"] = c.Rarity.ToString(),
+            ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
         }).ToList();
 
         return new Dictionary<string, object?>
@@ -1006,9 +1074,9 @@ public class RunSimulator
             .Select((e, i) => new Dictionary<string, object?>
             {
                 ["index"] = i,
-                ["name"] = e.CreationResult?.Card?.GetType().Name ?? "?",
+                ["name"] = _loc.Card(e.CreationResult?.Card?.Id.Entry ?? "?"),
                 ["type"] = e.CreationResult?.Card?.Type.ToString() ?? "?",
-                ["price"] = e.Cost,
+                ["cost"] = e.Cost,
                 ["is_stocked"] = e.IsStocked,
                 ["on_sale"] = e.IsOnSale,
             }).ToList();
@@ -1016,16 +1084,16 @@ public class RunSimulator
         var relics = inv.RelicEntries.Select((e, i) => new Dictionary<string, object?>
         {
             ["index"] = i,
-            ["name"] = e.Model?.GetType().Name ?? "?",
-            ["price"] = e.Cost,
+            ["name"] = _loc.Relic(e.Model?.Id.Entry ?? "?"),
+            ["cost"] = e.Cost,
             ["is_stocked"] = e.IsStocked,
         }).ToList();
 
         var potions = inv.PotionEntries.Select((e, i) => new Dictionary<string, object?>
         {
             ["index"] = i,
-            ["name"] = e.Model?.GetType().Name ?? "?",
-            ["price"] = e.Cost,
+            ["name"] = _loc.Potion(e.Model?.Id.Entry ?? "?"),
+            ["cost"] = e.Cost,
             ["is_stocked"] = e.IsStocked,
         }).ToList();
 
@@ -1125,12 +1193,12 @@ public class RunSimulator
     {
         return new Dictionary<string, object?>
         {
-            ["name"] = player.Character?.GetType().Name ?? "Unknown",
+            ["name"] = _loc.Bilingual("characters", (player.Character?.Id.Entry ?? "IRONCLAD") + ".title"),
             ["hp"] = player.Creature?.CurrentHp ?? 0,
             ["max_hp"] = player.Creature?.MaxHp ?? 0,
             ["gold"] = player.Gold,
-            ["relics"] = player.Relics?.Select(r => r.GetType().Name).ToList() ?? new List<string>(),
-            ["potions"] = player.Potions?.Select(p => p?.GetType().Name).Where(n => n != null).ToList() ?? new List<string?>(),
+            ["relics"] = player.Relics?.Select(r => _loc.Relic(r.Id.Entry)).ToList(),
+            ["potions"] = player.Potions?.Where(p => p != null).Select(p => _loc.Potion(p!.Id.Entry)).ToList(),
             ["deck_size"] = player.Deck?.Cards?.Count ?? 0,
         };
     }
