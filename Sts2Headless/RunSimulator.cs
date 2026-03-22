@@ -18,6 +18,8 @@ using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
 using HarmonyLib;
@@ -2320,9 +2322,24 @@ public class RunSimulator
             }
             catch (Exception ex) { Console.Error.WriteLine($"[WARN] Bundle patch: {ex.Message}"); }
 
-            // NOTE: Neutralize.OnPlay has a NullRef in headless mode (VFX chain).
-            // Cannot patch AttackCommand.Execute (async method — Harmony breaks it).
-            // Neutralize will silently fail to deal damage. TODO: find exact NullRef source.
+            // Patch Neutralize.OnPlay to avoid NullRef in DamageCmd.Attack().Execute()
+            try
+            {
+                var neutralizeType = typeof(MegaCrit.Sts2.Core.Models.Cards.Neutralize);
+                var neutralizeOnPlay = neutralizeType.GetMethod("OnPlay",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (neutralizeOnPlay != null)
+                {
+                    var neutPrefix = typeof(LocPatches).GetMethod(nameof(LocPatches.NeutralizePrefix),
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                    if (neutPrefix != null)
+                    {
+                        harmony.Patch(neutralizeOnPlay, new HarmonyMethod(neutPrefix));
+                        Console.Error.WriteLine("[INFO] Patched Neutralize.OnPlay");
+                    }
+                }
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"[WARN] Neutralize patch: {ex.Message}"); }
 
             // Patch HasEntry to always return true
             PatchMethod(harmony, typeof(LocTable), "HasEntry", nameof(LocPatches.HasEntryPrefix));
@@ -2389,6 +2406,27 @@ public class RunSimulator
             return false;
         }
 
+
+        /// <summary>Harmony prefix: replace Neutralize.OnPlay with safe damage+weak.</summary>
+        public static bool NeutralizePrefix(CardModel __instance, ref Task __result,
+            PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (cardPlay.Target == null) { __result = Task.CompletedTask; return false; }
+            __result = NeutralizeSafe(__instance, choiceContext, cardPlay);
+            return false;
+        }
+
+        private static async Task NeutralizeSafe(CardModel card, PlayerChoiceContext ctx, CardPlay play)
+        {
+            try
+            {
+                await CreatureCmd.Damage(ctx, play.Target!, card.DynamicVars.Damage.BaseValue,
+                    MegaCrit.Sts2.Core.ValueProps.ValueProp.Move, card);
+                await PowerCmd.Apply<WeakPower>(play.Target!, card.DynamicVars["WeakPower"].BaseValue,
+                    card.Owner.Creature, card);
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"[WARN] Neutralize safe: {ex.Message}"); }
+        }
 
         public static bool HasEntryPrefix(ref bool __result)
         {
