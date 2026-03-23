@@ -34,7 +34,7 @@
 |-----------------|---------|
 | `combat_play` | RL Agent |
 | `map_select`, `card_reward`, `rest_site`, `event_choice`, `shop` | LLM Agent |
-| `bundle_select`, `card_select`, `treasure` | LLM Agent (fallback: pick index 0) |
+| `bundle_select`, `card_select` | LLM Agent (fallback: pick index 0) |
 | `unknown` | skip / `leave_room` |
 | `game_over` | terminate loop |
 
@@ -110,7 +110,7 @@ class CombatEnv(gymnasium.Env):
 `map_select`, `card_reward`, `rest_site`, `event_choice`, `shop`, `bundle_select`, `card_select`
 
 ### Deck Summary
-Source: `state["context"]["deck"]` (list of card objects in game state JSON).
+Source: `state["player"]["deck"]` (list of card objects in game state JSON).
 Aggregation in `llm_agent.py`:
 - Count cards by type (Attack / Skill / Power)
 - Extract unique keywords from `localization_eng/card_keywords.json`
