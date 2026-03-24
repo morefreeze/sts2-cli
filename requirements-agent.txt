@@ -1,0 +1,6 @@
+stable-baselines3>=2.3
+sb3-contrib>=2.3
+gymnasium>=0.29
+anthropic>=0.40
+torch>=2.2
+pytest>=8.0
