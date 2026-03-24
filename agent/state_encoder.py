@@ -20,6 +20,13 @@ ENEMY_SLOT = 5
 ACTION_SIZE = MAX_HAND * 4 + 1  # 41
 NO_TARGET_SLOT = 3
 
+MAX_ENERGY = 3
+MAX_TURN = 20
+MAX_BLOCK_NORM = 30
+MAX_DAMAGE_NORM = 50
+MAX_BUFF_COUNT_NORM = 10
+MAX_BUFF_AMOUNT_NORM = 10
+
 
 class StateEncoder:
     def __init__(self, cards_json_path: str):
@@ -28,16 +35,16 @@ class StateEncoder:
         titles = sorted(set(
             k.rsplit(".", 1)[0] for k in data if k.endswith(".title")
         ))
-        self.vocab = {card_id: i for i, card_id in enumerate(titles)}
-        self.vocab_size = len(self.vocab)  # 605
+        self.vocab = {card_id: i + 1 for i, card_id in enumerate(titles)}
+        self.vocab_size = len(self.vocab) + 1  # 606 (index 0 reserved for unknown)
         self.obs_size = 1 + 1 + MAX_HAND * CARD_SLOT + 3 + MAX_ENEMIES * ENEMY_SLOT + MAX_BUFFS  # 130
 
     def encode(self, state: dict) -> np.ndarray:
         obs = np.zeros(self.obs_size, dtype=np.float32)
         idx = 0
 
-        obs[idx] = min(state.get("energy", 0) / 3.0, 1.0); idx += 1
-        obs[idx] = min(state.get("round", 1) / 20.0, 1.0); idx += 1
+        obs[idx] = min(state.get("energy", 0) / MAX_ENERGY, 1.0); idx += 1
+        obs[idx] = min(state.get("round", 1) / MAX_TURN, 1.0); idx += 1
 
         hand = state.get("hand", [])
         for slot in range(MAX_HAND):
@@ -48,7 +55,7 @@ class StateEncoder:
                     card_id = card_id.get("en", "")
                 ctype = (c.get("type") or "").lower()
                 obs[idx]     = self.vocab.get(card_id, 0) / max(self.vocab_size, 1)
-                obs[idx + 1] = min(c.get("cost", 0) / 3.0, 1.0)
+                obs[idx + 1] = min(c.get("cost", 0) / MAX_ENERGY, 1.0)
                 obs[idx + 2] = 1.0 if ctype == "attack" else 0.0
                 obs[idx + 3] = 1.0 if ctype == "skill" else 0.0
                 obs[idx + 4] = 1.0 if ctype == "power" else 0.0
@@ -62,8 +69,8 @@ class StateEncoder:
         player = state.get("player", {})
         max_hp = max(player.get("max_hp", 1), 1)
         obs[idx]     = player.get("hp", 0) / max_hp; idx += 1
-        obs[idx]     = min(player.get("block", 0) / 30.0, 1.0); idx += 1
-        obs[idx]     = min(len(player.get("buffs", [])) / 10.0, 1.0); idx += 1
+        obs[idx]     = min(player.get("block", 0) / MAX_BLOCK_NORM, 1.0); idx += 1
+        obs[idx]     = min(len(player.get("buffs", [])) / MAX_BUFF_COUNT_NORM, 1.0); idx += 1
 
         enemies = state.get("enemies", [])
         for slot in range(MAX_ENEMIES):
@@ -72,9 +79,9 @@ class StateEncoder:
                 max_ehp = max(e.get("max_hp", e.get("hp", 1)), 1)
                 intent = e.get("intent") or {}
                 obs[idx]     = e.get("hp", 0) / max_ehp
-                obs[idx + 1] = min(e.get("block", 0) / 30.0, 1.0)
+                obs[idx + 1] = min(e.get("block", 0) / MAX_BLOCK_NORM, 1.0)
                 obs[idx + 2] = 1.0 if (intent.get("type") or "").lower() == "attack" else 0.0
-                obs[idx + 3] = min((intent.get("damage", 0) * intent.get("times", 1)) / 50.0, 1.0)
+                obs[idx + 3] = min((intent.get("damage", 0) * intent.get("times", 1)) / MAX_DAMAGE_NORM, 1.0)
                 obs[idx + 4] = 0.0
             else:
                 obs[idx + 4] = 1.0
@@ -86,7 +93,7 @@ class StateEncoder:
         )
         for i in range(MAX_BUFFS):
             if i < len(buffs):
-                obs[idx] = min(abs(buffs[i].get("amount", 1)) / 10.0, 1.0)
+                obs[idx] = min(abs(buffs[i].get("amount", 1)) / MAX_BUFF_AMOUNT_NORM, 1.0)
             idx += 1
 
         return obs
@@ -105,7 +112,7 @@ class StateEncoder:
             needs_target = (c.get("target_type") or "").lower() == "anyenemy"
             base = slot * 4
             if needs_target:
-                for j in range(n_enemies):
+                for j in range(min(n_enemies, MAX_ENEMIES)):
                     mask[base + j] = True
             else:
                 mask[base + NO_TARGET_SLOT] = True
@@ -118,7 +125,10 @@ class StateEncoder:
 
         hand_slot = action_idx // 4
         target_slot = action_idx % 4
-        card = state.get("hand", [])[hand_slot]
+        hand = state.get("hand", [])
+        if hand_slot >= len(hand):
+            raise ValueError(f"Action {action_idx} maps to hand slot {hand_slot} but hand has only {len(hand)} cards")
+        card = hand[hand_slot]
         args = {"card_index": card["index"]}
         if target_slot != NO_TARGET_SLOT:
             args["target_index"] = target_slot
