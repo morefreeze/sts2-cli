@@ -359,20 +359,17 @@ def show_combat(state):
     # Player powers/buffs/debuffs
     ppowers = state.get("player_powers") or []
     if ppowers:
-        buffs = []
-        debuffs = []
         for pw in ppowers:
             amt = pw.get("amount", 0)
             amt_str = f" {amt}" if amt and amt != 0 else ""
-            entry = f"{n(pw.get('name','?'))}{amt_str}"
-            if isinstance(amt, (int, float)) and amt < 0:
-                debuffs.append(entry)
-            else:
-                buffs.append(entry)
-        if buffs:
-            print(f"    {c(t('Buffs','增益'), 'green')}: {c(', '.join(buffs), 'green')}")
-        if debuffs:
-            print(f"    {c(t('Debuffs','减益'), 'red')}: {c(', '.join(debuffs), 'red')}")
+            pw_desc = desc(pw.get("description", ""))
+            if pw_desc and amt:
+                pw_desc = resolve_template(pw_desc, {"Amount": abs(amt) if isinstance(amt, (int, float)) else amt})
+            is_debuff = isinstance(amt, (int, float)) and amt < 0
+            color = "red" if is_debuff else "green"
+            label = t("Debuff", "减益") if is_debuff else t("Buff", "增益")
+            desc_str = f": {c(pw_desc, 'dim')}" if pw_desc else ""
+            print(f"    {c(label, color)} {c(f'{n(pw.get(\"name\",\"?\"))}{amt_str}', color)}{desc_str}")
 
     # Character-specific: Necrobinder's Osty (show near player)
     osty = state.get("osty")
