@@ -16,3 +16,4 @@ play_*.py
 CLAUDE.md
 .venv312/
 .venv*/
+.env
