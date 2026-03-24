@@ -14,3 +14,5 @@ obj/
 agent/__pycache__/
 play_*.py
 CLAUDE.md
+.venv312/
+.venv*/
