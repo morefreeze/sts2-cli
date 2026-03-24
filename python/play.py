@@ -208,6 +208,10 @@ def desc(obj):
                 var = parts[0]
                 plural_parts = ":".join(parts[2:]).split("|")
                 return f"[{var}:{plural_parts[0]}|{plural_parts[1] if len(plural_parts) > 1 else plural_parts[0]}]"
+            # Conditional: {IsMultiplayer:textA|textB} → textB (single player)
+            if ":" in full and "|" in full:
+                parts_after = ":".join(full.split(":")[1:]).split("|")
+                return parts_after[-1]  # take the false/last branch
             # Simple var with format: {Damage:diff()} → [Damage]
             var = full.split(":")[0]
             return f"[{var}]"
@@ -369,7 +373,8 @@ def show_combat(state):
             color = "red" if is_debuff else "green"
             label = t("Debuff", "减益") if is_debuff else t("Buff", "增益")
             desc_str = f": {c(pw_desc, 'dim')}" if pw_desc else ""
-            print(f"    {c(label, color)} {c(f'{n(pw.get(\"name\",\"?\"))}{amt_str}', color)}{desc_str}")
+            pw_name = n(pw.get('name', '?'))
+            print(f"    {c(label, color)} {c(f'{pw_name}{amt_str}', color)}{desc_str}")
 
     # Character-specific: Necrobinder's Osty (show near player)
     osty = state.get("osty")
@@ -1125,7 +1130,19 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0):
                         continue
 
                 if choice == "e":
+                    # Track hand before end_turn to detect added status cards
+                    old_hand_names = [n(cd.get("name","?")) for cd in hand]
+                    old_discard = state.get("discard_pile_count", 0)
                     state = send({"cmd": "action", "action": "end_turn"})
+                    # Show status cards added (new cards in hand/discard that weren't there)
+                    if state and state.get("decision") == "combat_play":
+                        new_hand = state.get("hand", [])
+                        new_discard = state.get("discard_pile_count", 0)
+                        status_cards = [n(cd.get("name","?")) for cd in new_hand if cd.get("type") in ("Status", "Curse")]
+                        if status_cards:
+                            from collections import Counter
+                            sc_str = ", ".join(f"{c(name, 'red')}" for name in status_cards)
+                            print(f"  ⚠ {t('Status cards in hand:','手牌中的状态牌:')}: {sc_str}")
                 elif choice.startswith("p") and choice[1:].isdigit():
                     # Use potion
                     pidx = int(choice[1:])
