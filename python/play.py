@@ -312,8 +312,9 @@ def potion_str(p):
         d = desc(p.get("description", {}))
         vars_dict = p.get("vars") or {}
         d = resolve_template(d, vars_dict) if vars_dict else d
-        idx = p.get("index", "?")
-        return f"[{idx}] {name}" + (f": {c(d, 'dim')}" if d else "")
+        idx = p.get("index", -1)
+        display_idx = idx + 1 if isinstance(idx, int) else "?"
+        return f"[{display_idx}] {name}" + (f": {c(d, 'dim')}" if d else "")
     return n(p)
 
 def show_player(p, show_deck=False):
@@ -447,7 +448,7 @@ def show_combat(state):
             pw_parts = [f"{n(pw['name'])}{pw.get('amount','')}" for pw in powers]
             power_str = "  " + c(" ".join(pw_parts), "dim")
 
-        print(f"  [{e['index']}] {n(e['name'])}  {bar(hp, mhp)} {hp}/{mhp}"
+        print(f"  [{e['index']+1}] {n(e['name'])}  {bar(hp, mhp)} {hp}/{mhp}"
               + (f"  {c(str(blk), 'blue')}{t('blk','挡')}" if blk else "")
               + f"  {intent_str}{power_str}")
 
@@ -493,7 +494,7 @@ def show_combat(state):
         ench = card.get("enchantment")
         ench_str = f" {c(n(ench), 'magenta')}" if ench else ""
 
-        print(f"  {mark} [{card['index']}] {c(n(card['name']), type_color)}{ench_str} ({cost_str}) {stat_str}{kw_str}{extra_desc}"
+        print(f"  {mark} [{card['index']+1}] {c(n(card['name']), type_color)}{ench_str} ({cost_str}) {stat_str}{kw_str}{extra_desc}"
               + (f"  {c('→','yellow')}" if target == "AnyEnemy" else ""))
 
 def show_map(state, send_fn=None):
@@ -516,7 +517,7 @@ def show_map(state, send_fn=None):
             for i, ch in enumerate(choices):
                 icon = type_icons.get(ch["type"], "?")
                 ntype = t(ch["type"], NODE_TYPE_ZH.get(ch["type"], ch["type"]))
-                print(f"    [{i}] {c(icon, 'yellow')} {ntype}  ({t('col','列')}{ch['col']}, {t('row','行')}{ch['row']})")
+                print(f"    [{i+1}] {c(icon, 'yellow')} {ntype}  ({t('col','列')}{ch['col']}, {t('row','行')}{ch['row']})")
             return
 
     # Fallback: simple list
@@ -535,7 +536,7 @@ def show_map(state, send_fn=None):
     for i, ch in enumerate(choices):
         icon = type_icons.get(ch["type"], "?")
         ntype = t(ch["type"], NODE_TYPE_ZH.get(ch["type"], ch["type"]))
-        print(f"  [{i}] {icon} {ntype}")
+        print(f"  [{i+1}] {icon} {ntype}")
 
 def _format_upgrade_preview(stats, aug, current_cost=None):
     """Format upgrade preview string."""
@@ -586,7 +587,7 @@ def show_card_reward(state):
         stats = card.get("stats") or {}
         cd_desc = card_desc(card)
 
-        print(f"  [{card['index']}] {c(n(card['name']), type_color)} ({cost}) {c(rarity_label, rarity_color)}")
+        print(f"  [{card['index']+1}] {c(n(card['name']), type_color)} ({cost}) {c(rarity_label, rarity_color)}")
         if cd_desc:
             print(f"      {c(cd_desc, 'dim')}")
         # Show upgrade preview
@@ -607,21 +608,21 @@ def show_shop(state):
         affordable = c(str(cost), "green") if cost <= gold else c(str(cost), "red")
         sale = c(t(" SALE"," 打折"), "yellow") if card.get("on_sale") else ""
         ctype_zh = CARD_TYPE_ZH.get(card.get("type",""), card.get("type",""))
-        print(f"  [{card['index']}] {n(card['name'])} ({t(card.get('type','?'), ctype_zh)}) — {affordable}{t('g','金')}{sale}")
+        print(f"  [{card['index']+1}] {n(card['name'])} ({t(card.get('type','?'), ctype_zh)}) — {affordable}{t('g','金')}{sale}")
 
     print(f"\n  {c(t('Relics:','遗物:'), 'bold')}")
     for r in state.get("relics", []):
         if not r.get("is_stocked"): continue
         cost = r.get("cost", 0)
         affordable = c(str(cost), "green") if cost <= gold else c(str(cost), "red")
-        print(f"  [r{r['index']}] {n(r['name'])} — {affordable}{t('g','金')}")
+        print(f"  [r{r['index']+1}] {n(r['name'])} — {affordable}{t('g','金')}")
 
     print(f"\n  {c(t('Potions:','药水:'), 'bold')}")
     for p in state.get("potions", []):
         if not p.get("is_stocked"): continue
         cost = p.get("cost", 0)
         affordable = c(str(cost), "green") if cost <= gold else c(str(cost), "red")
-        print(f"  [p{p['index']}] {n(p['name'])} — {affordable}{t('g','金')}")
+        print(f"  [p{p['index']+1}] {n(p['name'])} — {affordable}{t('g','金')}")
 
     removal_cost = state.get("card_removal_cost")
     if removal_cost:
@@ -646,7 +647,7 @@ def show_rest_site(state):
         opt_id = opt.get("option_id", "?")
         opt_name = t(opt_id, REST_OPTIONS_ZH.get(opt_id, opt_id))
         opt_desc = opt.get("name", "")
-        print(f"  {mark} [{opt['index']}] {opt_name}" + (f" — {opt_desc}" if opt_desc and opt_desc != opt_id else ""))
+        print(f"  {mark} [{opt['index']+1}] {opt_name}" + (f" — {opt_desc}" if opt_desc and opt_desc != opt_id else ""))
 
 def _load_loc():
     """Load localization data for resolving event option names."""
@@ -716,7 +717,7 @@ def show_event(state):
     for opt in state.get("options", []):
         locked = opt.get("is_locked", False)
         mark = c("○", "dim") if locked else c("●", "green")
-        raw_title = opt.get("title", opt.get("text_key", f"Option {opt['index']}"))
+        raw_title = opt.get("title", opt.get("text_key", f"Option {opt['index']+1}"))
         # title is now bilingual dict or loc key string
         if isinstance(raw_title, dict):
             title = n(raw_title)
@@ -735,7 +736,7 @@ def show_event(state):
         if opt_vars and opt_desc:
             opt_desc = resolve_template(opt_desc, opt_vars)
         desc_str = f" — {c(opt_desc, 'dim')}" if opt_desc else ""
-        print(f"  {mark} [{opt['index']}] {title}{desc_str}")
+        print(f"  {mark} [{opt['index']+1}] {title}{desc_str}")
 
 # ─── Input handling ───
 
@@ -916,12 +917,12 @@ def get_input(prompt, valid_options=None, state=None):
     {c('quit', 'cyan')}     — 退出
 
   {c('操作:', 'bold')}
-    地图:    输入路径编号 (0, 1, 2)
-    战斗:    卡牌编号 / {c('e', 'yellow')} 结束回合 / {c('p0', 'yellow')} 使用药水
+    地图:    输入路径编号 (1, 2, 3)
+    战斗:    卡牌编号 / {c('e', 'yellow')} 结束回合 / {c('p1', 'yellow')} 使用药水
     奖励:    卡牌编号 / {c('s', 'yellow')} 跳过
     休息:    选项编号
     事件:    选项编号 / {c('leave', 'yellow')} 离开
-    商店:    {c('c0', 'yellow')} 买卡 / {c('r0', 'yellow')} 遗物 / {c('p0', 'yellow')} 药水 / {c('rm', 'yellow')} 移除 / {c('leave', 'yellow')} 离开
+    商店:    {c('1', 'yellow')} 买卡 / {c('r1', 'yellow')} 遗物 / {c('p1', 'yellow')} 药水 / {c('rm', 'yellow')} 移除 / {c('leave', 'yellow')} 离开
 """)
             else:
                 print(f"""
@@ -934,12 +935,12 @@ def get_input(prompt, valid_options=None, state=None):
     {c('quit', 'cyan')}     — quit
 
   {c('Actions:', 'bold')}
-    Map:     path number (0, 1, 2)
-    Combat:  card index / {c('e', 'yellow')} end turn / {c('p0', 'yellow')} use potion
+    Map:     path number (1, 2, 3)
+    Combat:  card index / {c('e', 'yellow')} end turn / {c('p1', 'yellow')} use potion
     Reward:  card index / {c('s', 'yellow')} skip
     Rest:    option index
     Event:   option index / {c('leave', 'yellow')} leave
-    Shop:    {c('c0', 'yellow')} card / {c('r0', 'yellow')} relic / {c('p0', 'yellow')} potion / {c('rm', 'yellow')} remove / {c('leave', 'yellow')} leave
+    Shop:    {c('1', 'yellow')} card / {c('r1', 'yellow')} relic / {c('p1', 'yellow')} potion / {c('rm', 'yellow')} remove / {c('leave', 'yellow')} leave
 """)
             continue
         if raw == "deck" and state:
@@ -1057,7 +1058,7 @@ def play(character="Ironclad", seed=None, auto=False):
                         else:
                             pick = choices[0]
                 else:
-                    valid = {str(i): ch for i, ch in enumerate(choices)}
+                    valid = {str(i+1): ch for i, ch in enumerate(choices)}
                     key = get_input(t("Choose path [number]", "选择路径 [编号]"), set(valid.keys()), state=state)
                     pick = valid[key]
 
@@ -1073,37 +1074,37 @@ def play(character="Ironclad", seed=None, auto=False):
                 valid = {"e": "end_turn"}
                 for card in hand:
                     if card.get("can_play") and card.get("cost", 99) <= energy:
-                        valid[str(card["index"])] = card
-                # Add potion shortcuts
+                        valid[str(card["index"]+1)] = card
+                # Add potion shortcuts (1-based: p1, p2, ...)
                 for pot in state.get("player", {}).get("potions", []):
                     if pot:
-                        valid[f"p{pot['index']}"] = f"potion_{pot['index']}"
+                        valid[f"p{pot['index']+1}"] = f"potion_{pot['index']}"
 
                 if auto:
                     # Auto: play first playable card, or end turn
                     playable = [c for c in hand if c.get("can_play") and c.get("cost", 99) <= energy]
                     if playable:
                         card = playable[0]
-                        choice = str(card["index"])
+                        choice = str(card["index"]+1)
                     else:
                         choice = "e"
                 else:
-                    choice = get_input(t("Play card [index], (e)nd turn, (p0) potion", "出牌 [编号], (e)结束回合, (p0)药水"), set(valid.keys()) | {"help"}, state=state)
+                    choice = get_input(t("Play card [index], (e)nd turn, (p1) potion", "出牌 [编号], (e)结束回合, (p1)药水"), set(valid.keys()) | {"help"}, state=state)
                     if choice == "help":
-                        print(f"  {t('Enter card index, e=end turn, p0=use potion 0', '输入卡牌编号，e=结束回合，p0=使用药水0')}")
+                        print(f"  {t('Enter card index, e=end turn, p1=use potion 1', '输入卡牌编号，e=结束回合，p1=使用药水1')}")
                         continue
 
                 if choice == "e":
                     state = send({"cmd": "action", "action": "end_turn"})
                 elif choice.startswith("p") and choice[1:].isdigit():
-                    # Use potion
-                    pidx = int(choice[1:])
+                    # Use potion (user input is 1-based, engine needs 0-based)
+                    pidx = int(choice[1:]) - 1
                     args = {"potion_index": pidx}
                     # Ask for target if needed
                     if enemies:
-                        tgt = get_input("Target enemy [index] or self (s)", state=state)
+                        tgt = get_input(t("Target enemy [index] or self (s)", "选择目标 [编号] 或 (s)自己"), state=state)
                         if tgt != "s" and tgt.isdigit():
-                            args["target_index"] = int(tgt)
+                            args["target_index"] = int(tgt) - 1
                     state = send({"cmd": "action", "action": "use_potion", "args": args})
                 else:
                     card = valid[choice]
@@ -1114,19 +1115,19 @@ def play(character="Ironclad", seed=None, auto=False):
                         elif auto:
                             args["target_index"] = min(enemies, key=lambda e: e.get("hp", 999))["index"]
                         else:
-                            tgt = get_input("Target enemy [index]",
-                                           {str(e["index"]) for e in enemies})
-                            args["target_index"] = int(tgt)
+                            tgt = get_input(t("Target enemy [index]", "选择目标 [编号]"),
+                                           {str(e["index"]+1) for e in enemies})
+                            args["target_index"] = int(tgt) - 1
                     state = send({"cmd": "action", "action": "play_card", "args": args})
 
             elif dec == "card_reward":
                 show_card_reward(state)
                 cards = state.get("cards", [])
-                valid = {str(c["index"]): c for c in cards}
+                valid = {str(c["index"]+1): c for c in cards}
                 valid["s"] = None  # skip
 
                 if auto:
-                    choice = "0" if cards else "s"
+                    choice = "1" if cards else "s"
                 else:
                     choice = get_input(t("Pick card [index] or (s)kip", "选择卡牌 [编号] 或 (s)跳过"), set(valid.keys()), state=state)
 
@@ -1134,7 +1135,7 @@ def play(character="Ironclad", seed=None, auto=False):
                     state = send({"cmd": "action", "action": "skip_card_reward"})
                 else:
                     state = send({"cmd": "action", "action": "select_card_reward",
-                                 "args": {"card_index": int(choice)}})
+                                 "args": {"card_index": valid[choice]["index"]}})
 
             elif dec == "bundle_select":
                 print(f"\n{'─' * 60}")
@@ -1147,19 +1148,19 @@ def play(character="Ironclad", seed=None, auto=False):
                 bundles = state.get("bundles", [])
                 for b in bundles:
                     bidx = b["index"]
-                    print(f"  {c(f'Pack [{bidx}]:', 'yellow')}")
+                    print(f"  {c(f'Pack [{bidx+1}]:', 'yellow')}")
                     for cd in b.get("cards", []):
                         cd_desc = card_desc(cd)
                         print(f"    {n(cd['name'])} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')}")
                         if cd_desc:
                             print(f"      {c(cd_desc, 'dim')}")
-                valid = {str(b["index"]): b for b in bundles}
+                valid = {str(b["index"]+1): b for b in bundles}
                 if auto:
-                    choice = "0"
+                    choice = "1"
                 else:
                     choice = get_input(t("Choose pack [index]", "选择卡牌包 [编号]"), set(valid.keys()), state=state)
                 state = send({"cmd": "action", "action": "select_bundle",
-                             "args": {"bundle_index": int(choice)}})
+                             "args": {"bundle_index": valid[choice]["index"]}})
 
             elif dec == "card_select":
                 print(f"\n{'─' * 60}")
@@ -1178,28 +1179,29 @@ def play(character="Ironclad", seed=None, auto=False):
                     ctype_zh = CARD_TYPE_ZH.get(cd.get("type", ""), cd.get("type", ""))
                     ctype_label = t(cd.get("type", ""), ctype_zh)
                     cd_desc_text = card_desc(cd)
-                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(ctype_label, 'dim')}")
+                    print(f"  [{cd['index']+1}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(ctype_label, 'dim')}")
                     if cd_desc_text:
                         print(f"      {c(cd_desc_text, 'dim')}")
                     aug_parts = _format_upgrade_preview(stats, cd.get("after_upgrade"), cd.get("cost"))
                     if aug_parts:
                         print(f"      {c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
 
-                valid = {str(cd["index"]): cd for cd in cards}
+                valid = {str(cd["index"]+1): cd for cd in cards}
                 if min_sel == 0:
                     valid["s"] = None
 
                 if auto:
-                    choice = "0"
+                    choice = "1"
                 else:
                     choice = get_input(t("Choose card(s) [index] or (s)kip", "选择卡牌 [编号] 或 (s)跳过"), set(valid.keys()), state=state)
 
                 if choice == "s":
                     state = send({"cmd": "action", "action": "skip_select"})
                 else:
-                    # Support comma-separated indices
+                    # Convert 1-based user input to 0-based for engine
+                    raw_indices = ",".join(str(int(x.strip())-1) for x in choice.split(",") if x.strip().isdigit())
                     state = send({"cmd": "action", "action": "select_cards",
-                                 "args": {"indices": choice}})
+                                 "args": {"indices": raw_indices or choice}})
 
             elif dec == "shop":
                 show_shop(state)
@@ -1213,21 +1215,24 @@ def play(character="Ironclad", seed=None, auto=False):
                     state = send({"cmd": "action", "action": "leave_room"})
                 elif choice == "rm":
                     state = send({"cmd": "action", "action": "remove_card"})
-                elif choice.startswith("r"):
+                elif choice.startswith("r") and choice[1:].isdigit():
                     state = send({"cmd": "action", "action": "buy_relic",
-                                 "args": {"relic_index": int(choice[1:])}})
-                elif choice.startswith("p"):
+                                 "args": {"relic_index": int(choice[1:]) - 1}})
+                elif choice.startswith("p") and choice[1:].isdigit():
                     state = send({"cmd": "action", "action": "buy_potion",
-                                 "args": {"potion_index": int(choice[1:])}})
-                else:
+                                 "args": {"potion_index": int(choice[1:]) - 1}})
+                elif choice.isdigit():
                     state = send({"cmd": "action", "action": "buy_card",
-                                 "args": {"card_index": int(choice)}})
+                                 "args": {"card_index": int(choice) - 1}})
+                else:
+                    print(f"  {t('Invalid input.','无效输入。')}")
+                    continue
 
             elif dec == "rest_site":
                 show_rest_site(state)
                 options = state.get("options", [])
                 enabled = [o for o in options if o.get("is_enabled")]
-                valid = {str(o["index"]): o for o in enabled}
+                valid = {str(o["index"]+1): o for o in enabled}
 
                 if auto:
                     hp = state.get("player", {}).get("hp", 1)
@@ -1235,12 +1240,12 @@ def play(character="Ironclad", seed=None, auto=False):
                     heal = next((o for o in enabled if o.get("option_id") == "HEAL"), None)
                     smith = next((o for o in enabled if o.get("option_id") == "SMITH"), None)
                     pick = (heal if hp < mhp * 0.7 else smith) or (heal or (enabled[0] if enabled else None))
-                    choice = str(pick["index"]) if pick else "0"
+                    choice = str(pick["index"]+1) if pick else "1"
                 else:
                     choice = get_input(t("Choose option [index]", "选择 [编号]"), set(valid.keys()), state=state)
 
                 state = send({"cmd": "action", "action": "choose_option",
-                             "args": {"option_index": int(choice)}})
+                             "args": {"option_index": valid[choice]["index"]}})
                 if state and state.get("type") == "error":
                     state = send({"cmd": "action", "action": "leave_room"})
 
@@ -1248,7 +1253,7 @@ def play(character="Ironclad", seed=None, auto=False):
                 show_event(state)
                 options = state.get("options", [])
                 unlocked = [o for o in options if not o.get("is_locked")]
-                valid = {str(o["index"]): o for o in unlocked}
+                valid = {str(o["index"]+1): o for o in unlocked}
                 valid["leave"] = None
 
                 # Save state before choice to show diff
@@ -1260,7 +1265,7 @@ def play(character="Ironclad", seed=None, auto=False):
                 old_gold = state.get("player",{}).get("gold", 0)
 
                 if auto:
-                    choice = str(unlocked[0]["index"]) if unlocked else "leave"
+                    choice = str(unlocked[0]["index"]+1) if unlocked else "leave"
                 else:
                     choice = get_input(t("Choose option [index] or (leave)", "选择 [编号] 或 (leave)离开"), set(valid.keys()), state=state)
 
@@ -1268,7 +1273,7 @@ def play(character="Ironclad", seed=None, auto=False):
                     state = send({"cmd": "action", "action": "leave_room"})
                 else:
                     state = send({"cmd": "action", "action": "choose_option",
-                                 "args": {"option_index": int(choice)}})
+                                 "args": {"option_index": valid[choice]["index"]}})
                     if state and state.get("type") == "error":
                         state = send({"cmd": "action", "action": "leave_room"})
 
