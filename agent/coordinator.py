@@ -131,7 +131,20 @@ class GameCoordinator:
             return None
 
 
+def _load_env():
+    """Load .env file from project root if it exists."""
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    if os.path.isfile(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    os.environ.setdefault(key.strip(), val.strip())
+
+
 def main():
+    _load_env()
     parser = argparse.ArgumentParser()
     parser.add_argument("--character", default="Ironclad")
     parser.add_argument("--mode", choices=["eval-rl", "eval-full"], default="eval-rl")
