@@ -18,20 +18,31 @@ def test_env_observation_space_shape():
     assert env.observation_space.shape == (130,)
 
 
-def test_reward_victory_full_hp():
+def test_reward_combat_win():
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
-    assert abs(env._compute_reward({"victory": True, "player": {"hp": 80, "max_hp": 80}}) - 2.0) < 1e-5
+    env._combat_start_player_max_hp = 80
+    # Combat win with full HP: 1.0 * (80/80) = 1.0
+    assert abs(env._combat_win_reward({"player": {"hp": 80, "max_hp": 80}}) - 1.0) < 1e-5
+    # Combat win with half HP: 1.0 * (40/80) = 0.5
+    assert abs(env._combat_win_reward({"player": {"hp": 40, "max_hp": 80}}) - 0.5) < 1e-5
 
 
-def test_reward_victory_half_hp():
+def test_reward_terminal():
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
-    # (0.5)^2 * 2 = 0.5
-    assert abs(env._compute_reward({"victory": True, "player": {"hp": 40, "max_hp": 80}}) - 0.5) < 1e-5
+    assert env._terminal_reward({"victory": False}) == -0.5
+    assert env._terminal_reward({"victory": True}) == 2.0
 
 
-def test_reward_defeat():
+def test_shaping_reward_damage():
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
-    assert env._compute_reward({"victory": False, "player": {"hp": 0, "max_hp": 80}}) == -1.0
+    env._prev_enemy_hp = 30
+    env._prev_player_hp = 80
+    env._combat_start_enemy_hp = 30
+    env._combat_start_player_max_hp = 80
+    # Deal 10 damage to enemy, take 0: +0.02 * 10/30 = +0.00667
+    r = env._shaping_reward({"enemies": [{"hp": 20}], "player": {"hp": 80}})
+    assert r > 0
+    assert abs(r - 0.02 * 10 / 30) < 1e-5
 
 
 def test_reset_returns_correct_obs_shape():

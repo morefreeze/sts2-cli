@@ -3,6 +3,9 @@ combat_env.py — gymnasium.Env for STS2 combat training.
 
 Also exports greedy_action(state) as a module-level function for use by
 coordinator.py and _advance_to_combat().
+
+Episode = one single combat (not a full game run).
+Reward shaping: per-step damage/block/kill signals + end-of-combat bonus.
 """
 import json, os, subprocess, random
 import gymnasium as gym
@@ -79,13 +82,30 @@ def greedy_action(state: dict) -> dict:
     return {"cmd": "action", "action": "proceed"}
 
 
+def _total_enemy_hp(state: dict) -> int:
+    return sum(e.get("hp", 0) for e in state.get("enemies", []))
+
+
+def _player_hp(state: dict) -> int:
+    return state.get("player", {}).get("hp", 0)
+
+
 class CombatEnv(gym.Env):
     """
     Gymnasium environment for STS2 combat.
 
-    Observation: float32 vector of shape (130,)
-    Action: int in [0, 40]
-    Reward: (hp/max_hp)^2 * 2.0 on victory, -1.0 on defeat/crash
+    Each episode = one single combat encounter, NOT a full game run.
+    After combat ends (win or lose), the episode terminates.
+    On reset, the game process is reused — we advance to the next combat.
+    If no more combats (game over), we restart a new run.
+
+    Reward:
+      Per-step shaping:
+        +0.02 per enemy HP point lost (normalized by start-of-combat total)
+        -0.02 per player HP point lost (normalized by max HP)
+      End-of-combat:
+        Win:  +1.0 × (player_hp / max_hp)
+        Lose: -0.5
     """
 
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
@@ -106,52 +126,85 @@ class CombatEnv(gym.Env):
         self._proc = None
         self._current_state = None
         self._run_counter = 0
+        # Track HP between steps for shaping reward
+        self._prev_enemy_hp = 0
+        self._prev_player_hp = 0
+        self._combat_start_enemy_hp = 1  # avoid /0
+        self._combat_start_player_max_hp = 1
+        self._game_alive = False  # is there a live game process with an active run?
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self._kill_proc()
 
         if self.dry_run:
             self._current_state = _dummy_combat_state()
             return self.enc.encode(self._current_state), {}
 
+        # Try to advance to next combat in the current run
+        if self._game_alive and self._current_state is not None:
+            state = self._advance_to_combat(self._current_state)
+            if state.get("decision") == "combat_play":
+                self._init_combat_tracking(state)
+                self._current_state = state
+                return self.enc.encode(state), {}
+            # game_over or stuck — start a fresh run
+
+        # Start a fresh game process + run
+        self._kill_proc()
         self._start_proc()
         run_seed = self._seed or f"train_{self._run_counter}"
         self._run_counter += 1
         state = self._send({"cmd": "start_run", "character": self.character,
                             "seed": run_seed, "ascension": self.ascension})
         if state is None:
+            self._game_alive = False
             self._current_state = _dummy_combat_state()
             return self.enc.encode(self._current_state), {}
 
+        self._game_alive = True
         state = self._advance_to_combat(state)
+        if state.get("decision") != "combat_play":
+            # Couldn't reach combat — treat as terminal dummy
+            self._game_alive = False
+            self._current_state = _dummy_combat_state()
+            return self.enc.encode(self._current_state), {}
+
+        self._init_combat_tracking(state)
         self._current_state = state
         return self.enc.encode(state), {}
 
     def step(self, action: int):
         if self.dry_run or self._current_state is None:
-            return np.zeros(self.enc.obs_size, dtype=np.float32), -1.0, True, False, {}
+            return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {}
 
         cmd = self.enc.decode(int(action), self._current_state)
         next_state = self._send(cmd)
 
         if next_state is None:
-            return np.zeros(self.enc.obs_size, dtype=np.float32), -1.0, True, False, {"crashed": True}
+            # Process crashed
+            self._game_alive = False
+            return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {"crashed": True}
 
         decision = next_state.get("decision", "")
 
+        # Game over (player died)
         if decision == "game_over":
-            return np.zeros(self.enc.obs_size, dtype=np.float32), self._compute_reward(next_state), True, False, {}
+            self._game_alive = False
+            reward = self._shaping_reward(next_state) + self._terminal_reward(next_state)
+            return np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {}
 
+        # Still in combat
         if decision == "combat_play":
+            reward = self._shaping_reward(next_state)
             self._current_state = next_state
-            return self.enc.encode(next_state), 0.0, False, False, {}
+            return self.enc.encode(next_state), reward, False, False, {}
 
-        next_state = self._advance_to_combat(next_state)
-        if next_state.get("decision") == "game_over":
-            return np.zeros(self.enc.obs_size, dtype=np.float32), self._compute_reward(next_state), True, False, {}
-        self._current_state = next_state
-        return self.enc.encode(next_state), 0.0, False, False, {}
+        # Combat ended (transitioned to card_reward, map_select, etc.)
+        # This means we WON this combat. Episode terminates.
+        reward = self._shaping_reward(next_state) + self._combat_win_reward(next_state)
+        self._current_state = next_state  # save for next reset() to continue from
+        return self.enc.encode(self._current_state) if decision == "combat_play" else \
+               np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {"combat_won": True}
 
     def action_masks(self) -> np.ndarray:
         if self._current_state is None:
@@ -161,13 +214,42 @@ class CombatEnv(gym.Env):
     def close(self):
         self._kill_proc()
 
-    def _compute_reward(self, state: dict) -> float:
-        if not state.get("victory", False):
-            return -1.0
-        player = state.get("player", {})
-        hp = player.get("hp", 0)
-        max_hp = max(player.get("max_hp", 1), 1)
-        return ((hp / max_hp) ** 2) * 2.0
+    def _init_combat_tracking(self, state: dict):
+        """Initialize tracking at the start of a new combat."""
+        self._prev_enemy_hp = _total_enemy_hp(state)
+        self._prev_player_hp = _player_hp(state)
+        self._combat_start_enemy_hp = max(self._prev_enemy_hp, 1)
+        self._combat_start_player_max_hp = max(state.get("player", {}).get("max_hp", 1), 1)
+
+    def _shaping_reward(self, next_state: dict) -> float:
+        """Per-step reward based on HP changes."""
+        cur_enemy_hp = _total_enemy_hp(next_state)
+        cur_player_hp = _player_hp(next_state)
+
+        # Reward for dealing damage to enemies (normalized by start-of-combat total)
+        enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
+        dmg_reward = 0.02 * enemy_hp_lost / self._combat_start_enemy_hp
+
+        # Penalty for losing player HP (normalized by max HP)
+        player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
+        hp_penalty = -0.02 * player_hp_lost / self._combat_start_player_max_hp
+
+        self._prev_enemy_hp = cur_enemy_hp
+        self._prev_player_hp = cur_player_hp
+
+        return dmg_reward + hp_penalty
+
+    def _combat_win_reward(self, state: dict) -> float:
+        """Bonus for winning a combat. Higher HP = bigger bonus."""
+        hp = _player_hp(state)
+        max_hp = self._combat_start_player_max_hp
+        return 1.0 * (hp / max_hp)
+
+    def _terminal_reward(self, state: dict) -> float:
+        """Reward for game_over."""
+        if state.get("victory", False):
+            return 2.0  # beat the boss — big bonus
+        return -0.5
 
     def _advance_to_combat(self, state: dict) -> dict:
         for _ in range(200):
@@ -176,6 +258,7 @@ class CombatEnv(gym.Env):
             cmd = greedy_action(state)
             next_state = self._send(cmd)
             if next_state is None:
+                self._game_alive = False
                 return {"decision": "game_over", "victory": False,
                         "player": {"hp": 0, "max_hp": 80}}
             state = next_state
@@ -206,6 +289,7 @@ class CombatEnv(gym.Env):
                 except Exception:
                     pass
             self._proc = None
+        self._game_alive = False
 
     def _read_json(self):
         if self._proc is None:
