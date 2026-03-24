@@ -10,7 +10,21 @@ import numpy as np
 from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
 
-DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
+def _find_dotnet():
+    """Find .NET SDK binary across platforms."""
+    for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
+              os.path.expanduser("~/.dotnet/dotnet"),
+              "/usr/local/share/dotnet/dotnet",
+              "dotnet"]:
+        try:
+            r = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return p
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return "dotnet"  # fallback, let it fail with a clear error
+
+DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(PROJECT_ROOT, "Sts2Headless", "Sts2Headless.csproj")
 
