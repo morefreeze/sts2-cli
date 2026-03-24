@@ -5,7 +5,11 @@ Usage:
     python3 agent/coordinator.py --character Ironclad --mode eval-full
     python3 agent/coordinator.py --character Ironclad --mode eval-rl --n-games 20
 """
-import argparse, json, os, subprocess, sys
+import argparse
+import json
+import os
+import subprocess
+import sys
 
 DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,8 +30,8 @@ class GameCoordinator:
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
-        self._start_proc()
         try:
+            self._start_proc()
             state = self._send({"cmd": "start_run", "character": character,
                                 "seed": seed, "ascension": ascension})
             if state is None:
@@ -91,12 +95,16 @@ class GameCoordinator:
     def _read_json(self):
         if not self._proc:
             return None
-        while True:
+        for _ in range(1000):
             line = self._proc.stdout.readline().strip()
             if not line:
                 return None
             if line.startswith("{"):
-                return json.loads(line)
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        return None
 
     def _send(self, cmd: dict):
         if not self._proc:
@@ -120,6 +128,9 @@ def main():
     args = parser.parse_args()
 
     if args.checkpoint is None:
+        if not os.path.isdir(CHECKPOINT_DIR):
+            print(f"Checkpoint directory not found: {CHECKPOINT_DIR}")
+            sys.exit(1)
         files = sorted(f for f in os.listdir(CHECKPOINT_DIR) if f.startswith(f"ppo_{args.character.lower()}"))
         if not files:
             print(f"No checkpoint found in {CHECKPOINT_DIR}"); sys.exit(1)
@@ -149,7 +160,8 @@ def main():
               f"hp={result.get('hp')}/{result.get('max_hp')}")
 
     wins = sum(1 for r in results if r.get("victory"))
-    print(f"\nWin rate: {wins}/{args.n_games} ({100*wins//args.n_games}%)")
+    pct = (100.0 * wins / args.n_games) if args.n_games > 0 else 0.0
+    print(f"\nWin rate: {wins}/{args.n_games} ({pct:.1f}%)")
 
 
 if __name__ == "__main__":
