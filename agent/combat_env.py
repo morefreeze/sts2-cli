@@ -109,7 +109,8 @@ class CombatEnv(gym.Env):
     """
 
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
-                 ascension: int = 0, seed: str = None, dry_run: bool = False):
+                 ascension: int = 0, seed: str = None, dry_run: bool = False,
+                 seed_prefix: str = "t"):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
@@ -117,6 +118,7 @@ class CombatEnv(gym.Env):
         self.character = character
         self.ascension = ascension
         self._seed = seed
+        self._seed_prefix = seed_prefix
         self.dry_run = dry_run
 
         self.observation_space = Box(low=0.0, high=1.0,
@@ -152,7 +154,7 @@ class CombatEnv(gym.Env):
         # Start a fresh game process + run
         self._kill_proc()
         self._start_proc()
-        run_seed = self._seed or f"train_{self._run_counter}"
+        run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}"
         self._run_counter += 1
         state = self._send({"cmd": "start_run", "character": self.character,
                             "seed": run_seed, "ascension": self.ascension})
@@ -163,13 +165,19 @@ class CombatEnv(gym.Env):
 
         self._game_alive = True
         state = self._advance_to_combat(state)
-        if state.get("decision") != "combat_play":
-            # Couldn't reach combat — treat as terminal dummy
+        if state is None or state.get("decision") != "combat_play":
             self._game_alive = False
             self._current_state = _dummy_combat_state()
             return self.enc.encode(self._current_state), {}
 
         self._init_combat_tracking(state)
+        # Auto-skip through forced single-option states to a real decision point
+        state = self._skip_forced_actions(state)
+        if state is None or state.get("decision") != "combat_play":
+            self._game_alive = False
+            self._current_state = _dummy_combat_state()
+            return self.enc.encode(self._current_state), {}
+
         self._current_state = state
         return self.enc.encode(state), {}
 
@@ -178,38 +186,91 @@ class CombatEnv(gym.Env):
             return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {}
 
         cmd = self.enc.decode(int(action), self._current_state)
-        next_state = self._send(cmd)
+        state, reward = self._execute_and_skip(cmd)
 
-        if next_state is None:
-            # Process crashed
+        if state is None:
             self._game_alive = False
-            return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {"crashed": True}
+            return np.zeros(self.enc.obs_size, dtype=np.float32), reward - 0.5, True, False, {"crashed": True}
 
-        decision = next_state.get("decision", "")
+        decision = state.get("decision", "")
 
-        # Game over (player died)
         if decision == "game_over":
             self._game_alive = False
-            reward = self._shaping_reward(next_state) + self._terminal_reward(next_state)
-            return np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {}
+            return np.zeros(self.enc.obs_size, dtype=np.float32), reward + self._terminal_reward(state), True, False, {}
 
-        # Still in combat
         if decision == "combat_play":
-            reward = self._shaping_reward(next_state)
-            self._current_state = next_state
-            return self.enc.encode(next_state), reward, False, False, {}
+            self._current_state = state
+            return self.enc.encode(state), reward, False, False, {}
 
-        # Combat ended (transitioned to card_reward, map_select, etc.)
-        # This means we WON this combat. Episode terminates.
-        reward = self._shaping_reward(next_state) + self._combat_win_reward(next_state)
-        self._current_state = next_state  # save for next reset() to continue from
-        return self.enc.encode(self._current_state) if decision == "combat_play" else \
-               np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {"combat_won": True}
+        # Combat ended — we won
+        reward += self._combat_win_reward(state)
+        self._current_state = state
+        return np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {"combat_won": True}
+
+    def _skip_forced_actions(self, state: dict):
+        """Auto-execute combat states where only 1 action is valid (no real choice).
+        Accumulates shaping reward internally. Returns state with >1 valid action or terminal."""
+        for _ in range(50):  # safety limit
+            if state is None:
+                return None
+            decision = state.get("decision", "")
+            if decision != "combat_play":
+                return state  # game_over, card_reward, etc.
+
+            mask = self.enc.action_mask(state)
+            if mask.sum() > 1:
+                return state  # real choice — return to agent
+
+            # Single valid action — auto-execute
+            # Update shaping tracking
+            self._prev_enemy_hp = _total_enemy_hp(state)
+            self._prev_player_hp = _player_hp(state)
+
+            only_action = int(np.where(mask)[0][0])
+            auto_cmd = self.enc.decode(only_action, state)
+            state = self._send(auto_cmd)
+
+        return state
+
+    def _execute_and_skip(self, cmd: dict):
+        """Execute agent's chosen action, then skip through any forced follow-ups.
+        Returns (state, shaping_reward_from_skipped_steps)."""
+        state = self._send(cmd)
+        if state is None:
+            return None, 0.0
+
+        # Collect shaping reward from the agent's action
+        reward = self._shaping_reward(state)
+
+        # Skip through forced single-option states
+        if state.get("decision") == "combat_play":
+            mask = self.enc.action_mask(state)
+            if mask.sum() <= 1:
+                # Need to auto-execute through forced actions
+                skipped_reward = 0.0
+                for _ in range(50):
+                    if state is None or state.get("decision") != "combat_play":
+                        break
+                    m = self.enc.action_mask(state)
+                    if m.sum() > 1:
+                        break
+                    self._prev_enemy_hp = _total_enemy_hp(state)
+                    self._prev_player_hp = _player_hp(state)
+                    auto_cmd = self.enc.decode(int(np.where(m)[0][0]), state)
+                    state = self._send(auto_cmd)
+                    if state is not None:
+                        skipped_reward += self._shaping_reward(state)
+                reward += skipped_reward
+
+        return state, reward
 
     def action_masks(self) -> np.ndarray:
         if self._current_state is None:
             return np.ones(41, dtype=bool)
-        return self.enc.action_mask(self._current_state)
+        mask = self.enc.action_mask(self._current_state)
+        # Should always have >1 valid action since we auto-execute single-option states
+        assert mask.sum() >= 1, "No valid actions"
+        return mask
 
     def close(self):
         self._kill_proc()
