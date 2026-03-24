@@ -1,16 +1,2 @@
 {
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cd /Users/haowu/Workspace/sts2-cli && for f in agent/learning_*.md; do python3 agent/validate_learning.py \"$f\"; done 2>&1 | grep -v '^$' || true",
-            "timeout": 5000
-          }
-        ]
-      }
-    ]
-  }
 }

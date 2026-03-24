@@ -11,7 +11,7 @@ import os
 
 DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
 PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "Sts2Headless", "Sts2Headless.csproj")
+                       "src", "Sts2Headless", "Sts2Headless.csproj")
 
 
 def play_run(seed: str, character: str = "Ironclad", verbose: bool = True):

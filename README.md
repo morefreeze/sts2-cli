@@ -56,7 +56,7 @@ Type `help` in-game:
 For programmatic control (AI agents, RL, etc.), communicate via stdin/stdout JSON:
 
 ```bash
-dotnet run --project Sts2Headless/Sts2Headless.csproj
+dotnet run --project src/Sts2Headless/Sts2Headless.csproj
 ```
 
 ```json
@@ -86,11 +86,11 @@ Each command returns a JSON decision point (`map_select` / `combat_play` / `card
 Your code (Python / JS / LLM)
     │  JSON stdin/stdout
     ▼
-Sts2Headless (C#)
+src/Sts2Headless (C#)
     │  RunSimulator.cs
     ▼
 sts2.dll (game engine, IL patched)
-  + GodotStubs (replaces GodotSharp.dll)
+  + src/GodotStubs (replaces GodotSharp.dll)
   + Harmony patches (localization)
 ```
 
@@ -162,7 +162,7 @@ python3 python/play.py --character Silent      # 选择静默猎手
 除了交互模式，也可以通过 stdin/stdout JSON 协议编程控制（写 AI agent、RL 训练等）：
 
 ```bash
-dotnet run --project Sts2Headless/Sts2Headless.csproj
+dotnet run --project src/Sts2Headless/Sts2Headless.csproj
 ```
 
 ```json
@@ -182,11 +182,11 @@ dotnet run --project Sts2Headless/Sts2Headless.csproj
 你的代码 (Python / JS / LLM)
     │  JSON stdin/stdout
     ▼
-Sts2Headless (C#)
+src/Sts2Headless (C#)
     │  RunSimulator.cs
     ▼
 sts2.dll (游戏引擎, IL patched)
-  + GodotStubs (替代 GodotSharp.dll)
+  + src/GodotStubs (替代 GodotSharp.dll)
   + Harmony patches (本地化)
 ```
 

@@ -143,7 +143,7 @@ var resolver = new DefaultAssemblyResolver();
 var libDir = Path.GetDirectoryName(dllPath)!;
 resolver.AddSearchDirectory(libDir);
 // Also search for GodotSharp.dll in the GodotStubs output (fallback)
-var stubsDir = Path.Combine(Path.GetDirectoryName(libDir)!, "GodotStubs", "bin", "Debug", "net9.0");
+var stubsDir = Path.Combine(Path.GetDirectoryName(libDir)!, "src", "GodotStubs", "bin", "Debug", "net9.0");
 if (Directory.Exists(stubsDir)) resolver.AddSearchDirectory(stubsDir);
 var module = ModuleDefinition.ReadModule(dllPath, new ReaderParameters {
     AssemblyResolver = resolver,
@@ -219,7 +219,7 @@ rm -rf "$PATCH_DIR"
 
 echo ""
 echo "🏗️ Building..."
-$DOTNET build Sts2Headless/Sts2Headless.csproj 2>&1 | tail -5
+$DOTNET build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -5
 
 echo ""
 echo "✅ Setup complete!"

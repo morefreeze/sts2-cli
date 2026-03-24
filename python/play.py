@@ -17,7 +17,7 @@ import argparse
 import random
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT = os.path.join(ROOT, "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 LIB_DIR = os.path.join(ROOT, "lib")
 
 def _find_dotnet():
@@ -144,7 +144,7 @@ def ensure_setup():
         os.environ["STS2_GAME_DIR"] = game_dir
 
     # Check if built
-    exe_dir = os.path.join(ROOT, "Sts2Headless", "bin", "Debug", "net9.0")
+    exe_dir = os.path.join(ROOT, "src", "Sts2Headless", "bin", "Debug", "net9.0")
     exe = os.path.join(exe_dir, "Sts2Headless.dll")
     if not os.path.isfile(exe) or os.path.getmtime(sts2_dll) > os.path.getmtime(exe):
         print("🏗️  Building...")

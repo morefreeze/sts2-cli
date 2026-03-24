@@ -96,7 +96,7 @@ internal class LocLookup
 
     public LocLookup()
     {
-        var baseDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
+        var baseDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..");
         Load(Path.Combine(baseDir, "localization_eng"), _eng);
         Load(Path.Combine(baseDir, "localization_zhs"), _zhs);
     }
@@ -134,48 +134,33 @@ internal class LocLookup
         return System.Text.RegularExpressions.Regex.Replace(text, @"\[/?[a-zA-Z_][a-zA-Z0-9_=]*\]", "");
     }
 
-    /// <summary>Return {en, zh} dict for JSON output.</summary>
-    public Dictionary<string, string?> Bilingual(string table, string key)
+    /// <summary>Return English string for JSON output.</summary>
+    public string Bilingual(string table, string key)
     {
         var en = _eng.GetValueOrDefault(table)?.GetValueOrDefault(key) ?? key;
-        var zh = _zhs.GetValueOrDefault(table)?.GetValueOrDefault(key);
-        return new Dictionary<string, string?>
-        {
-            ["en"] = StripBBCode(en),
-            ["zh"] = zh != null ? StripBBCode(zh) : null,
-        };
+        return StripBBCode(en);
     }
 
     // Convenience helpers using ModelId
-    public Dictionary<string, string?> Card(string entry) => Bilingual("cards", entry + ".title");
-    public Dictionary<string, string?> Monster(string entry) => Bilingual("monsters", entry + ".name");
-    public Dictionary<string, string?> Relic(string entry) => Bilingual("relics", entry + ".title");
-    public Dictionary<string, string?> Potion(string entry) => Bilingual("potions", entry + ".title");
-    public Dictionary<string, string?> Power(string entry) => Bilingual("powers", entry + ".title");
-    public Dictionary<string, string?> Event(string entry) => Bilingual("events", entry + ".title");
-    public Dictionary<string, string?> Act(string entry) => Bilingual("acts", entry + ".title");
+    public string Card(string entry) => Bilingual("cards", entry + ".title");
+    public string Monster(string entry) => Bilingual("monsters", entry + ".name");
+    public string Relic(string entry) => Bilingual("relics", entry + ".title");
+    public string Potion(string entry) => Bilingual("potions", entry + ".title");
+    public string Power(string entry) => Bilingual("powers", entry + ".title");
+    public string Event(string entry) => Bilingual("events", entry + ".title");
+    public string Act(string entry) => Bilingual("acts", entry + ".title");
 
     /// <summary>Resolve a full loc key like "TABLE.KEY.SUB" by searching all tables.</summary>
-    public Dictionary<string, string?> BilingualFromKey(string locKey)
+    public string BilingualFromKey(string locKey)
     {
         // Try to find the key in any table
         foreach (var tableName in _eng.Keys)
         {
             var en = _eng.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
             if (en != null)
-            {
-                var zh = _zhs.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
-                return new Dictionary<string, string?> { ["en"] = en, ["zh"] = zh };
-            }
+                return en;
         }
-        // Try zhs tables
-        foreach (var tableName in _zhs.Keys)
-        {
-            var zh = _zhs.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
-            if (zh != null)
-                return new Dictionary<string, string?> { ["en"] = locKey, ["zh"] = zh };
-        }
-        return new Dictionary<string, string?> { ["en"] = locKey, ["zh"] = null };
+        return locKey;
     }
 
     public bool IsLoaded => _eng.Count > 0;
@@ -1725,12 +1710,12 @@ public class RunSimulator
             .Select((opt, i) =>
             {
                 // Try to resolve title via loc tables
-                Dictionary<string, string?>? title = null;
+                string? title = null;
                 if (opt.Title != null)
                 {
                     var t = _loc.Bilingual(opt.Title.LocTable, opt.Title.LocEntryKey);
                     // Check if we actually found a translation (not just the key echoed back)
-                    if (t["en"] != null && t["en"] != opt.Title.LocEntryKey)
+                    if (t != opt.Title.LocEntryKey)
                         title = t;
                 }
                 // Fallback: try to extract option ID from the key and look up as relic/card/potion
@@ -1741,25 +1726,25 @@ public class RunSimulator
                     var optionId = parts.Length > 0 ? parts[^1] : opt.TextKey;
                     // Try relic, then card, then just use the optionId
                     var relic = _loc.Relic(optionId);
-                    if (relic["en"] != optionId + ".title")
+                    if (relic != optionId + ".title")
                         title = relic;
                     else
                     {
                         var card = _loc.Card(optionId);
-                        if (card["en"] != optionId + ".title")
+                        if (card != optionId + ".title")
                             title = card;
                         else
-                            title = new Dictionary<string, string?> { ["en"] = optionId.Replace("_", " ") };
+                            title = optionId.Replace("_", " ");
                     }
                 }
-                title ??= new Dictionary<string, string?> { ["en"] = $"option_{i}" };
+                title ??= $"option_{i}";
 
                 // Description: try loc table first
-                Dictionary<string, string?>? optDesc = null;
+                string? optDesc = null;
                 if (opt.Description != null && !string.IsNullOrEmpty(opt.Description.LocEntryKey))
                 {
                     var d = _loc.Bilingual(opt.Description.LocTable, opt.Description.LocEntryKey);
-                    if (d["en"] != null && d["en"] != opt.Description.LocEntryKey)
+                    if (d != opt.Description.LocEntryKey)
                         optDesc = d;
                 }
                 // Fallback: try relic/card description
@@ -1768,7 +1753,7 @@ public class RunSimulator
                     var parts = opt.TextKey.Split('.');
                     var optionId = parts.Length > 0 ? parts[^1] : opt.TextKey;
                     var rd = _loc.Bilingual("relics", optionId + ".description");
-                    if (rd["en"] != optionId + ".description")
+                    if (rd != optionId + ".description")
                         optDesc = rd;
                 }
 
@@ -1818,15 +1803,15 @@ public class RunSimulator
         // Resolve event name — try ancients table first (for Neow), then events
         var eventEntry = localEvent.Id?.Entry ?? localEvent.GetType().Name.ToUpperInvariant();
         var eventName = _loc.Bilingual("ancients", eventEntry + ".title");
-        if (eventName["en"] == eventEntry + ".title")
+        if (eventName == eventEntry + ".title")
             eventName = _loc.Event(eventEntry);
 
         // Resolve event description, suppress if key not found
-        Dictionary<string, string?>? eventDesc = null;
+        string? eventDesc = null;
         if (localEvent.Description != null)
         {
             var d = _loc.Bilingual(localEvent.Description.LocTable, localEvent.Description.LocEntryKey);
-            if (d["en"] != null && d["en"] != localEvent.Description.LocEntryKey)
+            if (d != localEvent.Description.LocEntryKey)
                 eventDesc = d;
         }
 
@@ -2494,7 +2479,7 @@ public class RunSimulator
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             var tables = new Dictionary<string, LocTable>();
 
-            var locDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "localization_eng");
+            var locDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "localization_eng");
             if (Directory.Exists(locDir))
             {
                 foreach (var file in Directory.GetFiles(locDir, "*.json"))

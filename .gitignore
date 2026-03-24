@@ -11,6 +11,3 @@ obj/
 *.pyc
 .DS_Store
 .obsidian/
-agent/
-play_*.py
-CLAUDE.md
