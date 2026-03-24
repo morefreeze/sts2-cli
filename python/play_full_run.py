@@ -10,7 +10,20 @@ import random
 import os
 from game_log import GameLogger
 
-DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
+def _find_dotnet():
+    for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
+              os.path.expanduser("~/.dotnet/dotnet"),
+              "/usr/local/share/dotnet/dotnet",
+              "dotnet"]:
+        try:
+            r = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return p
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return "dotnet"
+
+DOTNET = _find_dotnet()
 PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "src", "Sts2Headless", "Sts2Headless.csproj")
 
