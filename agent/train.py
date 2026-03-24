@@ -46,8 +46,9 @@ def main():
         model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=1, device=device,
-                            n_steps=256, batch_size=64, n_epochs=4,
-                            learning_rate=3e-4, gamma=0.99, ent_coef=0.01,
+                            n_steps=512, batch_size=128, n_epochs=4,
+                            learning_rate=3e-4, gamma=0.99, ent_coef=0.05,
+                            vf_coef=0.5, max_grad_norm=0.5,
                             tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"))
 
     save_interval = 25_000
