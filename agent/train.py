@@ -20,9 +20,10 @@ def mask_fn(env):
     return env.action_masks()
 
 
-def make_env(character: str, ascension: int):
+def make_env(character: str, ascension: int, worker_id: int = 0):
     def _init():
-        env = CombatEnv(character=character, ascension=ascension)
+        env = CombatEnv(character=character, ascension=ascension,
+                        seed_prefix=f"w{worker_id}")
         return ActionMasker(env, mask_fn)
     return _init
 
@@ -40,7 +41,7 @@ def main():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"Training on device: {device}")
 
-    vec_env = SubprocVecEnv([make_env(args.character, args.ascension) for _ in range(args.n_envs)])
+    vec_env = SubprocVecEnv([make_env(args.character, args.ascension, i) for i in range(args.n_envs)])
 
     if args.checkpoint:
         model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
