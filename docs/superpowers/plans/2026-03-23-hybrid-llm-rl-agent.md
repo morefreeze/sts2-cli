@@ -10,6 +10,8 @@
 
 ---
 
+> **Python Interpreter:** All commands use `.venv312/bin/python3.12` (Python 3.12 venv). System Python is 3.14 which has no torch wheels. Activate with: `source .venv312/bin/activate`
+
 ## File Structure
 
 ```
