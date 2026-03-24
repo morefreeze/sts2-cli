@@ -72,14 +72,16 @@ def test_coordinator_uses_greedy_when_no_llm():
     coord = GameCoordinator(rl_agent=rl, llm_agent=None)  # no LLM
 
     with patch.object(coord, '_start_proc'), \
-         patch.object(coord, '_kill_proc'):
+         patch.object(coord, '_kill_proc'), \
+         patch("agent.combat_env.greedy_action", return_value={"cmd": "action", "action": "select_map_node", "args": {"col": 0, "row": 1}}) as mock_greedy:
         with patch.object(coord, '_send', side_effect=[
             make_state("map_select", choices=[{"col": 0, "row": 1, "type": "rest"}]),
             make_game_over(victory=False),
         ]):
             result = coord.run_game("Ironclad", "test")
 
-    # Should not crash; greedy_action handles map_select
+    # greedy_action should have been called for map_select with no LLM
+    mock_greedy.assert_called_once()
     assert result is not None
 
 
@@ -90,8 +92,9 @@ def test_coordinator_game_over_result_structure():
     rl.act.return_value = {"cmd": "action", "action": "end_turn"}
     coord = GameCoordinator(rl_agent=rl, llm_agent=None)
 
+    kill_mock = MagicMock()
     with patch.object(coord, '_start_proc'), \
-         patch.object(coord, '_kill_proc'):
+         patch.object(coord, '_kill_proc', kill_mock):
         with patch.object(coord, '_send', side_effect=[
             make_state("combat_play", energy=3, round=1, hand=[], enemies=[]),
             make_game_over(victory=True, hp=60, max_hp=80),
@@ -102,3 +105,4 @@ def test_coordinator_game_over_result_structure():
     assert result["hp"] == 60
     assert result["max_hp"] == 80
     assert result["seed"] == "test_seed"
+    kill_mock.assert_called_once()
