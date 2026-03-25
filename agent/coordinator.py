@@ -472,7 +472,20 @@ class GameCoordinator:
                 prev_decision = decision
                 state = next_state
 
-            return {"victory": False, "seed": seed, "steps": 600, "error": "timeout"}
+            # Timeout — combat took too long
+            floor = self._floor(prev_state) if prev_state else "?"
+            hp = prev_state.get("player", {}).get("hp", "?") if prev_state else "?"
+            max_hp = prev_state.get("player", {}).get("max_hp", "?") if prev_state else "?"
+            zh = self.lang == "zh"
+            self._vlog(f"{'═'*50}")
+            self._vlog(f"  {_c('超时' if zh else 'TIMEOUT', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''} ({_c('600步' if zh else '600 steps', 'dim')})")
+            self._vlog(f"{'═'*50}")
+            log = combat_log if combat_log else last_combat_log
+            if self.verbose and log:
+                # Only replay last 10 turns to avoid flooding
+                self._replay_combat(log[-30:])
+            return {"victory": False, "seed": seed, "steps": 600,
+                    "floor": floor, "hp": hp, "max_hp": max_hp, "error": "timeout"}
         finally:
             self._kill_proc()
 
