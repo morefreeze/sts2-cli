@@ -179,14 +179,20 @@ class CombatEnv(gym.Env):
 
         if state is None:
             self._game_alive = False
-            return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {"crashed": True}
+            last_obs = self.enc.encode(self._current_state)
+            return last_obs, -0.5, True, False, {"crashed": True}
 
         decision = state.get("decision", "")
         reward = self._shaping_reward(state)
 
+        # Use last known combat obs for terminal states (NOT zeros — zeros
+        # confuse the value function because they're too similar to sparse
+        # combat states, causing gradient pollution that collapses entropy)
+        last_obs = self.enc.encode(self._current_state)
+
         if decision == "game_over":
             self._game_alive = False
-            return np.zeros(self.enc.obs_size, dtype=np.float32), reward + self._terminal_reward(state), True, False, {}
+            return last_obs, reward + self._terminal_reward(state), True, False, {}
 
         if decision == "combat_play":
             self._current_state = state
@@ -195,7 +201,7 @@ class CombatEnv(gym.Env):
         # Combat ended (transitioned to card_reward, map_select, etc.) — we won
         reward += self._combat_win_reward(state)
         self._current_state = state
-        return np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {"combat_won": True}
+        return last_obs, reward, True, False, {"combat_won": True}
 
     def action_masks(self) -> np.ndarray:
         if self._current_state is None:
