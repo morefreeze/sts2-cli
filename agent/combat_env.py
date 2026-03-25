@@ -6,8 +6,12 @@ coordinator.py and _advance_to_combat().
 
 Episode = one single combat (not a full game run).
 Reward shaping: per-step damage/block/kill signals + end-of-combat bonus.
+
+Design: simple 1:1 mapping — each env.step() = one game action (including
+end_turn). No auto-skip. Policy and value networks are separated in train.py
+to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import json, os, subprocess, random, time
+import json, os, subprocess, random, time, select
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -25,7 +29,7 @@ def _find_dotnet():
                 return p
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
-    return "dotnet"  # fallback, let it fail with a clear error
+    return "dotnet"
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -94,18 +98,11 @@ class CombatEnv(gym.Env):
     """
     Gymnasium environment for STS2 combat.
 
-    Each episode = one single combat encounter, NOT a full game run.
-    After combat ends (win or lose), the episode terminates.
-    On reset, the game process is reused — we advance to the next combat.
-    If no more combats (game over), we restart a new run.
-
-    Reward:
-      Per-step shaping:
-        +0.02 per enemy HP point lost (normalized by start-of-combat total)
-        -0.02 per player HP point lost (normalized by max HP)
-      End-of-combat:
-        Win:  +1.0 × (player_hp / max_hp)
-        Lose: -0.5
+    Each episode = one single combat encounter.
+    Each step = one game action (play_card or end_turn).
+    No auto-skip — forced end_turn steps are in the buffer. The policy and value
+    networks must be SEPARATE (net_arch=dict(pi=..., vf=...)) to prevent
+    value-loss gradient on forced steps from corrupting the policy head.
     """
 
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
@@ -128,12 +125,12 @@ class CombatEnv(gym.Env):
         self._proc = None
         self._current_state = None
         self._run_counter = 0
-        # Track HP between steps for shaping reward
         self._prev_enemy_hp = 0
         self._prev_player_hp = 0
-        self._combat_start_enemy_hp = 1  # avoid /0
+        self._combat_start_enemy_hp = 1
         self._combat_start_player_max_hp = 1
-        self._game_alive = False  # is there a live game process with an active run?
+        self._game_alive = False
+        self._read_buf = b""
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -145,11 +142,10 @@ class CombatEnv(gym.Env):
         # Try to advance to next combat in the current run
         if self._game_alive and self._current_state is not None:
             state = self._advance_to_combat(self._current_state)
-            if state.get("decision") == "combat_play":
+            if state and state.get("decision") == "combat_play":
                 self._init_combat_tracking(state)
                 self._current_state = state
                 return self.enc.encode(state), {}
-            # game_over or stuck — start a fresh run
 
         # Start a fresh game process + run
         self._kill_proc()
@@ -171,13 +167,6 @@ class CombatEnv(gym.Env):
             return self.enc.encode(self._current_state), {}
 
         self._init_combat_tracking(state)
-        # Auto-skip through forced single-option states to a real decision point
-        state = self._skip_forced_actions(state)
-        if state is None or state.get("decision") != "combat_play":
-            self._game_alive = False
-            self._current_state = _dummy_combat_state()
-            return self.enc.encode(self._current_state), {}
-
         self._current_state = state
         return self.enc.encode(state), {}
 
@@ -186,13 +175,14 @@ class CombatEnv(gym.Env):
             return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {}
 
         cmd = self.enc.decode(int(action), self._current_state)
-        state, reward = self._execute_and_skip(cmd)
+        state = self._send(cmd)
 
         if state is None:
             self._game_alive = False
-            return np.zeros(self.enc.obs_size, dtype=np.float32), reward - 0.5, True, False, {"crashed": True}
+            return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {"crashed": True}
 
         decision = state.get("decision", "")
+        reward = self._shaping_reward(state)
 
         if decision == "game_over":
             self._game_alive = False
@@ -202,137 +192,64 @@ class CombatEnv(gym.Env):
             self._current_state = state
             return self.enc.encode(state), reward, False, False, {}
 
-        # Combat ended — we won
+        # Combat ended (transitioned to card_reward, map_select, etc.) — we won
         reward += self._combat_win_reward(state)
         self._current_state = state
         return np.zeros(self.enc.obs_size, dtype=np.float32), reward, True, False, {"combat_won": True}
 
-    def _skip_forced_actions(self, state: dict):
-        """Auto-execute combat states where only 1 action is valid (no real choice).
-        Accumulates shaping reward internally. Returns state with >1 valid action or terminal."""
-        for _ in range(50):  # safety limit
-            if state is None:
-                return None
-            decision = state.get("decision", "")
-            if decision != "combat_play":
-                return state  # game_over, card_reward, etc.
-
-            mask = self.enc.action_mask(state)
-            if mask.sum() > 1:
-                return state  # real choice — return to agent
-
-            # Single valid action — auto-execute
-            # Update shaping tracking
-            self._prev_enemy_hp = _total_enemy_hp(state)
-            self._prev_player_hp = _player_hp(state)
-
-            only_action = int(np.where(mask)[0][0])
-            auto_cmd = self.enc.decode(only_action, state)
-            state = self._send(auto_cmd)
-
-        return state
-
-    def _execute_and_skip(self, cmd: dict):
-        """Execute agent's chosen action, then skip through any forced follow-ups.
-        Returns (state, shaping_reward_from_skipped_steps)."""
-        state = self._send(cmd)
-        if state is None:
-            return None, 0.0
-
-        # Collect shaping reward from the agent's action
-        reward = self._shaping_reward(state)
-
-        # Skip through forced single-option states
-        if state.get("decision") == "combat_play":
-            mask = self.enc.action_mask(state)
-            if mask.sum() <= 1:
-                # Need to auto-execute through forced actions
-                skipped_reward = 0.0
-                for _ in range(50):
-                    if state is None or state.get("decision") != "combat_play":
-                        break
-                    m = self.enc.action_mask(state)
-                    if m.sum() > 1:
-                        break
-                    self._prev_enemy_hp = _total_enemy_hp(state)
-                    self._prev_player_hp = _player_hp(state)
-                    auto_cmd = self.enc.decode(int(np.where(m)[0][0]), state)
-                    state = self._send(auto_cmd)
-                    if state is not None:
-                        skipped_reward += self._shaping_reward(state)
-                reward += skipped_reward
-
-        return state, reward
-
     def action_masks(self) -> np.ndarray:
         if self._current_state is None:
             return np.ones(41, dtype=bool)
-        mask = self.enc.action_mask(self._current_state)
-        # Should always have >1 valid action since we auto-execute single-option states
-        assert mask.sum() >= 1, "No valid actions"
-        return mask
+        return self.enc.action_mask(self._current_state)
 
     def close(self):
         self._kill_proc()
 
     def _init_combat_tracking(self, state: dict):
-        """Initialize tracking at the start of a new combat."""
         self._prev_enemy_hp = _total_enemy_hp(state)
         self._prev_player_hp = _player_hp(state)
         self._combat_start_enemy_hp = max(self._prev_enemy_hp, 1)
         self._combat_start_player_max_hp = max(state.get("player", {}).get("max_hp", 1), 1)
 
     def _shaping_reward(self, next_state: dict) -> float:
-        """Per-step reward based on HP changes."""
         cur_enemy_hp = _total_enemy_hp(next_state)
         cur_player_hp = _player_hp(next_state)
-
-        # Reward for dealing damage to enemies (normalized by start-of-combat total)
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
         dmg_reward = 0.02 * enemy_hp_lost / self._combat_start_enemy_hp
-
-        # Penalty for losing player HP (normalized by max HP)
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
         hp_penalty = -0.02 * player_hp_lost / self._combat_start_player_max_hp
-
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
-
         return dmg_reward + hp_penalty
 
     def _combat_win_reward(self, state: dict) -> float:
-        """Bonus for winning a combat. Higher HP = bigger bonus."""
         hp = _player_hp(state)
         max_hp = self._combat_start_player_max_hp
         return 1.0 * (hp / max_hp)
 
     def _terminal_reward(self, state: dict) -> float:
-        """Reward for game_over."""
         if state.get("victory", False):
-            return 2.0  # beat the boss — big bonus
+            return 2.0
         return -0.5
 
     def _advance_to_combat(self, state: dict) -> dict:
         for _ in range(200):
+            if state is None:
+                return {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
             if state.get("decision") in ("combat_play", "game_over"):
                 return state
             cmd = greedy_action(state)
-            next_state = self._send(cmd)
-            if next_state is None:
-                self._game_alive = False
-                return {"decision": "game_over", "victory": False,
-                        "player": {"hp": 0, "max_hp": 80}}
-            state = next_state
-        return state
+            state = self._send(cmd)
+        return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
 
     def _start_proc(self):
         self._proc = subprocess.Popen(
             [DOTNET, "run", "--no-build", "--project", PROJECT],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd=PROJECT_ROOT
+            stderr=subprocess.DEVNULL, cwd=PROJECT_ROOT
         )
-        self._read_json(timeout_sec=15.0)  # startup can be slow
+        self._read_buf = b""
+        self._read_json(timeout_sec=15.0)
 
     def _kill_proc(self):
         if self._proc is not None:
@@ -345,20 +262,17 @@ class CombatEnv(gym.Env):
                 self._proc.terminate()
                 self._proc.wait(timeout=3)
             except Exception:
-                try:
-                    self._proc.kill()
-                except Exception:
-                    pass
+                try: self._proc.kill()
+                except Exception: pass
             self._proc = None
         self._game_alive = False
+        self._read_buf = b""
 
     def _read_json(self, timeout_sec: float = 5.0):
         if self._proc is None:
             return None
         try:
-            import select
             fileno = self._proc.stdout.fileno()
-            buf = ""
             deadline = time.monotonic() + timeout_sec
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
@@ -369,17 +283,16 @@ class CombatEnv(gym.Env):
                     continue
                 chunk = os.read(fileno, 4096)
                 if not chunk:
-                    return None  # EOF
-                buf += chunk.decode("utf-8", errors="replace")
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
+                    return None
+                self._read_buf += chunk
+                while b"\n" in self._read_buf:
+                    line, self._read_buf = self._read_buf.split(b"\n", 1)
                     line = line.strip()
-                    if line.startswith("{"):
+                    if line.startswith(b"{"):
                         try:
                             return json.loads(line)
                         except json.JSONDecodeError:
                             continue
-            # Timeout
             self._kill_proc()
             return None
         except Exception:
@@ -390,8 +303,7 @@ class CombatEnv(gym.Env):
         if self._proc is None:
             return None
         try:
-            data = (json.dumps(cmd) + "\n").encode("utf-8")
-            self._proc.stdin.write(data)
+            self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
             self._proc.stdin.flush()
             return self._read_json()
         except Exception:
