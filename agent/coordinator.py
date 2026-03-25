@@ -301,8 +301,9 @@ def main():
     print(f"\nRunning {args.n_games} games | {args.character} | {args.mode} | A{args.ascension}")
     print("=" * 60)
     results = []
+    import random as _rng
     for i in range(args.n_games):
-        seed = f"eval_{args.character.lower()}_{i}"
+        seed = f"eval_{args.character.lower()}_{i}_{_rng.randint(0,99999)}"
         result = coord.run_game(args.character, seed, args.ascension)
         results.append(result)
         status = "WIN" if result.get("victory") else "LOSS"
