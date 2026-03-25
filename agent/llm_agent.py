@@ -44,7 +44,8 @@ class LLMAgent:
         pruned = self._prune_state(state)
         options_str = "\n".join(f"{i}: {self._option_label(o)}" for i, o in enumerate(options))
         return (
-            f"Character: ? | Act {state.get('act', '?')} Floor {state.get('floor', '?')} | "
+            f"Character: ? | Act {state.get('act') or state.get('context',{}).get('act','?')} "
+            f"Floor {state.get('floor') or state.get('context',{}).get('floor','?')} | "
             f"HP: {player.get('hp')}/{player.get('max_hp')} | Gold: {player.get('gold', 0)}\n"
             f"Deck: {self._deck_summary(player.get('deck', []))}\n"
             f"Relics: {', '.join(relics) or 'none'}\n\n"
@@ -77,7 +78,19 @@ class LLMAgent:
         elif decision in ("rest_site", "event_choice"):
             return state.get("options", [])
         elif decision == "shop":
-            return [{"_leave": True}]
+            gold = state.get("player", {}).get("gold", 0)
+            opts = []
+            for c in state.get("cards", []):
+                if c.get("is_stocked") and c.get("cost", 999) <= gold:
+                    opts.append({"_buy_card": True, "index": c.get("index", 0), **c})
+            for r in state.get("relics", []):
+                if r.get("is_stocked") and r.get("cost", 999) <= gold:
+                    opts.append({"_buy_relic": True, "index": r.get("index", 0), **r})
+            removal_cost = state.get("card_removal_cost")
+            if removal_cost and gold >= removal_cost:
+                opts.append({"_remove_card": True, "cost": removal_cost})
+            opts.append({"_leave": True})
+            return opts
         elif decision == "bundle_select":
             return state.get("bundles", [{"bundle_index": 0}])
         elif decision == "card_select":
@@ -89,10 +102,19 @@ class LLMAgent:
             return "Skip (take no card)"
         if option.get("_leave"):
             return "Leave shop"
+        if option.get("_remove_card"):
+            return f"Remove a card (cost {option.get('cost', '?')}g)"
         name = option.get("name") or option.get("title") or option.get("type") or ""
         if isinstance(name, dict):
             name = name.get("en", str(name))
-        return str(name) or json.dumps(option)[:60]
+        cost = option.get("cost", "")
+        cost_str = f" ({cost}g)" if cost else ""
+        prefix = ""
+        if option.get("_buy_card"):
+            prefix = "[Card] "
+        elif option.get("_buy_relic"):
+            prefix = "[Relic] "
+        return f"{prefix}{name}{cost_str}" or json.dumps(option)[:60]
 
     def _action_for_choice(self, state: dict, choice_idx: int) -> dict:
         decision = state.get("decision", "")
@@ -112,6 +134,18 @@ class LLMAgent:
         elif decision in ("rest_site", "event_choice"):
             return {"cmd": "action", "action": "choose_option",
                     "args": {"option_index": option.get("index", choice_idx)}}
+        elif decision == "shop":
+            if option.get("_leave"):
+                return {"cmd": "action", "action": "leave_room"}
+            if option.get("_remove_card"):
+                return {"cmd": "action", "action": "remove_card"}
+            if option.get("_buy_card"):
+                return {"cmd": "action", "action": "buy_card",
+                        "args": {"card_index": option["index"]}}
+            if option.get("_buy_relic"):
+                return {"cmd": "action", "action": "buy_relic",
+                        "args": {"relic_index": option["index"]}}
+            return {"cmd": "action", "action": "leave_room"}
         elif decision == "bundle_select":
             return {"cmd": "action", "action": "select_bundle",
                     "args": {"bundle_index": choice_idx}}
