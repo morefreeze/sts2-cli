@@ -7,7 +7,7 @@ coordinator.py and _advance_to_combat().
 Episode = one single combat (not a full game run).
 Reward shaping: per-step damage/block/kill signals + end-of-combat bonus.
 """
-import json, os, subprocess, random
+import json, os, subprocess, random, time
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -154,7 +154,7 @@ class CombatEnv(gym.Env):
         # Start a fresh game process + run
         self._kill_proc()
         self._start_proc()
-        run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}"
+        run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}_{random.randint(0,99999)}"
         self._run_counter += 1
         state = self._send({"cmd": "start_run", "character": self.character,
                             "seed": run_seed, "ascension": self.ascension})
@@ -330,14 +330,14 @@ class CombatEnv(gym.Env):
             [DOTNET, "run", "--no-build", "--project", PROJECT],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, cwd=PROJECT_ROOT
+            cwd=PROJECT_ROOT
         )
-        self._read_json()
+        self._read_json(timeout_sec=15.0)  # startup can be slow
 
     def _kill_proc(self):
         if self._proc is not None:
             try:
-                self._proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
+                self._proc.stdin.write(b'{"cmd":"quit"}\n')
                 self._proc.stdin.flush()
             except Exception:
                 pass
@@ -352,24 +352,50 @@ class CombatEnv(gym.Env):
             self._proc = None
         self._game_alive = False
 
-    def _read_json(self):
+    def _read_json(self, timeout_sec: float = 5.0):
         if self._proc is None:
             return None
-        while True:
-            line = self._proc.stdout.readline().strip()
-            if not line:
-                return None
-            if line.startswith("{"):
-                return json.loads(line)
+        try:
+            import select
+            fileno = self._proc.stdout.fileno()
+            buf = ""
+            deadline = time.monotonic() + timeout_sec
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                ready, _, _ = select.select([fileno], [], [], min(remaining, 0.5))
+                if not ready:
+                    continue
+                chunk = os.read(fileno, 4096)
+                if not chunk:
+                    return None  # EOF
+                buf += chunk.decode("utf-8", errors="replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if line.startswith("{"):
+                        try:
+                            return json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+            # Timeout
+            self._kill_proc()
+            return None
+        except Exception:
+            self._kill_proc()
+            return None
 
     def _send(self, cmd: dict):
         if self._proc is None:
             return None
         try:
-            self._proc.stdin.write(json.dumps(cmd) + "\n")
+            data = (json.dumps(cmd) + "\n").encode("utf-8")
+            self._proc.stdin.write(data)
             self._proc.stdin.flush()
             return self._read_json()
         except Exception:
+            self._kill_proc()
             return None
 
 
