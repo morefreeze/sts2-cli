@@ -128,9 +128,18 @@ class GameCoordinator:
         elif decision == "event_choice":
             prefix = f"第{floor}层" if zh else f"Floor {floor}"
             event_name = self._name(prev_state.get("event_name", prev_state.get("event", "?")))
-            opt_idx = args.get("option_index", "?")
+            opt_idx = args.get("option_index", 0)
+            opts = prev_state.get("options", [])
+            opt_label = ""
+            if isinstance(opt_idx, int) and opt_idx < len(opts):
+                opt = opts[opt_idx]
+                # Try title, then name, then option_id
+                raw = opt.get("title") or opt.get("name") or opt.get("option_id") or ""
+                opt_label = self._name(raw) if raw else ""
+            if not opt_label:
+                opt_label = f"{'选项' if zh else 'option'} {opt_idx}"
             label = "事件" if zh else "Event"
-            self._vlog(f"[{prefix}] {label}: {event_name} — {'选项' if zh else 'option'} {opt_idx}")
+            self._vlog(f"[{prefix}] {label}: {event_name} → {opt_label}")
 
         elif decision == "shop":
             prefix = f"第{floor}层" if zh else f"Floor {floor}"
