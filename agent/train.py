@@ -43,11 +43,18 @@ def main():
 
     vec_env = SubprocVecEnv([make_env(args.character, args.ascension, i) for i in range(args.n_envs)])
 
+    # Separate policy and value networks: prevents value-loss gradient on
+    # forced end_turn steps (87% of buffer) from corrupting the policy head.
+    policy_kwargs = dict(
+        net_arch=dict(pi=[64, 64], vf=[64, 64]),
+    )
+
     if args.checkpoint:
         model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=1, device=device,
-                            n_steps=512, batch_size=128, n_epochs=4,
+                            policy_kwargs=policy_kwargs,
+                            n_steps=8192, batch_size=512, n_epochs=4,
                             learning_rate=3e-4, gamma=0.99, ent_coef=0.05,
                             vf_coef=0.5, max_grad_norm=0.5,
                             tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"))
