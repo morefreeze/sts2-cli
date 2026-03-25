@@ -198,6 +198,26 @@ class CombatEnv(gym.Env):
         cmd = self.enc.decode(int(action), self._current_state)
         state = self._send(cmd)
 
+        # Detect stuck: end_turn ignored by engine (round/HP unchanged)
+        if (state and state.get("decision") == "combat_play"
+                and cmd.get("action") == "end_turn"
+                and state.get("round") == self._current_state.get("round")
+                and state.get("player", {}).get("hp") == self._current_state.get("player", {}).get("hp")):
+            # Try proceed to unstick
+            for _ in range(5):
+                state = self._send({"cmd": "action", "action": "proceed"})
+                if state is None or state.get("decision") != "combat_play":
+                    break
+                if state.get("round") != self._current_state.get("round"):
+                    break
+            if state and state.get("decision") == "combat_play" and \
+                    state.get("round") == self._current_state.get("round"):
+                # Still stuck — kill this combat
+                last_obs = self.enc.encode(self._current_state)
+                self._game_alive = False
+                self._kill_proc()
+                return last_obs, -0.5, True, False, {"stuck": True}
+
         if state is None:
             self._game_alive = False
             last_obs = self.enc.encode(self._current_state)
