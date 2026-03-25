@@ -298,72 +298,120 @@ class GameCoordinator:
                 self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
 
     def _replay_combat(self, combat_log):
-        """Replay the last combat — only show turns with actual card plays."""
+        """Replay the last combat — one line per round showing cards played + enemy intents."""
         if not combat_log:
             return
         zh = self.lang == "zh"
         self._vlog("")
-        self._vlog(f"{'─'*50}")
+        self._vlog(f"{'─'*55}")
         self._vlog(f"  {_c('最后一战回放' if zh else 'Last Combat Replay', 'bold')}")
-        self._vlog(f"{'─'*50}")
+        self._vlog(f"{'─'*55}")
 
-        # Group by round, only show rounds with card plays
-        skipped_end_turns = 0
-        last_shown_round = -1
-
+        # Group entries by round
+        rounds = {}  # round_num -> {cards: [], enemies: [], hp_start, hp_end, energy}
         for entry in combat_log:
             state = entry.get("state")
             action = entry.get("action")
             if not state or state.get("decision") != "combat_play":
                 continue
+            rnd = state.get("round", 0)
+            if rnd not in rounds:
+                enemies = state.get("enemies", [])
+                rounds[rnd] = {
+                    "cards": [],
+                    "hp_start": state.get("player", {}).get("hp", "?"),
+                    "hp_end": state.get("player", {}).get("hp", "?"),
+                    "energy": state.get("energy", "?"),
+                    "enemies": [
+                        {"name": self._name(e.get("name", "?")),
+                         "hp": e.get("hp", "?"),
+                         "intent": self._enemy_intent(e)}
+                        for e in enemies
+                    ],
+                }
+            # Track HP changes within the round
+            rounds[rnd]["hp_end"] = state.get("player", {}).get("hp", "?")
 
             act_name = action.get("action", "") if action else ""
-            rnd = state.get("round", "?")
-            energy = state.get("energy", "?")
-            hp = state.get("player", {}).get("hp", "?")
-            enemies = state.get("enemies", [])
-            enemy_summary = ", ".join(
-                f"{self._name(e.get('name','?'))} {e.get('hp','?')}HP"
-                for e in enemies
-            )
-
-            if act_name == "end_turn":
-                skipped_end_turns += 1
-                continue
-
-            # Show round header if new round
-            if rnd != last_shown_round:
-                if skipped_end_turns > 0:
-                    self._vlog(f"  {_c(f'... {skipped_end_turns}回合空过 ...' if zh else f'... {skipped_end_turns} turns skipped (end_turn only) ...', 'dim')}")
-                    skipped_end_turns = 0
-                label = f"回合{rnd}" if zh else f"Round {rnd}"
-                self._vlog(f"  {_c(label, 'bold')} | {'能量' if zh else 'E'}{energy} | HP {_c(str(hp), 'red')} | {enemy_summary}")
-                last_shown_round = rnd
-
-            # Show card play
             if act_name == "play_card":
                 ci = action.get("args", {}).get("card_index", 0)
                 hand = state.get("hand", [])
                 card = next((c for c in hand if c.get("index") == ci), None)
                 if card:
+                    cname = self._name(card.get("name", "?"))
                     ti = action.get("args", {}).get("target_index")
                     target = ""
                     if ti is not None:
+                        enemies = state.get("enemies", [])
                         enemy = next((e for e in enemies if e.get("index") == ti), None)
-                        if enemy:
-                            target = f" → {self._name(enemy.get('name', '?'))}"
-                    self._vlog(f"    {_c('▶', 'green')} {self._card_str(card)}{target}")
+                        if enemy and len(enemies) > 1:
+                            target = f"→{self._name(enemy.get('name', '?'))}"
+                    rounds[rnd]["cards"].append(f"{cname}{target}")
 
-        # Trailing skipped turns
-        if skipped_end_turns > 0:
-            self._vlog(f"  {_c(f'... {skipped_end_turns}回合空过 ...' if zh else f'... {skipped_end_turns} turns skipped (end_turn only) ...', 'dim')}")
+        # Print per-round summary
+        skipped = 0
+        for rnd in sorted(rounds.keys()):
+            r = rounds[rnd]
+            cards = r["cards"]
+            if not cards:
+                skipped += 1
+                continue
+            if skipped > 0:
+                self._vlog(f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}")
+                skipped = 0
+
+            # Round header
+            hp_start = r["hp_start"]
+            hp_end = r["hp_end"]
+            hp_color = "red" if isinstance(hp_end, int) and isinstance(hp_start, int) and hp_end < hp_start else "green"
+            hp_str = f"{_c(str(hp_start), 'red')}" + (f"→{_c(str(hp_end), hp_color)}" if hp_end != hp_start else "")
+
+            # Enemy intents
+            enemy_str = " | ".join(
+                f"{e['name']} {e['hp']}HP {e['intent']}"
+                for e in r["enemies"]
+            )
+
+            # Cards played
+            cards_str = ", ".join(cards)
+
+            label = f"R{rnd}" if not zh else f"回合{rnd}"
+            self._vlog(f"  {_c(label, 'bold')} HP:{hp_str} E{r['energy']} | {_c(cards_str, 'yellow')} | {_c(enemy_str, 'dim')}")
+
+        if skipped > 0:
+            self._vlog(f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}")
 
         total = len(combat_log)
-        plays = sum(1 for e in combat_log if e.get("action", {}).get("action") == "play_card")
-        ends = sum(1 for e in combat_log if e.get("action", {}).get("action") == "end_turn")
-        self._vlog(f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, "
-                   f"{plays}{'张牌' if zh else ' cards'}, {ends}{'次空过' if zh else ' end_turns'}")
-        self._vlog(f"{'─'*50}")
+        plays = sum(1 for e in combat_log if (e.get("action") or {}).get("action") == "play_card")
+        self._vlog(f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, {plays}{'张牌' if zh else ' cards played'}")
+        self._vlog(f"{'─'*55}")
+
+    def _enemy_intent(self, enemy):
+        """Format enemy intent as a short string."""
+        intent = enemy.get("intent") or {}
+        itype = intent.get("type", "")
+        dmg = intent.get("damage")
+        times = intent.get("times", 1)
+        if itype == "Attack":
+            return _c(f"⚔{dmg}" + (f"×{times}" if times > 1 else ""), "red")
+        elif itype == "Defend":
+            return _c(f"🛡{intent.get('block', '?')}", "blue")
+        elif itype in ("Buff", "StrengthBuff"):
+            return _c("⬆增益" if self.lang == "zh" else "⬆buff", "yellow")
+        elif itype in ("Debuff", "DebuffWeak", "DebuffStrong"):
+            return _c("⬇减益" if self.lang == "zh" else "⬇debuff", "yellow")
+        elif itype in ("AttackDebuff", "AttackBuff"):
+            dmg_str = f"⚔{dmg}" if dmg else "⚔"
+            return _c(f"{dmg_str}+⬇", "red")
+        elif itype == "AttackDefend":
+            return _c(f"⚔{dmg}+🛡", "red")
+        elif itype == "StatusCard":
+            return _c("⬇塞牌" if self.lang == "zh" else "⬇cards", "yellow")
+        elif itype == "Sleep":
+            return _c("💤", "dim")
+        elif itype == "Escape":
+            return _c("🏃", "dim")
+        return _c(itype or "?", "dim")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
