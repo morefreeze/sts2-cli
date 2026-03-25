@@ -3,14 +3,14 @@
 
 Usage:
     python3 agent/coordinator.py --character Ironclad --mode eval-full
-    python3 agent/coordinator.py --character Ironclad --mode eval-rl --n-games 20
+    python3 agent/coordinator.py --character Ironclad --mode eval-rl --n-games 20 --verbose
+    python3 agent/coordinator.py --character Ironclad --mode eval-rl --lang zh --verbose
 """
 import argparse
 import json
 import os
 import subprocess
 import sys
-import io
 
 def _find_dotnet():
     """Find .NET SDK binary across platforms."""
@@ -36,96 +36,112 @@ RL_DECISIONS = {"combat_play"}
 LLM_DECISIONS = {"map_select", "card_reward", "rest_site", "event_choice",
                  "shop", "bundle_select", "card_select"}
 
+# Chinese translations for verbose output
+NODE_TYPE_ZH = {
+    "Monster": "怪物", "Elite": "精英", "Boss": "Boss",
+    "RestSite": "休息", "Shop": "商店", "Treasure": "宝箱",
+    "Event": "事件", "Unknown": "未知", "Ancient": "远古",
+}
+REST_OPT_ZH = {"HEAL": "休息", "SMITH": "升级", "LIFT": "锻炼", "DIG": "挖掘", "RECALL": "回忆"}
+
 
 class GameCoordinator:
-    def __init__(self, rl_agent, llm_agent=None, verbose=False):
+    def __init__(self, rl_agent, llm_agent=None, verbose=False, lang="zh"):
         self.rl = rl_agent
         self.llm = llm_agent
         self._proc = None
         self.verbose = verbose
+        self.lang = lang  # "zh" or "en"
 
     def _vlog(self, msg):
         """Print a verbose log line to stderr."""
         if self.verbose:
             print(f"[game] {msg}", file=sys.stderr)
 
+    def _name(self, obj):
+        """Extract display name — handles both bilingual dict and plain string."""
+        if isinstance(obj, dict):
+            return obj.get(self.lang, obj.get("en", str(obj)))
+        return str(obj) if obj else "?"
+
     def _combat_enemy_names(self, state):
         enemies = state.get("enemies", [])
-        names = []
-        for e in enemies:
-            name = e.get("name", {})
-            if isinstance(name, dict):
-                names.append(name.get("en", "???"))
-            elif isinstance(name, str):
-                names.append(name)
-        return ", ".join(names) if names else "unknown"
+        names = [self._name(e.get("name", "?")) for e in enemies]
+        return ", ".join(names) if names else "?"
 
     def _on_combat_end(self, prev_state, new_state):
-        """Print combat summary when leaving combat_play."""
         floor = prev_state.get("floor", "?")
         enemies = self._combat_enemy_names(prev_state)
         hp_before = self._combat_start_hp
         player = new_state.get("player", {})
         hp_after = player.get("hp", "?")
         is_game_over = new_state.get("decision") == "game_over"
-        won = "Lost" if (is_game_over and not new_state.get("victory", False)) else "Won"
-        self._vlog(f"[Floor {floor}] Combat: {enemies} — {won} (HP: {hp_before}→{hp_after})")
+        if self.lang == "zh":
+            won = "败" if (is_game_over and not new_state.get("victory", False)) else "胜"
+            self._vlog(f"[第{floor}层] 战斗: {enemies} — {won} (HP: {hp_before}→{hp_after})")
+        else:
+            won = "Lost" if (is_game_over and not new_state.get("victory", False)) else "Won"
+            self._vlog(f"[Floor {floor}] Combat: {enemies} — {won} (HP: {hp_before}→{hp_after})")
 
     def _on_action(self, prev_state, action, new_state):
-        """Print verbose summary for non-combat decisions after action is taken."""
         decision = prev_state.get("decision", "")
         floor = prev_state.get("floor", "?")
         act_name = action.get("action", "")
         args = action.get("args", {})
+        zh = self.lang == "zh"
 
         if decision == "map_select":
-            col = args.get("col", "?")
-            row = args.get("row", "?")
-            # Try to find node type from choices
             node_type = "?"
             for c in prev_state.get("choices", []):
                 if c.get("col") == args.get("col") and c.get("row") == args.get("row"):
-                    node_type = c.get("type", "?")
+                    raw = c.get("type", "?")
+                    node_type = NODE_TYPE_ZH.get(raw, raw) if zh else raw
                     break
-            self._vlog(f"[Floor {floor}] Map: chose {node_type} ({col},{row})")
+            prefix = f"第{floor}层" if zh else f"Floor {floor}"
+            label = "地图" if zh else "Map"
+            self._vlog(f"[{prefix}] {label}: {node_type} ({args.get('col','?')},{args.get('row','?')})")
 
         elif decision == "card_reward":
+            prefix = f"第{floor}层" if zh else f"Floor {floor}"
             if act_name == "skip_card_reward":
-                self._vlog(f"[Floor {floor}] Card Reward: skipped")
+                self._vlog(f"[{prefix}] {'卡牌奖励: 跳过' if zh else 'Card Reward: skipped'}")
             else:
                 idx = args.get("card_index", 0)
                 cards = prev_state.get("cards", [])
-                if idx < len(cards):
-                    card = cards[idx]
-                    name = card.get("name", {})
-                    cname = name.get("en", str(name)) if isinstance(name, dict) else str(name)
-                else:
-                    cname = f"index {idx}"
-                self._vlog(f"[Floor {floor}] Card Reward: picked {cname}")
+                cname = self._name(cards[idx].get("name", "?")) if idx < len(cards) else f"#{idx}"
+                label = "卡牌奖励" if zh else "Card Reward"
+                self._vlog(f"[{prefix}] {label}: {cname}")
 
         elif decision == "rest_site":
-            choice = act_name.upper() if act_name else "?"
-            self._vlog(f"[Floor {floor}] Rest: chose {choice}")
+            prefix = f"第{floor}层" if zh else f"Floor {floor}"
+            opt_idx = args.get("option_index", 0)
+            opts = prev_state.get("options", [])
+            opt_id = opts[opt_idx].get("option_id", "?") if opt_idx < len(opts) else "?"
+            opt_name = REST_OPT_ZH.get(opt_id, opt_id) if zh else opt_id
+            label = "休息" if zh else "Rest"
+            self._vlog(f"[{prefix}] {label}: {opt_name}")
 
         elif decision == "event_choice":
-            event_name = prev_state.get("event", {})
-            if isinstance(event_name, dict):
-                event_name = event_name.get("en", str(event_name))
-            option = args.get("choice_index", "?")
-            self._vlog(f"[Floor {floor}] Event: {event_name} — chose option {option}")
+            prefix = f"第{floor}层" if zh else f"Floor {floor}"
+            event_name = self._name(prev_state.get("event_name", prev_state.get("event", "?")))
+            opt_idx = args.get("option_index", "?")
+            label = "事件" if zh else "Event"
+            self._vlog(f"[{prefix}] {label}: {event_name} — {'选项' if zh else 'option'} {opt_idx}")
 
         elif decision == "shop":
-            if act_name == "leave_shop":
-                self._vlog(f"[Floor {floor}] Shop: left")
+            prefix = f"第{floor}层" if zh else f"Floor {floor}"
+            if act_name == "leave_room":
+                self._vlog(f"[{prefix}] {'商店: 离开' if zh else 'Shop: left'}")
             else:
-                self._vlog(f"[Floor {floor}] Shop: bought ({act_name})")
+                self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {act_name}")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
         try:
             self._start_proc()
             state = self._send({"cmd": "start_run", "character": character,
-                                "seed": seed, "ascension": ascension})
+                                "seed": seed, "ascension": ascension,
+                                "lang": self.lang})
             if state is None:
                 return {"victory": False, "seed": seed, "error": "start_failed"}
 
@@ -135,11 +151,9 @@ class GameCoordinator:
             for step in range(600):
                 decision = state.get("decision", "")
 
-                # Detect combat start: track HP at entry
                 if decision == "combat_play" and prev_decision != "combat_play":
                     self._combat_start_hp = state.get("player", {}).get("hp", "?")
 
-                # Detect combat end: was in combat, now not
                 if self.verbose and prev_decision == "combat_play" and decision != "combat_play":
                     self._on_combat_end(prev_state, state)
 
@@ -147,8 +161,12 @@ class GameCoordinator:
                     hp = state.get("player", {}).get("hp", "?")
                     max_hp = state.get("player", {}).get("max_hp", "?")
                     floor = state.get("floor", "?")
-                    outcome = "VICTORY" if state.get("victory") else "DEFEAT"
-                    self._vlog(f"=== {outcome} at Floor {floor}, HP: {hp}/{max_hp} ===")
+                    if self.lang == "zh":
+                        outcome = "胜利" if state.get("victory") else "战败"
+                        self._vlog(f"=== {outcome} 第{floor}层, HP: {hp}/{max_hp} ===")
+                    else:
+                        outcome = "VICTORY" if state.get("victory") else "DEFEAT"
+                        self._vlog(f"=== {outcome} at Floor {floor}, HP: {hp}/{max_hp} ===")
                     return {
                         "victory": state.get("victory", False),
                         "seed": seed, "steps": step,
@@ -165,7 +183,6 @@ class GameCoordinator:
                 else:
                     action = {"cmd": "action", "action": "proceed"}
 
-                # Verbose: log non-combat decisions
                 if self.verbose and decision not in RL_DECISIONS and decision != "":
                     self._on_action(state, action, state)
 
@@ -253,6 +270,7 @@ def main():
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
     parser.add_argument("--verbose", action="store_true", help="Print per-room progress to stderr")
+    parser.add_argument("--lang", choices=["zh", "en"], default="zh", help="Output language (default: zh)")
     args = parser.parse_args()
 
     if args.checkpoint is None:
@@ -275,7 +293,7 @@ def main():
         from agent.llm_agent import LLMAgent
         llm = LLMAgent(api_key=args.api_key, cards_json=CARDS_JSON)
 
-    coord = GameCoordinator(rl_agent=rl, llm_agent=llm, verbose=args.verbose)
+    coord = GameCoordinator(rl_agent=rl, llm_agent=llm, verbose=args.verbose, lang=args.lang)
     print(f"\nRunning {args.n_games} games | {args.character} | {args.mode} | A{args.ascension}")
     print("=" * 60)
     results = []
