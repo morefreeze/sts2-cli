@@ -371,11 +371,28 @@ class GameCoordinator:
 
             prev_decision = ""
             self._combat_start_hp = None
+            self._current_act = None
             combat_log = []  # current combat: [{state, action}, ...]
             last_combat_log = []  # previous combat's log (for replay on death)
 
             for step in range(600):
                 decision = state.get("decision", "")
+
+                # Detect Act change
+                act = state.get("act") or state.get("context", {}).get("act")
+                if self.verbose and act and act != self._current_act:
+                    act_name = state.get("context", {}).get("act_name", "")
+                    if act_name:
+                        act_name = self._name(act_name)
+                    zh = self.lang == "zh"
+                    if self._current_act is not None:
+                        self._vlog(f"")
+                        self._vlog(f"{'━'*50}")
+                    self._vlog(f"  {_c(f'第{act}幕' if zh else f'Act {act}', 'bold')}" +
+                               (f" — {act_name}" if act_name else ""))
+                    if self._current_act is not None:
+                        self._vlog(f"{'━'*50}")
+                    self._current_act = act
 
                 # Track combat entry
                 if decision == "combat_play" and prev_decision != "combat_play":
