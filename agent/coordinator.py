@@ -12,6 +12,14 @@ import os
 import subprocess
 import sys
 
+# Import play.py display functions for combat replay
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
+try:
+    import play as _play
+    _has_play = True
+except ImportError:
+    _has_play = False
+
 def _find_dotnet():
     for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
               os.path.expanduser("~/.dotnet/dotnet"),
@@ -270,6 +278,68 @@ class GameCoordinator:
                             selected.append(self._card_str(cards[idx]))
                 self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
 
+    def _replay_combat(self, combat_log):
+        """Replay the last combat using play.py's rich display."""
+        if not combat_log:
+            return
+        zh = self.lang == "zh"
+        self._vlog("")
+        self._vlog(f"{'─'*50}")
+        self._vlog(f"  {_c('最后一战回放' if zh else 'Last Combat Replay', 'bold')}")
+        self._vlog(f"{'─'*50}")
+
+        if _has_play:
+            _play.LANG = self.lang
+            for entry in combat_log:
+                state = entry.get("state")
+                action = entry.get("action")
+                if state and state.get("decision") == "combat_play":
+                    # Use play.py's show_combat (prints to stdout, redirect to stderr)
+                    import io, contextlib
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        _play.show_combat(state)
+                    for line in buf.getvalue().rstrip().split("\n"):
+                        print(f"[replay] {line}", file=sys.stderr)
+                    # Show what action was taken
+                    act_name = action.get("action", "") if action else ""
+                    if act_name == "play_card":
+                        ci = action.get("args", {}).get("card_index", 0)
+                        hand = state.get("hand", [])
+                        card = next((c for c in hand if c.get("index") == ci), None)
+                        if card:
+                            cname = self._name(card.get("name", "?"))
+                            ti = action.get("args", {}).get("target_index")
+                            target = ""
+                            if ti is not None:
+                                enemies = state.get("enemies", [])
+                                enemy = next((e for e in enemies if e.get("index") == ti), None)
+                                if enemy:
+                                    target = f" → {self._name(enemy.get('name', '?'))}"
+                            print(f"[replay]   {_c('▶', 'green')} {_c(cname, 'yellow')}{target}", file=sys.stderr)
+                    elif act_name == "end_turn":
+                        print(f"[replay]   {_c('▶', 'cyan')} {'结束回合' if zh else 'End Turn'}", file=sys.stderr)
+            self._vlog(f"{'─'*50}")
+        else:
+            # Fallback without play.py
+            for entry in combat_log:
+                state = entry.get("state")
+                action = entry.get("action")
+                if not state or state.get("decision") != "combat_play":
+                    continue
+                rnd = state.get("round", "?")
+                energy = state.get("energy", "?")
+                hp = state.get("player", {}).get("hp", "?")
+                act_name = action.get("action", "") if action else ""
+                if act_name == "play_card":
+                    ci = action.get("args", {}).get("card_index", 0)
+                    hand = state.get("hand", [])
+                    card = next((c for c in hand if c.get("index") == ci), None)
+                    cname = self._name(card.get("name", "?")) if card else f"#{ci}"
+                    self._vlog(f"  R{rnd} E{energy} HP{hp} → {cname}")
+                elif act_name == "end_turn":
+                    self._vlog(f"  R{rnd} E{energy} HP{hp} → {'结束回合' if zh else 'end turn'}")
+
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
         try:
@@ -282,34 +352,51 @@ class GameCoordinator:
 
             prev_decision = ""
             self._combat_start_hp = None
+            combat_log = []  # current combat: [{state, action}, ...]
+            last_combat_log = []  # previous combat's log (for replay on death)
 
             for step in range(600):
                 decision = state.get("decision", "")
 
+                # Track combat entry
                 if decision == "combat_play" and prev_decision != "combat_play":
                     self._combat_start_hp = state.get("player", {}).get("hp", "?")
+                    combat_log = []
 
+                # Record combat steps
+                if decision == "combat_play":
+                    combat_log.append({"state": state, "action": None})
+
+                # Combat ended
                 if self.verbose and prev_decision == "combat_play" and decision != "combat_play":
                     self._on_combat_end(prev_state, state)
+                    last_combat_log = combat_log
+                    combat_log = []
 
                 if decision == "game_over":
                     hp = state.get("player", {}).get("hp", "?")
                     max_hp = state.get("player", {}).get("max_hp", "?")
                     floor = self._floor(state)
                     act = state.get("act") or state.get("context", {}).get("act")
+                    victory = state.get("victory", False)
+
                     if self.lang == "zh":
-                        outcome = _c("胜利", "green") if state.get("victory") else _c("战败", "red")
+                        outcome = _c("胜利", "green") if victory else _c("战败", "red")
                         self._vlog(f"{'═'*50}")
                         self._vlog(f"  {outcome} 第{floor}层, HP: {hp}/{max_hp}")
                         self._vlog(f"{'═'*50}")
                     else:
-                        outcome = _c("VICTORY", "green") if state.get("victory") else _c("DEFEAT", "red")
+                        outcome = _c("VICTORY", "green") if victory else _c("DEFEAT", "red")
                         self._vlog(f"{'═'*50}")
                         self._vlog(f"  {outcome} at Floor {floor}, HP: {hp}/{max_hp}")
                         self._vlog(f"{'═'*50}")
+
+                    # On defeat, replay the last combat
+                    if self.verbose and not victory and last_combat_log:
+                        self._replay_combat(last_combat_log)
+
                     return {
-                        "victory": state.get("victory", False),
-                        "seed": seed, "steps": step,
+                        "victory": victory, "seed": seed, "steps": step,
                         "act": act, "floor": floor,
                         "hp": state.get("player", {}).get("hp"),
                         "max_hp": state.get("player", {}).get("max_hp"),
@@ -321,6 +408,10 @@ class GameCoordinator:
                     action = self.llm.act(state) if self.llm else greedy_action(state)
                 else:
                     action = {"cmd": "action", "action": "proceed"}
+
+                # Record action in combat log
+                if decision == "combat_play" and combat_log:
+                    combat_log[-1]["action"] = action
 
                 if self.verbose and decision not in RL_DECISIONS and decision != "":
                     self._on_action(state, action, state)
