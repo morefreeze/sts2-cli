@@ -536,6 +536,22 @@ class GameCoordinator:
 
                 prev_state = state
                 next_state = self._send(action)
+
+                # Detect stuck state: end_turn didn't advance (engine bug)
+                if (next_state and next_state.get("decision") == "combat_play"
+                        and action.get("action") == "end_turn"
+                        and next_state.get("round") == state.get("round")
+                        and next_state.get("player", {}).get("hp") == state.get("player", {}).get("hp")):
+                    # end_turn was ignored — try proceed to unstick
+                    for _retry in range(5):
+                        next_state = self._send({"cmd": "action", "action": "proceed"})
+                        if next_state is None or next_state.get("decision") != "combat_play":
+                            break
+                        if next_state.get("round") != state.get("round"):
+                            break
+                        if next_state.get("player", {}).get("hp") != state.get("player", {}).get("hp"):
+                            break
+
                 if next_state is None:
                     floor = self._floor(prev_state)
                     hp = prev_state.get("player", {}).get("hp", "?")
