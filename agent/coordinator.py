@@ -298,7 +298,7 @@ class GameCoordinator:
                 self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
 
     def _replay_combat(self, combat_log):
-        """Replay the last combat using play.py's rich display."""
+        """Replay the last combat — only show turns with actual card plays."""
         if not combat_log:
             return
         zh = self.lang == "zh"
@@ -307,57 +307,63 @@ class GameCoordinator:
         self._vlog(f"  {_c('最后一战回放' if zh else 'Last Combat Replay', 'bold')}")
         self._vlog(f"{'─'*50}")
 
-        if _has_play:
-            _play.LANG = self.lang
-            for entry in combat_log:
-                state = entry.get("state")
-                action = entry.get("action")
-                if state and state.get("decision") == "combat_play":
-                    # Use play.py's show_combat (prints to stdout, redirect to stderr)
-                    import io, contextlib
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf):
-                        _play.show_combat(state)
-                    for line in buf.getvalue().rstrip().split("\n"):
-                        print(f"[replay] {line}", file=sys.stderr)
-                    # Show what action was taken
-                    act_name = action.get("action", "") if action else ""
-                    if act_name == "play_card":
-                        ci = action.get("args", {}).get("card_index", 0)
-                        hand = state.get("hand", [])
-                        card = next((c for c in hand if c.get("index") == ci), None)
-                        if card:
-                            cname = self._name(card.get("name", "?"))
-                            ti = action.get("args", {}).get("target_index")
-                            target = ""
-                            if ti is not None:
-                                enemies = state.get("enemies", [])
-                                enemy = next((e for e in enemies if e.get("index") == ti), None)
-                                if enemy:
-                                    target = f" → {self._name(enemy.get('name', '?'))}"
-                            print(f"[replay]   {_c('▶', 'green')} {_c(cname, 'yellow')}{target}", file=sys.stderr)
-                    elif act_name == "end_turn":
-                        print(f"[replay]   {_c('▶', 'cyan')} {'结束回合' if zh else 'End Turn'}", file=sys.stderr)
-            self._vlog(f"{'─'*50}")
-        else:
-            # Fallback without play.py
-            for entry in combat_log:
-                state = entry.get("state")
-                action = entry.get("action")
-                if not state or state.get("decision") != "combat_play":
-                    continue
-                rnd = state.get("round", "?")
-                energy = state.get("energy", "?")
-                hp = state.get("player", {}).get("hp", "?")
-                act_name = action.get("action", "") if action else ""
-                if act_name == "play_card":
-                    ci = action.get("args", {}).get("card_index", 0)
-                    hand = state.get("hand", [])
-                    card = next((c for c in hand if c.get("index") == ci), None)
-                    cname = self._name(card.get("name", "?")) if card else f"#{ci}"
-                    self._vlog(f"  R{rnd} E{energy} HP{hp} → {cname}")
-                elif act_name == "end_turn":
-                    self._vlog(f"  R{rnd} E{energy} HP{hp} → {'结束回合' if zh else 'end turn'}")
+        # Group by round, only show rounds with card plays
+        skipped_end_turns = 0
+        last_shown_round = -1
+
+        for entry in combat_log:
+            state = entry.get("state")
+            action = entry.get("action")
+            if not state or state.get("decision") != "combat_play":
+                continue
+
+            act_name = action.get("action", "") if action else ""
+            rnd = state.get("round", "?")
+            energy = state.get("energy", "?")
+            hp = state.get("player", {}).get("hp", "?")
+            enemies = state.get("enemies", [])
+            enemy_summary = ", ".join(
+                f"{self._name(e.get('name','?'))} {e.get('hp','?')}HP"
+                for e in enemies
+            )
+
+            if act_name == "end_turn":
+                skipped_end_turns += 1
+                continue
+
+            # Show round header if new round
+            if rnd != last_shown_round:
+                if skipped_end_turns > 0:
+                    self._vlog(f"  {_c(f'... {skipped_end_turns}回合空过 ...' if zh else f'... {skipped_end_turns} turns skipped (end_turn only) ...', 'dim')}")
+                    skipped_end_turns = 0
+                label = f"回合{rnd}" if zh else f"Round {rnd}"
+                self._vlog(f"  {_c(label, 'bold')} | {'能量' if zh else 'E'}{energy} | HP {_c(str(hp), 'red')} | {enemy_summary}")
+                last_shown_round = rnd
+
+            # Show card play
+            if act_name == "play_card":
+                ci = action.get("args", {}).get("card_index", 0)
+                hand = state.get("hand", [])
+                card = next((c for c in hand if c.get("index") == ci), None)
+                if card:
+                    ti = action.get("args", {}).get("target_index")
+                    target = ""
+                    if ti is not None:
+                        enemy = next((e for e in enemies if e.get("index") == ti), None)
+                        if enemy:
+                            target = f" → {self._name(enemy.get('name', '?'))}"
+                    self._vlog(f"    {_c('▶', 'green')} {self._card_str(card)}{target}")
+
+        # Trailing skipped turns
+        if skipped_end_turns > 0:
+            self._vlog(f"  {_c(f'... {skipped_end_turns}回合空过 ...' if zh else f'... {skipped_end_turns} turns skipped (end_turn only) ...', 'dim')}")
+
+        total = len(combat_log)
+        plays = sum(1 for e in combat_log if e.get("action", {}).get("action") == "play_card")
+        ends = sum(1 for e in combat_log if e.get("action", {}).get("action") == "end_turn")
+        self._vlog(f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, "
+                   f"{plays}{'张牌' if zh else ' cards'}, {ends}{'次空过' if zh else ' end_turns'}")
+        self._vlog(f"{'─'*50}")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
