@@ -509,7 +509,11 @@ def main():
         if not os.path.isdir(CHECKPOINT_DIR):
             print(f"Checkpoint directory not found: {CHECKPOINT_DIR}")
             sys.exit(1)
-        files = sorted(f for f in os.listdir(CHECKPOINT_DIR) if f.startswith(f"ppo_{args.character.lower()}"))
+        import re
+        files = sorted(
+            (f for f in os.listdir(CHECKPOINT_DIR) if f.startswith(f"ppo_{args.character.lower()}")),
+            key=lambda f: int(re.search(r'(\d+)k', f).group(1)) if re.search(r'(\d+)k', f) else 0
+        )
         if not files:
             print(f"No checkpoint found in {CHECKPOINT_DIR}"); sys.exit(1)
         args.checkpoint = os.path.join(CHECKPOINT_DIR, files[-1])
