@@ -39,6 +39,15 @@ def _find_dotnet():
 DOTNET = _find_dotnet()
 
 
+def _is_wsl():
+    """Check if running inside WSL."""
+    try:
+        with open("/proc/version", "r") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
 def _find_game_dir():
     """Auto-detect STS2 Steam install directory."""
     import platform
@@ -51,6 +60,19 @@ def _find_game_dir():
             os.path.join(base, "data_sts2_macos_x86_64"),
         ]
     elif system == "Linux":
+        if _is_wsl():
+            # WSL: scan Windows drives for Steam install
+            for drv in ["/mnt/c", "/mnt/d", "/mnt/e", "/mnt/f", "/mnt/g"]:
+                for steam in [
+                    f"{drv}/Program Files (x86)/Steam",
+                    f"{drv}/Program Files/Steam",
+                    f"{drv}/SteamLibrary",
+                    f"{drv}/Games/Steam",
+                    f"{drv}/Steam",
+                ]:
+                    d = f"{steam}/steamapps/common/Slay the Spire 2/data_sts2_windows_x86_64"
+                    candidates.append(d)
+        # Native Linux Steam
         for steam in ["~/.steam/steam", "~/.local/share/Steam"]:
             candidates.append(os.path.expanduser(f"{steam}/steamapps/common/Slay the Spire 2"))
     elif system == "Windows":
@@ -138,10 +160,9 @@ def ensure_setup():
             print("❌ Failed to copy sts2.dll")
             sys.exit(1)
 
-    # Set STS2_GAME_DIR env var for runtime DLL resolution
-    game_dir = _find_game_dir()
-    if game_dir:
-        os.environ["STS2_GAME_DIR"] = game_dir
+    # Set STS2_GAME_DIR env var for runtime DLL resolution (point to lib/ where DLLs were copied)
+    if "STS2_GAME_DIR" not in os.environ:
+        os.environ["STS2_GAME_DIR"] = LIB_DIR
 
     # Check if built
     exe_dir = os.path.join(ROOT, "src", "Sts2Headless", "bin", "Debug", "net9.0")
