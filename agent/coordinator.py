@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import io
 
 def _find_dotnet():
     """Find .NET SDK binary across platforms."""
@@ -37,10 +38,87 @@ LLM_DECISIONS = {"map_select", "card_reward", "rest_site", "event_choice",
 
 
 class GameCoordinator:
-    def __init__(self, rl_agent, llm_agent=None):
+    def __init__(self, rl_agent, llm_agent=None, verbose=False):
         self.rl = rl_agent
         self.llm = llm_agent
         self._proc = None
+        self.verbose = verbose
+
+    def _vlog(self, msg):
+        """Print a verbose log line to stderr."""
+        if self.verbose:
+            print(f"[game] {msg}", file=sys.stderr)
+
+    def _combat_enemy_names(self, state):
+        enemies = state.get("enemies", [])
+        names = []
+        for e in enemies:
+            name = e.get("name", {})
+            if isinstance(name, dict):
+                names.append(name.get("en", "???"))
+            elif isinstance(name, str):
+                names.append(name)
+        return ", ".join(names) if names else "unknown"
+
+    def _on_combat_end(self, prev_state, new_state):
+        """Print combat summary when leaving combat_play."""
+        floor = prev_state.get("floor", "?")
+        enemies = self._combat_enemy_names(prev_state)
+        hp_before = self._combat_start_hp
+        player = new_state.get("player", {})
+        hp_after = player.get("hp", "?")
+        is_game_over = new_state.get("decision") == "game_over"
+        won = "Lost" if (is_game_over and not new_state.get("victory", False)) else "Won"
+        self._vlog(f"[Floor {floor}] Combat: {enemies} — {won} (HP: {hp_before}→{hp_after})")
+
+    def _on_action(self, prev_state, action, new_state):
+        """Print verbose summary for non-combat decisions after action is taken."""
+        decision = prev_state.get("decision", "")
+        floor = prev_state.get("floor", "?")
+        act_name = action.get("action", "")
+        args = action.get("args", {})
+
+        if decision == "map_select":
+            col = args.get("col", "?")
+            row = args.get("row", "?")
+            # Try to find node type from choices
+            node_type = "?"
+            for c in prev_state.get("choices", []):
+                if c.get("col") == args.get("col") and c.get("row") == args.get("row"):
+                    node_type = c.get("type", "?")
+                    break
+            self._vlog(f"[Floor {floor}] Map: chose {node_type} ({col},{row})")
+
+        elif decision == "card_reward":
+            if act_name == "skip_card_reward":
+                self._vlog(f"[Floor {floor}] Card Reward: skipped")
+            else:
+                idx = args.get("card_index", 0)
+                cards = prev_state.get("cards", [])
+                if idx < len(cards):
+                    card = cards[idx]
+                    name = card.get("name", {})
+                    cname = name.get("en", str(name)) if isinstance(name, dict) else str(name)
+                else:
+                    cname = f"index {idx}"
+                self._vlog(f"[Floor {floor}] Card Reward: picked {cname}")
+
+        elif decision == "rest_site":
+            choice = act_name.upper() if act_name else "?"
+            self._vlog(f"[Floor {floor}] Rest: chose {choice}")
+
+        elif decision == "event_choice":
+            event_name = prev_state.get("event", {})
+            if isinstance(event_name, dict):
+                event_name = event_name.get("en", str(event_name))
+            option = args.get("choice_index", "?")
+            self._vlog(f"[Floor {floor}] Event: {event_name} — chose option {option}")
+
+        elif decision == "shop":
+            if act_name == "leave_shop":
+                self._vlog(f"[Floor {floor}] Shop: left")
+            else:
+                self._vlog(f"[Floor {floor}] Shop: bought ({act_name})")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
@@ -51,10 +129,26 @@ class GameCoordinator:
             if state is None:
                 return {"victory": False, "seed": seed, "error": "start_failed"}
 
+            prev_decision = ""
+            self._combat_start_hp = None
+
             for step in range(600):
                 decision = state.get("decision", "")
 
+                # Detect combat start: track HP at entry
+                if decision == "combat_play" and prev_decision != "combat_play":
+                    self._combat_start_hp = state.get("player", {}).get("hp", "?")
+
+                # Detect combat end: was in combat, now not
+                if self.verbose and prev_decision == "combat_play" and decision != "combat_play":
+                    self._on_combat_end(prev_state, state)
+
                 if decision == "game_over":
+                    hp = state.get("player", {}).get("hp", "?")
+                    max_hp = state.get("player", {}).get("max_hp", "?")
+                    floor = state.get("floor", "?")
+                    outcome = "VICTORY" if state.get("victory") else "DEFEAT"
+                    self._vlog(f"=== {outcome} at Floor {floor}, HP: {hp}/{max_hp} ===")
                     return {
                         "victory": state.get("victory", False),
                         "seed": seed, "steps": step,
@@ -71,9 +165,15 @@ class GameCoordinator:
                 else:
                     action = {"cmd": "action", "action": "proceed"}
 
+                # Verbose: log non-combat decisions
+                if self.verbose and decision not in RL_DECISIONS and decision != "":
+                    self._on_action(state, action, state)
+
+                prev_state = state
                 next_state = self._send(action)
                 if next_state is None:
                     return {"victory": False, "seed": seed, "steps": step, "error": "eof"}
+                prev_decision = decision
                 state = next_state
 
             return {"victory": False, "seed": seed, "steps": 600, "error": "timeout"}
@@ -152,6 +252,7 @@ def main():
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
+    parser.add_argument("--verbose", action="store_true", help="Print per-room progress to stderr")
     args = parser.parse_args()
 
     if args.checkpoint is None:
@@ -174,7 +275,7 @@ def main():
         from agent.llm_agent import LLMAgent
         llm = LLMAgent(api_key=args.api_key, cards_json=CARDS_JSON)
 
-    coord = GameCoordinator(rl_agent=rl, llm_agent=llm)
+    coord = GameCoordinator(rl_agent=rl, llm_agent=llm, verbose=args.verbose)
     print(f"\nRunning {args.n_games} games | {args.character} | {args.mode} | A{args.ascension}")
     print("=" * 60)
     results = []
