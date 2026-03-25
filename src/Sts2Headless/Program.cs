@@ -28,7 +28,7 @@ class Program
         };
 
         // Set up assembly resolution to find game DLLs
-        var libDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "lib");
+        var libDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "lib");
         if (!Directory.Exists(libDir))
             libDir = Path.Combine(AppContext.BaseDirectory, "lib");
 
@@ -88,7 +88,8 @@ class Program
                 return sim.StartRun(
                     cmd.TryGetProperty("character", out var ch) ? ch.GetString() ?? "Ironclad" : "Ironclad",
                     cmd.TryGetProperty("ascension", out var asc) ? asc.GetInt32() : 0,
-                    cmd.TryGetProperty("seed", out var s) ? s.GetString() : null
+                    cmd.TryGetProperty("seed", out var s) ? s.GetString() : null,
+                    cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en"
                 );
 
             case "action":
@@ -115,6 +116,31 @@ class Program
 
             case "get_map":
                 return sim.GetFullMap();
+
+            case "set_player":
+            {
+                var args = new Dictionary<string, JsonElement>();
+                foreach (var prop in cmd.EnumerateObject())
+                    if (prop.Name != "cmd") args[prop.Name] = prop.Value;
+                return sim.SetPlayer(args);
+            }
+
+            case "enter_room":
+            {
+                var roomType = cmd.TryGetProperty("type", out var rt) ? rt.GetString() ?? "" : "";
+                var encounter = cmd.TryGetProperty("encounter", out var enc) ? enc.GetString() : null;
+                var eventId = cmd.TryGetProperty("event", out var ev) ? ev.GetString() : null;
+                return sim.EnterRoom(roomType, encounter, eventId);
+            }
+
+            case "set_draw_order":
+            {
+                var cards = new List<string>();
+                if (cmd.TryGetProperty("cards", out var cardsArr))
+                    foreach (var c in cardsArr.EnumerateArray())
+                        cards.Add(c.GetString() ?? "");
+                return sim.SetDrawOrder(cards);
+            }
 
             case "quit":
                 sim.CleanUp();

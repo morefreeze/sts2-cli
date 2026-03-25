@@ -29,7 +29,7 @@ def _find_dotnet():
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT = os.path.join(PROJECT_ROOT, "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 
 
 def greedy_action(state: dict) -> dict:

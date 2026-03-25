@@ -140,3 +140,27 @@
 - **Fix**: Re-enabled PatchTaskYield() Harmony patch (was commented out). Added targeted SuppressYield=true only during EndTurn (try/finally), disabled during map navigation. This forces Task.Yield() continuations to run inline synchronously during enemy turn processing.
 - **Verification**: 15/15 regression runs pass (all 5 characters × 3 runs), 0 timeouts.
 - **Relevant code**: Sts2Headless/RunSimulator.cs (DoEndTurn, EnsureModelDbInitialized, YieldPatches)
+
+## [FIXED] BUG-024: Tools of Trade power blocks play_card at start of turn (2026-03-23, fixed 2026-03-23)
+- **Decision type**: combat_play
+- **Description**: When Tools of the Trade power is active (draw 1 + discard 1 at start of turn), the start-of-turn discard creates a pending card_select state. However, the bridge reports combat_play decision instead of card_select because the HasPending check at line ~1154 runs BEFORE the Pump() at line ~1210 that processes start-of-turn effects.
+- **Fix**: Added a re-check for `_cardSelector.HasPending` AFTER the `Pump()` + `WaitForActionExecutor()` in the combat room section of DetectDecisionPoint. If a pending card selection appeared during pump (from start-of-turn powers), it now correctly jumps back to the card_select handler via goto label.
+- **Relevant code**: Sts2Headless/RunSimulator.cs (DetectDecisionPoint, combat room section ~line 1210)
+
+## [FIXED] BUG-023: Shop card removal causes NullReferenceException in PlayerSummary (2026-03-23, fixed 2026-03-23)
+- **Decision type**: shop (remove_card → select_cards)
+- **Description**: After removing a card via shop card removal, returning to ShopState triggers NullReferenceException in PlayerSummary's deck card serialization. The removed card's model becomes null in the deck list, but PlayerSummary iterates all cards without null-checking.
+- **Fix**: Added `.Where(c => c != null)` filter before `.Select()` in PlayerSummary deck serialization. Also fixed `deck_size` to use `.Count(c => c != null)` to exclude null entries.
+- **Relevant code**: Sts2Headless/RunSimulator.cs (PlayerSummary, lines ~2090-2091)
+
+## [FIXED] BUG-025: Eradicate can_play=true at 0 energy blocks turn end (2026-03-23, fixed 2026-03-23)
+- **Decision type**: combat_play
+- **Description**: Eradicate has base cost 0 with Retain keyword. Its mechanic deals 11 damage × current energy. At 0 energy, `CanPlay()` returns true (cost 0 ≤ 0 energy), but playing it fails because the card action requires energy > 0. This blocks the game: the bridge won't allow end_turn when "playable" cards exist, and the card can't actually be played.
+- **Fix**: Added special-case override in CombatPlayState hand card serialization: when card is ERADICATE and player energy is 0, set can_play to false. Same pattern as BUG-007 (Astral Pulse star cost).
+- **Relevant code**: Sts2Headless/RunSimulator.cs (CombatPlayState hand card serialization, ~line 1414)
+
+## [FIXED] BUG-026: Attack Potion card_select deadlocks combat — all cards unplayable (2026-03-23, fixed 2026-03-23)
+- **Decision type**: combat_play (use_potion with Attack Potion)
+- **Description**: When Attack Potion is used, it triggers a card_select (choose from 3 attack cards). The game engine's async method awaits GetSelectedCards(), which creates a pending TaskCompletionSource. WaitForActionExecutor loops 1000 pumps but the executor can never finish because it's awaiting the user's card selection. After WaitForActionExecutor gives up (with IsRunning still true), all subsequent card plays and end_turn fail because the executor remains permanently "stuck".
+- **Fix**: Added early exit in WaitForActionExecutor when `_cardSelector.HasPending` or `_cardSelector.HasPendingReward` is true. The executor can't progress until the user resolves the selection, so there's no point waiting. This allows DoUsePotion to return the card_select decision immediately. When DoSelectCards later resolves the selection, the executor chain completes normally.
+- **Relevant code**: Sts2Headless/RunSimulator.cs (WaitForActionExecutor, ~line 1990)

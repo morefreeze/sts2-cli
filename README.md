@@ -5,7 +5,7 @@
 
 A CLI for Slay the Spire 2.
 
-Runs the real game engine headless in your terminal — all damage, card effects, enemy AI, relics, and RNG are identical to the actual game.
+Runs the real game engine headless in your terminal — all damage, card effects, enemy AI, relics, and RNG are identical to the actual game. Everything is unlocked from the start: all characters, cards, relics, potions, and ascension levels — no timeline progression required.
 
 ![demo](docs/demo_en.gif)
 
@@ -27,8 +27,10 @@ Or just run `python3 python/play.py` — it auto-detects and sets up on first ru
 ## Play
 
 ```bash
-python3 python/play.py                # interactive (Chinese)
-python3 python/play.py --lang en      # interactive (English)
+python3 python/play.py                        # interactive (Chinese)
+python3 python/play.py --lang en              # interactive (English)
+python3 python/play.py --ascension 10         # Ascension 10
+python3 python/play.py --character Silent      # play as Silent
 ```
 
 Type `help` in-game:
@@ -54,7 +56,7 @@ Type `help` in-game:
 For programmatic control (AI agents, RL, etc.), communicate via stdin/stdout JSON:
 
 ```bash
-dotnet run --project Sts2Headless/Sts2Headless.csproj
+dotnet run --project src/Sts2Headless/Sts2Headless.csproj
 ```
 
 ```json
@@ -66,7 +68,7 @@ dotnet run --project Sts2Headless/Sts2Headless.csproj
 {"cmd": "quit"}
 ```
 
-Each command returns a JSON decision point (`map_select` / `combat_play` / `card_reward` / `rest_site` / `event_choice` / `shop` / `game_over`). All names are bilingual (en/zh).
+Each command returns a JSON decision point (`map_select` / `combat_play` / `card_reward` / `rest_site` / `event_choice` / `shop` / `game_over`). All names are in English.
 
 ## Supported Characters
 
@@ -84,11 +86,11 @@ Each command returns a JSON decision point (`map_select` / `combat_play` / `card
 Your code (Python / JS / LLM)
     │  JSON stdin/stdout
     ▼
-Sts2Headless (C#)
+src/Sts2Headless (C#)
     │  RunSimulator.cs
     ▼
 sts2.dll (game engine, IL patched)
-  + GodotStubs (replaces GodotSharp.dll)
+  + src/GodotStubs (replaces GodotSharp.dll)
   + Harmony patches (localization)
 ```
 
@@ -99,7 +101,7 @@ sts2.dll (game engine, IL patched)
 
 杀戮尖塔2的命令行版本。
 
-在终端里运行真实游戏引擎 — 所有伤害计算、卡牌效果、敌人AI、遗物触发、随机数都和真实游戏一致。
+在终端里运行真实游戏引擎 — 所有伤害计算、卡牌效果、敌人AI、遗物触发、随机数都和真实游戏一致。所有内容从一开始就全部解锁：全角色、全卡牌、全遗物、全药水、全渐进难度等级，无需时间线进度。
 
 ![demo](docs/demo_zh.gif)
 
@@ -121,8 +123,10 @@ cd sts2-cli
 ## 玩
 
 ```bash
-python3 python/play.py              # 中文交互模式
-python3 python/play.py --lang en    # English
+python3 python/play.py                        # 中文交互模式
+python3 python/play.py --lang en              # English
+python3 python/play.py --ascension 10         # 渐进难度 10
+python3 python/play.py --character Silent      # 选择静默猎手
 ```
 
 游戏内输入 `help` 查看所有命令：
@@ -158,7 +162,7 @@ python3 python/play.py --lang en    # English
 除了交互模式，也可以通过 stdin/stdout JSON 协议编程控制（写 AI agent、RL 训练等）：
 
 ```bash
-dotnet run --project Sts2Headless/Sts2Headless.csproj
+dotnet run --project src/Sts2Headless/Sts2Headless.csproj
 ```
 
 ```json
@@ -170,7 +174,7 @@ dotnet run --project Sts2Headless/Sts2Headless.csproj
 {"cmd": "quit"}
 ```
 
-每个命令返回一个 JSON decision point（`map_select` / `combat_play` / `card_reward` / `rest_site` / `event_choice` / `shop` / `game_over`），所有名称都是中英双语。
+每个命令返回一个 JSON decision point（`map_select` / `combat_play` / `card_reward` / `rest_site` / `event_choice` / `shop` / `game_over`），所有名称为英文。
 
 ## 架构
 
@@ -178,11 +182,11 @@ dotnet run --project Sts2Headless/Sts2Headless.csproj
 你的代码 (Python / JS / LLM)
     │  JSON stdin/stdout
     ▼
-Sts2Headless (C#)
+src/Sts2Headless (C#)
     │  RunSimulator.cs
     ▼
 sts2.dll (游戏引擎, IL patched)
-  + GodotStubs (替代 GodotSharp.dll)
+  + src/GodotStubs (替代 GodotSharp.dll)
   + Harmony patches (本地化)
 ```
 

@@ -28,7 +28,7 @@ def _find_dotnet():
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT = os.path.join(PROJECT_ROOT, "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 CARDS_JSON = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
 CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 

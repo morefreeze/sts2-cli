@@ -15,35 +15,35 @@
   <!-- Reference game DLL and its non-Godot dependencies -->
   <ItemGroup>
     <Reference Include="sts2">
-      <HintPath>..\lib\sts2.dll</HintPath>
+      <HintPath>..\..\lib\sts2.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SmartFormat">
-      <HintPath>..\lib\SmartFormat.dll</HintPath>
+      <HintPath>..\..\lib\SmartFormat.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="SmartFormat.ZString">
-      <HintPath>..\lib\SmartFormat.ZString.dll</HintPath>
+      <HintPath>..\..\lib\SmartFormat.ZString.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Sentry">
-      <HintPath>..\lib\Sentry.dll</HintPath>
+      <HintPath>..\..\lib\Sentry.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Steamworks.NET">
-      <HintPath>..\lib\Steamworks.NET.dll</HintPath>
+      <HintPath>..\..\lib\Steamworks.NET.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MonoMod.Backports">
-      <HintPath>..\lib\MonoMod.Backports.dll</HintPath>
+      <HintPath>..\..\lib\MonoMod.Backports.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MonoMod.ILHelpers">
-      <HintPath>..\lib\MonoMod.ILHelpers.dll</HintPath>
+      <HintPath>..\..\lib\MonoMod.ILHelpers.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>..\lib\0Harmony.dll</HintPath>
+      <HintPath>..\..\lib\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

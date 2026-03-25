@@ -96,7 +96,7 @@ internal class LocLookup
 
     public LocLookup()
     {
-        var baseDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
+        var baseDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..");
         Load(Path.Combine(baseDir, "localization_eng"), _eng);
         Load(Path.Combine(baseDir, "localization_zhs"), _zhs);
     }
@@ -134,48 +134,47 @@ internal class LocLookup
         return System.Text.RegularExpressions.Regex.Replace(text, @"\[/?[a-zA-Z_][a-zA-Z0-9_=]*\]", "");
     }
 
-    /// <summary>Return {en, zh} dict for JSON output.</summary>
-    public Dictionary<string, string?> Bilingual(string table, string key)
+    /// <summary>Language for JSON output: "en" or "zh". Default: "en".</summary>
+    public string Lang { get; set; } = "en";
+
+    /// <summary>Return localized string for JSON output based on Lang setting.</summary>
+    public string Bilingual(string table, string key)
     {
-        var en = _eng.GetValueOrDefault(table)?.GetValueOrDefault(key) ?? key;
-        var zh = _zhs.GetValueOrDefault(table)?.GetValueOrDefault(key);
-        return new Dictionary<string, string?>
+        if (Lang == "zh")
         {
-            ["en"] = StripBBCode(en),
-            ["zh"] = zh != null ? StripBBCode(zh) : null,
-        };
+            var zh = _zhs.GetValueOrDefault(table)?.GetValueOrDefault(key);
+            if (zh != null) return StripBBCode(zh);
+        }
+        var en = _eng.GetValueOrDefault(table)?.GetValueOrDefault(key) ?? key;
+        return StripBBCode(en);
     }
 
     // Convenience helpers using ModelId
-    public Dictionary<string, string?> Card(string entry) => Bilingual("cards", entry + ".title");
-    public Dictionary<string, string?> Monster(string entry) => Bilingual("monsters", entry + ".name");
-    public Dictionary<string, string?> Relic(string entry) => Bilingual("relics", entry + ".title");
-    public Dictionary<string, string?> Potion(string entry) => Bilingual("potions", entry + ".title");
-    public Dictionary<string, string?> Power(string entry) => Bilingual("powers", entry + ".title");
-    public Dictionary<string, string?> Event(string entry) => Bilingual("events", entry + ".title");
-    public Dictionary<string, string?> Act(string entry) => Bilingual("acts", entry + ".title");
+    public string Card(string entry) => Bilingual("cards", entry + ".title");
+    public string Monster(string entry) => Bilingual("monsters", entry + ".name");
+    public string Relic(string entry) => Bilingual("relics", entry + ".title");
+    public string Potion(string entry) => Bilingual("potions", entry + ".title");
+    public string Power(string entry) => Bilingual("powers", entry + ".title");
+    public string Event(string entry) => Bilingual("events", entry + ".title");
+    public string Act(string entry) => Bilingual("acts", entry + ".title");
 
     /// <summary>Resolve a full loc key like "TABLE.KEY.SUB" by searching all tables.</summary>
-    public Dictionary<string, string?> BilingualFromKey(string locKey)
+    public string BilingualFromKey(string locKey)
     {
-        // Try to find the key in any table
+        if (Lang == "zh")
+        {
+            foreach (var tableName in _zhs.Keys)
+            {
+                var zh = _zhs.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
+                if (zh != null) return zh;
+            }
+        }
         foreach (var tableName in _eng.Keys)
         {
             var en = _eng.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
-            if (en != null)
-            {
-                var zh = _zhs.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
-                return new Dictionary<string, string?> { ["en"] = en, ["zh"] = zh };
-            }
+            if (en != null) return en;
         }
-        // Try zhs tables
-        foreach (var tableName in _zhs.Keys)
-        {
-            var zh = _zhs.GetValueOrDefault(tableName)?.GetValueOrDefault(locKey);
-            if (zh != null)
-                return new Dictionary<string, string?> { ["en"] = locKey, ["zh"] = zh };
-        }
-        return new Dictionary<string, string?> { ["en"] = locKey, ["zh"] = null };
+        return locKey;
     }
 
     public bool IsLoaded => _eng.Count > 0;
@@ -208,10 +207,11 @@ public class RunSimulator
     private IReadOnlyList<IReadOnlyList<CardModel>>? _pendingBundles;
     private TaskCompletionSource<IEnumerable<CardModel>>? _pendingBundleTcs;
 
-    public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null)
+    public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en")
     {
         try
         {
+            _loc.Lang = lang;
             EnsureModelDbInitialized();
 
             var player = CreatePlayer(character);
@@ -268,6 +268,199 @@ public class RunSimulator
             return ErrorWithTrace("StartRun failed", ex);
         }
     }
+
+    // ─── Test/Debug commands ───
+
+    private static readonly System.Reflection.BindingFlags NonPublic =
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+
+    /// <summary>Get the backing List&lt;T&gt; behind an IReadOnlyList property via reflection.</summary>
+    private static List<T>? GetBackingList<T>(object obj, string fieldName)
+    {
+        var field = obj.GetType().GetField(fieldName, NonPublic);
+        return field?.GetValue(obj) as List<T>;
+    }
+
+    private static void SetField(object obj, string fieldName, object? value)
+    {
+        var field = obj.GetType().GetField(fieldName, NonPublic);
+        field?.SetValue(obj, value);
+    }
+
+    public Dictionary<string, object?> SetPlayer(Dictionary<string, System.Text.Json.JsonElement> args)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players[0];
+
+            if (args.TryGetValue("hp", out var hpEl) && player.Creature != null)
+                SetField(player.Creature, "_currentHp", hpEl.GetInt32());
+            if (args.TryGetValue("max_hp", out var mhpEl) && player.Creature != null)
+                SetField(player.Creature, "_maxHp", mhpEl.GetInt32());
+            if (args.TryGetValue("gold", out var goldEl))
+                player.Gold = goldEl.GetInt32();
+
+            if (args.TryGetValue("relics", out var relicsEl))
+            {
+                var list = GetBackingList<RelicModel>(player, "_relics");
+                if (list != null)
+                {
+                    list.Clear();
+                    foreach (var rEl in relicsEl.EnumerateArray())
+                    {
+                        var id = rEl.GetString();
+                        if (id == null) continue;
+                        var model = ModelDb.GetById<RelicModel>(new ModelId("RELIC", id));
+                        if (model != null) list.Add(model.ToMutable());
+                    }
+                }
+            }
+            if (args.TryGetValue("deck", out var deckEl))
+            {
+                // Remove existing cards from RunState tracking
+                foreach (var c in player.Deck.Cards.ToList())
+                    _runState.RemoveCard(c);
+                player.Deck.Clear(silent: true);
+                // Add new cards via RunState.CreateCard (sets Owner + registers)
+                foreach (var cEl in deckEl.EnumerateArray())
+                {
+                    var id = cEl.GetString();
+                    if (id == null) continue;
+                    var canonical = ModelDb.GetById<CardModel>(new ModelId("CARD", id));
+                    if (canonical != null)
+                    {
+                        var card = _runState.CreateCard(canonical, player);
+                        player.Deck.AddInternal(card, silent: true);
+                    }
+                }
+            }
+            if (args.TryGetValue("potions", out var potionsEl))
+            {
+                var slots = GetBackingList<PotionModel>(player, "_potionSlots")
+                         ?? GetBackingList<PotionModel?>(player, "_potionSlots") as System.Collections.IList;
+                if (slots != null)
+                {
+                    for (int i = 0; i < slots.Count; i++) slots[i] = null;
+                    int idx = 0;
+                    foreach (var pEl in potionsEl.EnumerateArray())
+                    {
+                        if (idx >= slots.Count) break;
+                        var id = pEl.GetString();
+                        if (id != null)
+                        {
+                            var model = ModelDb.GetById<PotionModel>(new ModelId("POTION", id));
+                            if (model != null) slots[idx] = model;
+                        }
+                        idx++;
+                    }
+                }
+            }
+
+            Log($"SetPlayer: hp={player.Creature?.CurrentHp} gold={player.Gold} relics={player.Relics.Count} deck={player.Deck?.Cards?.Count}");
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "ok",
+                ["player"] = PlayerSummary(player),
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetPlayer failed", ex); }
+    }
+
+    public Dictionary<string, object?> EnterRoom(string roomType, string? encounter, string? eventId)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var runState = _runState;
+            Log($"EnterRoom: type={roomType} encounter={encounter} event={eventId}");
+
+            AbstractRoom room;
+            switch (roomType.ToLowerInvariant())
+            {
+                case "combat":
+                case "monster":
+                case "elite":
+                {
+                    if (string.IsNullOrEmpty(encounter))
+                        encounter = "SHRINKER_BEETLE_WEAK"; // default encounter
+                    var encModel = ModelDb.GetById<EncounterModel>(new ModelId("ENCOUNTER", encounter));
+                    if (encModel == null) return Error($"Unknown encounter: {encounter}");
+                    room = new CombatRoom(encModel.ToMutable(), runState);
+                    break;
+                }
+                case "shop":
+                    room = new MerchantRoom();
+                    break;
+                case "rest":
+                case "rest_site":
+                    room = new RestSiteRoom();
+                    break;
+                case "event":
+                {
+                    if (string.IsNullOrEmpty(eventId))
+                        return Error("event requires 'event' parameter (e.g. CHANGELING_GROVE)");
+                    var evModel = ModelDb.GetById<EventModel>(new ModelId("EVENT", eventId));
+                    if (evModel == null) return Error($"Unknown event: {eventId}");
+                    room = new EventRoom(evModel);
+                    break;
+                }
+                case "treasure":
+                    room = new TreasureRoom(_runState.CurrentActIndex);
+                    break;
+                default:
+                    return Error($"Unknown room type: {roomType}");
+            }
+
+            RunManager.Instance.EnterRoom(room).GetAwaiter().GetResult();
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            return DetectDecisionPoint();
+        }
+        catch (Exception ex) { return ErrorWithTrace("EnterRoom failed", ex); }
+    }
+
+    public Dictionary<string, object?> SetDrawOrder(List<string> cardIds)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players[0];
+            var pcs = player.PlayerCombatState;
+            if (pcs?.DrawPile == null) return Error("Not in combat");
+
+            var drawList = GetBackingList<CardModel>(pcs.DrawPile, "_cards");
+            if (drawList == null) return Error("Cannot access draw pile");
+
+            var newOrder = new List<CardModel>();
+            var available = new List<CardModel>(drawList);
+            foreach (var cardId in cardIds)
+            {
+                var match = available.FirstOrDefault(c =>
+                    c.Id.Entry.Equals(cardId, StringComparison.OrdinalIgnoreCase));
+                if (match != null)
+                {
+                    newOrder.Add(match);
+                    available.Remove(match);
+                }
+            }
+            newOrder.AddRange(available);
+
+            drawList.Clear();
+            drawList.AddRange(newOrder);
+
+            Log($"SetDrawOrder: {newOrder.Count} cards, top={newOrder.FirstOrDefault()?.Id.Entry}");
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "ok",
+                ["draw_pile_count"] = drawList.Count,
+                ["top_cards"] = newOrder.Take(5).Select(c => _loc.Card(c.Id.Entry)).ToList(),
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetDrawOrder failed", ex); }
+    }
+
+    // ─── Game actions ───
 
     public Dictionary<string, object?> ExecuteAction(string action, Dictionary<string, object?>? args)
     {
@@ -807,6 +1000,29 @@ public class RunSimulator
         _cardSelector.ResolvePendingByIndices(indices);
         _syncCtx.Pump();
         WaitForActionExecutor();
+
+        // Extra wait for rest-site SMITH: the background ChooseLocalOption task
+        // needs time to complete the upgrade after card selection resolves.
+        if (_runState?.CurrentRoom is RestSiteRoom)
+        {
+            Thread.Sleep(200);
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            // Force to map after SMITH completes (same pattern as HEAL)
+            Log("Card selection in rest site (SMITH), forcing to map");
+            ForceToMap();
+            return MapSelectState();
+        }
+
+        // Extra wait for shop card removal: the purchase task needs to finish
+        if (_runState?.CurrentRoom is MerchantRoom)
+        {
+            Thread.Sleep(200);
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            Log("Card selection in shop (card removal), refreshing shop state");
+        }
+
         return DetectDecisionPoint();
     }
 
@@ -1136,7 +1352,8 @@ public class RunSimulator
             };
         }
 
-        // Check if there's a pending card selection (upgrade, remove, transform)
+        // Check if there's a pending card selection (upgrade, remove, transform, start-of-turn powers)
+        checkCardSelect:
         if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
         {
             var opts = _cardSelector.PendingOptions.Select((card, i) =>
@@ -1195,6 +1412,13 @@ public class RunSimulator
             // With Task.Yield() patched, combat init should be synchronous
             _syncCtx.Pump();
             WaitForActionExecutor();
+
+            // Re-check for pending card selections AFTER pump (BUG-024: start-of-turn effects
+            // like Tools of Trade create card selections during Pump, AFTER the initial HasPending check)
+            if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
+            {
+                goto checkCardSelect;  // Jump back to card_select handling
+            }
 
             if (CombatManager.Instance.IsInProgress && CombatManager.Instance.IsPlayPhase)
             {
@@ -1442,6 +1666,7 @@ public class RunSimulator
                 var ePowers = e.Powers?.Select(pw => new Dictionary<string, object?>
                 {
                     ["name"] = _loc.Power(pw.Id.Entry),
+                    ["description"] = _loc.Bilingual("powers", pw.Id.Entry + ".description"),
                     ["amount"] = pw.Amount,
                 }).ToList();
 
@@ -1462,6 +1687,7 @@ public class RunSimulator
         var playerPowers = player.Creature?.Powers?.Select(pw => new Dictionary<string, object?>
         {
             ["name"] = _loc.Power(pw.Id.Entry),
+            ["description"] = _loc.Bilingual("powers", pw.Id.Entry + ".description"),
             ["amount"] = pw.Amount,
         }).ToList();
 
@@ -1703,12 +1929,12 @@ public class RunSimulator
             .Select((opt, i) =>
             {
                 // Try to resolve title via loc tables
-                Dictionary<string, string?>? title = null;
+                string? title = null;
                 if (opt.Title != null)
                 {
                     var t = _loc.Bilingual(opt.Title.LocTable, opt.Title.LocEntryKey);
                     // Check if we actually found a translation (not just the key echoed back)
-                    if (t["en"] != null && t["en"] != opt.Title.LocEntryKey)
+                    if (t != opt.Title.LocEntryKey)
                         title = t;
                 }
                 // Fallback: try to extract option ID from the key and look up as relic/card/potion
@@ -1719,25 +1945,25 @@ public class RunSimulator
                     var optionId = parts.Length > 0 ? parts[^1] : opt.TextKey;
                     // Try relic, then card, then just use the optionId
                     var relic = _loc.Relic(optionId);
-                    if (relic["en"] != optionId + ".title")
+                    if (relic != optionId + ".title")
                         title = relic;
                     else
                     {
                         var card = _loc.Card(optionId);
-                        if (card["en"] != optionId + ".title")
+                        if (card != optionId + ".title")
                             title = card;
                         else
-                            title = new Dictionary<string, string?> { ["en"] = optionId.Replace("_", " ") };
+                            title = optionId.Replace("_", " ");
                     }
                 }
-                title ??= new Dictionary<string, string?> { ["en"] = $"option_{i}" };
+                title ??= $"option_{i}";
 
                 // Description: try loc table first
-                Dictionary<string, string?>? optDesc = null;
+                string? optDesc = null;
                 if (opt.Description != null && !string.IsNullOrEmpty(opt.Description.LocEntryKey))
                 {
                     var d = _loc.Bilingual(opt.Description.LocTable, opt.Description.LocEntryKey);
-                    if (d["en"] != null && d["en"] != opt.Description.LocEntryKey)
+                    if (d != opt.Description.LocEntryKey)
                         optDesc = d;
                 }
                 // Fallback: try relic/card description
@@ -1746,7 +1972,7 @@ public class RunSimulator
                     var parts = opt.TextKey.Split('.');
                     var optionId = parts.Length > 0 ? parts[^1] : opt.TextKey;
                     var rd = _loc.Bilingual("relics", optionId + ".description");
-                    if (rd["en"] != optionId + ".description")
+                    if (rd != optionId + ".description")
                         optDesc = rd;
                 }
 
@@ -1796,15 +2022,15 @@ public class RunSimulator
         // Resolve event name — try ancients table first (for Neow), then events
         var eventEntry = localEvent.Id?.Entry ?? localEvent.GetType().Name.ToUpperInvariant();
         var eventName = _loc.Bilingual("ancients", eventEntry + ".title");
-        if (eventName["en"] == eventEntry + ".title")
+        if (eventName == eventEntry + ".title")
             eventName = _loc.Event(eventEntry);
 
         // Resolve event description, suppress if key not found
-        Dictionary<string, string?>? eventDesc = null;
+        string? eventDesc = null;
         if (localEvent.Description != null)
         {
             var d = _loc.Bilingual(localEvent.Description.LocTable, localEvent.Description.LocEntryKey);
-            if (d["en"] != null && d["en"] != localEvent.Description.LocEntryKey)
+            if (d != localEvent.Description.LocEntryKey)
                 eventDesc = d;
         }
 
@@ -1857,20 +2083,43 @@ public class RunSimulator
         if (inv == null) { ForceToMap(); return MapSelectState(); }
 
         var cards = inv.CharacterCardEntries.Concat(inv.ColorlessCardEntries)
-            .Select((e, i) => new Dictionary<string, object?>
+            .Select((e, i) =>
             {
-                ["index"] = i,
-                ["name"] = _loc.Card(e.CreationResult?.Card?.Id.Entry ?? "?"),
-                ["type"] = e.CreationResult?.Card?.Type.ToString() ?? "?",
-                ["cost"] = e.Cost,
-                ["is_stocked"] = e.IsStocked,
-                ["on_sale"] = e.IsOnSale,
+                var card = e.CreationResult?.Card;
+                var entry = card?.Id.Entry ?? "?";
+                var stats = new Dictionary<string, object?>();
+                int cardCost = 0;
+                try
+                {
+                    if (card != null)
+                    {
+                        cardCost = card.EnergyCost?.GetResolved() ?? 0;
+                        var mutable = card.ToMutable();
+                        foreach (var dv in mutable.DynamicVars.Values)
+                            stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue;
+                    }
+                }
+                catch { }
+                return new Dictionary<string, object?>
+                {
+                    ["index"] = i,
+                    ["name"] = _loc.Card(entry),
+                    ["type"] = card?.Type.ToString() ?? "?",
+                    ["card_cost"] = cardCost,
+                    ["description"] = _loc.Bilingual("cards", entry + ".description"),
+                    ["stats"] = stats.Count > 0 ? stats : null,
+                    ["after_upgrade"] = card != null ? GetUpgradedInfo(card) : null,
+                    ["cost"] = e.Cost,
+                    ["is_stocked"] = e.IsStocked,
+                    ["on_sale"] = e.IsOnSale,
+                };
             }).ToList();
 
         var relics = inv.RelicEntries.Select((e, i) => new Dictionary<string, object?>
         {
             ["index"] = i,
             ["name"] = _loc.Relic(e.Model?.Id.Entry ?? "?"),
+            ["description"] = _loc.Bilingual("relics", (e.Model?.Id.Entry ?? "?") + ".description"),
             ["cost"] = e.Cost,
             ["is_stocked"] = e.IsStocked,
         }).ToList();
@@ -1879,6 +2128,7 @@ public class RunSimulator
         {
             ["index"] = i,
             ["name"] = _loc.Potion(e.Model?.Id.Entry ?? "?"),
+            ["description"] = _loc.Bilingual("potions", (e.Model?.Id.Entry ?? "?") + ".description"),
             ["cost"] = e.Cost,
             ["is_stocked"] = e.IsStocked,
         }).ToList();
@@ -2073,8 +2323,8 @@ public class RunSimulator
                     ["target_type"] = p.TargetType.ToString(),
                 };
             }).Where(x => x != null).ToList(),
-            ["deck_size"] = player.Deck?.Cards?.Count ?? 0,
-            ["deck"] = player.Deck?.Cards?.Select(c =>
+            ["deck_size"] = player.Deck?.Cards?.Count(c => c != null) ?? 0,
+            ["deck"] = player.Deck?.Cards?.Where(c => c != null).Select(c =>
             {
                 var dstats = new Dictionary<string, object?>();
                 try { foreach (var dv in c.DynamicVars.Values) dstats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
@@ -2472,7 +2722,7 @@ public class RunSimulator
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             var tables = new Dictionary<string, LocTable>();
 
-            var locDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "localization_eng");
+            var locDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "localization_eng");
             if (Directory.Exists(locDir))
             {
                 foreach (var file in Directory.GetFiles(locDir, "*.json"))
