@@ -381,7 +381,31 @@ class GameCoordinator:
             combat_log = []  # current combat: [{state, action}, ...]
             last_combat_log = []  # previous combat's log (for replay on death)
 
+            _consecutive_errors = 0
             for step in range(600):
+                # Handle engine errors (e.g. end_turn rejected)
+                if state.get("type") == "error":
+                    _consecutive_errors += 1
+                    err_msg = state.get("message", "?")
+                    if _consecutive_errors <= 3:
+                        self._vlog(f"  {_c('⚠', 'yellow')} {err_msg}")
+                    if _consecutive_errors > 10:
+                        self._vlog(f"  {_c('引擎反复报错，尝试 proceed' if self.lang == 'zh' else 'Engine stuck in errors, trying proceed', 'red')}")
+                        state = self._send({"cmd": "action", "action": "proceed"})
+                        if state is None:
+                            break
+                        continue
+                    # Retry: if in combat, try end_turn; otherwise proceed
+                    if prev_decision == "combat_play":
+                        state = self._send({"cmd": "action", "action": "end_turn"})
+                    else:
+                        state = self._send({"cmd": "action", "action": "proceed"})
+                    if state is None:
+                        break
+                    continue
+                else:
+                    _consecutive_errors = 0
+
                 decision = state.get("decision", "")
 
                 # Detect Act change
