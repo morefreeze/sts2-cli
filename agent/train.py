@@ -54,7 +54,7 @@ def main():
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=1, device=device,
                             policy_kwargs=policy_kwargs,
-                            n_steps=8192, batch_size=512, n_epochs=4,
+                            n_steps=2048, batch_size=256, n_epochs=4,
                             learning_rate=3e-4, gamma=0.99, ent_coef=0.05,
                             vf_coef=0.5, max_grad_norm=0.5,
                             tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"))
