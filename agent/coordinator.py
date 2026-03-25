@@ -75,15 +75,18 @@ class GameCoordinator:
 
     @staticmethod
     def _resolve_vars(text, vars_dict):
-        """Replace {VarName} and [VarName] placeholders with actual values."""
-        if not text or not vars_dict:
-            return text or ""
+        """Replace {VarName} and [VarName] placeholders with actual values.
+        Unresolved placeholders are cleaned up (removed or replaced with ?)."""
+        if not text:
+            return ""
         import re
-        lower_vars = {k.lower(): v for k, v in vars_dict.items()}
+        lower_vars = {}
+        if vars_dict:
+            lower_vars = {k.lower(): v for k, v in vars_dict.items()}
         def replacer(m):
             key = m.group(1)
             val = lower_vars.get(key.lower())
-            return str(val) if val is not None else m.group(0)
+            return str(val) if val is not None else "?"
         text = re.sub(r'\{(\w+)\}', replacer, text)
         text = re.sub(r'\[(\w+)\]', replacer, text)
         return text
@@ -429,6 +432,24 @@ class GameCoordinator:
                 # Record action in combat log
                 if decision == "combat_play" and combat_log:
                     combat_log[-1]["action"] = action
+
+                # Verbose: combat actions (brief one-liner)
+                if self.verbose and decision == "combat_play" and action:
+                    act_name = action.get("action", "")
+                    if act_name == "play_card":
+                        ci = action.get("args", {}).get("card_index", 0)
+                        hand = state.get("hand", [])
+                        card = next((c for c in hand if c.get("index") == ci), None)
+                        if card:
+                            cname = self._name(card.get("name", "?"))
+                            ti = action.get("args", {}).get("target_index")
+                            enemies = state.get("enemies", [])
+                            tname = ""
+                            if ti is not None:
+                                enemy = next((e for e in enemies if e.get("index") == ti), None)
+                                if enemy:
+                                    tname = f" → {self._name(enemy.get('name', '?'))}"
+                            self._vlog(f"  {_c('▶', 'green')} {self._card_str(card)}{tname}")
 
                 if self.verbose and decision not in RL_DECISIONS and decision != "":
                     self._on_action(state, action, state)
