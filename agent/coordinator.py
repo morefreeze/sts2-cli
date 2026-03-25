@@ -187,7 +187,7 @@ class GameCoordinator:
                         if i == idx:
                             s = f"[{_c('✓', 'green')}] {s}"
                         else:
-                            s = f"[ ] {_c(self._name(cd.get('name','?')), 'dim')}"
+                            s = f"[ ] {s}"
                         all_cards.append(s)
                     self._vlog(f"[{prefix}] {label}:")
                     for s in all_cards:
