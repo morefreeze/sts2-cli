@@ -13,17 +13,13 @@ import subprocess
 import sys
 
 def _find_dotnet():
-    """Find .NET SDK binary across platforms."""
     for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
               os.path.expanduser("~/.dotnet/dotnet"),
-              "/usr/local/share/dotnet/dotnet",
-              "dotnet"]:
+              "/usr/local/share/dotnet/dotnet", "dotnet"]:
         try:
             r = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=5)
-            if r.returncode == 0:
-                return p
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
+            if r.returncode == 0: return p
+        except (FileNotFoundError, subprocess.TimeoutExpired): continue
     return "dotnet"
 
 DOTNET = _find_dotnet()
@@ -36,13 +32,20 @@ RL_DECISIONS = {"combat_play"}
 LLM_DECISIONS = {"map_select", "card_reward", "rest_site", "event_choice",
                  "shop", "bundle_select", "card_select"}
 
-# Chinese translations for verbose output
 NODE_TYPE_ZH = {
     "Monster": "怪物", "Elite": "精英", "Boss": "Boss",
     "RestSite": "休息", "Shop": "商店", "Treasure": "宝箱",
     "Event": "事件", "Unknown": "未知", "Ancient": "远古",
 }
 REST_OPT_ZH = {"HEAL": "休息", "SMITH": "升级", "LIFT": "锻炼", "DIG": "挖掘", "RECALL": "回忆"}
+CARD_TYPE_ZH = {"Attack": "攻击", "Skill": "技能", "Power": "能力", "Status": "状态", "Curse": "诅咒"}
+
+# ANSI color helpers
+def _c(text, color):
+    codes = {"red": "91", "green": "92", "yellow": "93", "blue": "94",
+             "magenta": "95", "cyan": "96", "dim": "2", "bold": "1", "reset": "0"}
+    code = codes.get(color, "0")
+    return f"\033[{code}m{text}\033[0m"
 
 
 class GameCoordinator:
@@ -51,27 +54,68 @@ class GameCoordinator:
         self.llm = llm_agent
         self._proc = None
         self.verbose = verbose
-        self.lang = lang  # "zh" or "en"
+        self.lang = lang
 
     def _vlog(self, msg):
-        """Print a verbose log line to stderr."""
         if self.verbose:
             print(f"[game] {msg}", file=sys.stderr)
 
     def _name(self, obj):
-        """Extract display name — handles both bilingual dict and plain string."""
         if isinstance(obj, dict):
             return obj.get(self.lang, obj.get("en", str(obj)))
         return str(obj) if obj else "?"
+
+    def _floor(self, state):
+        return state.get("floor") or state.get("context", {}).get("floor", "?")
+
+    def _card_str(self, card):
+        """Format a card with colored cost, type, stats."""
+        name = self._name(card.get("name", "?"))
+        cost = card.get("cost", "?")
+        ctype = card.get("type", "")
+        stats = card.get("stats") or {}
+        rarity = card.get("rarity", "")
+
+        # Color by type
+        type_colors = {"Attack": "red", "Skill": "blue", "Power": "magenta"}
+        name_colored = _c(name, type_colors.get(ctype, "reset"))
+
+        # Cost in cyan
+        cost_str = _c(f"{cost}费", "cyan") if self.lang == "zh" else _c(f"{cost}E", "cyan")
+
+        # Stats
+        parts = []
+        if "damage" in stats:
+            parts.append(_c(f"{stats['damage']}伤" if self.lang == "zh" else f"{stats['damage']}dmg", "red"))
+        if "block" in stats:
+            parts.append(_c(f"{stats['block']}挡" if self.lang == "zh" else f"{stats['block']}blk", "blue"))
+        stat_str = " ".join(parts)
+
+        # Type label
+        type_label = CARD_TYPE_ZH.get(ctype, ctype) if self.lang == "zh" else ctype
+
+        # Rarity
+        rarity_colors = {"Rare": "yellow", "Uncommon": "cyan"}
+        rarity_str = ""
+        if rarity and rarity != "Common":
+            rarity_label = {"Rare": "稀有", "Uncommon": "罕见"}.get(rarity, rarity) if self.lang == "zh" else rarity
+            rarity_str = f" {_c(rarity_label, rarity_colors.get(rarity, 'dim'))}"
+
+        result = f"{name_colored} ({cost_str} {_c(type_label, 'dim')})"
+        if stat_str:
+            result += f" {stat_str}"
+        if rarity_str:
+            result += rarity_str
+        return result
+
+    def _relic_str(self, relic):
+        name = self._name(relic.get("name", "?"))
+        return _c(name, "yellow")
 
     def _combat_enemy_names(self, state):
         enemies = state.get("enemies", [])
         names = [self._name(e.get("name", "?")) for e in enemies]
         return ", ".join(names) if names else "?"
-
-    def _floor(self, state):
-        """Get floor number from state — may be top-level or in context."""
-        return state.get("floor") or state.get("context", {}).get("floor", "?")
 
     def _on_combat_end(self, prev_state, new_state):
         floor = self._floor(prev_state)
@@ -80,12 +124,19 @@ class GameCoordinator:
         player = new_state.get("player", {})
         hp_after = player.get("hp", "?")
         is_game_over = new_state.get("decision") == "game_over"
-        if self.lang == "zh":
-            won = "败" if (is_game_over and not new_state.get("victory", False)) else "胜"
-            self._vlog(f"[第{floor}层] 战斗: {enemies} — {won} (HP: {hp_before}→{hp_after})")
+        zh = self.lang == "zh"
+
+        if is_game_over and not new_state.get("victory", False):
+            won_str = _c("败", "red") if zh else _c("Lost", "red")
         else:
-            won = "Lost" if (is_game_over and not new_state.get("victory", False)) else "Won"
-            self._vlog(f"[Floor {floor}] Combat: {enemies} — {won} (HP: {hp_before}→{hp_after})")
+            won_str = _c("胜", "green") if zh else _c("Won", "green")
+
+        hp_color = "green" if isinstance(hp_after, int) and isinstance(hp_before, int) and hp_after >= hp_before else "red"
+        hp_str = _c(f"{hp_before}→{hp_after}", hp_color)
+
+        prefix = f"第{floor}层" if zh else f"Floor {floor}"
+        label = "战斗" if zh else "Combat"
+        self._vlog(f"[{prefix}] {label}: {enemies} — {won_str} (HP: {hp_str})")
 
     def _on_action(self, prev_state, action, new_state):
         decision = prev_state.get("decision", "")
@@ -93,6 +144,7 @@ class GameCoordinator:
         act_name = action.get("action", "")
         args = action.get("args", {})
         zh = self.lang == "zh"
+        prefix = f"第{floor}层" if zh else f"Floor {floor}"
 
         if decision == "map_select":
             node_type = "?"
@@ -101,52 +153,122 @@ class GameCoordinator:
                     raw = c.get("type", "?")
                     node_type = NODE_TYPE_ZH.get(raw, raw) if zh else raw
                     break
-            prefix = f"第{floor}层" if zh else f"Floor {floor}"
+            icon = {"Monster": "⚔", "Elite": "💀", "Boss": "👹", "RestSite": "🏕",
+                    "Shop": "🏪", "Treasure": "💎", "Event": "❓", "Unknown": "❓"}.get(
+                    next((c.get("type","") for c in prev_state.get("choices",[])
+                          if c.get("col")==args.get("col") and c.get("row")==args.get("row")), ""), "")
             label = "地图" if zh else "Map"
-            self._vlog(f"[{prefix}] {label}: {node_type} ({args.get('col','?')},{args.get('row','?')})")
+            self._vlog(f"[{prefix}] {label}: {icon} {node_type}")
 
         elif decision == "card_reward":
-            prefix = f"第{floor}层" if zh else f"Floor {floor}"
             if act_name == "skip_card_reward":
-                self._vlog(f"[{prefix}] {'卡牌奖励: 跳过' if zh else 'Card Reward: skipped'}")
+                self._vlog(f"[{prefix}] {'卡牌奖励' if zh else 'Card Reward'}: {_c('跳过' if zh else 'skip', 'dim')}")
             else:
                 idx = args.get("card_index", 0)
                 cards = prev_state.get("cards", [])
-                cname = self._name(cards[idx].get("name", "?")) if idx < len(cards) else f"#{idx}"
+                if idx < len(cards):
+                    card_detail = self._card_str(cards[idx])
+                else:
+                    card_detail = f"#{idx}"
                 label = "卡牌奖励" if zh else "Card Reward"
-                self._vlog(f"[{prefix}] {label}: {cname}")
+                # Show all options with chosen highlighted
+                if cards:
+                    all_cards = []
+                    for i, cd in enumerate(cards):
+                        s = self._card_str(cd)
+                        if i == idx:
+                            s = f"[{_c('✓', 'green')}] {s}"
+                        else:
+                            s = f"[ ] {_c(self._name(cd.get('name','?')), 'dim')}"
+                        all_cards.append(s)
+                    self._vlog(f"[{prefix}] {label}:")
+                    for s in all_cards:
+                        self._vlog(f"    {s}")
+                else:
+                    self._vlog(f"[{prefix}] {label}: {card_detail}")
 
         elif decision == "rest_site":
-            prefix = f"第{floor}层" if zh else f"Floor {floor}"
             opt_idx = args.get("option_index", 0)
             opts = prev_state.get("options", [])
             opt_id = opts[opt_idx].get("option_id", "?") if opt_idx < len(opts) else "?"
             opt_name = REST_OPT_ZH.get(opt_id, opt_id) if zh else opt_id
+            # Color: heal=green, smith=cyan
+            opt_color = {"HEAL": "green", "SMITH": "cyan"}.get(opt_id, "yellow")
             label = "休息" if zh else "Rest"
-            self._vlog(f"[{prefix}] {label}: {opt_name}")
+            self._vlog(f"[{prefix}] {label}: {_c(opt_name, opt_color)}")
 
         elif decision == "event_choice":
-            prefix = f"第{floor}层" if zh else f"Floor {floor}"
             event_name = self._name(prev_state.get("event_name", prev_state.get("event", "?")))
             opt_idx = args.get("option_index", 0)
             opts = prev_state.get("options", [])
-            opt_label = ""
-            if isinstance(opt_idx, int) and opt_idx < len(opts):
-                opt = opts[opt_idx]
-                # Try title, then name, then option_id
-                raw = opt.get("title") or opt.get("name") or opt.get("option_id") or ""
-                opt_label = self._name(raw) if raw else ""
-            if not opt_label:
-                opt_label = f"{'选项' if zh else 'option'} {opt_idx}"
+            # Show all options with chosen marked
             label = "事件" if zh else "Event"
-            self._vlog(f"[{prefix}] {label}: {event_name} → {opt_label}")
+            self._vlog(f"[{prefix}] {label}: {_c(event_name, 'yellow')}")
+            for i, opt in enumerate(opts):
+                raw = opt.get("title") or opt.get("name") or opt.get("option_id") or ""
+                opt_text = self._name(raw) if raw else f"{'选项' if zh else 'option'} {i}"
+                desc = opt.get("description")
+                desc_text = f" — {_c(self._name(desc), 'dim')}" if desc else ""
+                if i == opt_idx:
+                    self._vlog(f"    [{_c('✓', 'green')}] {opt_text}{desc_text}")
+                else:
+                    locked = opt.get("is_locked", False)
+                    mark = _c("✗", "red") if locked else " "
+                    self._vlog(f"    [{mark}] {_c(opt_text, 'dim')}{_c(desc_text, 'dim') if desc_text else ''}")
 
         elif decision == "shop":
-            prefix = f"第{floor}层" if zh else f"Floor {floor}"
             if act_name == "leave_room":
-                self._vlog(f"[{prefix}] {'商店: 离开' if zh else 'Shop: left'}")
+                self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {_c('离开' if zh else 'left', 'dim')}")
+            elif act_name == "remove_card":
+                cost = prev_state.get("card_removal_cost", "?")
+                self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {_c('移除卡牌' if zh else 'remove card', 'magenta')} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})")
+            elif act_name == "buy_card":
+                idx = args.get("card_index", 0)
+                cards = prev_state.get("cards", [])
+                card = next((c for c in cards if c.get("index") == idx), None)
+                if card:
+                    cost = card.get("cost", "?")
+                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._card_str(card)} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})")
+                else:
+                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买卡牌' if zh else 'buy card'} #{idx}")
+            elif act_name == "buy_relic":
+                idx = args.get("relic_index", 0)
+                relics = prev_state.get("relics", [])
+                relic = next((r for r in relics if r.get("index") == idx), None)
+                if relic:
+                    cost = relic.get("cost", "?")
+                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._relic_str(relic)} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})")
+                else:
+                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买遗物' if zh else 'buy relic'} #{idx}")
             else:
                 self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {act_name}")
+
+        elif decision == "bundle_select":
+            idx = args.get("bundle_index", 0)
+            bundles = prev_state.get("bundles", [])
+            label = "卡牌包" if zh else "Bundle"
+            if idx < len(bundles):
+                bundle = bundles[idx]
+                cards_in = [self._name(cd.get("name", "?")) for cd in bundle.get("cards", [])]
+                self._vlog(f"[{prefix}] {label}: {', '.join(cards_in)}")
+            else:
+                self._vlog(f"[{prefix}] {label}: #{idx}")
+
+        elif decision == "card_select":
+            label = "选牌" if zh else "Card Select"
+            if act_name == "skip_select":
+                self._vlog(f"[{prefix}] {label}: {_c('跳过' if zh else 'skip', 'dim')}")
+            else:
+                indices = args.get("indices", "")
+                cards = prev_state.get("cards", [])
+                selected = []
+                for idx_str in str(indices).split(","):
+                    idx_str = idx_str.strip()
+                    if idx_str.isdigit():
+                        idx = int(idx_str)
+                        if idx < len(cards):
+                            selected.append(self._card_str(cards[idx]))
+                self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
@@ -176,11 +298,15 @@ class GameCoordinator:
                     floor = self._floor(state)
                     act = state.get("act") or state.get("context", {}).get("act")
                     if self.lang == "zh":
-                        outcome = "胜利" if state.get("victory") else "战败"
-                        self._vlog(f"=== {outcome} 第{floor}层, HP: {hp}/{max_hp} ===")
+                        outcome = _c("胜利", "green") if state.get("victory") else _c("战败", "red")
+                        self._vlog(f"{'═'*50}")
+                        self._vlog(f"  {outcome} 第{floor}层, HP: {hp}/{max_hp}")
+                        self._vlog(f"{'═'*50}")
                     else:
-                        outcome = "VICTORY" if state.get("victory") else "DEFEAT"
-                        self._vlog(f"=== {outcome} at Floor {floor}, HP: {hp}/{max_hp} ===")
+                        outcome = _c("VICTORY", "green") if state.get("victory") else _c("DEFEAT", "red")
+                        self._vlog(f"{'═'*50}")
+                        self._vlog(f"  {outcome} at Floor {floor}, HP: {hp}/{max_hp}")
+                        self._vlog(f"{'═'*50}")
                     return {
                         "victory": state.get("victory", False),
                         "seed": seed, "steps": step,
@@ -224,45 +350,35 @@ class GameCoordinator:
             try:
                 self._proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
                 self._proc.stdin.flush()
-            except Exception:
-                pass
+            except Exception: pass
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=3)
             except Exception:
-                try:
-                    self._proc.kill()
-                except Exception:
-                    pass
+                try: self._proc.kill()
+                except Exception: pass
             self._proc = None
 
     def _read_json(self):
-        if not self._proc:
-            return None
+        if not self._proc: return None
         for _ in range(1000):
             line = self._proc.stdout.readline().strip()
-            if not line:
-                return None
+            if not line: return None
             if line.startswith("{"):
-                try:
-                    return json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                try: return json.loads(line)
+                except json.JSONDecodeError: continue
         return None
 
     def _send(self, cmd: dict):
-        if not self._proc:
-            return None
+        if not self._proc: return None
         try:
             self._proc.stdin.write(json.dumps(cmd) + "\n")
             self._proc.stdin.flush()
             return self._read_json()
-        except Exception:
-            return None
+        except Exception: return None
 
 
 def _load_env():
-    """Load .env file from project root if it exists."""
     env_path = os.path.join(PROJECT_ROOT, ".env")
     if os.path.isfile(env_path):
         with open(env_path) as f:
