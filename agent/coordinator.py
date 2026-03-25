@@ -69,8 +69,12 @@ class GameCoordinator:
         names = [self._name(e.get("name", "?")) for e in enemies]
         return ", ".join(names) if names else "?"
 
+    def _floor(self, state):
+        """Get floor number from state — may be top-level or in context."""
+        return state.get("floor") or state.get("context", {}).get("floor", "?")
+
     def _on_combat_end(self, prev_state, new_state):
-        floor = prev_state.get("floor", "?")
+        floor = self._floor(prev_state)
         enemies = self._combat_enemy_names(prev_state)
         hp_before = self._combat_start_hp
         player = new_state.get("player", {})
@@ -85,7 +89,7 @@ class GameCoordinator:
 
     def _on_action(self, prev_state, action, new_state):
         decision = prev_state.get("decision", "")
-        floor = prev_state.get("floor", "?")
+        floor = self._floor(prev_state)
         act_name = action.get("action", "")
         args = action.get("args", {})
         zh = self.lang == "zh"
@@ -160,7 +164,8 @@ class GameCoordinator:
                 if decision == "game_over":
                     hp = state.get("player", {}).get("hp", "?")
                     max_hp = state.get("player", {}).get("max_hp", "?")
-                    floor = state.get("floor", "?")
+                    floor = self._floor(state)
+                    act = state.get("act") or state.get("context", {}).get("act")
                     if self.lang == "zh":
                         outcome = "胜利" if state.get("victory") else "战败"
                         self._vlog(f"=== {outcome} 第{floor}层, HP: {hp}/{max_hp} ===")
@@ -170,8 +175,7 @@ class GameCoordinator:
                     return {
                         "victory": state.get("victory", False),
                         "seed": seed, "steps": step,
-                        "act": state.get("act"),
-                        "floor": state.get("floor"),
+                        "act": act, "floor": floor,
                         "hp": state.get("player", {}).get("hp"),
                         "max_hp": state.get("player", {}).get("max_hp"),
                     }
