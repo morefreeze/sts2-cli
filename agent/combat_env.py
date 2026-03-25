@@ -81,6 +81,18 @@ def greedy_action(state: dict) -> dict:
         return {"cmd": "action", "action": "skip_select"}
 
     elif decision == "shop":
+        gold = state.get("player", {}).get("gold", 0)
+        # Try to remove a card if affordable (thins deck)
+        removal_cost = state.get("card_removal_cost")
+        if removal_cost and gold >= removal_cost:
+            return {"cmd": "action", "action": "remove_card"}
+        # Buy cheapest affordable card
+        cards = [c for c in state.get("cards", [])
+                 if c.get("is_stocked") and c.get("cost", 999) <= gold]
+        if cards:
+            cheapest = min(cards, key=lambda c: c.get("cost", 999))
+            return {"cmd": "action", "action": "buy_card",
+                    "args": {"card_index": cheapest.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
 
     return {"cmd": "action", "action": "proceed"}
