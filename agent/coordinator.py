@@ -73,6 +73,21 @@ class GameCoordinator:
             return obj.get(self.lang, obj.get("en", str(obj)))
         return str(obj) if obj else "?"
 
+    @staticmethod
+    def _resolve_vars(text, vars_dict):
+        """Replace {VarName} and [VarName] placeholders with actual values."""
+        if not text or not vars_dict:
+            return text or ""
+        import re
+        lower_vars = {k.lower(): v for k, v in vars_dict.items()}
+        def replacer(m):
+            key = m.group(1)
+            val = lower_vars.get(key.lower())
+            return str(val) if val is not None else m.group(0)
+        text = re.sub(r'\{(\w+)\}', replacer, text)
+        text = re.sub(r'\[(\w+)\]', replacer, text)
+        return text
+
     def _floor(self, state):
         return state.get("floor") or state.get("context", {}).get("floor", "?")
 
@@ -209,20 +224,21 @@ class GameCoordinator:
             event_name = self._name(prev_state.get("event_name", prev_state.get("event", "?")))
             opt_idx = args.get("option_index", 0)
             opts = prev_state.get("options", [])
-            # Show all options with chosen marked
             label = "事件" if zh else "Event"
             self._vlog(f"[{prefix}] {label}: {_c(event_name, 'yellow')}")
             for i, opt in enumerate(opts):
                 raw = opt.get("title") or opt.get("name") or opt.get("option_id") or ""
                 opt_text = self._name(raw) if raw else f"{'选项' if zh else 'option'} {i}"
                 desc = opt.get("description")
-                desc_text = f" — {_c(self._name(desc), 'dim')}" if desc else ""
+                opt_vars = opt.get("vars") or {}
+                desc_resolved = self._resolve_vars(self._name(desc), opt_vars) if desc else ""
+                desc_text = f" — {_c(desc_resolved, 'dim')}" if desc_resolved else ""
                 if i == opt_idx:
                     self._vlog(f"    [{_c('✓', 'green')}] {opt_text}{desc_text}")
                 else:
                     locked = opt.get("is_locked", False)
                     mark = _c("✗", "red") if locked else " "
-                    self._vlog(f"    [{mark}] {_c(opt_text, 'dim')}{_c(desc_text, 'dim') if desc_text else ''}")
+                    self._vlog(f"    [{mark}] {opt_text}{desc_text}")
 
         elif decision == "shop":
             if act_name == "leave_room":
