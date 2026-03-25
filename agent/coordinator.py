@@ -392,8 +392,9 @@ class GameCoordinator:
                         self._vlog(f"{'═'*50}")
 
                     # On defeat, replay the last combat
-                    if self.verbose and not victory and last_combat_log:
-                        self._replay_combat(last_combat_log)
+                    log = combat_log if combat_log else last_combat_log
+                    if self.verbose and not victory and log:
+                        self._replay_combat(log)
 
                     return {
                         "victory": victory, "seed": seed, "steps": step,
@@ -419,7 +420,18 @@ class GameCoordinator:
                 prev_state = state
                 next_state = self._send(action)
                 if next_state is None:
-                    return {"victory": False, "seed": seed, "steps": step, "error": "eof"}
+                    floor = self._floor(prev_state)
+                    hp = prev_state.get("player", {}).get("hp", "?")
+                    max_hp = prev_state.get("player", {}).get("max_hp", "?")
+                    zh = self.lang == "zh"
+                    self._vlog(f"{'═'*50}")
+                    self._vlog(f"  {_c('连接断开' if zh else 'EOF', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''}, HP: {hp}/{max_hp}")
+                    self._vlog(f"{'═'*50}")
+                    log = combat_log if combat_log else last_combat_log
+                    if self.verbose and log:
+                        self._replay_combat(log)
+                    return {"victory": False, "seed": seed, "steps": step,
+                            "floor": floor, "hp": hp, "max_hp": max_hp, "error": "eof"}
                 prev_decision = decision
                 state = next_state
 
