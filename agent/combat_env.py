@@ -143,6 +143,8 @@ class CombatEnv(gym.Env):
         self._combat_start_player_max_hp = 1
         self._game_alive = False
         self._read_buf = b""
+        self._combat_steps = 0
+        self.max_combat_steps = 150  # ~30 turns × 5 actions/turn
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -180,11 +182,18 @@ class CombatEnv(gym.Env):
 
         self._init_combat_tracking(state)
         self._current_state = state
+        self._combat_steps = 0
         return self.enc.encode(state), {}
 
     def step(self, action: int):
         if self.dry_run or self._current_state is None:
             return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {}
+
+        self._combat_steps += 1
+        if self._combat_steps > self.max_combat_steps:
+            # Combat too long — treat as defeat to avoid wasting time
+            last_obs = self.enc.encode(self._current_state)
+            return last_obs, -0.5, True, False, {"timeout": True}
 
         cmd = self.enc.decode(int(action), self._current_state)
         state = self._send(cmd)
