@@ -122,14 +122,16 @@ def main():
     policy_kwargs = dict(net_arch=dict(pi=[64, 64], vf=[64, 64]))
 
     if args.checkpoint:
-        model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
+        ckpt_path = args.checkpoint
+        if ckpt_path.endswith(".zip"):
+            ckpt_path = ckpt_path[:-4]
+        model = MaskablePPO.load(ckpt_path, env=vec_env, device=device)
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=0, device=device,
                             policy_kwargs=policy_kwargs,
                             n_steps=n_steps, batch_size=256, n_epochs=4,
                             learning_rate=3e-4, gamma=0.99, ent_coef=0.05,
-                            vf_coef=0.5, max_grad_norm=0.5,
-                            tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"))
+                            vf_coef=0.5, max_grad_norm=0.5)
 
     callback = ProgressCallback(args.steps, args.n_envs, n_steps)
 
