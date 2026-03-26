@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 # Import play.py display functions for combat replay
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
@@ -94,37 +95,44 @@ class GameCoordinator:
     def _floor(self, state):
         return state.get("floor") or state.get("context", {}).get("floor", "?")
 
-    def _card_str(self, card):
-        """Format a card with colored cost, type, stats."""
+    def _card_str(self, card, gold_price=None):
+        """Format a card with colored energy cost, type, stats.
+        gold_price: if set, show gold price instead of energy cost (for shop)."""
         name = self._name(card.get("name", "?"))
         cost = card.get("cost", "?")
         ctype = card.get("type", "")
         stats = card.get("stats") or {}
         rarity = card.get("rarity", "")
+        zh = self.lang == "zh"
 
-        # Color by type
         type_colors = {"Attack": "red", "Skill": "blue", "Power": "magenta"}
         name_colored = _c(name, type_colors.get(ctype, "reset"))
 
-        # Cost in cyan
-        cost_str = _c(f"{cost}费", "cyan") if self.lang == "zh" else _c(f"{cost}E", "cyan")
+        if gold_price is not None:
+            cost_str = _c(f"{gold_price}金", "yellow") if zh else _c(f"{gold_price}g", "yellow")
+        else:
+            cost_str = _c(f"{cost}费", "cyan") if zh else _c(f"{cost}E", "cyan")
 
-        # Stats
+        # Stats: damage, block, draw, energy, magic_number, etc.
         parts = []
         if "damage" in stats:
-            parts.append(_c(f"{stats['damage']}伤" if self.lang == "zh" else f"{stats['damage']}dmg", "red"))
+            parts.append(_c(f"{stats['damage']}{'伤' if zh else 'dmg'}", "red"))
         if "block" in stats:
-            parts.append(_c(f"{stats['block']}挡" if self.lang == "zh" else f"{stats['block']}blk", "blue"))
+            parts.append(_c(f"{stats['block']}{'挡' if zh else 'blk'}", "blue"))
+        if "draw" in stats:
+            parts.append(_c(f"+{stats['draw']}{'抽' if zh else 'draw'}", "green"))
+        if "energy" in stats:
+            parts.append(_c(f"+{stats['energy']}{'能' if zh else 'energy'}", "cyan"))
+        if "magic_number" in stats and "damage" not in stats and "block" not in stats:
+            parts.append(_c(f"×{stats['magic_number']}", "yellow"))
         stat_str = " ".join(parts)
 
-        # Type label
-        type_label = CARD_TYPE_ZH.get(ctype, ctype) if self.lang == "zh" else ctype
+        type_label = CARD_TYPE_ZH.get(ctype, ctype) if zh else ctype
 
-        # Rarity
         rarity_colors = {"Rare": "yellow", "Uncommon": "cyan"}
         rarity_str = ""
         if rarity and rarity != "Common":
-            rarity_label = {"Rare": "稀有", "Uncommon": "罕见"}.get(rarity, rarity) if self.lang == "zh" else rarity
+            rarity_label = {"Rare": "稀有", "Uncommon": "罕见"}.get(rarity, rarity) if zh else rarity
             rarity_str = f" {_c(rarity_label, rarity_colors.get(rarity, 'dim'))}"
 
         result = f"{name_colored} ({cost_str} {_c(type_label, 'dim')})"
@@ -254,8 +262,8 @@ class GameCoordinator:
                 cards = prev_state.get("cards", [])
                 card = next((c for c in cards if c.get("index") == idx), None)
                 if card:
-                    cost = card.get("cost", "?")
-                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._card_str(card)} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})")
+                    gold = card.get("cost", "?")  # shop cost = gold price
+                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._card_str(card, gold_price=gold)}")
                 else:
                     self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买卡牌' if zh else 'buy card'} #{idx}")
             elif act_name == "buy_relic":
@@ -430,6 +438,10 @@ class GameCoordinator:
             last_combat_log = []  # previous combat's log (for replay on death)
 
             _consecutive_errors = 0
+            _room_start = time.time()
+            _room_decision = ""
+            _room_timer_shown = False
+            _room_timeout = 60  # 1 minute per room
             for step in range(600):
                 # Handle engine errors (e.g. end_turn rejected)
                 if state.get("type") == "error":
@@ -455,6 +467,30 @@ class GameCoordinator:
                     _consecutive_errors = 0
 
                 decision = state.get("decision", "")
+
+                # Room timer: reset on room change, show if >10s, timeout at 60s
+                if decision != _room_decision:
+                    _room_start = time.time()
+                    _room_decision = decision
+                    _room_timer_shown = False
+                room_elapsed = time.time() - _room_start
+                if self.verbose and room_elapsed > 10 and not _room_timer_shown:
+                    _room_timer_shown = True
+                if self.verbose and _room_timer_shown and int(room_elapsed) % 5 == 0:
+                    print(f"\r[game]   ⏱ {room_elapsed:.0f}s / {_room_timeout}s", end="", file=sys.stderr, flush=True)
+                if room_elapsed > _room_timeout:
+                    zh = self.lang == "zh"
+                    floor = self._floor(state)
+                    self._vlog(f"\n  {_c(f'房间超时 ({_room_timeout}s)' if zh else f'Room timeout ({_room_timeout}s)', 'red')}")
+                    # Force end this room
+                    if decision == "combat_play":
+                        log = combat_log if combat_log else last_combat_log
+                        if self.verbose and log:
+                            self._replay_combat(log)
+                    hp = state.get("player", {}).get("hp", "?")
+                    max_hp = state.get("player", {}).get("max_hp", "?")
+                    return {"victory": False, "seed": seed, "steps": step,
+                            "floor": floor, "hp": hp, "max_hp": max_hp, "error": "room_timeout"}
 
                 # Detect Act change
                 act = state.get("act") or state.get("context", {}).get("act")
