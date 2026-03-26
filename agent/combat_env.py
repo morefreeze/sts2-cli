@@ -43,7 +43,26 @@ def greedy_action(state: dict) -> dict:
     if decision == "map_select":
         choices = state.get("choices", [])
         if choices:
-            chosen = random.choice(choices)
+            player = state.get("player", {})
+            hp_pct = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
+            ctx = state.get("context", {})
+            floor = ctx.get("floor", 0)
+            deck = player.get("deck", [])
+            deck_names = {c.get("name", "") for c in deck} if deck else set()
+            type_priority = {
+                "Treasure": 100,
+                "RestSite": 80 if hp_pct < 0.7 else 30,
+                "Shop": 70,
+                "Unknown": 40,
+                "Monster": 35 if hp_pct > 0.4 else 10,
+                "Elite": 50 if (hp_pct > 0.85 and len(deck) >= 14 and floor >= 12) else 1,
+                "Boss": 90,
+            }
+            if floor >= 15:
+                type_priority["RestSite"] = 95
+            if hp_pct < 0.3:
+                type_priority["Monster"] = 3
+            chosen = max(choices, key=lambda c: type_priority.get(c.get("type", ""), 0))
             return {"cmd": "action", "action": "select_map_node",
                     "args": {"col": chosen["col"], "row": chosen["row"]}}
 

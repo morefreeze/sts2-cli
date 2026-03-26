@@ -21,7 +21,10 @@ CARDS_JSON = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
 
 def evaluate(checkpoint: str, character: str, ascension: int,
              episodes: int, seed_prefix: str = "eval") -> dict:
-    model = MaskablePPO.load(checkpoint)
+    ckpt_path = checkpoint
+    if ckpt_path.endswith(".zip"):
+        ckpt_path = ckpt_path[:-4]
+    model = MaskablePPO.load(ckpt_path)
     env = CombatEnv(character=character, ascension=ascension,
                     seed_prefix=seed_prefix)
 
