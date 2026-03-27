@@ -6,6 +6,7 @@ Usage:
     python3 agent/coordinator.py --character Ironclad --mode eval-rl --n-games 20 --verbose
     python3 agent/coordinator.py --character Ironclad --mode eval-rl --lang zh --verbose
 """
+
 import argparse
 import json
 import os
@@ -14,56 +15,117 @@ import sys
 import time
 
 # Import play.py display functions for combat replay
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
+sys.path.insert(
+    0,
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"),
+)
 try:
     import play as _play
+
     _has_play = True
 except ImportError:
     _has_play = False
 
+
 def _find_dotnet():
-    for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
-              os.path.expanduser("~/.dotnet/dotnet"),
-              "/usr/local/share/dotnet/dotnet", "dotnet"]:
+    for p in [
+        os.path.expanduser("~/.dotnet-arm64/dotnet"),
+        os.path.expanduser("~/.dotnet/dotnet"),
+        "/usr/local/share/dotnet/dotnet",
+        "/usr/local/Cellar/dotnet/10.0.105/bin/dotnet",
+        "/usr/local/bin/dotnet",
+        "dotnet",
+    ]:
+        if p != "dotnet" and not os.path.isfile(p):
+            continue
         try:
-            r = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=5)
-            if r.returncode == 0: return p
-        except (FileNotFoundError, subprocess.TimeoutExpired): continue
+            r = subprocess.run(
+                [p, "--version"], capture_output=True, text=True, timeout=30
+            )
+            if r.returncode == 0:
+                return p
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
     return "dotnet"
+
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT = os.path.join(PROJECT_ROOT, "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 CARDS_JSON = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
 CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 
 RL_DECISIONS = {"combat_play"}
-LLM_DECISIONS = {"map_select", "card_reward", "rest_site", "event_choice",
-                 "shop", "bundle_select", "card_select"}
+GREEDY_DECISIONS = {"combat_play"}
+LLM_DECISIONS = {
+    "map_select",
+    "card_reward",
+    "rest_site",
+    "event_choice",
+    "shop",
+    "bundle_select",
+    "card_select",
+}
 
 NODE_TYPE_ZH = {
-    "Monster": "怪物", "Elite": "精英", "Boss": "Boss",
-    "RestSite": "休息", "Shop": "商店", "Treasure": "宝箱",
-    "Event": "事件", "Unknown": "未知", "Ancient": "远古",
+    "Monster": "怪物",
+    "Elite": "精英",
+    "Boss": "Boss",
+    "RestSite": "休息",
+    "Shop": "商店",
+    "Treasure": "宝箱",
+    "Event": "事件",
+    "Unknown": "未知",
+    "Ancient": "远古",
 }
-REST_OPT_ZH = {"HEAL": "休息", "SMITH": "升级", "LIFT": "锻炼", "DIG": "挖掘", "RECALL": "回忆"}
-CARD_TYPE_ZH = {"Attack": "攻击", "Skill": "技能", "Power": "能力", "Status": "状态", "Curse": "诅咒"}
+REST_OPT_ZH = {
+    "HEAL": "休息",
+    "SMITH": "升级",
+    "LIFT": "锻炼",
+    "DIG": "挖掘",
+    "RECALL": "回忆",
+}
+CARD_TYPE_ZH = {
+    "Attack": "攻击",
+    "Skill": "技能",
+    "Power": "能力",
+    "Status": "状态",
+    "Curse": "诅咒",
+}
+
 
 # ANSI color helpers
 def _c(text, color):
-    codes = {"red": "91", "green": "92", "yellow": "93", "blue": "94",
-             "magenta": "95", "cyan": "96", "dim": "2", "bold": "1", "reset": "0"}
+    codes = {
+        "red": "91",
+        "green": "92",
+        "yellow": "93",
+        "blue": "94",
+        "magenta": "95",
+        "cyan": "96",
+        "dim": "2",
+        "bold": "1",
+        "reset": "0",
+    }
     code = codes.get(color, "0")
     return f"\033[{code}m{text}\033[0m"
 
 
 class GameCoordinator:
-    def __init__(self, rl_agent, llm_agent=None, verbose=False, lang="zh"):
+    def __init__(
+        self,
+        rl_agent=None,
+        llm_agent=None,
+        verbose=False,
+        lang="zh",
+        use_greedy_combat=False,
+    ):
         self.rl = rl_agent
         self.llm = llm_agent
         self._proc = None
         self.verbose = verbose
         self.lang = lang
+        self.use_greedy_combat = use_greedy_combat
 
     def _vlog(self, msg):
         if self.verbose:
@@ -81,15 +143,18 @@ class GameCoordinator:
         if not text:
             return ""
         import re
+
         lower_vars = {}
         if vars_dict:
             lower_vars = {k.lower(): v for k, v in vars_dict.items()}
+
         def replacer(m):
             key = m.group(1)
             val = lower_vars.get(key.lower())
             return str(val) if val is not None else "?"
-        text = re.sub(r'\{(\w+)\}', replacer, text)
-        text = re.sub(r'\[(\w+)\]', replacer, text)
+
+        text = re.sub(r"\{(\w+)\}", replacer, text)
+        text = re.sub(r"\[(\w+)\]", replacer, text)
         return text
 
     def _floor(self, state):
@@ -109,7 +174,11 @@ class GameCoordinator:
         name_colored = _c(name, type_colors.get(ctype, "reset"))
 
         if gold_price is not None:
-            cost_str = _c(f"{gold_price}金", "yellow") if zh else _c(f"{gold_price}g", "yellow")
+            cost_str = (
+                _c(f"{gold_price}金", "yellow")
+                if zh
+                else _c(f"{gold_price}g", "yellow")
+            )
         else:
             cost_str = _c(f"{cost}费", "cyan") if zh else _c(f"{cost}E", "cyan")
 
@@ -132,7 +201,11 @@ class GameCoordinator:
         rarity_colors = {"Rare": "yellow", "Uncommon": "cyan"}
         rarity_str = ""
         if rarity and rarity != "Common":
-            rarity_label = {"Rare": "稀有", "Uncommon": "罕见"}.get(rarity, rarity) if zh else rarity
+            rarity_label = (
+                {"Rare": "稀有", "Uncommon": "罕见"}.get(rarity, rarity)
+                if zh
+                else rarity
+            )
             rarity_str = f" {_c(rarity_label, rarity_colors.get(rarity, 'dim'))}"
 
         result = f"{name_colored} ({cost_str} {_c(type_label, 'dim')})"
@@ -165,7 +238,13 @@ class GameCoordinator:
         else:
             won_str = _c("胜", "green") if zh else _c("Won", "green")
 
-        hp_color = "green" if isinstance(hp_after, int) and isinstance(hp_before, int) and hp_after >= hp_before else "red"
+        hp_color = (
+            "green"
+            if isinstance(hp_after, int)
+            and isinstance(hp_before, int)
+            and hp_after >= hp_before
+            else "red"
+        )
         hp_str = _c(f"{hp_before}→{hp_after}", hp_color)
 
         prefix = f"第{floor}层" if zh else f"Floor {floor}"
@@ -187,16 +266,35 @@ class GameCoordinator:
                     raw = c.get("type", "?")
                     node_type = NODE_TYPE_ZH.get(raw, raw) if zh else raw
                     break
-            icon = {"Monster": "⚔", "Elite": "💀", "Boss": "👹", "RestSite": "🏕",
-                    "Shop": "🏪", "Treasure": "💎", "Event": "❓", "Unknown": "❓"}.get(
-                    next((c.get("type","") for c in prev_state.get("choices",[])
-                          if c.get("col")==args.get("col") and c.get("row")==args.get("row")), ""), "")
+            icon = {
+                "Monster": "⚔",
+                "Elite": "💀",
+                "Boss": "👹",
+                "RestSite": "🏕",
+                "Shop": "🏪",
+                "Treasure": "💎",
+                "Event": "❓",
+                "Unknown": "❓",
+            }.get(
+                next(
+                    (
+                        c.get("type", "")
+                        for c in prev_state.get("choices", [])
+                        if c.get("col") == args.get("col")
+                        and c.get("row") == args.get("row")
+                    ),
+                    "",
+                ),
+                "",
+            )
             label = "地图" if zh else "Map"
             self._vlog(f"[{prefix}] {label}: {icon} {node_type}")
 
         elif decision == "card_reward":
             if act_name == "skip_card_reward":
-                self._vlog(f"[{prefix}] {'卡牌奖励' if zh else 'Card Reward'}: {_c('跳过' if zh else 'skip', 'dim')}")
+                self._vlog(
+                    f"[{prefix}] {'卡牌奖励' if zh else 'Card Reward'}: {_c('跳过' if zh else 'skip', 'dim')}"
+                )
             else:
                 idx = args.get("card_index", 0)
                 cards = prev_state.get("cards", [])
@@ -232,17 +330,23 @@ class GameCoordinator:
             self._vlog(f"[{prefix}] {label}: {_c(opt_name, opt_color)}")
 
         elif decision == "event_choice":
-            event_name = self._name(prev_state.get("event_name", prev_state.get("event", "?")))
+            event_name = self._name(
+                prev_state.get("event_name", prev_state.get("event", "?"))
+            )
             opt_idx = args.get("option_index", 0)
             opts = prev_state.get("options", [])
             label = "事件" if zh else "Event"
             self._vlog(f"[{prefix}] {label}: {_c(event_name, 'yellow')}")
             for i, opt in enumerate(opts):
                 raw = opt.get("title") or opt.get("name") or opt.get("option_id") or ""
-                opt_text = self._name(raw) if raw else f"{'选项' if zh else 'option'} {i}"
+                opt_text = (
+                    self._name(raw) if raw else f"{'选项' if zh else 'option'} {i}"
+                )
                 desc = opt.get("description")
                 opt_vars = opt.get("vars") or {}
-                desc_resolved = self._resolve_vars(self._name(desc), opt_vars) if desc else ""
+                desc_resolved = (
+                    self._resolve_vars(self._name(desc), opt_vars) if desc else ""
+                )
                 desc_text = f" — {_c(desc_resolved, 'dim')}" if desc_resolved else ""
                 if i == opt_idx:
                     self._vlog(f"    [{_c('✓', 'green')}] {opt_text}{desc_text}")
@@ -253,28 +357,40 @@ class GameCoordinator:
 
         elif decision == "shop":
             if act_name == "leave_room":
-                self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {_c('离开' if zh else 'left', 'dim')}")
+                self._vlog(
+                    f"[{prefix}] {'商店' if zh else 'Shop'}: {_c('离开' if zh else 'left', 'dim')}"
+                )
             elif act_name == "remove_card":
                 cost = prev_state.get("card_removal_cost", "?")
-                self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {_c('移除卡牌' if zh else 'remove card', 'magenta')} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})")
+                self._vlog(
+                    f"[{prefix}] {'商店' if zh else 'Shop'}: {_c('移除卡牌' if zh else 'remove card', 'magenta')} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})"
+                )
             elif act_name == "buy_card":
                 idx = args.get("card_index", 0)
                 cards = prev_state.get("cards", [])
                 card = next((c for c in cards if c.get("index") == idx), None)
                 if card:
                     gold = card.get("cost", "?")  # shop cost = gold price
-                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._card_str(card, gold_price=gold)}")
+                    self._vlog(
+                        f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._card_str(card, gold_price=gold)}"
+                    )
                 else:
-                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买卡牌' if zh else 'buy card'} #{idx}")
+                    self._vlog(
+                        f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买卡牌' if zh else 'buy card'} #{idx}"
+                    )
             elif act_name == "buy_relic":
                 idx = args.get("relic_index", 0)
                 relics = prev_state.get("relics", [])
                 relic = next((r for r in relics if r.get("index") == idx), None)
                 if relic:
                     cost = relic.get("cost", "?")
-                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._relic_str(relic)} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})")
+                    self._vlog(
+                        f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买' if zh else 'buy'} {self._relic_str(relic)} ({_c(f'{cost}金' if zh else f'{cost}g', 'yellow')})"
+                    )
                 else:
-                    self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买遗物' if zh else 'buy relic'} #{idx}")
+                    self._vlog(
+                        f"[{prefix}] {'商店' if zh else 'Shop'}: {'购买遗物' if zh else 'buy relic'} #{idx}"
+                    )
             else:
                 self._vlog(f"[{prefix}] {'商店' if zh else 'Shop'}: {act_name}")
 
@@ -284,7 +400,9 @@ class GameCoordinator:
             label = "卡牌包" if zh else "Bundle"
             if idx < len(bundles):
                 bundle = bundles[idx]
-                cards_in = [self._name(cd.get("name", "?")) for cd in bundle.get("cards", [])]
+                cards_in = [
+                    self._name(cd.get("name", "?")) for cd in bundle.get("cards", [])
+                ]
                 self._vlog(f"[{prefix}] {label}: {', '.join(cards_in)}")
             else:
                 self._vlog(f"[{prefix}] {label}: #{idx}")
@@ -303,7 +421,9 @@ class GameCoordinator:
                         idx = int(idx_str)
                         if idx < len(cards):
                             selected.append(self._card_str(cards[idx]))
-                self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
+                self._vlog(
+                    f"[{prefix}] {label}: {', '.join(selected) if selected else indices}"
+                )
 
     def _replay_combat(self, combat_log):
         """Replay the last combat — one line per round showing cards played + enemy intents."""
@@ -311,9 +431,9 @@ class GameCoordinator:
             return
         zh = self.lang == "zh"
         self._vlog("")
-        self._vlog(f"{'─'*55}")
+        self._vlog(f"{'─' * 55}")
         self._vlog(f"  {_c('最后一战回放' if zh else 'Last Combat Replay', 'bold')}")
-        self._vlog(f"{'─'*55}")
+        self._vlog(f"{'─' * 55}")
 
         # Group entries by round
         rounds = {}  # round_num -> {cards: [], enemies: [], hp_start, hp_end, energy}
@@ -331,9 +451,11 @@ class GameCoordinator:
                     "hp_end": state.get("player", {}).get("hp", "?"),
                     "energy": state.get("energy", "?"),
                     "enemies": [
-                        {"name": self._name(e.get("name", "?")),
-                         "hp": e.get("hp", "?"),
-                         "intent": self._enemy_intent(e)}
+                        {
+                            "name": self._name(e.get("name", "?")),
+                            "hp": e.get("hp", "?"),
+                            "intents": e.get("intents") or e.get("intent") or [],
+                        }
                         for e in enemies
                     ],
                 }
@@ -365,34 +487,86 @@ class GameCoordinator:
                 skipped += 1
                 continue
             if skipped > 0:
-                self._vlog(f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}")
+                self._vlog(
+                    f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}"
+                )
                 skipped = 0
 
             # Round header
             hp_start = r["hp_start"]
             hp_end = r["hp_end"]
-            hp_color = "red" if isinstance(hp_end, int) and isinstance(hp_start, int) and hp_end < hp_start else "green"
-            hp_str = f"{_c(str(hp_start), 'red')}" + (f"→{_c(str(hp_end), hp_color)}" if hp_end != hp_start else "")
+            hp_color = (
+                "red"
+                if isinstance(hp_end, int)
+                and isinstance(hp_start, int)
+                and hp_end < hp_start
+                else "green"
+            )
+            hp_str = f"{_c(str(hp_start), 'red')}" + (
+                f"→{_c(str(hp_end), hp_color)}" if hp_end != hp_start else ""
+            )
 
             # Enemy intents
-            enemy_str = " | ".join(
-                f"{e['name']} {e['hp']}HP {e['intent']}"
-                for e in r["enemies"]
-            )
+            enemy_parts = []
+            for e in r["enemies"]:
+                name = self._name(e.get("name", "?"))
+                hp = e.get("hp", "?")
+                # Get intents properly (plural) - handle both list and dict
+                intents_raw = e.get("intents") or e.get("intent") or []
+                # Normalize to list
+                if isinstance(intents_raw, list):
+                    intents_list = intents_raw
+                elif isinstance(intents_raw, dict):
+                    intents_list = [intents_raw] if intents_raw else []
+                else:
+                    intents_list = []
+
+                if intents_list:
+                    intent_strs = []
+                    for it in intents_list:
+                        itype = it.get("type", "?")
+                        dmg = it.get("damage")
+                        if itype == "Attack" and dmg:
+                            intent_strs.append(f"⚔{dmg}")
+                        elif itype == "Defend":
+                            intent_strs.append("🛡")
+                        elif itype in ("Buff", "StrengthBuff"):
+                            intent_strs.append("⬆")
+                        elif itype in ("Debuff", "DebuffWeak", "DebuffStrong"):
+                            intent_strs.append("⬇")
+                        elif itype == "StatusCard":
+                            intent_strs.append("📄")
+                        else:
+                            intent_strs.append(itype[:3])
+                    intent_display = " ".join(intent_strs) if intent_strs else "?"
+                else:
+                    intent_display = "?"
+                enemy_parts.append(f"{name} {hp}HP {intent_display}")
+            enemy_str = " | ".join(enemy_parts)
 
             # Cards played
             cards_str = ", ".join(cards)
 
             label = f"R{rnd}" if not zh else f"回合{rnd}"
-            self._vlog(f"  {_c(label, 'bold')} HP:{hp_str} E{r['energy']} | {_c(cards_str, 'yellow')} | {_c(enemy_str, 'dim')}")
+            self._vlog(
+                f"  {_c(label, 'bold')} HP:{hp_str} E{r['energy']} | {_c(cards_str, 'yellow')} | {_c(enemy_str, 'dim')}"
+            )
 
         if skipped > 0:
-            self._vlog(f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}")
+            self._vlog(
+                f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}"
+            )
 
         total = len(combat_log)
-        plays = sum(1 for e in combat_log if (e.get("action") or {}).get("action") == "play_card")
-        self._vlog(f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, {plays}{'张牌' if zh else ' cards played'}")
-        self._vlog(f"{'─'*55}")
+        plays = sum(
+            1
+            for e in combat_log
+            if (e.get("action") or {}).get("action") == "play_card"
+        )
+        self._vlog(
+            f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, {plays}{'张牌' if zh else ' cards played'}"
+        )
+        self._vlog(f"{'─' * 55}")
 
     def _enemy_intent(self, enemy):
         """Format enemy intent as a short string."""
@@ -422,12 +596,19 @@ class GameCoordinator:
         return _c(itype or "?", "dim")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
-        from agent.combat_env import greedy_action
+        from agent.combat_env import greedy_action, greedy_combat_action
+
         try:
             self._start_proc()
-            state = self._send({"cmd": "start_run", "character": character,
-                                "seed": seed, "ascension": ascension,
-                                "lang": self.lang})
+            state = self._send(
+                {
+                    "cmd": "start_run",
+                    "character": character,
+                    "seed": seed,
+                    "ascension": ascension,
+                    "lang": self.lang,
+                }
+            )
             if state is None:
                 return {"victory": False, "seed": seed, "error": "start_failed"}
 
@@ -441,8 +622,9 @@ class GameCoordinator:
             _room_start = time.time()
             _room_decision = ""
             _room_timer_shown = False
-            _room_timeout = 60  # 1 minute per room
-            for step in range(600):
+            _room_timeout = 120
+            _stuck_count = 0
+            for step in range(2000):
                 # Handle engine errors (e.g. end_turn rejected)
                 if state.get("type") == "error":
                     _consecutive_errors += 1
@@ -450,7 +632,9 @@ class GameCoordinator:
                     if _consecutive_errors <= 3:
                         self._vlog(f"  {_c('⚠', 'yellow')} {err_msg}")
                     if _consecutive_errors > 10:
-                        self._vlog(f"  {_c('引擎反复报错，尝试 proceed' if self.lang == 'zh' else 'Engine stuck in errors, trying proceed', 'red')}")
+                        self._vlog(
+                            f"  {_c('引擎反复报错，尝试 proceed' if self.lang == 'zh' else 'Engine stuck in errors, trying proceed', 'red')}"
+                        )
                         state = self._send({"cmd": "action", "action": "proceed"})
                         if state is None:
                             break
@@ -477,11 +661,18 @@ class GameCoordinator:
                 if self.verbose and room_elapsed > 10 and not _room_timer_shown:
                     _room_timer_shown = True
                 if self.verbose and _room_timer_shown and int(room_elapsed) % 5 == 0:
-                    print(f"\r[game]   ⏱ {room_elapsed:.0f}s / {_room_timeout}s", end="", file=sys.stderr, flush=True)
+                    print(
+                        f"\r[game]   ⏱ {room_elapsed:.0f}s / {_room_timeout}s",
+                        end="",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 if room_elapsed > _room_timeout:
                     zh = self.lang == "zh"
                     floor = self._floor(state)
-                    self._vlog(f"\n  {_c(f'房间超时 ({_room_timeout}s)' if zh else f'Room timeout ({_room_timeout}s)', 'red')}")
+                    self._vlog(
+                        f"\n  {_c(f'房间超时 ({_room_timeout}s)' if zh else f'Room timeout ({_room_timeout}s)', 'red')}"
+                    )
                     # Force end this room
                     if decision == "combat_play":
                         log = combat_log if combat_log else last_combat_log
@@ -489,8 +680,15 @@ class GameCoordinator:
                             self._replay_combat(log)
                     hp = state.get("player", {}).get("hp", "?")
                     max_hp = state.get("player", {}).get("max_hp", "?")
-                    return {"victory": False, "seed": seed, "steps": step,
-                            "floor": floor, "hp": hp, "max_hp": max_hp, "error": "room_timeout"}
+                    return {
+                        "victory": False,
+                        "seed": seed,
+                        "steps": step,
+                        "floor": floor,
+                        "hp": hp,
+                        "max_hp": max_hp,
+                        "error": "room_timeout",
+                    }
 
                 # Detect Act change
                 act = state.get("act") or state.get("context", {}).get("act")
@@ -501,11 +699,13 @@ class GameCoordinator:
                     zh = self.lang == "zh"
                     if self._current_act is not None:
                         self._vlog(f"")
-                        self._vlog(f"{'━'*50}")
-                    self._vlog(f"  {_c(f'第{act}幕' if zh else f'Act {act}', 'bold')}" +
-                               (f" — {act_name}" if act_name else ""))
+                        self._vlog(f"{'━' * 50}")
+                    self._vlog(
+                        f"  {_c(f'第{act}幕' if zh else f'Act {act}', 'bold')}"
+                        + (f" — {act_name}" if act_name else "")
+                    )
                     if self._current_act is not None:
-                        self._vlog(f"{'━'*50}")
+                        self._vlog(f"{'━' * 50}")
                     self._current_act = act
 
                 # Track combat entry
@@ -518,7 +718,11 @@ class GameCoordinator:
                     combat_log.append({"state": state, "action": None})
 
                 # Combat ended
-                if self.verbose and prev_decision == "combat_play" and decision != "combat_play":
+                if (
+                    self.verbose
+                    and prev_decision == "combat_play"
+                    and decision != "combat_play"
+                ):
                     self._on_combat_end(prev_state, state)
                     last_combat_log = combat_log
                     combat_log = []
@@ -532,14 +736,16 @@ class GameCoordinator:
 
                     if self.lang == "zh":
                         outcome = _c("胜利", "green") if victory else _c("战败", "red")
-                        self._vlog(f"{'═'*50}")
+                        self._vlog(f"{'═' * 50}")
                         self._vlog(f"  {outcome} 第{floor}层, HP: {hp}/{max_hp}")
-                        self._vlog(f"{'═'*50}")
+                        self._vlog(f"{'═' * 50}")
                     else:
-                        outcome = _c("VICTORY", "green") if victory else _c("DEFEAT", "red")
-                        self._vlog(f"{'═'*50}")
+                        outcome = (
+                            _c("VICTORY", "green") if victory else _c("DEFEAT", "red")
+                        )
+                        self._vlog(f"{'═' * 50}")
                         self._vlog(f"  {outcome} at Floor {floor}, HP: {hp}/{max_hp}")
-                        self._vlog(f"{'═'*50}")
+                        self._vlog(f"{'═' * 50}")
 
                     # On defeat, replay the last combat
                     log = combat_log if combat_log else last_combat_log
@@ -547,18 +753,54 @@ class GameCoordinator:
                         self._replay_combat(log)
 
                     return {
-                        "victory": victory, "seed": seed, "steps": step,
-                        "act": act, "floor": floor,
+                        "victory": victory,
+                        "seed": seed,
+                        "steps": step,
+                        "act": act,
+                        "floor": floor,
                         "hp": state.get("player", {}).get("hp"),
                         "max_hp": state.get("player", {}).get("max_hp"),
                     }
 
-                if decision in RL_DECISIONS:
-                    action = self.rl.act(state)
+                if decision in RL_DECISIONS and not self.use_greedy_combat:
+                    if self.rl:
+                        action = self.rl.act(state)
+                    else:
+                        action = greedy_combat_action(state)
+                elif decision in GREEDY_DECISIONS and self.use_greedy_combat:
+                    action = greedy_combat_action(state)
+                    if self.verbose and action.get("action") == "play_card":
+                        ci = action.get("args", {}).get("card_index", "?")
+                        hand = state.get("hand", [])
+                        name = (
+                            hand[ci].get("name", "?")
+                            if isinstance(ci, int) and ci < len(hand)
+                            else "?"
+                        )
+                        energy = state.get("energy", "?")
+                        print(
+                            f"\r[combat] 🃏 {name} (idx={ci}) E={energy}",
+                            end="",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    elif self.verbose and action.get("action") == "end_turn":
+                        rnd = state.get("round", "?")
+                        hand_count = len(state.get("hand", []))
+                        energy = state.get("energy", "?")
+                        playable = sum(
+                            1 for c in state.get("hand", []) if c.get("can_play")
+                        )
+                        print(
+                            f"\r[combat] ⏎ end_turn R{rnd} hand={hand_count} playable={playable} E={energy}",
+                            end="",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 elif decision in LLM_DECISIONS:
                     action = self.llm.act(state) if self.llm else greedy_action(state)
                 else:
-                    action = {"cmd": "action", "action": "proceed"}
+                    action = greedy_action(state)
 
                 # Record action in combat log
                 if decision == "combat_play" and combat_log:
@@ -573,60 +815,172 @@ class GameCoordinator:
                 prev_state = state
                 next_state = self._send(action)
 
-                # Detect stuck state: end_turn didn't advance (engine bug)
-                if (next_state and next_state.get("decision") == "combat_play"
-                        and action.get("action") == "end_turn"
-                        and next_state.get("round") == state.get("round")
-                        and next_state.get("player", {}).get("hp") == state.get("player", {}).get("hp")):
-                    # end_turn was ignored — try proceed to unstick
+                # Debug: log state changes for combat actions
+                if self.verbose and decision == "combat_play":
+                    action_type = action.get("action", "?")
+                    prev_hp = state.get("player", {}).get("hp", "?")
+                    prev_round = state.get("round", "?")
+                    prev_block = state.get("player", {}).get("block", 0)
+                    # Get enemy intents (plural)
+                    prev_intents = []
+                    for e in state.get("enemies", []):
+                        intents_list = e.get("intents") or e.get("intent")
+                        if intents_list:
+                            if isinstance(intents_list, list):
+                                for i in intents_list[:1]:
+                                    prev_intents.append(i.get("type", "?"))
+                            else:
+                                prev_intents.append(intents_list.get("type", "?"))
+                        else:
+                            prev_intents.append("?")
+                    next_hp = (
+                        next_state.get("player", {}).get("hp", "?")
+                        if next_state
+                        else "?"
+                    )
+                    next_round = next_state.get("round", "?") if next_state else "?"
+                    next_decision = (
+                        next_state.get("decision", "?") if next_state else "?"
+                    )
+
+                    # Log important transitions
+                    if action_type == "end_turn":
+                        print(
+                            f"\n[DEBUG] end_turn: R{prev_round}→R{next_round} HP:{prev_hp}→{next_hp} block:{prev_block} intents:{prev_intents} decision:{next_decision}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    elif prev_hp != next_hp:
+                        print(
+                            f"\n[DEBUG] {action_type}: HP:{prev_hp}→{next_hp} R:{prev_round}→{next_round} intents:{prev_intents}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    next_round = next_state.get("round", "?") if next_state else "?"
+                    next_decision = (
+                        next_state.get("decision", "?") if next_state else "?"
+                    )
+
+                    # Log important transitions
+                    if action_type == "end_turn":
+                        print(
+                            f"\n[DEBUG] end_turn: R{prev_round}→R{next_round} HP:{prev_hp}→{next_hp} block:{prev_block} intents:{prev_intents} decision:{next_decision}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    elif prev_hp != next_hp:
+                        print(
+                            f"\n[DEBUG] {action_type}: HP:{prev_hp}→{next_hp} R:{prev_round}→{next_round} intents:{prev_intents}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
+                if (
+                    next_state
+                    and next_state.get("decision") == "combat_play"
+                    and action.get("action") == "end_turn"
+                    and next_state.get("round") == state.get("round")
+                    and next_state.get("player", {}).get("hp")
+                    == state.get("player", {}).get("hp")
+                ):
+                    _stuck_count += 1
                     for _retry in range(5):
                         next_state = self._send({"cmd": "action", "action": "proceed"})
-                        if next_state is None or next_state.get("decision") != "combat_play":
+                        if (
+                            next_state is None
+                            or next_state.get("decision") != "combat_play"
+                        ):
+                            _stuck_count = 0
                             break
                         if next_state.get("round") != state.get("round"):
+                            _stuck_count = 0
                             break
-                        if next_state.get("player", {}).get("hp") != state.get("player", {}).get("hp"):
+                        if next_state.get("player", {}).get("hp") != state.get(
+                            "player", {}
+                        ).get("hp"):
+                            _stuck_count = 0
                             break
+                    if _stuck_count >= 10:
+                        for fallback in [
+                            {"cmd": "action", "action": "end_turn"},
+                            {"cmd": "action", "action": "proceed"},
+                            {"cmd": "action", "action": "leave_room"},
+                        ]:
+                            next_state = self._send(fallback)
+                            if (
+                                next_state is None
+                                or next_state.get("decision") != "combat_play"
+                            ):
+                                _stuck_count = 0
+                                break
+                            if next_state.get("round") != state.get("round"):
+                                _stuck_count = 0
+                                break
+                else:
+                    _stuck_count = 0
 
                 if next_state is None:
                     floor = self._floor(prev_state)
                     hp = prev_state.get("player", {}).get("hp", "?")
                     max_hp = prev_state.get("player", {}).get("max_hp", "?")
                     zh = self.lang == "zh"
-                    self._vlog(f"{'═'*50}")
-                    self._vlog(f"  {_c('连接断开' if zh else 'EOF', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''}, HP: {hp}/{max_hp}")
-                    self._vlog(f"{'═'*50}")
+                    self._vlog(f"{'═' * 50}")
+                    self._vlog(
+                        f"  {_c('连接断开' if zh else 'EOF', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''}, HP: {hp}/{max_hp}"
+                    )
+                    self._vlog(f"{'═' * 50}")
                     log = combat_log if combat_log else last_combat_log
                     if self.verbose and log:
                         self._replay_combat(log)
-                    return {"victory": False, "seed": seed, "steps": step,
-                            "floor": floor, "hp": hp, "max_hp": max_hp, "error": "eof"}
+                    return {
+                        "victory": False,
+                        "seed": seed,
+                        "steps": step,
+                        "floor": floor,
+                        "hp": hp,
+                        "max_hp": max_hp,
+                        "error": "eof",
+                    }
                 prev_decision = decision
                 state = next_state
 
             # Timeout — combat took too long
             floor = self._floor(prev_state) if prev_state else "?"
             hp = prev_state.get("player", {}).get("hp", "?") if prev_state else "?"
-            max_hp = prev_state.get("player", {}).get("max_hp", "?") if prev_state else "?"
+            max_hp = (
+                prev_state.get("player", {}).get("max_hp", "?") if prev_state else "?"
+            )
             zh = self.lang == "zh"
-            self._vlog(f"{'═'*50}")
-            self._vlog(f"  {_c('超时' if zh else 'TIMEOUT', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''} ({_c('600步' if zh else '600 steps', 'dim')})")
-            self._vlog(f"{'═'*50}")
+            self._vlog(f"{'═' * 50}")
+            self._vlog(
+                f"  {_c('超时' if zh else 'TIMEOUT', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''} ({_c('2000步' if zh else '2000 steps', 'dim')})"
+            )
+            self._vlog(f"{'═' * 50}")
             log = combat_log if combat_log else last_combat_log
             if self.verbose and log:
                 # Only replay last 10 turns to avoid flooding
                 self._replay_combat(log[-30:])
-            return {"victory": False, "seed": seed, "steps": 600,
-                    "floor": floor, "hp": hp, "max_hp": max_hp, "error": "timeout"}
+            return {
+                "victory": False,
+                "seed": seed,
+                "steps": 2000,
+                "floor": floor,
+                "hp": hp,
+                "max_hp": max_hp,
+                "error": "timeout",
+            }
         finally:
             self._kill_proc()
 
     def _start_proc(self):
         self._proc = subprocess.Popen(
             [DOTNET, "run", "--no-build", "--project", PROJECT],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, cwd=PROJECT_ROOT
+            text=True,
+            bufsize=1,
+            cwd=PROJECT_ROOT,
         )
         self._read_json()
 
@@ -635,32 +989,41 @@ class GameCoordinator:
             try:
                 self._proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
                 self._proc.stdin.flush()
-            except Exception: pass
+            except Exception:
+                pass
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=3)
             except Exception:
-                try: self._proc.kill()
-                except Exception: pass
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
             self._proc = None
 
     def _read_json(self):
-        if not self._proc: return None
+        if not self._proc:
+            return None
         for _ in range(1000):
             line = self._proc.stdout.readline().strip()
-            if not line: return None
+            if not line:
+                return None
             if line.startswith("{"):
-                try: return json.loads(line)
-                except json.JSONDecodeError: continue
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
         return None
 
     def _send(self, cmd: dict):
-        if not self._proc: return None
+        if not self._proc:
+            return None
         try:
             self._proc.stdin.write(json.dumps(cmd) + "\n")
             self._proc.stdin.flush()
             return self._read_json()
-        except Exception: return None
+        except Exception:
+            return None
 
 
 def _load_env():
@@ -678,55 +1041,99 @@ def main():
     _load_env()
     parser = argparse.ArgumentParser()
     parser.add_argument("--character", default="Ironclad")
-    parser.add_argument("--mode", choices=["eval-rl", "eval-full"], default="eval-rl")
+    parser.add_argument(
+        "--mode", choices=["eval-rl", "eval-greedy", "eval-full"], default="eval-greedy"
+    )
     parser.add_argument("--n-games", type=int, default=10)
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"))
-    parser.add_argument("--verbose", action="store_true", help="Print per-room progress to stderr")
-    parser.add_argument("--lang", choices=["zh", "en"], default="zh", help="Output language (default: zh)")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Print per-room progress to stderr"
+    )
+    parser.add_argument(
+        "--lang",
+        choices=["zh", "en"],
+        default="zh",
+        help="Output language (default: zh)",
+    )
     args = parser.parse_args()
 
-    if args.checkpoint is None:
-        if not os.path.isdir(CHECKPOINT_DIR):
-            print(f"Checkpoint directory not found: {CHECKPOINT_DIR}")
-            sys.exit(1)
-        import re
-        files = sorted(
-            (f for f in os.listdir(CHECKPOINT_DIR) if f.startswith(f"ppo_{args.character.lower()}")),
-            key=lambda f: int(re.search(r'(\d+)k', f).group(1)) if re.search(r'(\d+)k', f) else 0
-        )
-        if not files:
-            print(f"No checkpoint found in {CHECKPOINT_DIR}"); sys.exit(1)
-        args.checkpoint = os.path.join(CHECKPOINT_DIR, files[-1])
-    print(f"Loading RL checkpoint: {args.checkpoint}")
+    rl = None
+    use_greedy_combat = args.mode == "eval-greedy"
 
-    from agent.rl_agent import RLAgent
-    rl = RLAgent(args.checkpoint, CARDS_JSON)
+    if args.mode in ("eval-rl", "eval-full"):
+        if args.checkpoint is None:
+            if not os.path.isdir(CHECKPOINT_DIR):
+                print(f"Checkpoint directory not found: {CHECKPOINT_DIR}")
+                sys.exit(1)
+            import re
+
+            files = sorted(
+                (
+                    f
+                    for f in os.listdir(CHECKPOINT_DIR)
+                    if f.startswith(f"ppo_{args.character.lower()}")
+                ),
+                key=lambda f: int(re.search(r"(\d+)k", f).group(1))
+                if re.search(r"(\d+)k", f)
+                else 0,
+            )
+            if not files:
+                print(f"No checkpoint found in {CHECKPOINT_DIR}")
+                sys.exit(1)
+            args.checkpoint = os.path.join(CHECKPOINT_DIR, files[-1])
+        print(f"Loading RL checkpoint: {args.checkpoint}")
+        from agent.rl_agent import RLAgent
+
+        rl = RLAgent(args.checkpoint, CARDS_JSON)
+    else:
+        print(f"Using greedy combat strategy (no RL checkpoint)")
 
     llm = None
     if args.mode == "eval-full":
         if not args.api_key:
-            print("ANTHROPIC_API_KEY not set"); sys.exit(1)
+            print("ANTHROPIC_API_KEY not set")
+            sys.exit(1)
         from agent.llm_agent import LLMAgent
+
         llm = LLMAgent(api_key=args.api_key, cards_json=CARDS_JSON)
 
-    coord = GameCoordinator(rl_agent=rl, llm_agent=llm, verbose=args.verbose, lang=args.lang)
-    print(f"\nRunning {args.n_games} games | {args.character} | {args.mode} | A{args.ascension}")
+    coord = GameCoordinator(
+        rl_agent=rl,
+        llm_agent=llm,
+        verbose=args.verbose,
+        lang=args.lang,
+        use_greedy_combat=use_greedy_combat,
+    )
+    print(
+        f"\nRunning {args.n_games} games | {args.character} | {args.mode} | A{args.ascension}"
+    )
     print("=" * 60)
     results = []
     import random as _rng
+
     for i in range(args.n_games):
-        seed = f"eval_{args.character.lower()}_{i}_{_rng.randint(0,99999)}"
+        seed = f"eval_{args.character.lower()}_{i}_{_rng.randint(0, 99999)}"
         result = coord.run_game(args.character, seed, args.ascension)
         results.append(result)
         status = "WIN" if result.get("victory") else "LOSS"
-        print(f"  Game {i+1:2d}: {status} | floor={result.get('floor')} | "
-              f"hp={result.get('hp')}/{result.get('max_hp')}")
+        floor = result.get("floor", "?")
+        hp = result.get("hp", "?")
+        max_hp = result.get("max_hp", "?")
+        act = result.get("act", "?")
+        err = result.get("error", "")
+        extra = f" [{err}]" if err else ""
+        print(
+            f"  Game {i + 1:2d}: {status} | act={act} floor={floor} | "
+            f"hp={hp}/{max_hp}{extra}"
+        )
 
     wins = sum(1 for r in results if r.get("victory"))
     pct = (100.0 * wins / args.n_games) if args.n_games > 0 else 0.0
+    avg_floor = sum(r.get("floor", 0) or 0 for r in results) / max(args.n_games, 1)
     print(f"\nWin rate: {wins}/{args.n_games} ({pct:.1f}%)")
+    print(f"Avg floor: {avg_floor:.1f}")
 
 
 if __name__ == "__main__":
