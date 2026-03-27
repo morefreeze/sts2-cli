@@ -535,6 +535,11 @@ class CombatEnv(gym.Env):
             # Check if this was a dangerous crash
             if self._is_dangerous(self._current_state):
                 last_obs = self.enc.encode(self._current_state)
+                player_hp = (
+                    self._current_state.get("player", {}).get("hp", 0)
+                    if self._current_state
+                    else 0
+                )
                 return (
                     last_obs,
                     -0.5,
@@ -542,9 +547,7 @@ class CombatEnv(gym.Env):
                     False,
                     {
                         "dangerous_crash": True,
-                        "hp": self._current_state.get("player", {}).get("hp", 0)
-                        if self._current_state
-                        else 0,
+                        "hp": player_hp,
                     },
                 )
             self._game_alive = False
