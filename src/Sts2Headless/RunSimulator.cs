@@ -1695,13 +1695,14 @@ public class RunSimulator
             {
                 return DetectPostCombatState(player, combatRoom);
             }
-            // Fallback: brief wait
-            for (int i = 0; i < 20; i++)
+            // Fallback: extended wait for enemy turn to complete
+            for (int i = 0; i < 400; i++)
             {
                 _syncCtx.Pump();
                 Thread.Sleep(5);
                 if (CombatManager.Instance.IsPlayPhase) return CombatPlayState(player);
                 if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
+                if (player.Creature != null && player.Creature.IsDead) return DetectPostCombatState(player, combatRoom);
             }
             return CombatPlayState(player);
         }

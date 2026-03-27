@@ -5,8 +5,11 @@ Usage:
     python3 agent/train.py --character Ironclad --steps 100000
     python3 agent/train.py --character Ironclad --steps 500000 --checkpoint checkpoints/ppo_ironclad_100k.zip
 """
-import argparse, os, time
+import argparse, os, sys, time
 import torch
+
+if not sys.stdout.isatty():
+    sys.stdout.reconfigure(line_buffering=True)
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib import MaskablePPO
@@ -47,7 +50,6 @@ class ProgressCallback(BaseCallback):
         self._step_in_iter += self.n_envs
         self._global_steps += self.n_envs
         now = time.time()
-        # Update progress every 2 seconds
         if now - self._last_print >= 2.0:
             self._last_print = now
             elapsed = now - self._train_start
@@ -121,17 +123,22 @@ def main():
     n_steps = 2048
     policy_kwargs = dict(net_arch=dict(pi=[64, 64], vf=[64, 64]))
 
+    try:
+        import tensorboard  # noqa: F401
+        tb_log = os.path.join(CHECKPOINT_DIR, "tb_logs")
+    except ImportError:
+        tb_log = None
+
     if args.checkpoint:
-        ckpt_path = args.checkpoint
-        if ckpt_path.endswith(".zip"):
-            ckpt_path = ckpt_path[:-4]
-        model = MaskablePPO.load(ckpt_path, env=vec_env, device=device)
+        model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
+        model.tensorboard_log = tb_log
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=0, device=device,
                             policy_kwargs=policy_kwargs,
                             n_steps=n_steps, batch_size=256, n_epochs=4,
                             learning_rate=3e-4, gamma=0.99, ent_coef=0.05,
-                            vf_coef=0.5, max_grad_norm=0.5)
+                            vf_coef=0.5, max_grad_norm=0.5,
+                            tensorboard_log=tb_log)
 
     callback = ProgressCallback(args.steps, args.n_envs, n_steps)
 
