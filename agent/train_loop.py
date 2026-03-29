@@ -192,16 +192,24 @@ def main():
         print(f"Training: {current_steps} -> {milestone} ({steps_to_train} steps)")
         print(f"{'='*60}")
 
-        callback = ProgressCallback(steps_to_train, args.n_envs, n_steps)
-        model.learn(total_timesteps=steps_to_train, callback=callback,
-                    reset_num_timesteps=(current_steps == 0))
-        current_steps = milestone
+        # Train in chunks, saving intermediate checkpoints every 10k steps
+        save_interval = 10_000
+        trained = 0
+        while trained < steps_to_train:
+            chunk = min(save_interval, steps_to_train - trained)
+            callback = ProgressCallback(chunk, args.n_envs, n_steps)
+            model.learn(total_timesteps=chunk, callback=callback,
+                        reset_num_timesteps=(current_steps + trained == 0))
+            trained += chunk
 
-        # Save checkpoint
-        ckpt_name = f"ppo_{character.lower()}_{milestone // 1000}k.zip"
-        ckpt_file = os.path.join(ckpt_dir, ckpt_name)
-        model.save(ckpt_file)
-        print(f"\n  Checkpoint saved: {ckpt_file}")
+            # Save intermediate checkpoint
+            total = current_steps + trained
+            ckpt_name = f"ppo_{character.lower()}_{total // 1000}k.zip"
+            ckpt_file = os.path.join(ckpt_dir, ckpt_name)
+            model.save(ckpt_file)
+            print(f"\n  Checkpoint saved: {ckpt_file}")
+
+        current_steps = milestone
 
         # Extract training metrics
         train_metrics = extract_train_metrics(model)
