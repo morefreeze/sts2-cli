@@ -104,6 +104,63 @@ sts2.dll (game engine, IL patched)
   + Harmony patches (localization)
 ```
 
+## RL Training
+
+Train a combat agent with MaskablePPO (requires `requirements-agent.txt`):
+
+```bash
+# Single training run
+python3 agent/train.py --character Ironclad --steps 100000
+
+# Autonomous train-eval loop (runs unattended for hours)
+python3 agent/train_loop.py --character Ironclad --n-eval-games 15
+
+# Parallel evaluation (4x faster eval phase)
+python3 agent/train_loop.py --character Ironclad --n-eval-games 15 --n-eval-workers 4
+
+# Custom milestones
+python3 agent/train_loop.py --milestones 10000,25000,50000,100000
+
+# Auto-resumes from latest checkpoint after interruption
+python3 agent/train_loop.py --character Ironclad
+```
+
+The loop trains to each milestone, saves a checkpoint, evaluates with full game runs (RL combat + heuristic strategy), and appends results to `training_log.jsonl`.
+
+### Evaluate a Trained Model
+
+```bash
+# Run 30 games with verbose output
+python3 agent/coordinator.py --character Ironclad \
+    --checkpoint checkpoints/ppo_ironclad_100k.zip \
+    --n-games 30 --verbose
+
+# Quick results summary
+python3 -c "
+import json, sys
+for line in open('training_log.jsonl'):
+    r = json.loads(line)
+    e = r['eval']
+    t = r.get('train_metrics', {})
+    print(f\"{r['milestone']//1000}k steps | win={e['win_rate']:.0%} | avg_floor={e['avg_floor']:.1f}\")
+"
+```
+
+### Map Strategy
+
+Non-combat decisions (map routing, card rewards, shops) use a swappable strategy:
+
+```python
+from agent.combat_env import set_map_strategy
+from agent.strategy import Act1SafeStrategy
+
+# Default: avoid fights, prefer rest sites, shop when rich
+set_map_strategy(Act1SafeStrategy())
+
+# Swap to a custom or LLM-based strategy
+set_map_strategy(MyCustomStrategy())
+```
+
 </details>
 
 <details>
@@ -208,6 +265,62 @@ src/Sts2Headless (C#)
 sts2.dll (游戏引擎, IL patched)
   + src/GodotStubs (替代 GodotSharp.dll)
   + Harmony patches (本地化)
+```
+
+## RL 训练
+
+使用 MaskablePPO 训练战斗 AI（需要 `requirements-agent.txt`）：
+
+```bash
+# 单次训练
+python3 agent/train.py --character Ironclad --steps 100000
+
+# 自动训练-评估循环（无人值守，运行数小时）
+python3 agent/train_loop.py --character Ironclad --n-eval-games 15
+
+# 并行评估（4 线程加速评估阶段）
+python3 agent/train_loop.py --character Ironclad --n-eval-games 15 --n-eval-workers 4
+
+# 自定义里程碑
+python3 agent/train_loop.py --milestones 10000,25000,50000,100000
+
+# 中断后自动从最新 checkpoint 恢复
+python3 agent/train_loop.py --character Ironclad
+```
+
+训练循环会在每个里程碑保存 checkpoint，运行完整游戏评估（RL 战斗 + 策略决策），并将结果追加到 `training_log.jsonl`。每 10k 步自动存盘，崩溃不会丢失进度。
+
+### 评估训练好的模型
+
+```bash
+# 运行 30 局并显示详细输出
+python3 agent/coordinator.py --character Ironclad \
+    --checkpoint checkpoints/ppo_ironclad_100k.zip \
+    --n-games 30 --verbose
+
+# 快速查看训练日志摘要
+python3 -c "
+import json
+for line in open('training_log.jsonl'):
+    r = json.loads(line)
+    e = r['eval']
+    print(f\"{r['milestone']//1000}k 步 | 胜率={e['win_rate']:.0%} | 平均层数={e['avg_floor']:.1f}\")
+"
+```
+
+### 地图策略
+
+非战斗决策（地图路线、卡牌奖励、商店）使用可替换的策略：
+
+```python
+from agent.combat_env import set_map_strategy
+from agent.strategy import Act1SafeStrategy
+
+# 默认：避开战斗，优先火堆，有钱去商店
+set_map_strategy(Act1SafeStrategy())
+
+# 替换为自定义或 LLM 策略
+set_map_strategy(MyCustomStrategy())
 ```
 
 </details>
