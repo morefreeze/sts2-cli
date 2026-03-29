@@ -262,17 +262,38 @@ class CombatEnv(gym.Env):
         cur_enemy_hp = _total_enemy_hp(next_state)
         cur_player_hp = _player_hp(next_state)
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
-        dmg_reward = 0.02 * enemy_hp_lost / self._combat_start_enemy_hp
+        dmg_reward = 0.03 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
-        hp_penalty = -0.02 * player_hp_lost / self._combat_start_player_max_hp
+        hp_penalty = -0.05 * player_hp_lost / self._combat_start_player_max_hp
+
+        # Block effectiveness: reward blocking incoming damage
+        incoming = 0
+        for e in next_state.get("enemies", []):
+            for it in (e.get("intents") or []):
+                if it.get("type", "").lower() == "attack":
+                    incoming += it.get("damage", 0) * (it.get("hits") or 1)
+        player_block = next_state.get("player", {}).get("block", 0)
+        block_reward = 0.0
+        if incoming > 0 and player_block > 0:
+            effective_block = min(player_block, incoming)
+            block_reward = 0.02 * effective_block / self._combat_start_player_max_hp
+
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
-        return dmg_reward + hp_penalty
+        return dmg_reward + hp_penalty + block_reward
 
     def _combat_win_reward(self, state: dict) -> float:
         hp = _player_hp(state)
         max_hp = self._combat_start_player_max_hp
-        return 1.0 * (hp / max_hp)
+        hp_ratio = hp / max_hp
+        # Base win reward scaled by HP remaining (stronger incentive to preserve HP)
+        reward = 1.5 * hp_ratio
+        # Survival bonus for ending with high HP
+        if hp_ratio >= 0.9:
+            reward += 0.3
+        elif hp_ratio >= 0.7:
+            reward += 0.1
+        return reward
 
     def _terminal_reward(self, state: dict) -> float:
         if state.get("victory", False):
@@ -362,7 +383,8 @@ def _dummy_combat_state() -> dict:
     return {
         "decision": "combat_play", "energy": 3, "round": 1,
         "hand": [{"index": 0, "id": {"en": "STRIKE"}, "cost": 1,
-                  "can_play": True, "target_type": "AnyEnemy", "type": "Attack"}],
+                  "can_play": True, "target_type": "AnyEnemy", "type": "Attack",
+                  "stats": {"damage": 6}}],
         "player": {"hp": 80, "max_hp": 80, "block": 0, "buffs": []},
         "enemies": [{"hp": 30, "max_hp": 30, "block": 0,
                      "intent": {"type": "Attack", "damage": 10, "times": 1}, "buffs": []}],

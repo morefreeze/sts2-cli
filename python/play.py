@@ -28,6 +28,8 @@ def _find_dotnet():
     candidates = [
         os.path.expanduser("~/.dotnet-arm64/dotnet"),
         os.path.expanduser("~/.dotnet/dotnet"),
+        "/usr/local/share/dotnet/dotnet",
+        "/usr/share/dotnet/dotnet",
         "dotnet",
     ]
     for p in candidates:
@@ -1621,15 +1623,18 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     state = send({"cmd": "action", "action": "leave_room"})
                 elif choice == "rm":
                     state = send({"cmd": "action", "action": "remove_card"})
-                elif choice.startswith("r"):
+                elif choice.startswith("r") and choice[1:].isdigit():
                     state = send({"cmd": "action", "action": "buy_relic",
                                  "args": {"relic_index": int(choice[1:])}})
-                elif choice.startswith("p"):
+                elif choice.startswith("p") and choice[1:].isdigit():
                     state = send({"cmd": "action", "action": "buy_potion",
                                  "args": {"potion_index": int(choice[1:])}})
-                else:
+                elif choice.isdigit():
                     state = send({"cmd": "action", "action": "buy_card",
                                  "args": {"card_index": int(choice)}})
+                else:
+                    print(c(t("Invalid input", "输入无效"), "red"))
+                    continue
 
             elif dec == "rest_site":
                 show_rest_site(state)

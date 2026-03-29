@@ -14,6 +14,7 @@ def _find_dotnet():
     for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
               os.path.expanduser("~/.dotnet/dotnet"),
               "/usr/local/share/dotnet/dotnet",
+              "/usr/share/dotnet/dotnet",
               "dotnet"]:
         try:
             r = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=5)

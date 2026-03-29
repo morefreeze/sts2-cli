@@ -305,6 +305,49 @@ class GameCoordinator:
                             selected.append(self._card_str(cards[idx]))
                 self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
 
+    def _print_combat_hp_summary(self, combat_hp_log):
+        """Print per-combat HP cost summary, sorted by loss (highest first)."""
+        if not combat_hp_log:
+            return
+        zh = self.lang == "zh"
+        self._vlog("")
+        self._vlog(f"{'─'*55}")
+        self._vlog(f"  {_c('战斗血量消耗统计' if zh else 'Combat HP Cost Summary', 'bold')}")
+        self._vlog(f"{'─'*55}")
+
+        losses = [e["hp_loss"] for e in combat_hp_log]
+        avg_loss = sum(losses) / max(len(losses), 1)
+        max_loss = max(losses)
+        min_loss = min(losses)
+        total_loss = sum(losses)
+
+        sorted_log = sorted(combat_hp_log, key=lambda e: e["hp_loss"], reverse=True)
+        for entry in sorted_log:
+            loss = entry["hp_loss"]
+            floor = entry["floor"]
+            enemies_name = entry["enemies"][:30]
+            hp_before = entry["hp_before"]
+            hp_after = entry["hp_after"]
+            if loss >= avg_loss * 1.5 and loss > 5:
+                flag = _c(" ⚠高消耗" if zh else " ⚠HIGH", "red")
+            elif loss == 0:
+                flag = _c(" 无伤" if zh else " clean", "green")
+            else:
+                flag = ""
+            loss_color = "red" if loss > avg_loss else ("green" if loss == 0 else "yellow")
+            floor_str = _c(f"第{floor}层" if zh else f"F{floor}", "cyan")
+            hp_change = _c(f"{hp_before}→{hp_after}", "dim")
+            loss_str = _c(f"-{loss}HP", loss_color)
+            self._vlog(f"  {floor_str} {enemies_name}  {hp_change}  {loss_str}{flag}")
+
+        self._vlog(f"{'─'*55}")
+        self._vlog(f"  {'平均' if zh else 'Avg'}: {_c(f'-{avg_loss:.1f}HP', 'yellow')}  "
+                   f"{'最高' if zh else 'Max'}: {_c(f'-{max_loss}HP', 'red')}  "
+                   f"{'最低' if zh else 'Min'}: {_c(f'-{min_loss}HP', 'green')}  "
+                   f"{'总计' if zh else 'Total'}: {_c(f'-{total_loss}HP', 'dim')}  "
+                   f"({'共' if zh else ''}{len(combat_hp_log)}{'战' if zh else ' combats'})")
+        self._vlog(f"{'─'*55}")
+
     def _replay_combat(self, combat_log):
         """Replay the last combat — one line per round showing cards played + enemy intents."""
         if not combat_log:
@@ -374,17 +417,17 @@ class GameCoordinator:
             hp_color = "red" if isinstance(hp_end, int) and isinstance(hp_start, int) and hp_end < hp_start else "green"
             hp_str = f"{_c(str(hp_start), 'red')}" + (f"→{_c(str(hp_end), hp_color)}" if hp_end != hp_start else "")
 
-            # Enemy intents
-            enemy_str = " | ".join(
-                f"{e['name']} {e['hp']}HP {e['intent']}"
-                for e in r["enemies"]
-            )
+            # Enemy intents — name in cyan, HP in green, intent colored by type
+            def _fmt_enemy(e):
+                hp_label = _c(f"{e['hp']}HP", "green")
+                return f"{_c(e['name'], 'cyan')} {hp_label} {e['intent']}"
+            enemy_str = " | ".join(_fmt_enemy(e) for e in r["enemies"])
 
             # Cards played
             cards_str = ", ".join(cards)
 
             label = f"R{rnd}" if not zh else f"回合{rnd}"
-            self._vlog(f"  {_c(label, 'bold')} HP:{hp_str} E{r['energy']} | {_c(cards_str, 'yellow')} | {_c(enemy_str, 'dim')}")
+            self._vlog(f"  {_c(label, 'bold')} HP:{hp_str} E{r['energy']} | {_c(cards_str, 'yellow')} | {enemy_str}")
 
         if skipped > 0:
             self._vlog(f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}")
@@ -394,32 +437,100 @@ class GameCoordinator:
         self._vlog(f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, {plays}{'张牌' if zh else ' cards played'}")
         self._vlog(f"{'─'*55}")
 
+    def _print_combat_hp_summary(self, combat_hp_log):
+        """Print per-combat HP cost summary, sorted by loss (highest first)."""
+        if not combat_hp_log:
+            return
+        zh = self.lang == "zh"
+        losses = [e["hp_loss"] for e in combat_hp_log]
+        avg_loss = sum(losses) / len(losses)
+        max_loss = max(losses)
+        min_loss = min(losses)
+
+        self._vlog("")
+        self._vlog(f"  {_c('── 战斗HP消耗总结 ──' if zh else '── Combat HP Cost Summary ──', 'bold')}")
+        self._vlog(f"  {'共' if zh else 'Total'} {len(combat_hp_log)} {'场战斗' if zh else ' combats'} | "
+                   f"{'平均' if zh else 'avg'} {_c(f'{avg_loss:.1f}', 'yellow')} | "
+                   f"{'最高' if zh else 'max'} {_c(f'{max_loss}', 'red')} | "
+                   f"{'最低' if zh else 'min'} {_c(f'{min_loss}', 'green')}")
+
+        # Sort by HP loss descending — highlight costly rooms
+        sorted_log = sorted(combat_hp_log, key=lambda e: e["hp_loss"], reverse=True)
+        for entry in sorted_log:
+            floor = entry["floor"]
+            enemies = entry["enemies"]
+            hp_before = entry["hp_before"]
+            hp_after = entry["hp_after"]
+            hp_loss = entry["hp_loss"]
+            if hp_loss >= avg_loss * 1.5:
+                flag = _c("⚠", "red")
+            elif hp_loss == 0:
+                flag = _c("✓", "green")
+            else:
+                flag = " "
+            hp_color = "red" if hp_loss > avg_loss else ("green" if hp_loss == 0 else "yellow")
+            self._vlog(f"  {flag} {_c(f'第{floor}层' if zh else f'F{floor}', 'bold')} "
+                       f"{enemies} | "
+                       f"{_c(f'{hp_before}→{hp_after}', hp_color)} | "
+                       f"{_c(f'-{hp_loss}HP', hp_color)}")
+
     def _enemy_intent(self, enemy):
-        """Format enemy intent as a short string."""
-        intent = enemy.get("intent") or {}
-        itype = intent.get("type", "")
-        dmg = intent.get("damage")
-        times = intent.get("times", 1)
-        if itype == "Attack":
-            return _c(f"⚔{dmg}" + (f"×{times}" if times > 1 else ""), "red")
-        elif itype == "Defend":
-            return _c(f"🛡{intent.get('block', '?')}", "blue")
-        elif itype in ("Buff", "StrengthBuff"):
-            return _c("⬆增益" if self.lang == "zh" else "⬆buff", "yellow")
-        elif itype in ("Debuff", "DebuffWeak", "DebuffStrong"):
-            return _c("⬇减益" if self.lang == "zh" else "⬇debuff", "yellow")
-        elif itype in ("AttackDebuff", "AttackBuff"):
-            dmg_str = f"⚔{dmg}" if dmg else "⚔"
-            return _c(f"{dmg_str}+⬇", "red")
-        elif itype == "AttackDefend":
-            return _c(f"⚔{dmg}+🛡", "red")
-        elif itype == "StatusCard":
-            return _c("⬇塞牌" if self.lang == "zh" else "⬇cards", "yellow")
-        elif itype == "Sleep":
-            return _c("💤", "dim")
-        elif itype == "Escape":
-            return _c("🏃", "dim")
-        return _c(itype or "?", "dim")
+        """Format enemy intent as a short string — handles both `intents` (array) and `intent` (single)."""
+        zh = self.lang == "zh"
+        # Game engine sends `intents` (plural array)
+        raw_intents = enemy.get("intents") or []
+        # Fallback to singular `intent` for older data
+        if not raw_intents:
+            single = enemy.get("intent")
+            if single:
+                raw_intents = [single]
+        if not raw_intents:
+            return _c("💤?", "dim")
+
+        parts = []
+        for it in raw_intents:
+            itype = it.get("type", "")
+            dmg = it.get("damage")
+            hits = it.get("hits") or it.get("times", 1)
+
+            if itype == "Attack":
+                if dmg is not None:
+                    parts.append(_c(f"⚔{dmg}" + (f"×{hits}" if hits > 1 else ""), "red"))
+                else:
+                    parts.append(_c("⚔" + ("攻击" if zh else "ATK"), "red"))
+            elif itype == "Defend":
+                blk = it.get("block") or it.get("damage")
+                parts.append(_c(f"🛡{blk}" if blk else "🛡", "blue"))
+            elif itype in ("Buff", "Heal", "StrengthBuff"):
+                label = "⬆增益" if zh else "⬆buff"
+                if itype == "Heal":
+                    label = "❤回复" if zh else "❤heal"
+                parts.append(_c(label, "magenta"))
+            elif itype in ("Debuff", "DebuffWeak", "DebuffStrong"):
+                parts.append(_c("⬇减益" if zh else "⬇debuff", "yellow"))
+            elif itype in ("AttackDebuff", "AttackBuff"):
+                dmg_str = f"⚔{dmg}" if dmg else "⚔"
+                parts.append(_c(f"{dmg_str}+⬇", "red"))
+            elif itype == "AttackDefend":
+                parts.append(_c(f"⚔{dmg}+🛡" if dmg else "⚔+🛡", "red"))
+            elif itype == "StatusCard":
+                parts.append(_c("⬇塞牌" if zh else "⬇cards", "yellow"))
+            elif itype == "DeathBlow":
+                parts.append(_c(f"💀{dmg}" if dmg else "💀", "red"))
+            elif itype == "Escape":
+                parts.append(_c("🏃逃跑" if zh else "🏃escape", "dim"))
+            elif itype == "Summon":
+                parts.append(_c("📢召唤" if zh else "📢summon", "magenta"))
+            elif itype == "Sleep":
+                parts.append(_c("💤休眠" if zh else "💤sleep", "dim"))
+            elif itype == "Stun":
+                parts.append(_c("⚡眩晕" if zh else "⚡stun", "yellow"))
+            elif itype == "Hidden":
+                parts.append(_c("? ???", "dim"))
+            elif itype:
+                parts.append(_c(itype, "dim"))
+
+        return " ".join(parts) if parts else _c("💤?", "dim")
 
     def run_game(self, character: str, seed: str, ascension: int = 0) -> dict:
         from agent.combat_env import greedy_action
@@ -436,12 +547,13 @@ class GameCoordinator:
             self._current_act = None
             combat_log = []  # current combat: [{state, action}, ...]
             last_combat_log = []  # previous combat's log (for replay on death)
+            combat_hp_log = []  # [{floor, enemies, hp_before, hp_after, hp_loss}, ...]
 
             _consecutive_errors = 0
             _room_start = time.time()
             _room_decision = ""
             _room_timer_shown = False
-            _room_timeout = 60  # 1 minute per room
+            _room_timeout = 30  # 30s per room (normal combat ~10s; stuck = crashed)
             for step in range(600):
                 # Handle engine errors (e.g. end_turn rejected)
                 if state.get("type") == "error":
@@ -518,8 +630,20 @@ class GameCoordinator:
                     combat_log.append({"state": state, "action": None})
 
                 # Combat ended
-                if self.verbose and prev_decision == "combat_play" and decision != "combat_play":
-                    self._on_combat_end(prev_state, state)
+                if prev_decision == "combat_play" and decision != "combat_play":
+                    if self.verbose:
+                        self._on_combat_end(prev_state, state)
+                    # Track combat HP cost
+                    hp_after = state.get("player", {}).get("hp")
+                    if isinstance(self._combat_start_hp, int) and isinstance(hp_after, int):
+                        hp_loss = self._combat_start_hp - hp_after
+                        combat_hp_log.append({
+                            "floor": self._floor(prev_state),
+                            "enemies": self._combat_enemy_names(prev_state),
+                            "hp_before": self._combat_start_hp,
+                            "hp_after": hp_after,
+                            "hp_loss": hp_loss,
+                        })
                     last_combat_log = combat_log
                     combat_log = []
 
@@ -546,11 +670,16 @@ class GameCoordinator:
                     if self.verbose and not victory and log:
                         self._replay_combat(log)
 
+                    # Print combat HP summary
+                    if combat_hp_log:
+                        self._print_combat_hp_summary(combat_hp_log)
+
                     return {
                         "victory": victory, "seed": seed, "steps": step,
                         "act": act, "floor": floor,
                         "hp": state.get("player", {}).get("hp"),
                         "max_hp": state.get("player", {}).get("max_hp"),
+                        "combat_hp_log": combat_hp_log,
                     }
 
                 if decision in RL_DECISIONS:
@@ -644,14 +773,30 @@ class GameCoordinator:
                 except Exception: pass
             self._proc = None
 
-    def _read_json(self):
+    def _read_json(self, timeout: float = 3.0):
         if not self._proc: return None
-        for _ in range(1000):
-            line = self._proc.stdout.readline().strip()
-            if not line: return None
-            if line.startswith("{"):
-                try: return json.loads(line)
-                except json.JSONDecodeError: continue
+        import select as _sel
+        deadline = time.monotonic() + timeout
+        buf = ""
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = _sel.select([self._proc.stdout], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+            chunk = os.read(self._proc.stdout.fileno(), 4096)
+            if not chunk:
+                return None
+            buf += chunk.decode(errors="replace")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        return json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
         return None
 
     def _send(self, cmd: dict):
@@ -721,12 +866,47 @@ def main():
         result = coord.run_game(args.character, seed, args.ascension)
         results.append(result)
         status = "WIN" if result.get("victory") else "LOSS"
-        print(f"  Game {i+1:2d}: {status} | floor={result.get('floor')} | "
-              f"hp={result.get('hp')}/{result.get('max_hp')}")
+        floor = result.get('floor', 0)
+        hp = result.get('hp', '?')
+        mhp = result.get('max_hp', '?')
+        print(f"  Game {i+1:3d}: {_c(status, 'green' if status == 'WIN' else 'red')} | "
+              f"floor={floor} | hp={hp}/{mhp}")
+
+        # Per-10-game summary
+        if (i + 1) % 10 == 0:
+            batch = results[max(0, i-9):i+1]
+            batch_wins = sum(1 for r in batch if r.get("victory"))
+            batch_floors = [r.get("floor", 0) for r in batch if r.get("floor")]
+            avg_floor = sum(batch_floors) / max(len(batch_floors), 1)
+            completed = sum(1 for r in batch if r.get("floor") is not None)
+            # Compare with previous batch
+            prev_start = max(0, i - 19)
+            prev_batch = results[prev_start:prev_start + 10]
+            if len(prev_batch) == 10 and prev_batch != batch:
+                prev_floors = [r.get("floor", 0) for r in prev_batch if r.get("floor")]
+                prev_avg = sum(prev_floors) / max(len(prev_floors), 1)
+                if prev_avg > 0:
+                    improvement = 100.0 * (avg_floor - prev_avg) / prev_avg
+                    imp_str = f" | {'📈' if improvement >= 0 else '📉'}{improvement:+.1f}%"
+                else:
+                    imp_str = ""
+            else:
+                imp_str = ""
+            print(f"\n  {_c(f'── 批次 {(i+1)//10} 总结 (Game {i-8}-{i+1}) ──', 'bold')}")
+            print(f"  胜率: {_c(f'{batch_wins}/10', 'green' if batch_wins > 0 else 'red')} | "
+                  f"完成: {completed}/10 | 平均层数: {avg_floor:.1f}{imp_str}")
+            overall_wins = sum(1 for r in results if r.get("victory"))
+            overall_floors = [r.get("floor", 0) for r in results if r.get("floor")]
+            overall_avg = sum(overall_floors) / max(len(overall_floors), 1)
+            print(f"  累计: {overall_wins}/{i+1} 胜 | 总平均层数: {overall_avg:.1f}")
+            print()
 
     wins = sum(1 for r in results if r.get("victory"))
     pct = (100.0 * wins / args.n_games) if args.n_games > 0 else 0.0
-    print(f"\nWin rate: {wins}/{args.n_games} ({pct:.1f}%)")
+    all_floors = [r.get("floor", 0) for r in results if r.get("floor")]
+    avg_floor = sum(all_floors) / max(len(all_floors), 1)
+    print(f"\n{_c('═══ 最终总结 ═══', 'bold')}")
+    print(f"  胜率: {wins}/{args.n_games} ({pct:.1f}%) | 平均层数: {avg_floor:.1f}")
 
 
 if __name__ == "__main__":

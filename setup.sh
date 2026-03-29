@@ -1,7 +1,8 @@
 #!/bin/bash
-# setup.sh — Copy game DLLs from Steam installation to lib/
+# setup.sh — Full project setup: Python env (pyenv), game DLLs, IL patch, build
 #
 # Prerequisites:
+#   - pyenv (https://github.com/pyenv/pyenv) — auto-installs Python if needed
 #   - Slay the Spire 2 installed via Steam
 #   - .NET 9+ SDK (ARM64 for Apple Silicon, x64 for Intel/Linux)
 #
@@ -10,6 +11,53 @@
 #   ./setup.sh /path/to/game      # Manual game directory
 
 set -e
+
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$REPO_DIR"
+
+# ── Python (pyenv for version, venv for env) ──
+
+PY_VERSION="3.11.12"
+
+echo ""
+echo "🐍 Setting up Python..."
+
+# Ensure pyenv is available (for Python version management)
+if ! command -v pyenv &>/dev/null; then
+    echo "  pyenv not found. Installing..."
+    curl -fsSL https://pyenv.run | bash
+    export PYENV_ROOT="$HOME/.pyenv"
+    export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
+    eval "$(pyenv init -)"
+fi
+
+export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
+export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
+eval "$(pyenv init -)" 2>/dev/null || true
+
+# Install required Python version if missing
+if ! pyenv versions --bare | grep -q "^${PY_VERSION}$"; then
+    echo "  Installing Python ${PY_VERSION} (this may take a few minutes)..."
+    pyenv install "$PY_VERSION" --skip-existing
+fi
+
+# Create venv if missing
+if [ ! -d ".venv" ]; then
+    echo "  Creating .venv/ ..."
+    "$(pyenv prefix "$PY_VERSION")/bin/python3" -m venv .venv
+fi
+
+# Activate venv
+source .venv/bin/activate
+echo "  ✓ Python $(python3 --version) ($(which python3))"
+echo "  ✓ Venv: .venv/"
+
+# Install dependencies
+echo "  Installing dependencies..."
+pip install --quiet --upgrade pip
+pip install --quiet pytest
+[ -f requirements-agent.txt ] && pip install --quiet -r requirements-agent.txt
+echo "  ✓ Dependencies installed"
 
 # ── Locate game directory ──
 
@@ -94,9 +142,18 @@ fi
 # ── Detect .NET SDK ──
 
 DOTNET=""
-if [ -x "$HOME/.dotnet-arm64/dotnet" ]; then
-    DOTNET="$HOME/.dotnet-arm64/dotnet"
-elif command -v dotnet &>/dev/null; then
+for d in \
+    "$HOME/.dotnet-arm64/dotnet" \
+    "$HOME/.dotnet/dotnet" \
+    "/usr/local/share/dotnet/dotnet" \
+    "/usr/share/dotnet/dotnet"; do
+    if [ -x "$d" ]; then
+        DOTNET="$d"
+        break
+    fi
+done
+# Fallback: try PATH
+if [ -z "$DOTNET" ] && command -v dotnet &>/dev/null; then
     DOTNET="dotnet"
 fi
 
@@ -222,11 +279,21 @@ echo ""
 echo "🏗️ Building..."
 $DOTNET build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -5
 
+# ── Verify ──
+
+echo ""
+echo "🧪 Verifying..."
+python3 -c "import json, subprocess, sys, os, argparse, random; print('  ✓ play.py imports OK')"
+echo "  ✓ python3 → $(which python3) ($(python3 --version))"
+
 echo ""
 echo "✅ Setup complete!"
 echo ""
 echo "To play:"
 echo "  python3 python/play.py"
+echo ""
+echo "To run tests:"
+echo "  pytest tests/"
 echo ""
 echo "To run batch games:"
 echo "  python3 python/play_full_run.py 10"

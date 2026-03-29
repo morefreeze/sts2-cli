@@ -18,3 +18,4 @@ CLAUDE.md
 .venv312/
 .venv*/
 .env
+checkpoints/

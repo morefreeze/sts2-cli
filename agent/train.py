@@ -7,7 +7,7 @@ Usage:
 """
 import argparse, os, time
 import torch
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
@@ -106,8 +106,8 @@ class ProgressCallback(BaseCallback):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--character", default="Ironclad")
-    parser.add_argument("--steps", type=int, default=100_000)
-    parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument("--steps", type=int, default=25_000)
+    parser.add_argument("--n-envs", type=int, default=1)
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--checkpoint", default=None)
     args = parser.parse_args()
@@ -116,24 +116,24 @@ def main():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs | device={device}")
 
-    vec_env = SubprocVecEnv([make_env(args.character, args.ascension, i) for i in range(args.n_envs)])
+    vec_env = DummyVecEnv([make_env(args.character, args.ascension, i) for i in range(args.n_envs)])
 
     n_steps = 2048
-    policy_kwargs = dict(net_arch=dict(pi=[64, 64], vf=[64, 64]))
+    policy_kwargs = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
 
     if args.checkpoint:
         model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=0, device=device,
                             policy_kwargs=policy_kwargs,
-                            n_steps=n_steps, batch_size=256, n_epochs=4,
-                            learning_rate=3e-4, gamma=0.99, ent_coef=0.05,
+                            n_steps=n_steps, batch_size=512, n_epochs=4,
+                            learning_rate=3e-4, gamma=0.99, ent_coef=0.03,
                             vf_coef=0.5, max_grad_norm=0.5,
                             tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"))
 
     callback = ProgressCallback(args.steps, args.n_envs, n_steps)
 
-    save_interval = 25_000
+    save_interval = 10_000
     steps_done = 0
     while steps_done < args.steps:
         chunk = min(save_interval, args.steps - steps_done)
