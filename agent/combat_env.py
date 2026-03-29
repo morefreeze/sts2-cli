@@ -16,6 +16,16 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
+from agent.strategy import Act1SafeStrategy, MapStrategy
+
+# Swappable map strategy — change globally via set_map_strategy()
+_map_strategy: MapStrategy = Act1SafeStrategy()
+
+
+def set_map_strategy(strategy: MapStrategy):
+    """Replace the global map strategy. Call before training or evaluation."""
+    global _map_strategy
+    _map_strategy = strategy
 
 def _find_dotnet():
     """Find .NET SDK binary across platforms."""
@@ -43,9 +53,7 @@ def greedy_action(state: dict) -> dict:
     if decision == "map_select":
         choices = state.get("choices", [])
         if choices:
-            chosen = random.choice(choices)
-            return {"cmd": "action", "action": "select_map_node",
-                    "args": {"col": chosen["col"], "row": chosen["row"]}}
+            return _map_strategy.choose(state, choices)
 
     elif decision == "card_reward":
         cards = state.get("cards", [])
