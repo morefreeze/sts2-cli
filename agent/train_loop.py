@@ -11,6 +11,7 @@ Usage:
     python3 agent/train_loop.py --character Ironclad
 """
 import argparse, json, os, random, re, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import torch
@@ -85,48 +86,59 @@ def extract_train_metrics(model):
     return result
 
 
-def run_eval(model, encoder, character, n_games, ascension):
-    """Run N full games using trained model + greedy heuristics."""
-    # Create RLAgent wrapper — model is already loaded, share it
+def _run_single_eval(model, encoder, character, game_idx, ascension):
+    """Run one eval game. Each call creates its own coordinator (own subprocess)."""
     rl = RLAgent.__new__(RLAgent)
     rl.enc = encoder
     rl.model = model
-
     coord = GameCoordinator(rl_agent=rl, llm_agent=None, verbose=False, lang="en")
-    games = []
-    wins = 0
-    total_floors = 0
-    floor_count = 0
+    seed = f"loop_{character.lower()}_{game_idx}_{random.randint(0, 99999)}"
+    return game_idx, coord.run_game(character, seed, ascension)
 
-    for i in range(n_games):
-        seed = f"loop_{character.lower()}_{i}_{random.randint(0, 99999)}"
-        result = coord.run_game(character, seed, ascension)
-        games.append(result)
 
-        if result.get("victory"):
-            wins += 1
-        floor = result.get("floor")
-        if floor is not None:
-            total_floors += floor
-            floor_count += 1
+def run_eval(model, encoder, character, n_games, ascension, n_workers=1):
+    """Run N full games. If n_workers > 1, evaluate in parallel threads."""
+    games = [None] * n_games
 
-        status = "WIN" if result.get("victory") else "LOSS"
-        err = result.get("error", "")
-        floor_str = result.get("floor", "?")
-        hp = result.get("hp", "?")
-        mhp = result.get("max_hp", "?")
-        suffix = f" ({err})" if err else ""
-        print(f"    Eval {i+1}/{n_games}: {status} | floor={floor_str} | hp={hp}/{mhp}{suffix}",
-              flush=True)
+    if n_workers <= 1:
+        # Sequential
+        for i in range(n_games):
+            _, result = _run_single_eval(model, encoder, character, i, ascension)
+            games[i] = result
+            _print_eval_result(i, n_games, result)
+    else:
+        # Parallel — each thread gets its own coordinator/subprocess
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {
+                pool.submit(_run_single_eval, model, encoder, character, i, ascension): i
+                for i in range(n_games)
+            }
+            for future in as_completed(futures):
+                i, result = future.result()
+                games[i] = result
+                _print_eval_result(i, n_games, result)
 
+    wins = sum(1 for g in games if g and g.get("victory"))
+    floors = [g["floor"] for g in games if g and g.get("floor") is not None]
     win_rate = wins / max(n_games, 1)
-    avg_floor = total_floors / max(floor_count, 1)
+    avg_floor = sum(floors) / max(len(floors), 1)
     return {
         "n_games": n_games,
         "win_rate": round(win_rate, 3),
         "avg_floor": round(avg_floor, 1),
         "games": games,
     }
+
+
+def _print_eval_result(idx, total, result):
+    status = "WIN" if result.get("victory") else "LOSS"
+    err = result.get("error", "")
+    floor_str = result.get("floor", "?")
+    hp = result.get("hp", "?")
+    mhp = result.get("max_hp", "?")
+    suffix = f" ({err})" if err else ""
+    print(f"    Eval {idx+1}/{total}: {status} | floor={floor_str} | hp={hp}/{mhp}{suffix}",
+          flush=True)
 
 
 def main():
@@ -137,6 +149,8 @@ def main():
     parser.add_argument("--n-envs", type=int, default=1)
     parser.add_argument("--n-eval-games", type=int, default=15,
                         help="Number of eval games per milestone")
+    parser.add_argument("--n-eval-workers", type=int, default=1,
+                        help="Parallel eval threads (default: 1 = sequential)")
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--log-path", default="training_log.jsonl")
     parser.add_argument("--checkpoint-dir", default=CHECKPOINT_DIR)
@@ -215,9 +229,11 @@ def main():
         train_metrics = extract_train_metrics(model)
 
         # Evaluate
-        print(f"\n  Evaluating ({args.n_eval_games} games)...")
+        workers = args.n_eval_workers
+        print(f"\n  Evaluating ({args.n_eval_games} games, {workers} worker(s))...")
         eval_results = run_eval(model, encoder, character,
-                                args.n_eval_games, args.ascension)
+                                args.n_eval_games, args.ascension,
+                                n_workers=workers)
 
         # Log
         record = {
