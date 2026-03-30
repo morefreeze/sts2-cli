@@ -13,12 +13,14 @@ class MapStrategy(Protocol):
 
 
 class Act1SafeStrategy:
-    """Act 1 safe strategy: avoid fights, prefer rest, shop when rich.
+    """Act 1 safe strategy: avoid fights early, avoid elites before floor 3.
 
     Priority: RestSite > Shop (if gold sufficient) > Event/Treasure > Monster > Elite.
     Boss is unavoidable (only choice) so it ranks lowest to never be picked over alternatives.
+    On floors 1-2: Elite is deprioritized heavily (penalty +10).
     """
     SHOP_GOLD_THRESHOLD = 100
+    ELITE_AVOID_FLOOR = 3  # avoid elites on floors below this
 
     # Lower = higher priority. Boss=99 because it's never alongside alternatives.
     PRIORITY = {
@@ -35,12 +37,16 @@ class Act1SafeStrategy:
 
     def choose(self, state: dict, choices: list[dict]) -> dict:
         gold = state.get("player", {}).get("gold", 0)
+        floor = state.get("floor") or state.get("context", {}).get("floor", 99)
         scored = []
         for i, c in enumerate(choices):
             p = self.PRIORITY.get(c.get("type", "Unknown"), 4)
             # Shop is unattractive when broke
             if c.get("type") == "Shop" and gold < self.SHOP_GOLD_THRESHOLD:
                 p += 5
+            # Avoid elites on early floors
+            if c.get("type") == "Elite" and isinstance(floor, int) and floor < self.ELITE_AVOID_FLOOR:
+                p += 10
             scored.append((p, i, c))
         scored.sort()
         best = scored[0][2]

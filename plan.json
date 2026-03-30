@@ -1,0 +1,104 @@
+{
+  "project": "sts2-cli RL Training",
+  "generated": "2026-03-30",
+  "phases": [
+    {
+      "name": "Combat Foundation",
+      "features": [
+        {"id": "F01", "title": "State encoder — card ID embedding", "status": "done", "file": "agent/state_encoder.py", "desc": "Vocab-based card ID encoding (606 cards), normalized by vocab_size"},
+        {"id": "F02", "title": "State encoder — hand encoding", "status": "done", "file": "agent/state_encoder.py", "desc": "10 slots × 11 floats: id, cost, type×3, can_play, target, empty, damage, block, draw"},
+        {"id": "F03", "title": "State encoder — enemy encoding", "status": "done", "file": "agent/state_encoder.py", "desc": "3 enemy slots × 5 floats: hp, block, is_attacking, damage, empty"},
+        {"id": "F04", "title": "State encoder — player encoding", "status": "done", "file": "agent/state_encoder.py", "desc": "hp_norm, block_norm, buff_count, incoming_damage"},
+        {"id": "F05", "title": "State encoder — buff encoding", "status": "done", "file": "agent/state_encoder.py", "desc": "Top 30 buff magnitudes, alphabetical, normalized"},
+        {"id": "F06", "title": "Action mask — playable cards", "status": "done", "file": "agent/state_encoder.py", "desc": "Mask invalid actions by energy cost, can_play flag"},
+        {"id": "F07", "title": "Action mask — target selection", "status": "done", "file": "agent/state_encoder.py", "desc": "AnyEnemy cards → 3 targets, others → no-target slot"},
+        {"id": "F08", "title": "Action decode — play_card", "status": "done", "file": "agent/state_encoder.py", "desc": "Decode action index → {card_index, target_index}"},
+        {"id": "F09", "title": "Action decode — end_turn", "status": "done", "file": "agent/state_encoder.py", "desc": "Action 40 = end_turn, always valid"},
+        {"id": "F10", "title": "Combat env — episode lifecycle", "status": "done", "file": "agent/combat_env.py", "desc": "reset/start game → advance to combat → step → done"},
+        {"id": "F11", "title": "Combat env — stuck detection", "status": "done", "file": "agent/combat_env.py", "desc": "Detect end_turn ignored, unstick with proceed, kill after 5 retries"},
+        {"id": "F12", "title": "Combat env — process management", "status": "done", "file": "agent/combat_env.py", "desc": "Subprocess lifecycle: _start_proc, _kill_proc, _send, _read_json"}
+      ]
+    },
+    {
+      "name": "Reward Shaping",
+      "features": [
+        {"id": "F13", "title": "Damage reward", "status": "done", "file": "agent/combat_env.py", "desc": "0.15 × enemy_hp_lost / start_enemy_hp per step"},
+        {"id": "F14", "title": "HP preservation penalty", "status": "done", "file": "agent/combat_env.py", "desc": "-0.25 × player_hp_lost / max_hp per step"},
+        {"id": "F15", "title": "Block effectiveness reward", "status": "done", "file": "agent/combat_env.py", "desc": "0.10 × effective_block / max_hp when blocking incoming"},
+        {"id": "F16", "title": "Per-step time penalty", "status": "done", "file": "agent/combat_env.py", "desc": "-0.01 per step to encourage fast combat"},
+        {"id": "F17", "title": "Combat win reward", "status": "done", "file": "agent/combat_env.py", "desc": "3.0 × hp_ratio + survival bonus (up to +1.0)"},
+        {"id": "F18", "title": "Terminal reward", "status": "done", "file": "agent/combat_env.py", "desc": "+2.0 victory, -2.0 defeat"},
+        {"id": "F19", "title": "Timeout penalty", "status": "done", "file": "agent/combat_env.py", "desc": "-2.0 + truncated episode at max_combat_steps=80"},
+        {"id": "F20", "title": "Reward scaling validation", "status": "pending", "file": "agent/combat_env.py", "desc": "Unit test verifying reward magnitudes across combat scenarios"}
+      ]
+    },
+    {
+      "name": "Training Pipeline",
+      "features": [
+        {"id": "F21", "title": "MaskablePPO integration", "status": "done", "file": "agent/train.py", "desc": "sb3-contrib MaskablePPO with MlpPolicy, action masking"},
+        {"id": "F22", "title": "Network architecture", "status": "done", "file": "agent/train.py", "desc": "Separate pi/vf heads, [256, 256] each"},
+        {"id": "F23", "title": "Anti-collapse: entropy bonus", "status": "done", "file": "agent/train.py", "desc": "ent_coef=0.5 to maintain exploration"},
+        {"id": "F24", "title": "Anti-collapse: clip range", "status": "done", "file": "agent/train.py", "desc": "clip_range=0.1 for conservative policy updates"},
+        {"id": "F25", "title": "Multi-environment training", "status": "done", "file": "agent/train.py", "desc": "n_envs=4 DummyVecEnv for data diversity"},
+        {"id": "F26", "title": "Curriculum learning", "status": "done", "file": "agent/train.py", "desc": "3-phase: floor≤4 → floor≤8 → full game"},
+        {"id": "F27", "title": "Progress callback", "status": "done", "file": "agent/train.py", "desc": "Real-time steps/sec, ETA, entropy/value_loss display"},
+        {"id": "F28", "title": "Learning rate schedule", "status": "pending", "file": "agent/train.py", "desc": "Linear LR decay from 1e-4 to 0 over training"}
+      ]
+    },
+    {
+      "name": "Deck Building Intelligence",
+      "features": [
+        {"id": "F29", "title": "Card scoring system", "status": "done", "file": "agent/card_scoring.py", "desc": "0-10 score per card: DPE, BPE, effects, overrides"},
+        {"id": "F30", "title": "Card scoring — manual overrides", "status": "done", "file": "agent/card_scoring.py", "desc": "50+ card overrides: Feed 9.5, Demon Form 9.5, Strike 2.0"},
+        {"id": "F31", "title": "Card scoring — attack formula", "status": "done", "file": "agent/card_scoring.py", "desc": "damage/cost normalized against Strike baseline (6 DPE)"},
+        {"id": "F32", "title": "Card scoring — skill formula", "status": "done", "file": "agent/card_scoring.py", "desc": "block/cost + draw + energy value"},
+        {"id": "F33", "title": "Card reward selection", "status": "done", "file": "agent/combat_env.py", "desc": "Pick highest-score card if ≥ 3.5 threshold, else skip"},
+        {"id": "F34", "title": "Shop buy strategy", "status": "done", "file": "agent/combat_env.py", "desc": "Buy best score/cost ratio card, prefer removal first"},
+        {"id": "F35", "title": "Card removal (deck thinning)", "status": "done", "file": "agent/combat_env.py", "desc": "Remove lowest-score card (Strike/Defend priority)"},
+        {"id": "F36", "title": "Card scoring — context-aware", "status": "pending", "file": "agent/card_scoring.py", "desc": "Adjust scores by deck composition (e.g. already have 3 attacks → deprioritize)"}
+      ]
+    },
+    {
+      "name": "Map Strategy",
+      "features": [
+        {"id": "F37", "title": "Map strategy interface", "status": "done", "file": "agent/strategy.py", "desc": "Protocol class with choose(state, choices) → action"},
+        {"id": "F38", "title": "Act1SafeStrategy", "status": "done", "file": "agent/strategy.py", "desc": "Priority: Rest > Shop(gold≥100) > Event > Monster > Elite"},
+        {"id": "F39", "title": "Map strategy — HP-aware routing", "status": "pending", "file": "agent/strategy.py", "desc": "Avoid elites when HP < 50%, prefer rest when low"},
+        {"id": "F40", "title": "Map strategy — Act2 adaptation", "status": "pending", "file": "agent/strategy.py", "desc": "Different risk tolerance per act (Act 2 more aggressive)"}
+      ]
+    },
+    {
+      "name": "Evaluation & Monitoring",
+      "features": [
+        {"id": "F41", "title": "Coordinator — RL eval mode", "status": "done", "file": "agent/coordinator.py", "desc": "eval-rl mode: RL for combat, heuristic for non-combat"},
+        {"id": "F42", "title": "Coordinator — stuck recovery", "status": "done", "file": "agent/coordinator.py", "desc": "Error retry logic, proceed unstick, consecutive error limit"},
+        {"id": "F43", "title": "Train-eval loop", "status": "done", "file": "agent/train_loop.py", "desc": "Autonomous train→eval→log→resume cycle"},
+        {"id": "F44", "title": "Training metrics logging", "status": "done", "file": "agent/train.py", "desc": "Tensorboard + JSONL: entropy, value_loss, clip_fraction"},
+        {"id": "F45", "title": "Eval metrics — combat analysis", "status": "pending", "file": "agent/coordinator.py", "desc": "Log per-combat: cards played, damage dealt/taken, turns"},
+        {"id": "F46", "title": "Eval metrics — floor heatmap", "status": "pending", "file": "agent/coordinator.py", "desc": "Track death floor distribution across eval games"}
+      ]
+    },
+    {
+      "name": "Advanced Training",
+      "features": [
+        {"id": "F47", "title": "Observation — enemy intent detail", "status": "pending", "file": "agent/state_encoder.py", "desc": "Encode intent type (attack/defend/buff/debuff) not just is_attacking"},
+        {"id": "F48", "title": "Observation — relic encoding", "status": "pending", "file": "agent/state_encoder.py", "desc": "Add relic info to obs vector (currently missing!)"},
+        {"id": "F49", "title": "Observation — potion encoding", "status": "pending", "file": "agent/state_encoder.py", "desc": "Add potion slots to obs (currently missing!)"},
+        {"id": "F50", "title": "Observation — deck composition", "status": "pending", "file": "agent/state_encoder.py", "desc": "Encode draw/discard pile stats for strategic decisions"},
+        {"id": "F51", "title": "Reward — enemy kill bonus", "status": "pending", "file": "agent/combat_env.py", "desc": "Extra reward for killing an enemy (not just damage dealt)"},
+        {"id": "F52", "title": "Reward — efficient turn bonus", "status": "pending", "file": "agent/combat_env.py", "desc": "Reward spending all energy (encourages full energy usage)"},
+        {"id": "F53", "title": "SubprocVecEnv parallel training", "status": "pending", "file": "agent/train.py", "desc": "True multi-process env for 4x throughput"}
+      ]
+    }
+  ],
+  "summary": {
+    "total": 53,
+    "done": 39,
+    "pending": 14,
+    "active_training": {
+      "pid": 12298,
+      "config": "v3 curriculum, 200k steps, 4 envs",
+      "started": "2026-03-30"
+    }
+  }
+}

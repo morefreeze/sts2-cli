@@ -553,7 +553,7 @@ class GameCoordinator:
             _room_start = time.time()
             _room_decision = ""
             _room_timer_shown = False
-            _room_timeout = 30  # 30s per room (normal combat ~10s; stuck = crashed)
+            _room_timeout = 45  # 45s per room (RL inference + engine comm can be slow)
             for step in range(600):
                 # Handle engine errors (e.g. end_turn rejected)
                 if state.get("type") == "error":

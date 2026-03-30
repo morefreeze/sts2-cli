@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""train.py — RL combat training with progress display.
+"""train.py — RL combat training with curriculum learning and progress display.
+
+Curriculum schedule (controlled by --curriculum flag):
+  Phase 1 (0-33%):   max_floor=4  — easy enemies only (floor 2)
+  Phase 2 (33-66%):  max_floor=8  — medium difficulty
+  Phase 3 (66-100%): max_floor=0  — full game, no limit
 
 Usage:
-    python3 agent/train.py --character Ironclad --steps 100000
+    python3 agent/train.py --character Ironclad --steps 200000 --curriculum
     python3 agent/train.py --character Ironclad --steps 500000 --checkpoint checkpoints/ppo_ironclad_100k.zip
 """
 import argparse, os, time
@@ -16,15 +21,23 @@ from agent.combat_env import CombatEnv
 CARDS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "localization_eng", "cards.json")
 CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints")
 
+# Curriculum phases: (step_fraction, max_floor)
+# max_floor=0 means unlimited (full game)
+CURRICULUM_SCHEDULE = [
+    (0.00, 4),   # Phase 1: only floor 2 fights (Cultist, Jaw Worm, small Slimes)
+    (0.33, 8),   # Phase 2: floor 2-7 (adds medium enemies, first elite range)
+    (0.66, 0),   # Phase 3: full game
+]
+
 
 def mask_fn(env):
     return env.action_masks()
 
 
-def make_env(character: str, ascension: int, worker_id: int = 0):
+def make_env(character: str, ascension: int, worker_id: int = 0, max_floor: int = 0):
     def _init():
         env = CombatEnv(character=character, ascension=ascension,
-                        seed_prefix=f"w{worker_id}")
+                        seed_prefix=f"w{worker_id}", max_floor=max_floor)
         return ActionMasker(env, mask_fn)
     return _init
 
@@ -32,22 +45,43 @@ def make_env(character: str, ascension: int, worker_id: int = 0):
 class ProgressCallback(BaseCallback):
     """Real-time progress: steps/sec, ETA, training metrics."""
 
-    def __init__(self, total_steps: int, n_envs: int, n_steps_per_iter: int):
+    def __init__(self, total_steps: int, n_envs: int, n_steps_per_iter: int,
+                 curriculum: bool = False):
         super().__init__()
         self.total_steps = total_steps
         self.n_envs = n_envs
         self.n_steps_per_iter = n_steps_per_iter
+        self.curriculum = curriculum
         self._iter_start = time.time()
         self._train_start = time.time()
         self._step_in_iter = 0
         self._global_steps = 0
         self._last_print = 0
+        self._last_curriculum_phase = -1
+
+    def _curriculum_max_floor(self) -> int:
+        """Get current max_floor based on training progress."""
+        progress = self._global_steps / max(self.total_steps, 1)
+        max_floor = 0
+        phase = 0
+        for frac, mf in CURRICULUM_SCHEDULE:
+            if progress >= frac:
+                max_floor = mf
+                phase = CURRICULUM_SCHEDULE.index((frac, mf))
+        return max_floor, phase
 
     def _on_step(self) -> bool:
         self._step_in_iter += self.n_envs
         self._global_steps += self.n_envs
+
+        # Update curriculum floor on all envs
+        if self.curriculum:
+            max_floor, phase = self._curriculum_max_floor()
+            if phase != self._last_curriculum_phase:
+                self._last_curriculum_phase = phase
+                self._apply_max_floor(max_floor)
+
         now = time.time()
-        # Update progress every 2 seconds
         if now - self._last_print >= 2.0:
             self._last_print = now
             elapsed = now - self._train_start
@@ -55,11 +89,30 @@ class ProgressCallback(BaseCallback):
             remaining = (self.total_steps - self._global_steps) / max(sps, 0.1)
             pct = 100 * self._global_steps / self.total_steps
             iter_pct = 100 * self._step_in_iter / (self.n_steps_per_iter * self.n_envs)
+            extra = ""
+            if self.curriculum:
+                mf, _ = self._curriculum_max_floor()
+                extra = f" | floor<={mf or '∞'}"
             print(f"\r  [{pct:5.1f}%] {self._global_steps}/{self.total_steps} "
                   f"| {sps:.0f} steps/s | ETA {self._fmt_time(remaining)} "
-                  f"| iter {iter_pct:.0f}%",
+                  f"| iter {iter_pct:.0f}%{extra}",
                   end="", flush=True)
         return True
+
+    def _apply_max_floor(self, max_floor: int):
+        """Update max_floor on all wrapped environments."""
+        try:
+            for env_idx in range(self.training_env.num_envs):
+                # Navigate through ActionMasker → CombatEnv
+                env = self.training_env.envs[env_idx]
+                if hasattr(env, 'env'):
+                    env = env.env  # ActionMasker wraps the env
+                if hasattr(env, 'max_floor'):
+                    env.max_floor = max_floor
+            floor_str = str(max_floor) if max_floor > 0 else "∞"
+            print(f"\n  [curriculum] Phase change → max_floor={floor_str}", flush=True)
+        except Exception:
+            pass
 
     def _on_rollout_end(self):
         now = time.time()
@@ -106,41 +159,51 @@ class ProgressCallback(BaseCallback):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--character", default="Ironclad")
-    parser.add_argument("--steps", type=int, default=25_000)
-    parser.add_argument("--n-envs", type=int, default=1)
+    parser.add_argument("--steps", type=int, default=200_000)
+    parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--curriculum", action="store_true",
+                        help="Enable curriculum: easy→medium→full game")
     args = parser.parse_args()
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs | device={device}")
+    suffix = " + curriculum" if args.curriculum else ""
+    print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs | "
+          f"device={device}{suffix}")
 
-    vec_env = DummyVecEnv([make_env(args.character, args.ascension, i) for i in range(args.n_envs)])
+    # Start with curriculum phase 1 floor if enabled
+    initial_floor = CURRICULUM_SCHEDULE[0][1] if args.curriculum else 0
+    vec_env = DummyVecEnv([make_env(args.character, args.ascension, i,
+                                    max_floor=initial_floor)
+                           for i in range(args.n_envs)])
 
     n_steps = 2048
-    policy_kwargs = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
+    policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
     if args.checkpoint:
         model = MaskablePPO.load(args.checkpoint, env=vec_env, device=device)
     else:
         model = MaskablePPO("MlpPolicy", vec_env, verbose=0, device=device,
                             policy_kwargs=policy_kwargs,
-                            n_steps=n_steps, batch_size=512, n_epochs=4,
-                            learning_rate=3e-4, gamma=0.99, ent_coef=0.03,
-                            vf_coef=0.5, max_grad_norm=0.5,
+                            n_steps=n_steps, batch_size=256, n_epochs=4,
+                            learning_rate=1e-4, gamma=0.99, ent_coef=0.5,
+                            clip_range=0.1, vf_coef=0.5, max_grad_norm=0.5,
                             tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"))
 
-    callback = ProgressCallback(args.steps, args.n_envs, n_steps)
+    callback = ProgressCallback(args.steps, args.n_envs, n_steps,
+                                curriculum=args.curriculum)
 
-    save_interval = 10_000
+    save_interval = 25_000
     steps_done = 0
     while steps_done < args.steps:
         chunk = min(save_interval, args.steps - steps_done)
         model.learn(total_timesteps=chunk, callback=callback,
                     reset_num_timesteps=(steps_done == 0))
         steps_done += chunk
-        ckpt = os.path.join(CHECKPOINT_DIR, f"ppo_{args.character.lower()}_{steps_done // 1000}k.zip")
+        ckpt = os.path.join(CHECKPOINT_DIR,
+                            f"ppo_{args.character.lower()}_{steps_done // 1000}k.zip")
         model.save(ckpt)
         print(f"  Checkpoint: {ckpt}", flush=True)
 

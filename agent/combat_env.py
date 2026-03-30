@@ -17,6 +17,7 @@ import numpy as np
 from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
 from agent.strategy import Act1SafeStrategy, MapStrategy
+from agent.card_scoring import score_card, pick_best_card, pick_worst_card
 
 # Swappable map strategy — change globally via set_map_strategy()
 _map_strategy: MapStrategy = Act1SafeStrategy()
@@ -58,8 +59,10 @@ def greedy_action(state: dict) -> dict:
     elif decision == "card_reward":
         cards = state.get("cards", [])
         if cards:
-            return {"cmd": "action", "action": "select_card_reward",
-                    "args": {"card_index": 0}}
+            best = pick_best_card(cards)
+            if best is not None:
+                return {"cmd": "action", "action": "select_card_reward",
+                        "args": {"card_index": best}}
         return {"cmd": "action", "action": "skip_card_reward"}
 
     elif decision == "rest_site":
@@ -85,7 +88,9 @@ def greedy_action(state: dict) -> dict:
     elif decision == "card_select":
         cards = state.get("cards", [])
         if cards:
-            return {"cmd": "action", "action": "select_cards", "args": {"indices": "0"}}
+            worst = pick_worst_card(cards, threshold=10.0)  # always remove worst if possible
+            idx = worst if worst is not None else 0
+            return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
         return {"cmd": "action", "action": "skip_select"}
 
     elif decision == "shop":
@@ -94,13 +99,13 @@ def greedy_action(state: dict) -> dict:
         removal_cost = state.get("card_removal_cost")
         if removal_cost and gold >= removal_cost:
             return {"cmd": "action", "action": "remove_card"}
-        # Buy cheapest affordable card
+        # Buy best card by score that we can afford
         cards = [c for c in state.get("cards", [])
                  if c.get("is_stocked") and c.get("cost", 999) <= gold]
         if cards:
-            cheapest = min(cards, key=lambda c: c.get("cost", 999))
+            best = max(cards, key=lambda c: score_card(c) / max(c.get("cost", 1), 1))
             return {"cmd": "action", "action": "buy_card",
-                    "args": {"card_index": cheapest.get("index", 0)}}
+                    "args": {"card_index": best.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
 
     return {"cmd": "action", "action": "proceed"}
@@ -127,7 +132,7 @@ class CombatEnv(gym.Env):
 
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
                  ascension: int = 0, seed: str = None, dry_run: bool = False,
-                 seed_prefix: str = "t"):
+                 seed_prefix: str = "t", max_floor: int = 0):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
@@ -137,6 +142,7 @@ class CombatEnv(gym.Env):
         self._seed = seed
         self._seed_prefix = seed_prefix
         self.dry_run = dry_run
+        self.max_floor = max_floor  # 0 = unlimited
 
         self.observation_space = Box(low=0.0, high=1.0,
                                      shape=(self.enc.obs_size,), dtype=np.float32)
@@ -152,7 +158,7 @@ class CombatEnv(gym.Env):
         self._game_alive = False
         self._read_buf = b""
         self._combat_steps = 0
-        self.max_combat_steps = 150  # ~30 turns × 5 actions/turn
+        self.max_combat_steps = 80   # normal combat < 50 steps; 80 is generous
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -163,6 +169,12 @@ class CombatEnv(gym.Env):
 
         # Try to advance to next combat in the current run
         if self._game_alive and self._current_state is not None:
+            cur_floor = (self._current_state.get("floor")
+                         or self._current_state.get("context", {}).get("floor", 0))
+            if self.max_floor > 0 and isinstance(cur_floor, int) and cur_floor >= self.max_floor:
+                # Curriculum: restart to keep fighting easy enemies
+                self._game_alive = False
+                self._kill_proc()
             state = self._advance_to_combat(self._current_state)
             if state and state.get("decision") == "combat_play":
                 self._init_combat_tracking(state)
@@ -201,7 +213,7 @@ class CombatEnv(gym.Env):
         if self._combat_steps > self.max_combat_steps:
             # Combat too long — treat as defeat to avoid wasting time
             last_obs = self.enc.encode(self._current_state)
-            return last_obs, -0.5, True, False, {"timeout": True}
+            return last_obs, -2.0, True, False, {"timeout": True}
 
         cmd = self.enc.decode(int(action), self._current_state)
         state = self._send(cmd)
@@ -270,9 +282,9 @@ class CombatEnv(gym.Env):
         cur_enemy_hp = _total_enemy_hp(next_state)
         cur_player_hp = _player_hp(next_state)
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
-        dmg_reward = 0.03 * enemy_hp_lost / self._combat_start_enemy_hp
+        dmg_reward = 0.15 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
-        hp_penalty = -0.05 * player_hp_lost / self._combat_start_player_max_hp
+        hp_penalty = -0.25 * player_hp_lost / self._combat_start_player_max_hp
 
         # Block effectiveness: reward blocking incoming damage
         incoming = 0
@@ -284,29 +296,32 @@ class CombatEnv(gym.Env):
         block_reward = 0.0
         if incoming > 0 and player_block > 0:
             effective_block = min(player_block, incoming)
-            block_reward = 0.02 * effective_block / self._combat_start_player_max_hp
+            block_reward = 0.10 * effective_block / self._combat_start_player_max_hp
 
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
-        return dmg_reward + hp_penalty + block_reward
+
+        # Per-step penalty to encourage faster combat
+        step_penalty = -0.01
+        return dmg_reward + hp_penalty + block_reward + step_penalty
 
     def _combat_win_reward(self, state: dict) -> float:
         hp = _player_hp(state)
         max_hp = self._combat_start_player_max_hp
         hp_ratio = hp / max_hp
         # Base win reward scaled by HP remaining (stronger incentive to preserve HP)
-        reward = 1.5 * hp_ratio
+        reward = 3.0 * hp_ratio
         # Survival bonus for ending with high HP
         if hp_ratio >= 0.9:
-            reward += 0.3
+            reward += 1.0
         elif hp_ratio >= 0.7:
-            reward += 0.1
+            reward += 0.5
         return reward
 
     def _terminal_reward(self, state: dict) -> float:
         if state.get("victory", False):
             return 2.0
-        return -0.5
+        return -2.0
 
     def _advance_to_combat(self, state: dict) -> dict:
         for _ in range(200):
