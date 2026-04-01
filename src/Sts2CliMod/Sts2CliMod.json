@@ -1,0 +1,11 @@
+{
+  "id": "Sts2CliMod",
+  "name": "STS2 CLI Mod",
+  "author": "sts2-cli",
+  "description": "Embedded CLI server for headless play and RL training",
+  "version": "0.1.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": ["BaseLib"],
+  "affects_gameplay": false
+}

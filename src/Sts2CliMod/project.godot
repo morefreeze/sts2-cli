@@ -1,0 +1,9 @@
+config_version=5
+
+[application]
+config/name="Sts2CliMod"
+run/main_scene="res://MainFile.cs"
+config/features=PackedStringArray("4.3")
+
+[dotnet]
+project/assembly_name="Sts2CliMod"
