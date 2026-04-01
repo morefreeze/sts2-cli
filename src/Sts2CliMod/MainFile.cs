@@ -1,6 +1,7 @@
 using Godot;
 using MegaCrit.Sts2.Core.Modding;
 using Sts2CliMod.Server;
+using Sts2CliMod.Hooks;
 
 namespace Sts2CliMod;
 
@@ -22,6 +23,10 @@ public partial class MainFile : Node
         Logger.Info("Sts2CliMod initializing...");
         _server = new EmbeddedServer(DefaultPort);
         _server.Start();
+
+        ModHooks.SetServer(_server);
+        Logger.Info("ModHooks initialized and connected to server");
+
         Logger.Info($"Sts2CliMod initialized. Version 0.1.0");
     }
 
