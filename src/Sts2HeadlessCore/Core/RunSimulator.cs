@@ -630,6 +630,265 @@ public class RunSimulator
         return Error("DoProceed not yet fully implemented");
     }
 
+    // ─── Query Methods ───
+
+    public Dictionary<string, object?> GetFullMap()
+    {
+        if (_runState?.Map == null)
+            return Error("No map available");
+
+        var map = _runState.Map;
+        var rows = new List<List<Dictionary<string, object?>>>();
+        var currentCoord = _runState.CurrentMapCoord;
+        var visited = _runState.VisitedMapCoords;
+
+        for (int row = 0; row < map.GetRowCount(); row++)
+        {
+            var rowNodes = new List<Dictionary<string, object?>>();
+            foreach (var point in map.GetPointsInRow(row))
+            {
+                if (point == null) continue;
+                var children = point.Children?.Select(ch => new Dictionary<string, object?>
+                {
+                    ["col"] = (int)ch.coord.col,
+                    ["row"] = (int)ch.coord.row,
+                }).ToList();
+
+                var isVisited = visited?.Any(v => v.col == point.coord.col && v.row == point.coord.row) ?? false;
+                var isCurrent = currentCoord.HasValue &&
+                    currentCoord.Value.col == point.coord.col && currentCoord.Value.row == point.coord.row;
+
+                rowNodes.Add(new Dictionary<string, object?>
+                {
+                    ["col"] = (int)point.coord.col,
+                    ["row"] = (int)point.coord.row,
+                    ["type"] = point.PointType.ToString(),
+                    ["children"] = children,
+                    ["visited"] = isVisited,
+                    ["current"] = isCurrent,
+                });
+            }
+            if (rowNodes.Count > 0)
+                rows.Add(rowNodes);
+        }
+
+        // Boss node
+        var bossNode = new Dictionary<string, object?>
+        {
+            ["col"] = (int)map.BossMapPoint.coord.col,
+            ["row"] = (int)map.BossMapPoint.coord.row,
+            ["type"] = map.BossMapPoint.PointType.ToString(),
+        };
+
+        // Add boss name/id — use BossEncounter?.Id?.Entry
+        try
+        {
+            var bossIdEntry = _runState.Act?.BossEncounter?.Id?.Entry;
+            if (!string.IsNullOrEmpty(bossIdEntry))
+            {
+                var monsterKey = bossIdEntry.EndsWith("_BOSS") ? bossIdEntry[..^5] : bossIdEntry;
+                if (monsterKey == "THE_KIN") monsterKey = "KIN_PRIEST";
+                bossNode["id"] = bossIdEntry;
+                bossNode["name"] = _loc.Monster(monsterKey);
+            }
+        }
+        catch { }
+
+        return new Dictionary<string, object?>
+        {
+            ["type"] = "map",
+            ["rows"] = rows,
+            ["boss"] = bossNode,
+            ["current_coord"] = currentCoord.HasValue ? new Dictionary<string, object?>
+            {
+                ["col"] = (int)currentCoord.Value.col,
+                ["row"] = (int)currentCoord.Value.row,
+            } : null,
+        };
+    }
+
+    public Dictionary<string, object?> SetPlayer(Dictionary<string, System.Text.Json.JsonElement> args)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players[0];
+
+            if (args.TryGetValue("hp", out var hpEl) && player.Creature != null)
+                SetField(player.Creature, "_currentHp", hpEl.GetInt32());
+            if (args.TryGetValue("max_hp", out var mhpEl) && player.Creature != null)
+                SetField(player.Creature, "_maxHp", mhpEl.GetInt32());
+            if (args.TryGetValue("gold", out var goldEl))
+                player.Gold = goldEl.GetInt32();
+
+            if (args.TryGetValue("relics", out var relicsEl))
+            {
+                var list = GetBackingList<MegaCrit.Sts2.Core.Models.RelicModel>(player, "_relics");
+                if (list != null)
+                {
+                    list.Clear();
+                    foreach (var rEl in relicsEl.EnumerateArray())
+                    {
+                        var id = rEl.GetString();
+                        if (id == null) continue;
+                        var model = MegaCrit.Sts2.Core.Models.ModelDb.GetById<MegaCrit.Sts2.Core.Models.RelicModel>(new MegaCrit.Sts2.Core.Models.ModelId("RELIC", id));
+                        if (model != null) list.Add(model.ToMutable());
+                    }
+                }
+            }
+            if (args.TryGetValue("deck", out var deckEl))
+            {
+                // Remove existing cards from RunState tracking
+                foreach (var c in player.Deck.Cards.ToList())
+                    _runState.RemoveCard(c);
+                player.Deck.Clear(silent: true);
+                // Add new cards via RunState.CreateCard (sets Owner + registers)
+                foreach (var cEl in deckEl.EnumerateArray())
+                {
+                    var id = cEl.GetString();
+                    if (id == null) continue;
+                    var canonical = MegaCrit.Sts2.Core.Models.ModelDb.GetById<MegaCrit.Sts2.Core.Models.CardModel>(new MegaCrit.Sts2.Core.Models.ModelId("CARD", id));
+                    if (canonical != null)
+                    {
+                        var card = _runState.CreateCard(canonical, player);
+                        player.Deck.AddInternal(card, silent: true);
+                    }
+                }
+            }
+            if (args.TryGetValue("potions", out var potionsEl))
+            {
+                var slots = GetBackingList<MegaCrit.Sts2.Core.Models.PotionModel>(player, "_potionSlots")
+                         ?? GetBackingList<MegaCrit.Sts2.Core.Models.PotionModel?>(player, "_potionSlots") as System.Collections.IList;
+                if (slots != null)
+                {
+                    for (int i = 0; i < slots.Count; i++) slots[i] = null;
+                    int idx = 0;
+                    foreach (var pEl in potionsEl.EnumerateArray())
+                    {
+                        if (idx >= slots.Count) break;
+                        var id = pEl.GetString();
+                        if (id != null)
+                        {
+                            var model = MegaCrit.Sts2.Core.Models.ModelDb.GetById<MegaCrit.Sts2.Core.Models.PotionModel>(new MegaCrit.Sts2.Core.Models.ModelId("POTION", id));
+                            if (model != null) slots[idx] = model;
+                        }
+                        idx++;
+                    }
+                }
+            }
+
+            Log($"SetPlayer: hp={player.Creature?.CurrentHp} gold={player.Gold} relics={player.Relics.Count} deck={player.Deck?.Cards?.Count}");
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "ok",
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetPlayer failed", ex); }
+    }
+
+    public Dictionary<string, object?> EnterRoom(string roomType, string? encounter, string? eventId)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var runState = _runState;
+            Log($"EnterRoom: type={roomType} encounter={encounter} event={eventId}");
+
+            MegaCrit.Sts2.Core.Rooms.AbstractRoom room;
+            switch (roomType.ToLowerInvariant())
+            {
+                case "combat":
+                case "monster":
+                case "elite":
+                {
+                    if (string.IsNullOrEmpty(encounter))
+                        encounter = "SHRINKER_BEETLE_WEAK"; // default encounter
+                    var encModel = MegaCrit.Sts2.Core.Models.ModelDb.GetById<MegaCrit.Sts2.Core.Models.EncounterModel>(new MegaCrit.Sts2.Core.Models.ModelId("ENCOUNTER", encounter));
+                    if (encModel == null) return Error($"Unknown encounter: {encounter}");
+                    room = new MegaCrit.Sts2.Core.Rooms.CombatRoom(encModel.ToMutable(), runState);
+                    break;
+                }
+                case "shop":
+                    room = new MegaCrit.Sts2.Core.Rooms.MerchantRoom();
+                    break;
+                case "rest":
+                case "rest_site":
+                    room = new MegaCrit.Sts2.Core.Rooms.RestSiteRoom();
+                    break;
+                case "event":
+                {
+                    if (string.IsNullOrEmpty(eventId))
+                        return Error("event requires 'event' parameter (e.g. CHANGELING_GROVE)");
+                    var evModel = MegaCrit.Sts2.Core.Models.ModelDb.GetById<MegaCrit.Sts2.Core.Models.EventModel>(new MegaCrit.Sts2.Core.Models.ModelId("EVENT", eventId));
+                    if (evModel == null) return Error($"Unknown event: {eventId}");
+                    room = new MegaCrit.Sts2.Core.Rooms.EventRoom(evModel);
+                    break;
+                }
+                case "treasure":
+                    room = new MegaCrit.Sts2.Core.Rooms.TreasureRoom(_runState.CurrentActIndex);
+                    break;
+                default:
+                    return Error($"Unknown room type: {roomType}");
+            }
+
+            RunManager.Instance.EnterRoom(room).GetAwaiter().GetResult();
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            return DetectDecisionPoint();
+        }
+        catch (Exception ex) { return ErrorWithTrace("EnterRoom failed", ex); }
+    }
+
+    public Dictionary<string, object?> SetDrawOrder(List<string> cardIds)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var player = _runState.Players[0];
+            var pcs = player.PlayerCombatState;
+            if (pcs?.DrawPile == null) return Error("Not in combat");
+
+            var drawList = GetBackingList<MegaCrit.Sts2.Core.Models.CardModel>(pcs.DrawPile, "_cards");
+            if (drawList == null) return Error("Cannot access draw pile");
+
+            var newOrder = new List<MegaCrit.Sts2.Core.Models.CardModel>();
+            var available = new List<MegaCrit.Sts2.Core.Models.CardModel>(drawList);
+            foreach (var cardId in cardIds)
+            {
+                var match = available.FirstOrDefault(c =>
+                    c.Id.Entry.Equals(cardId, StringComparison.OrdinalIgnoreCase));
+                if (match != null)
+                {
+                    newOrder.Add(match);
+                    available.Remove(match);
+                }
+            }
+            newOrder.AddRange(available);
+
+            drawList.Clear();
+            foreach (var card in newOrder)
+                drawList.Add(card);
+
+            Log($"SetDrawOrder: reordered to {string.Join(",", cardIds)}");
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "ok",
+                ["draw_pile_size"] = drawList.Count,
+            };
+        }
+        catch (Exception ex) { return ErrorWithTrace("SetDrawOrder failed", ex); }
+    }
+
+    public Dictionary<string, object?> GetDecisionPoint()
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            return DetectDecisionPoint();
+        }
+        catch (Exception ex) { return ErrorWithTrace("GetDecisionPoint failed", ex); }
+    }
+
     // ─── Decision Point Detection (stub for now) ───
 
     private Dictionary<string, object?> DetectDecisionPoint()
