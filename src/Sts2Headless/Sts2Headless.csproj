@@ -10,6 +10,8 @@
   <ItemGroup>
     <!-- Our GodotStubs (outputs as GodotSharp.dll to satisfy sts2.dll references) -->
     <ProjectReference Include="..\GodotStubs\GodotStubs.csproj" />
+    <!-- Core library with shared game interaction code -->
+    <ProjectReference Include="..\Sts2HeadlessCore\Sts2HeadlessCore.csproj" />
   </ItemGroup>
 
   <!-- Reference game DLL and its non-Godot dependencies -->
