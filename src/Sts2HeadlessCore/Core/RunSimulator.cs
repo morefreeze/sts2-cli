@@ -902,6 +902,22 @@ public class RunSimulator
         };
     }
 
+    // ─── Cleanup ───
+
+    public void CleanUp()
+    {
+        try
+        {
+            if (RunManager.Instance.IsInProgress)
+                RunManager.Instance.CleanUp(graceful: true);
+            _runState = null;
+        }
+        catch (Exception ex)
+        {
+            Log($"CleanUp exception: {ex.Message}");
+        }
+    }
+
     // ─── Helpers ───
 
     private static void Log(string message)
