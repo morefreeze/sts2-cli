@@ -2,6 +2,7 @@ using Godot;
 using MegaCrit.Sts2.Core.Modding;
 using Sts2CliMod.Server;
 using Sts2CliMod.Hooks;
+using Sts2HeadlessCore.Core;
 
 namespace Sts2CliMod;
 
@@ -17,13 +18,19 @@ public partial class MainFile : Node
     );
 
     private static EmbeddedServer? _server;
+    private static RunSimulator? _simulator;
 
     public static void Initialize()
     {
         Logger.Info("Sts2CliMod initializing...");
+
+        // Create simulator and server
+        _simulator = new RunSimulator();
         _server = new EmbeddedServer(DefaultPort);
+        _server.SetSimulator(_simulator);
         _server.Start();
 
+        // Connect hooks to server
         ModHooks.SetServer(_server);
         Logger.Info("ModHooks initialized and connected to server");
 
@@ -34,5 +41,6 @@ public partial class MainFile : Node
     {
         Logger.Info("Sts2CliMod shutting down...");
         _server?.Stop();
+        _simulator?.CleanUp();
     }
 }

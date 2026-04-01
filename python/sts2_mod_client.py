@@ -49,6 +49,29 @@ class Sts2ModClient:
             resp.raise_for_status()
             return await resp.json()
 
+    async def start_run(self, character: str = "Ironclad", ascension: int = 0,
+                       seed: Optional[str] = None, lang: str = "en") -> Dict[str, Any]:
+        """Start a new run."""
+        return await self.send_command("start_run",
+                                      character=character,
+                                      ascension=ascension,
+                                      seed=seed,
+                                      lang=lang)
+
+    async def get_map(self) -> Dict[str, Any]:
+        """Get current map state."""
+        return await self.send_command("get_map")
+
+    async def get_state(self) -> Dict[str, Any]:
+        """Get current game state."""
+        async with self.session.get(f"{self.base_url}/state") as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+    async def action(self, action_name: str, **args) -> Dict[str, Any]:
+        """Execute an action."""
+        return await self.send_command("action", action=action_name, args=args if args else None)
+
     async def interactive_loop(self):
         """Run interactive command loop."""
         print(f"Connected to Sts2CliMod at {self.base_url}")
@@ -104,6 +127,10 @@ Available Commands:
   help              Show this help message
   health            Check server health
   quit/exit/q       Exit the client
+  start_run         Start a new run
+  get_map           Get current map state
+  get_state         Get current game state
+  action            Execute an action
 
 Command Format:
   { "cmd": "command_name", "key": "value" }
@@ -112,7 +139,7 @@ Command Format:
 
 Examples:
   {"cmd": "start_run", "character": "Ironclad"}
-  {"cmd": "play_card", "card": "Strike", "target": 0}
+  {"cmd": "action", "action": "select_map_node", "args": {"col": 0, "row": 0}}
   get_state
 """)
 

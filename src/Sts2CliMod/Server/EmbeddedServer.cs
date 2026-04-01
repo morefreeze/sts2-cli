@@ -15,9 +15,11 @@ public class EmbeddedServer
     public bool IsRunning { get; private set; }
     public int ConnectedClients => _clients.Count;
     private RunSimulator? _simulator;
+    private Dictionary<string, object?>? _currentState;
 
     public void SetSimulator(RunSimulator simulator) => _simulator = simulator;
     public RunSimulator? GetSimulator() => _simulator;
+    public void SetCurrentState(Dictionary<string, object?> state) => _currentState = state;
 
     public EmbeddedServer(int port = 12580) => _port = port;
 
@@ -84,6 +86,11 @@ public class EmbeddedServer
                 await HandleCommand(request, response);
                 return;
             }
+            if (request.Url?.PathAndQuery == "/state")
+            {
+                await HandleGetState(response);
+                return;
+            }
             response.StatusCode = 404;
             response.Close();
         }
@@ -109,7 +116,9 @@ public class EmbeddedServer
             var cmdData = JsonSerializer.Deserialize<JsonElement>(body);
             var cmd = cmdData.GetProperty("cmd").GetString() ?? "";
             MainFile.Logger.Info($"Command: {cmd}");
-            await WriteJsonResponse(response, new { type = "ack", command = cmd, status = "not_implemented" });
+
+            var result = ExecuteCommand(cmd, cmdData);
+            await WriteJsonResponse(response, result);
         }
         catch (Exception ex)
         {
@@ -119,6 +128,93 @@ public class EmbeddedServer
         {
             _inputLock.Release(InputLock.InputSource.CLI);
         }
+    }
+
+    private object ExecuteCommand(string cmd, JsonElement cmdData)
+    {
+        if (_simulator == null)
+        {
+            return new { type = "error", message = "No simulator instance" };
+        }
+
+        try
+        {
+            return cmd switch
+            {
+                "start_run" => ExecuteStartRun(cmdData),
+                "get_map" => _simulator.GetFullMap(),
+                "get_state" => GetCurrentState() ?? new Dictionary<string, object?> { ["type"] = "error", ["message"] = "No state available" },
+                "action" => ExecuteAction(cmdData),
+                _ => new { type = "ack", command = cmd, status = "unknown_command" }
+            };
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Error($"Command execution failed: {ex.Message}");
+            return new { type = "error", message = ex.Message };
+        }
+    }
+
+    private object ExecuteStartRun(JsonElement cmdData)
+    {
+        var character = cmdData.TryGetProperty("character", out var charEl) ? charEl.GetString() ?? "Ironclad" : "Ironclad";
+        var ascension = cmdData.TryGetProperty("ascension", out var ascEl) ? ascEl.GetInt32() : 0;
+        var seed = cmdData.TryGetProperty("seed", out var seedEl) ? seedEl.GetString() : null;
+        var lang = cmdData.TryGetProperty("lang", out var langEl) ? langEl.GetString() ?? "en" : "en";
+
+        MainFile.Logger.Info($"Starting run: {character} A{ascension} seed={seed}");
+        var result = _simulator!.StartRun(character, ascension, seed, lang);
+        SetCurrentState(result);
+        BroadcastDecisionPoint(result);
+        return result;
+    }
+
+    private object ExecuteAction(JsonElement cmdData)
+    {
+        if (!cmdData.TryGetProperty("action", out var actionEl))
+        {
+            return new { type = "error", message = "Missing 'action' parameter" };
+        }
+
+        var action = actionEl.GetString() ?? "";
+        Dictionary<string, object?>? args = null;
+
+        if (cmdData.TryGetProperty("args", out var argsEl))
+        {
+            args = new Dictionary<string, object?>();
+            foreach (var prop in argsEl.EnumerateObject())
+            {
+                args[prop.Name] = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString(),
+                    JsonValueKind.Number => prop.Value.GetInt32(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.Null => null,
+                    _ => prop.Value.ToString()
+                };
+            }
+        }
+
+        MainFile.Logger.Info($"Executing action: {action}");
+        var result = _simulator!.ExecuteAction(action, args);
+        SetCurrentState(result);
+        BroadcastDecisionPoint(result);
+        return result;
+    }
+
+    private async Task HandleGetState(HttpListenerResponse response)
+    {
+        var state = GetCurrentState();
+        if (state == null)
+        {
+            state = new Dictionary<string, object?>
+            {
+                ["type"] = "state",
+                ["message"] = "No state available"
+            };
+        }
+        await WriteJsonResponse(response, state);
     }
 
     private async Task WriteJsonResponse(HttpListenerResponse response, object data, int statusCode = 200)
@@ -133,10 +229,19 @@ public class EmbeddedServer
     }
 
     public void BroadcastDecisionPoint(Dictionary<string, object?> data)
-        => MainFile.Logger.Debug($"Decision: {data.GetValueOrDefault("type")}");
+    {
+        SetCurrentState(data);
+        MainFile.Logger.Info($"Decision: {data.GetValueOrDefault("type")}");
+        // TODO: Send to WebSocket clients when implemented
+    }
+
     public void BroadcastStateUpdate(Dictionary<string, object?> data)
-        => MainFile.Logger.Debug($"State: {data.Count} fields");
-    public Dictionary<string, object?>? GetCurrentState() => null;
+    {
+        MainFile.Logger.Debug($"State: {data.Count} fields");
+        // TODO: Send to WebSocket clients when implemented
+    }
+
+    public Dictionary<string, object?>? GetCurrentState() => _currentState;
 }
 
 internal class WebSocketConnection
