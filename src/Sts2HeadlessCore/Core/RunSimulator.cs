@@ -463,6 +463,173 @@ public class RunSimulator
         }
     }
 
+    // ─── Actions ───
+
+    public Dictionary<string, object?> ExecuteAction(string action, Dictionary<string, object?>? args)
+    {
+        try
+        {
+            if (_runState == null)
+                return Error("No run in progress");
+
+            var player = _runState.Players[0];
+
+            return action switch
+            {
+                "select_map_node" => DoMapSelect(player, args),
+                "play_card" => DoPlayCard(player, args),
+                "end_turn" => DoEndTurn(player),
+                "choose_option" => DoChooseOption(player, args),
+                "select_card_reward" => DoSelectCardReward(player, args),
+                "skip_card_reward" => DoSkipCardReward(player),
+                "buy_card" => DoBuyCard(player, args),
+                "buy_relic" => DoBuyRelic(player, args),
+                "buy_potion" => DoBuyPotion(player, args),
+                "remove_card" => DoRemoveCard(player),
+                "select_bundle" => DoSelectBundle(player, args),
+                "select_cards" => DoSelectCards(player, args),
+                "skip_select" => DoSkipSelect(player),
+                "use_potion" => DoUsePotion(player, args),
+                "discard_potion" => DoDiscardPotion(player, args),
+                "leave_room" => DoLeaveRoom(player),
+                "proceed" => DoProceed(player),
+                _ => Error($"Unknown action: {action}")
+            };
+        }
+        catch (Exception ex)
+        {
+            return ErrorWithTrace($"Action '{action}' failed", ex);
+        }
+    }
+
+    // Action method stubs - full implementations copied from original RunSimulator.cs
+    // These are stubs for now to establish the API surface
+
+    private Dictionary<string, object?> DoMapSelect(Player player, Dictionary<string, object?>? args)
+    {
+        if (args == null || !args.ContainsKey("col") || !args.ContainsKey("row"))
+            return Error("select_map_node requires 'col' and 'row'");
+
+        // Reset tracking for new room
+        _rewardsProcessed = false;
+        _pendingCardReward = null;
+        _eventOptionChosen = false;
+        _lastEventOptionCount = 0;
+        _pendingRewards = null;
+        _lastKnownHp = player.Creature?.CurrentHp ?? 0;
+
+        var col = Convert.ToInt32(args["col"]);
+        var row = Convert.ToInt32(args["row"]);
+        var coord = new MapCoord((byte)col, (byte)row);
+
+        Log($"Moving to map coord ({col},{row})");
+        WaitForActionExecutor();
+        _syncCtx.Pump();
+        RunManager.Instance.EnterMapCoord(coord).GetAwaiter().GetResult();
+        _syncCtx.Pump();
+        WaitForActionExecutor();
+
+        return DetectDecisionPoint();
+    }
+
+    private Dictionary<string, object?> DoPlayCard(Player player, Dictionary<string, object?>? args)
+    {
+        if (args == null || !args.ContainsKey("card_index"))
+            return Error("play_card requires 'card_index'");
+        // TODO: Full implementation
+        return Error("DoPlayCard not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoEndTurn(Player player)
+    {
+        // TODO: Full implementation
+        return Error("DoEndTurn not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoChooseOption(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoChooseOption not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoSelectCardReward(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoSelectCardReward not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoSkipCardReward(Player player)
+    {
+        // TODO: Full implementation
+        return Error("DoSkipCardReward not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoBuyCard(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoBuyCard not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoBuyRelic(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoBuyRelic not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoBuyPotion(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoBuyPotion not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoRemoveCard(Player player)
+    {
+        // TODO: Full implementation
+        return Error("DoRemoveCard not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoSelectBundle(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoSelectBundle not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoSelectCards(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoSelectCards not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoSkipSelect(Player player)
+    {
+        // TODO: Full implementation
+        return Error("DoSkipSelect not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoUsePotion(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoUsePotion not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoDiscardPotion(Player player, Dictionary<string, object?>? args)
+    {
+        // TODO: Full implementation
+        return Error("DoDiscardPotion not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoLeaveRoom(Player player)
+    {
+        // TODO: Full implementation
+        return Error("DoLeaveRoom not yet fully implemented");
+    }
+
+    private Dictionary<string, object?> DoProceed(Player player)
+    {
+        // TODO: Full implementation
+        return Error("DoProceed not yet fully implemented");
+    }
+
     // ─── Decision Point Detection (stub for now) ───
 
     private Dictionary<string, object?> DetectDecisionPoint()
