@@ -594,7 +594,7 @@ class CombatEnv(gym.Env):
 
             use = False
             target_index = None
-            if ("heal" in text or "hp" in text) and "curse" not in text and hp_ratio < 0.30:
+            if ("heal" in text or "restore" in text) and "curse" not in text and hp_ratio < 0.30:
                 use = True  # health potion when critically low HP (any fight)
             elif not is_tough:
                 continue  # other potions: save for elite/boss
