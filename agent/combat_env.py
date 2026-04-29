@@ -11,16 +11,16 @@ Design: simple 1:1 mapping — each env.step() = one game action (including
 end_turn). No auto-skip. Policy and value networks are separated in train.py
 to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import json, os, subprocess, random, time, select
+import json, os, subprocess, random, time, select, sys
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
-from agent.strategy import Act1SafeStrategy, MapStrategy
+from agent.strategy import Act1SafeStrategy, HpAwareMapStrategy, MapStrategy, rest_site_action
 from agent.card_scoring import score_card, pick_best_card, pick_worst_card
 
 # Swappable map strategy — change globally via set_map_strategy()
-_map_strategy: MapStrategy = Act1SafeStrategy()
+_map_strategy: MapStrategy = HpAwareMapStrategy()
 
 
 def set_map_strategy(strategy: MapStrategy):
@@ -44,7 +44,51 @@ def _find_dotnet():
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT = os.path.join(PROJECT_ROOT, "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
+
+
+def _score_event_option(opt: dict) -> float:
+    """Score an event option by keyword analysis. Higher = better."""
+    title = (opt.get("title") or "").lower()
+    desc = (opt.get("description") or "").lower()
+    text = title + " " + desc
+    score = 0.0
+    # Strong negatives
+    if "lose max" in text or "maximum hp" in text:
+        score -= 10.0
+    if "curse" in text:
+        score -= 8.0
+    if "lose all gold" in text:
+        score -= 5.0
+    if "torment" in title:
+        score -= 5.0  # Neow's Torment adds a negative card
+    if "take" in text and "damage" in text:
+        score -= 3.0
+    if "lose" in text and "gold" in text:
+        score -= 2.0
+    # Negative: adds basic/weak cards to deck
+    if "add" in text and ("additional strike" in text or "additional defend" in text):
+        score -= 3.0
+    # Strong positives
+    if "rare" in text and ("card" in text or "obtain" in text or "random" in text):
+        score += 8.0
+    if "remove" in text and ("card" in text or "deck" in text):
+        score += 6.0  # deck thinning = very valuable
+    if "relic" in text and "add" not in text:
+        score += 5.0  # relics without downside
+    elif "relic" in text:
+        score += 2.0  # relics with some downside (e.g. also adds Strike)
+    if "upgrade" in text:
+        score += 4.0
+    if "gain" in text and "gold" in text:
+        score += 3.0
+    if "max hp" in text and ("raise" in text or "increase" in text or "gain" in text):
+        score += 3.0  # gaining max HP is good
+    if "potion" in text:
+        score += 2.0
+    if "heal" in text and "hp" in text:
+        score += 2.0
+    return score
 
 
 def greedy_action(state: dict) -> dict:
@@ -66,20 +110,15 @@ def greedy_action(state: dict) -> dict:
         return {"cmd": "action", "action": "skip_card_reward"}
 
     elif decision == "rest_site":
-        options = state.get("options", [])
-        enabled = [o for o in options if o.get("is_enabled", True)]
-        heal = next((o for o in enabled if o.get("option_id") == "HEAL"), None)
-        choice = heal or (enabled[0] if enabled else None)
-        if choice:
-            return {"cmd": "action", "action": "choose_option",
-                    "args": {"option_index": choice["index"]}}
+        return rest_site_action(state, state.get("options", []))
 
     elif decision == "event_choice":
         options = state.get("options", [])
-        choice = next((o for o in options if not o.get("is_locked")), None)
-        if choice:
+        available = [o for o in options if not o.get("is_locked")]
+        if available:
+            best = max(available, key=_score_event_option)
             return {"cmd": "action", "action": "choose_option",
-                    "args": {"option_index": choice["index"]}}
+                    "args": {"option_index": best["index"]}}
         return {"cmd": "action", "action": "leave_room"}
 
     elif decision == "bundle_select":
@@ -99,13 +138,14 @@ def greedy_action(state: dict) -> dict:
         removal_cost = state.get("card_removal_cost")
         if removal_cost and gold >= removal_cost:
             return {"cmd": "action", "action": "remove_card"}
-        # Buy best card by score that we can afford
+        # Buy best card by score that we can afford — only if score >= 6.0
         cards = [c for c in state.get("cards", [])
                  if c.get("is_stocked") and c.get("cost", 999) <= gold]
         if cards:
-            best = max(cards, key=lambda c: score_card(c) / max(c.get("cost", 1), 1))
-            return {"cmd": "action", "action": "buy_card",
-                    "args": {"card_index": best.get("index", 0)}}
+            best = max(cards, key=lambda c: score_card(c))
+            if score_card(best) >= 6.0:
+                return {"cmd": "action", "action": "buy_card",
+                        "args": {"card_index": best.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
 
     return {"cmd": "action", "action": "proceed"}
@@ -155,10 +195,11 @@ class CombatEnv(gym.Env):
         self._prev_player_hp = 0
         self._combat_start_enemy_hp = 1
         self._combat_start_player_max_hp = 1
+        self._current_floor = 1
         self._game_alive = False
         self._read_buf = b""
         self._combat_steps = 0
-        self.max_combat_steps = 80   # normal combat < 50 steps; 80 is generous
+        self.max_combat_steps = 200  # floor 4+ fights can take 100+ steps with a learning policy
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -207,7 +248,7 @@ class CombatEnv(gym.Env):
 
     def step(self, action: int):
         if self.dry_run or self._current_state is None:
-            return np.zeros(self.enc.obs_size, dtype=np.float32), -0.5, True, False, {}
+            return np.zeros(self.enc.obs_size, dtype=np.float32), -2.0, True, False, {}
 
         self._combat_steps += 1
         if self._combat_steps > self.max_combat_steps:
@@ -216,6 +257,7 @@ class CombatEnv(gym.Env):
             return last_obs, -2.0, True, False, {"timeout": True}
 
         cmd = self.enc.decode(int(action), self._current_state)
+        self._last_cmd = cmd
         state = self._send(cmd)
 
         # Detect stuck: end_turn ignored by engine (round/HP unchanged)
@@ -236,12 +278,27 @@ class CombatEnv(gym.Env):
                 last_obs = self.enc.encode(self._current_state)
                 self._game_alive = False
                 self._kill_proc()
-                return last_obs, -0.5, True, False, {"stuck": True}
+                return last_obs, -2.0, True, False, {"stuck": True}
 
         if state is None:
             self._game_alive = False
             last_obs = self.enc.encode(self._current_state)
-            return last_obs, -0.5, True, False, {"crashed": True}
+            cmd_str = json.dumps(getattr(self, "_last_cmd", None))
+            floor = self._current_floor
+            hand_size = len(self._current_state.get("hand", []))
+            n_enemies = len(self._current_state.get("enemies", []))
+            print(f"\n[CRASH] floor={floor} cmd={cmd_str} hand={hand_size} enemies={n_enemies}",
+                  file=sys.stderr, flush=True)
+            return last_obs, -2.0, True, False, {"crashed": True, "floor": floor}
+
+        # C# returns {"decision":"stuck"} when enemy turn deadlocks for 15s.
+        # Kill the process immediately — returning a garbage combat_play state and
+        # continuing would corrupt the C# process → cr=100% cascade.
+        if state.get("decision") == "stuck":
+            self._game_alive = False
+            self._kill_proc()
+            last_obs = self.enc.encode(self._current_state)
+            return last_obs, -2.0, True, False, {"crashed": True, "floor": self._current_floor}
 
         decision = state.get("decision", "")
         reward = self._shaping_reward(state)
@@ -253,16 +310,44 @@ class CombatEnv(gym.Env):
 
         if decision == "game_over":
             self._game_alive = False
-            return last_obs, reward + self._terminal_reward(state), True, False, {}
+            r = reward + self._terminal_reward(state)
+            return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
+                                               "victory": state.get("victory", False)}
 
         if decision == "combat_play":
             self._current_state = state
             return self.enc.encode(state), reward, False, False, {}
 
+        # Mid-combat card_select (e.g. boss mechanics, card effects that trigger selection)
+        # Auto-handle these without ending the episode — they appear in Boss/Monster/Elite rooms
+        # while CombatManager is still active. Without this, Python incorrectly treats them as
+        # "combat won" and then resume in the same boss fight as a "new" combat.
+        if decision == "card_select":
+            context = state.get("context", {})
+            if context.get("room_type") in ("Boss", "Monster", "Elite"):
+                for _ in range(10):
+                    auto_cmd = greedy_action(state)
+                    state = self._send(auto_cmd)
+                    if state is None:
+                        self._game_alive = False
+                        return last_obs, -2.0, True, False, {"crashed": True}
+                    if state.get("decision") in ("combat_play", "game_over"):
+                        break
+                    if state.get("decision") != "card_select":
+                        break
+                if state.get("decision") == "combat_play":
+                    self._current_state = state
+                    return self.enc.encode(state), reward, False, False, {}
+                if state.get("decision") == "game_over":
+                    self._game_alive = False
+                    r = reward + self._terminal_reward(state)
+                    return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
+                                                       "victory": state.get("victory", False)}
+
         # Combat ended (transitioned to card_reward, map_select, etc.) — we won
         reward += self._combat_win_reward(state)
         self._current_state = state
-        return last_obs, reward, True, False, {"combat_won": True}
+        return last_obs, reward, True, False, {"floor": self._current_floor, "combat_won": True}
 
     def action_masks(self) -> np.ndarray:
         if self._current_state is None:
@@ -272,11 +357,16 @@ class CombatEnv(gym.Env):
     def close(self):
         self._kill_proc()
 
+    def set_max_floor(self, max_floor: int) -> None:
+        self.max_floor = max_floor
+
     def _init_combat_tracking(self, state: dict):
         self._prev_enemy_hp = _total_enemy_hp(state)
         self._prev_player_hp = _player_hp(state)
         self._combat_start_enemy_hp = max(self._prev_enemy_hp, 1)
         self._combat_start_player_max_hp = max(state.get("player", {}).get("max_hp", 1), 1)
+        floor = state.get("floor") or state.get("context", {}).get("floor", 1)
+        self._current_floor = int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1
 
     def _shaping_reward(self, next_state: dict) -> float:
         cur_enemy_hp = _total_enemy_hp(next_state)
@@ -284,7 +374,8 @@ class CombatEnv(gym.Env):
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
         dmg_reward = 0.15 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
-        hp_penalty = -0.25 * player_hp_lost / self._combat_start_player_max_hp
+        # Increased from -0.25: HP conservation is the primary combat objective
+        hp_penalty = -0.35 * player_hp_lost / self._combat_start_player_max_hp
 
         # Block effectiveness: reward blocking incoming damage
         incoming = 0
@@ -301,21 +392,25 @@ class CombatEnv(gym.Env):
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
 
-        # Per-step penalty to encourage faster combat
-        step_penalty = -0.01
+        # No step penalty — avoids incentivizing fast death spiral
+        step_penalty = 0.0
         return dmg_reward + hp_penalty + block_reward + step_penalty
 
     def _combat_win_reward(self, state: dict) -> float:
         hp = _player_hp(state)
         max_hp = self._combat_start_player_max_hp
         hp_ratio = hp / max_hp
-        # Base win reward scaled by HP remaining (stronger incentive to preserve HP)
-        reward = 3.0 * hp_ratio
-        # Survival bonus for ending with high HP
+        # Base win reward scaled by HP remaining — pure combat efficiency signal
+        reward = 2.0 * hp_ratio
+        # HP survival bonus tiers
         if hp_ratio >= 0.9:
-            reward += 1.0
-        elif hp_ratio >= 0.7:
             reward += 0.5
+        elif hp_ratio >= 0.7:
+            reward += 0.25
+        # Small floor weight so curriculum still has gradient (strategy layer owns this signal)
+        # Reduced 0.15→0.05/floor, cap 2.4→0.8 so HP efficiency dominates
+        floor_bonus = min((self._current_floor - 1) * 0.05, 0.8)
+        reward += floor_bonus
         return reward
 
     def _terminal_reward(self, state: dict) -> float:
@@ -334,13 +429,20 @@ class CombatEnv(gym.Env):
         return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
 
     def _start_proc(self):
+        crash_log = os.path.join(PROJECT_ROOT, "crash_stderr.log")
+        self._crash_log_f = open(crash_log, "a")
         self._proc = subprocess.Popen(
             [DOTNET, "run", "--no-build", "--project", PROJECT],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, cwd=PROJECT_ROOT
+            stderr=self._crash_log_f, cwd=PROJECT_ROOT,
+            start_new_session=True,  # own process group — killed with os.killpg
         )
         self._read_buf = b""
-        self._read_json(timeout_sec=15.0)
+        ready = self._read_json(timeout_sec=15.0)
+        if ready is None:
+            # Game process failed to produce ready message — kill it now
+            self._kill_proc()
+            time.sleep(1.0)  # back-off before retry
 
     def _kill_proc(self):
         if self._proc is not None:
@@ -396,7 +498,9 @@ class CombatEnv(gym.Env):
         try:
             self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
             self._proc.stdin.flush()
-            return self._read_json()
+            # DoEndTurn can take up to ~15s (3s wait + 5s cancel + nuclear fallback).
+            # Use 20s timeout to avoid false crash on slow enemy turns.
+            return self._read_json(timeout_sec=20.0)
         except Exception:
             self._kill_proc()
             return None

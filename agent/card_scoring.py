@@ -68,7 +68,13 @@ OVERRIDES: dict[str, float] = {
 
     # === Mediocre (3-4) ===
     "DEFEND": 3.0,          # basic, want to remove
+    "DEFEND_IRONCLAD": 3.0,
+    "DEFEND_SILENT": 3.0,
+    "DEFEND_DEFECT": 3.0,
     "STRIKE": 2.0,          # basic, want to remove
+    "STRIKE_IRONCLAD": 2.0,
+    "STRIKE_SILENT": 2.0,
+    "STRIKE_DEFECT": 2.0,
     "WOUND": 1.0,           # pure bad
     "DAZE": 1.0,
     "SLIMED": 1.0,
@@ -90,7 +96,11 @@ RARITY_BONUS = {"Common": 0.0, "Uncommon": 0.5, "Rare": 1.0}
 
 # Cards that are never worth picking (status/curse starters)
 SKIP_IDS = {"STRIKE_R", "DEFEND_R", "STRIKE_B", "DEFEND_B", "STRIKE_G",
-            "DEFEND_G", "WOUND", "DAZE", "SLIMED", "BURN", "DECAY"}
+            "DEFEND_G", "WOUND", "DAZE", "SLIMED", "BURN", "DECAY",
+            # STS2 naming variants
+            "STRIKE_IRONCLAD", "DEFEND_IRONCLAD",
+            "STRIKE_SILENT", "DEFEND_SILENT",
+            "STRIKE_DEFECT", "DEFEND_DEFECT"}
 
 
 def score_card(card: dict) -> float:
@@ -102,6 +112,9 @@ def score_card(card: dict) -> float:
     if isinstance(card_id, dict):
         card_id = card_id.get("en", str(card_id))
     card_id = card_id.upper().strip()
+    # Game prefixes IDs with "CARD." — strip it for override lookups
+    if card_id.startswith("CARD."):
+        card_id = card_id[5:]
 
     # Check manual override first
     if card_id in OVERRIDES:
