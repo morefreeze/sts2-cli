@@ -120,9 +120,14 @@ def _score_shop_potion(potion: dict) -> float:
 
 def _score_event_option(opt: dict) -> float:
     """Score an event option by keyword analysis. Higher = better."""
+    import re as _re
     title = (opt.get("title") or "").lower()
     desc = (opt.get("description") or "").lower()
-    text = title + " " + desc
+    # Strip rich-text markup ([gold], [red], [/gold]) to prevent false keyword matches
+    # e.g. "[gold]ALL[/gold]" causing "lose all gold" to trigger.
+    # Keep template vars like {RandomRelic} since their names carry useful semantics.
+    raw = title + " " + desc
+    text = _re.sub(r'\[/?[a-z0-9_]+\]', ' ', raw)   # markup tags only
     score = 0.0
     # Strong negatives — losing Max HP is permanent and devastating
     # Covers "lose max hp", "lose 10 max hp", "maximum hp", "lose N max hp"
@@ -130,7 +135,7 @@ def _score_event_option(opt: dict) -> float:
         score -= 10.0
     if "curse" in text:
         score -= 8.0
-    # "lose ALL gold" — text uses formatting tags, check components separately
+    # "lose ALL gold" — losing all gold is very bad
     if "lose" in text and "all" in text and "gold" in text:
         score -= 5.0
     elif "lose" in text and "gold" in text:
@@ -159,9 +164,11 @@ def _score_event_option(opt: dict) -> float:
         score += 4.0
     if "transform" in text:
         score += 3.0  # transform replaces bad starters with random cards
-    if "gain" in text and "gold" in text:
+    # Use word-boundary search for "gain" to avoid "bargain", "again", "regain" false positives
+    _gain = bool(_re.search(r'\bgain\b', text))
+    if _gain and "gold" in text:
         score += 3.0
-    if "max hp" in text and ("raise" in text or "increase" in text or "gain" in text):
+    if "max hp" in text and ("raise" in text or "increase" in text or _gain):
         score += 3.0  # gaining max HP is good
     if "potion" in text:
         score += 2.0
@@ -170,9 +177,11 @@ def _score_event_option(opt: dict) -> float:
     if "colorless" in text and "card" in text:
         score += 2.0  # colorless cards add utility
     # Permanent stat gains are very strong
-    if "strength" in text and "gain" in text and "enem" not in text and "lose" not in text:
+    if "strength" in text and _gain and "enem" not in text and "lose" not in text:
         score += 4.0  # +str permanently is game-warping for Ironclad
-    if "dexterity" in text and "gain" in text and "enem" not in text and "lose" not in text:
+    elif "strength" in text and _gain and "enem" in text:
+        score -= 3.0  # enemies gaining strength is very bad
+    if "dexterity" in text and _gain and "enem" not in text and "lose" not in text:
         score += 3.0  # +dex permanently is strong defense
     if "energy" in text and "each turn" in text and "lose" not in text:
         score += 5.0  # extra energy per turn = unlimited scaling
