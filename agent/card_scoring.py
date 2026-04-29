@@ -19,11 +19,14 @@ OVERRIDES: dict[str, float] = {
     "OFFERING": 8.5,        # draw + energy, life cost is fine
     "DARK_EMBRACE": 8.5,    # draw on exhaust synergy
     "FEEL_NO_PAIN": 8.5,    # block on exhaust
+    "JUGGERNAUT": 8.5,      # each block = damage — game-winning in block-heavy decks
     "SENTINEL": 8.0,        # 3 energy if exhausted
     "SECOND_WIND": 8.0,     # exhaust + block
     "TRUE_GRIT": 7.5,       # exhaust 1, draw 2
     "WARCRY": 7.0,          # draw with no downside
     "SHRUG_IT_OFF": 8.0,    # 8 block + draw 1
+    "SPOT_WEAKNESS": 6.5,   # +3 str if enemy attacking — strong conditional
+    "BRUTALITY": 5.5,       # 0-cost draw at 1 HP/turn — aggressive cycle
 
     # === STS2 new cards — top picks (8-9) ===
     "HOWL_FROM_BEYOND": 9.0,   # AOE that auto-replays from exhaust pile each turn
