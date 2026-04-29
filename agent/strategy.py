@@ -116,8 +116,8 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     pre_boss = isinstance(floor, int) and floor >= 11
 
     enabled = [o for o in options if o.get("is_enabled", True)]
-    heal  = next((o for o in enabled if o.get("option_id") == "HEAL"),  None)
-    smith = next((o for o in enabled if o.get("option_id") == "SMITH"), None)
+    heal  = next((o for o in enabled if "heal"  in (o.get("option_id") or "").lower()), None)
+    smith = next((o for o in enabled if "smith" in (o.get("option_id") or "").lower()), None)
 
     if pre_boss and hp_ratio < 0.85:
         choice = heal or (enabled[0] if enabled else None)
