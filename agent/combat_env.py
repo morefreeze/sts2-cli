@@ -627,7 +627,7 @@ class CombatEnv(gym.Env):
         """
         player = state.get("player", {})
         hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
-        if hp_ratio >= 0.35:
+        if hp_ratio >= 0.40:
             return state  # healthy enough, no heal needed
         potions = player.get("potions", []) or []
         for p in potions:
