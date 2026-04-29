@@ -93,14 +93,15 @@ def _score_event_option(opt: dict) -> float:
         score -= 10.0
     if "curse" in text:
         score -= 8.0
-    if "lose all gold" in text:
+    # "lose ALL gold" — text uses formatting tags, check components separately
+    if "lose" in text and "all" in text and "gold" in text:
         score -= 5.0
+    elif "lose" in text and "gold" in text:
+        score -= 2.0
     if "torment" in title:
         score -= 5.0  # Neow's Torment adds a negative card
     if "take" in text and "damage" in text:
         score -= 3.0
-    if "lose" in text and "gold" in text:
-        score -= 2.0
     # Negative: adds basic/weak cards to deck
     if "add" in text and ("additional strike" in text or "additional defend" in text):
         score -= 3.0
@@ -115,6 +116,8 @@ def _score_event_option(opt: dict) -> float:
         score += 2.0  # relics with some downside (e.g. also adds Strike)
     if "upgrade" in text:
         score += 4.0
+    if "transform" in text:
+        score += 3.0  # transform replaces bad starters with random cards
     if "gain" in text and "gold" in text:
         score += 3.0
     if "max hp" in text and ("raise" in text or "increase" in text or "gain" in text):
@@ -123,6 +126,8 @@ def _score_event_option(opt: dict) -> float:
         score += 2.0
     if "heal" in text and "hp" in text:
         score += 2.0
+    if "colorless" in text and "card" in text:
+        score += 2.0  # colorless cards add utility
     return score
 
 
