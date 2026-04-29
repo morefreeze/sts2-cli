@@ -83,6 +83,8 @@ def _score_shop_relic(relic: dict) -> float:
     if "potion" in text and "slot" in text: score += 1.0
     # Bad: adds wounds or curses
     if "wound" in text and "add" in text: score -= 2.0
+    # Bad: enemies gain strength/buffs (e.g. Philosopher's Stone)
+    if "enem" in text and "strength" in text: score -= 3.0
     return score
 
 
