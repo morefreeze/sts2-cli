@@ -181,6 +181,21 @@
 - **Verification**: 20-game eval shows game 14 (floor=17 seed) now ends as `[dead]` instead of `crash/stuck`. No crashes in 20 games.
 - **Relevant code**: RunSimulator.cs (`InlineSynchronizationContext.Post/Pump`, ~line 44)
 
+## [FIXED] BUG-030: Vantom DISMEMBER_MOVE deadlocks boss fight via Cmd.Wait (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (end_turn during Vantom boss Round 3)
+- **Description**: `Cmd.Wait(float, bool)` and `Cmd.Wait(float, CancellationToken, bool)` are used for UI animation delays (e.g. AddToCombatAndPreview for Vantom's Wound cards). In headless mode, these create timers that never fire, causing the ActionExecutor to hang indefinitely.
+- **Root cause**: All Harmony runtime patches (including the existing Cmd.Wait patch) fail on CoreCLR 10.0.5 with "CoreCLR version X is not supported". The runtime patch was never actually applied.
+- **Evidence**: 365 "EndTurn stuck after 10s(boss)" entries in crash_stderr.log, all at Round=3, Enemies=[Vantom]. Harmony "[WARN] Failed to patch Cmd.Wait" appears on every game startup.
+- **Fix**: IL-patch `lib/sts2.dll` via Mono.Cecil to replace both Cmd.Wait() overloads with `return Task.CompletedTask`. Added to setup.sh (Patch 3) so future installs apply the fix permanently.
+- **Relevant code**: setup.sh (Patch 3), lib/sts2.dll
+
+## [FIXED] BUG-031: KinPriest crash — GpuParticles2D.Amount missing from GodotStubs (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (end_turn during KinPriest boss fight)
+- **Description**: KinPriest (and KinFollower) emit VFX via `GpuParticles2D.Amount` property setter. This method was not stubbed in GodotStubs, causing "Method not found: 'Void Godot.GpuParticles2D.set_Amount(Int32)'" exceptions that killed the ActionExecutor.
+- **Evidence**: 87 "EndTurn stuck after Ns — KinFollower/KinPriest" entries in crash_stderr.log. Error message "Method not found: 'Void Godot.GpuParticles2D.set_Amount'" in log.
+- **Fix**: Added `Amount`, `Lifetime`, `LifetimeRandomness`, `OneShot`, `LocalCoords`, `SpeedScale`, `Explosiveness`, `Restart()` to GpuParticles2D and CpuParticles2D in GodotStubs/UI.cs and ExtraGodotTypes.cs.
+- **Relevant code**: src/GodotStubs/UI.cs (GpuParticles2D), src/GodotStubs/ExtraGodotTypes.cs (CpuParticles2D)
+
 ## [FIXED] BUG-026: Attack Potion card_select deadlocks combat — all cards unplayable (2026-03-23, fixed 2026-03-23)
 - **Decision type**: combat_play (use_potion with Attack Potion)
 - **Description**: When Attack Potion is used, it triggers a card_select (choose from 3 attack cards). The game engine's async method awaits GetSelectedCards(), which creates a pending TaskCompletionSource. WaitForActionExecutor loops 1000 pumps but the executor can never finish because it's awaiting the user's card selection. After WaitForActionExecutor gives up (with IsRunning still true), all subsequent card plays and end_turn fail because the executor remains permanently "stuck".
