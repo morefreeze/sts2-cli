@@ -83,7 +83,7 @@ OVERRIDES: dict[str, float] = {
     "MASTER_OF_STRATEGY": 6.0, # draw 3, exhaust — card advantage
     "ANGER": 5.0,           # damage + copy in discard (scaling but clogs deck)
     "DARK_SHACKLES": 4.5,   # reduce enemy strength this turn — situational defensive
-    "BLIGHT_STRIKE": 6.5,   # damage + apply Doom — strong if Doom mechanic is real damage
+    "BLIGHT_STRIKE": 5.0,   # damage + apply Doom — Doom may not tick in headless (BUG-021)
     "DISCOVERY": 5.5,       # choose 1 of 3 random cards free — card quality upgrade
     "JACK_OF_ALL_TRADES": 5.0,  # add random colorless cards — inconsistent
 
