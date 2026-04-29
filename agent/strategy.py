@@ -103,9 +103,9 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     """Decide heal vs upgrade at a rest site based on current HP ratio and floor.
 
     Rules:
-    - floor >= 12 (pre-boss zone): heal if HP < 80%, otherwise upgrade
-    - HP < 55%  → always heal (survival first)
-    - HP >= 55% → upgrade if SMITH is available, else heal
+    - floor >= 11 (pre-boss zone): heal if HP < 85%, otherwise upgrade
+    - HP < 70%  → always heal (survival first)
+    - HP >= 70% → upgrade if SMITH is available, else heal
     - Fallback  → first enabled option
     """
     player = state.get("player", {})
@@ -121,7 +121,7 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
 
     if pre_boss and hp_ratio < 0.85:
         choice = heal or (enabled[0] if enabled else None)
-    elif hp_ratio < 0.62 or smith is None:
+    elif hp_ratio < 0.70 or smith is None:
         choice = heal or (enabled[0] if enabled else None)
     else:
         choice = smith or heal or (enabled[0] if enabled else None)
