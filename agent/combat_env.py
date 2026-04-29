@@ -487,6 +487,9 @@ class CombatEnv(gym.Env):
         if decision == "game_over":
             self._game_alive = False
             r = reward + self._terminal_reward(state)
+            if state.get("victory", False):
+                # Boss kill: also award combat_win_reward so victory > regular combat win
+                r += self._combat_win_reward(state)
             return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
                                                "victory": state.get("victory", False)}
 
@@ -495,6 +498,8 @@ class CombatEnv(gym.Env):
             if state.get("decision") == "game_over":
                 self._game_alive = False
                 r = reward + self._terminal_reward(state)
+                if state.get("victory", False):
+                    r += self._combat_win_reward(state)
                 return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
                                                    "victory": state.get("victory", False)}
             self._current_state = state
@@ -523,6 +528,8 @@ class CombatEnv(gym.Env):
                 if state.get("decision") == "game_over":
                     self._game_alive = False
                     r = reward + self._terminal_reward(state)
+                    if state.get("victory", False):
+                        r += self._combat_win_reward(state)
                     return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
                                                        "victory": state.get("victory", False)}
 
