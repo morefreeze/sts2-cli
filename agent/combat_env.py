@@ -682,9 +682,27 @@ class CombatEnv(gym.Env):
 
             use = False
             target_index = None
+            # Pre-compute incoming attack damage for threat-aware decisions
+            incoming_dmg = sum(
+                it.get("damage", 0) * (it.get("hits") or 1)
+                for e in state.get("enemies", [])
+                for it in (e.get("intents") or [])
+                if it.get("type", "").lower() == "attack"
+            )
+            hp_cur = player.get("hp", 80)
+            blk_cur = player.get("block", 0)
+            # Damage that bypasses current block (what we'll actually take)
+            unblocked_dmg = max(0, incoming_dmg - blk_cur)
+
             if ("heal" in text or "restore" in text) and "curse" not in text:
                 # Heal: any fight at 30%, elite/boss at 50%
                 use = hp_ratio < 0.30 or (is_tough and hp_ratio < 0.50)
+            elif "block" in text:
+                # Block potion: use when incoming damage is threatening regardless of fight type
+                # - Incoming > 50% of remaining HP (will take a serious hit)
+                # - OR standard HP-ratio threshold at elite/boss
+                threatening = incoming_dmg > 0 and unblocked_dmg >= hp_cur * 0.45
+                use = threatening or (is_tough and hp_ratio < (0.70 if is_boss else 0.60))
             elif not is_tough:
                 continue  # other potions: save for elite/boss
             elif "strength" in text or "flex" in text:
@@ -697,8 +715,6 @@ class CombatEnv(gym.Env):
             elif "duplicat" in text:
                 # duplicator/duplication: boss always; elite if damaged (doubles best card = big swing)
                 use = is_boss or (is_elite and hp_ratio < 0.60)
-            elif "block" in text and hp_ratio < (0.70 if is_boss else 0.60):
-                use = True  # block potion: more aggressive at elite/boss
             elif "blessing" in text or "forge" in text:
                 use = is_tough  # upgrade hand at elite/boss
             elif "fire" in text or "explosive" in text:
