@@ -613,13 +613,17 @@ class CombatEnv(gym.Env):
                 continue  # other potions: save for elite/boss
             elif "strength" in text or "flex" in text:
                 use = True  # always use strength at elite/boss
-            elif "duplication" in text or "duplicate" in text:
-                use = is_boss  # save duplication for boss
+            elif "duplicat" in text:
+                use = is_boss  # duplicator/duplication at boss
             elif "block" in text and hp_ratio < 0.50:
                 use = True  # block potion when damaged
+            elif "blessing" in text or "forge" in text:
+                use = is_tough  # upgrade hand at elite/boss
             elif "fire" in text or "explosive" in text:
-                use = is_boss  # damage potions only at boss
+                use = is_tough  # damage potions at elite and boss
                 target_index = 0
+            elif "attack" in text and hp_ratio < 0.50:
+                use = is_tough  # attack potion at elite/boss when hurt
 
             if not use:
                 continue
