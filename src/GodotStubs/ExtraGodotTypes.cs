@@ -12,7 +12,12 @@ public class Line2D : Node2D
 
 public class CpuParticles2D : Node2D
 {
+    public int Amount { get; set; }
     public bool Emitting { get; set; }
+    public float Lifetime { get; set; }
+    public bool OneShot { get; set; }
+    public float SpeedScale { get; set; }
+    public void Restart() { }
 }
 
 public class Marker2D : Node2D { }

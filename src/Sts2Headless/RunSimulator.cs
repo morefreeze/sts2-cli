@@ -40,26 +40,39 @@ internal class InlineSynchronizationContext : SynchronizationContext
 {
     private readonly Queue<(SendOrPostCallback, object?)> _queue = new();
     private bool _executing;
+    // Capture the main thread ID so that timer callbacks from ThreadPool always
+    // enqueue rather than execute inline — prevents game async continuations from
+    // running on non-main threads and bypassing our context for subsequent awaits.
+    private readonly int _mainThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
 
     public override void Post(SendOrPostCallback d, object? state)
     {
-        if (_executing)
+        // Always enqueue when called from a non-main thread (e.g. Cmd.Wait(1f) timer).
+        // Running inline on a ThreadPool thread would cause subsequent await continuations
+        // to post to ThreadPool's default SyncCtx instead of ours, breaking the pump loop.
+        if (_executing || System.Threading.Thread.CurrentThread.ManagedThreadId != _mainThreadId)
         {
-            _queue.Enqueue((d, state));
+            lock (_queue) { _queue.Enqueue((d, state)); }
             return;
         }
-        // removed debug log
 
         // Execute inline immediately, then drain any nested posts
         _executing = true;
         try
         {
             d(state);
-            // Drain any callbacks that were queued during execution
-            while (_queue.Count > 0)
+            // Drain any callbacks queued during execution.
+            // Exceptions from individual continuations (e.g. VFX NullRef in headless mode)
+            // are caught per-callback so they don't kill the ActionExecutor.
+            while (true)
             {
-                var (cb, st) = _queue.Dequeue();
-                cb(st);
+                (SendOrPostCallback cb, object? st) item;
+                lock (_queue) { if (_queue.Count == 0) break; item = _queue.Dequeue(); }
+                try { item.cb(item.st); }
+                catch (Exception ex) when (ex is NullReferenceException || ex is InvalidOperationException)
+                {
+                    Console.Error.WriteLine($"[WARN] SyncCtx swallowed non-fatal continuation exception: {ex.GetType().Name}: {ex.Message}");
+                }
             }
         }
         finally
@@ -75,12 +88,18 @@ internal class InlineSynchronizationContext : SynchronizationContext
 
     public void Pump()
     {
-        // Drain any remaining queued callbacks
-        while (_queue.Count > 0)
+        // Drain any remaining queued callbacks.
+        // Per-callback exception handling prevents VFX NullRef from killing the ActionExecutor.
+        while (true)
         {
-            var (cb, st) = _queue.Dequeue();
+            (SendOrPostCallback cb, object? st) item;
+            lock (_queue) { if (_queue.Count == 0) break; item = _queue.Dequeue(); }
             _executing = true;
-            try { cb(st); }
+            try { item.cb(item.st); }
+            catch (Exception ex) when (ex is NullReferenceException || ex is InvalidOperationException)
+            {
+                Console.Error.WriteLine($"[WARN] SyncCtx.Pump swallowed non-fatal exception: {ex.GetType().Name}: {ex.Message}");
+            }
             finally { _executing = false; }
         }
     }
@@ -244,6 +263,11 @@ public class RunSimulator
             // Launch the run
             RunManager.Instance.Launch();
             Log("Run launched");
+
+            // Try AssetCache injection again now that the game is live.
+            // The singleton is created lazily during Launch(), so this is the first
+            // opportunity to find and populate it with stub VFX entries.
+            PreloadVfxAssets();
 
             // Register event handlers for combat turn transitions
             CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
@@ -888,13 +912,20 @@ public class RunSimulator
 
     private Dictionary<string, object?> DoEndTurn(Player player)
     {
+        // player.Creature can become null mid-combat (e.g. BYRDONIS PECK_MOVE removes
+        // the player creature from the creatures list). Treat as game over.
+        if (player.Creature == null)
+        {
+            Log("DoEndTurn: player.Creature is null — treating as game over");
+            return DetectDecisionPoint();
+        }
         if (!CombatManager.Instance.IsPlayPhase)
         {
             // Might be between phases — pump and check
             _syncCtx.Pump();
             if (!CombatManager.Instance.IsPlayPhase)
             {
-                if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead)
+                if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true)
                     return DetectDecisionPoint();
                 // Brief wait for ThreadPool if sync context didn't catch it
                 Thread.Sleep(100);
@@ -911,134 +942,84 @@ public class RunSimulator
         _turnStarted.Reset();
         _combatEnded.Reset();
 
-        // Enable SuppressYield so Task.Yield() runs inline during enemy turn processing.
-        // This prevents deadlocks during boss fights (e.g., Vantom) where continuations
-        // would otherwise be posted to ThreadPool and never complete.
+        // Keep SuppressYield=true for the ENTIRE DoEndTurn including all wait loops.
+        // Enemy async continuations (BYRDONIS etc.) execute on ThreadPool threads; with
+        // SuppressYield=false those threads post Task.Yield() continuations back to the
+        // ThreadPool default context, which _syncCtx.Pump() never drains → enemy turn
+        // stalls forever. Keeping it true makes Task.Yield() a no-op everywhere so the
+        // enemy processing chain completes inline.
         YieldPatches.SuppressYield = true;
         try
         {
             PlayerCmd.EndTurn(player, canBackOut: false);
             _syncCtx.Pump();
+
+            // Fast path: DEF-mode enemies process instantaneously inside Pump()
+            if (CombatManager.Instance.IsInProgress && CombatManager.Instance.IsPlayPhase)
+                PumpStartOfTurnSetup(player);
+
+            // Fallback wait: up to 3s for enemy turn to complete.
+            // NOTE: Task.Yield/Cmd.Wait Harmony patches may fail on newer CoreCLR —
+            // in that case SuppressYield has no effect. We rely on the InlineSyncCtx
+            // being active so that continuations posted via await are drained by Pump().
+            if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature?.IsDead == true)
+            {
+                bool isBossRoom = (_runState?.CurrentRoom as CombatRoom)?.RoomType == RoomType.Boss;
+                int waitIter = isBossRoom ? 1000 : 300; // 10s for boss, 3s for normal
+                bool prevExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
+                for (int i = 0; i < waitIter; i++)   // waitIter × 10ms
+                {
+                    SynchronizationContext.SetSynchronizationContext(_syncCtx);
+                    _syncCtx.Pump();
+                    if (_turnStarted.IsSet || _combatEnded.IsSet) break;
+                    if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) break;
+                    if (CombatManager.Instance.IsPlayPhase) break;
+
+                    // When executor just stopped, burst-pump to drain post-execution continuations
+                    bool curExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
+                    if (prevExecutorRunning && !curExecutorRunning)
+                    {
+                        for (int burst = 0; burst < 300; burst++)
+                        {
+                            SynchronizationContext.SetSynchronizationContext(_syncCtx);
+                            _syncCtx.Pump();
+                            if (CombatManager.Instance.IsPlayPhase || !CombatManager.Instance.IsInProgress) goto AfterWait;
+                            if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
+                            Thread.Sleep(1);
+                        }
+                    }
+                    prevExecutorRunning = curExecutorRunning;
+                    Thread.Sleep(10);
+                }
+                AfterWait:
+                // Flush start-of-turn setup if turn started
+                if (_turnStarted.IsSet || CombatManager.Instance.IsPlayPhase)
+                    PumpStartOfTurnSetup(player);
+
+                // Player died asynchronously (HP=0 but IsDead not set yet due to Harmony patch failure):
+                // return game_over directly instead of stuck to avoid cr spike on player death.
+                int curHp = player.Creature?.CurrentHp ?? 1;
+                bool playerEffectivelyDead = (player.Creature?.IsDead == true) || (curHp <= 0);
+                if (playerEffectivelyDead)
+                {
+                    Log($"EndTurn: player HP={curHp} IsDead={player.Creature?.IsDead} — treating as game_over(defeat)");
+                    return GameOverState(false);
+                }
+                if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature?.IsDead == true)
+                {
+                    var stuckState = CombatManager.Instance.DebugOnlyGetState();
+                    var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
+                        .Select(e => $"{e.Monster?.GetType().Name}(hp={e.CurrentHp})").ToList();
+                    Log($"EndTurn stuck after {(isBossRoom ? "10s(boss)" : "3s")} — returning stuck signal. Round={stuckState?.RoundNumber}, " +
+                        $"Enemies=[{string.Join(",", stuckEnemies ?? new())}], " +
+                        $"ActionExecutor.IsRunning={RunManager.Instance.ActionExecutor.IsRunning}");
+                    return new Dictionary<string, object?> { ["decision"] = "stuck" };
+                }
+            }
         }
         finally
         {
             YieldPatches.SuppressYield = false;
-        }
-
-        // Fallback: if turn didn't complete synchronously, wait briefly then force retry
-        if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature.IsDead)
-        {
-            for (int i = 0; i < 50; i++)
-            {
-                _syncCtx.Pump();
-                if (_turnStarted.IsSet || _combatEnded.IsSet) break;
-                if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
-                if (CombatManager.Instance.IsPlayPhase) break;
-                Thread.Sleep(5);
-            }
-
-            // If STILL stuck, the WaitUntilQueue TCS is likely deadlocked.
-            // Cancel the ActionExecutor to break out, then re-trigger EndTurn.
-            if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature.IsDead)
-            {
-                Log("EndTurn stuck, cancelling and retrying with SuppressYield...");
-                try
-                {
-                    RunManager.Instance.ActionExecutor.Cancel();
-                    _syncCtx.Pump();
-                    Thread.Sleep(50);
-                    _syncCtx.Pump();
-
-                    // Reset the player ready state and try again with SuppressYield
-                    CombatManager.Instance.UndoReadyToEndTurn(player);
-                    _syncCtx.Pump();
-
-                    YieldPatches.SuppressYield = true;
-                    try
-                    {
-                        PlayerCmd.EndTurn(player, canBackOut: false);
-                        _syncCtx.Pump();
-                    }
-                    finally
-                    {
-                        YieldPatches.SuppressYield = false;
-                    }
-
-                    for (int i = 0; i < 100; i++)
-                    {
-                        _syncCtx.Pump();
-                        if (_turnStarted.IsSet || _combatEnded.IsSet) break;
-                        if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
-                        if (CombatManager.Instance.IsPlayPhase) break;
-                        Thread.Sleep(10);
-                    }
-                }
-                catch (Exception ex) { Log($"Cancel retry: {ex.Message}"); }
-            }
-
-            // NUCLEAR OPTION: If STILL stuck after 2 attempts, use ThreadPool to force
-            // the enemy turn processing to complete with SuppressYield permanently on.
-            if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature.IsDead)
-            {
-                var stuckState = CombatManager.Instance.DebugOnlyGetState();
-                var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
-                    .Select(e => $"{e.Monster?.GetType().Name}(hp={e.CurrentHp})").ToList();
-                Log($"EndTurn STILL stuck after retry — nuclear fallback. Round={stuckState?.RoundNumber}, " +
-                    $"Enemies=[{string.Join(",", stuckEnemies ?? new())}], " +
-                    $"IsPlayPhase={CombatManager.Instance.IsPlayPhase}, " +
-                    $"IsInProgress={CombatManager.Instance.IsInProgress}, " +
-                    $"ActionExecutor.IsRunning={RunManager.Instance.ActionExecutor.IsRunning}");
-                try
-                {
-                    // Cancel again and undo
-                    RunManager.Instance.ActionExecutor.Cancel();
-                    _syncCtx.Pump();
-                    CombatManager.Instance.UndoReadyToEndTurn(player);
-                    _syncCtx.Pump();
-                    Thread.Sleep(50);
-
-                    // Run EndTurn on ThreadPool with SuppressYield permanently on
-                    YieldPatches.SuppressYield = true;
-                    var endTurnTask = Task.Run(() =>
-                    {
-                        PlayerCmd.EndTurn(player, canBackOut: false);
-                    });
-
-                    // Aggressively pump sync context while waiting (up to 5 seconds)
-                    for (int i = 0; i < 500; i++)
-                    {
-                        _syncCtx.Pump();
-                        if (endTurnTask.IsCompleted) break;
-                        if (_turnStarted.IsSet || _combatEnded.IsSet) break;
-                        if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
-                        if (CombatManager.Instance.IsPlayPhase) break;
-                        Thread.Sleep(10);
-                    }
-                    YieldPatches.SuppressYield = false;
-
-                    // If still not play phase, try just waiting a bit more
-                    if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature.IsDead)
-                    {
-                        for (int i = 0; i < 200; i++)
-                        {
-                            _syncCtx.Pump();
-                            Thread.Sleep(10);
-                            if (CombatManager.Instance.IsPlayPhase || !CombatManager.Instance.IsInProgress || player.Creature.IsDead)
-                                break;
-                        }
-                    }
-
-                    if (CombatManager.Instance.IsPlayPhase)
-                        Log("Nuclear fallback SUCCEEDED — play phase resumed");
-                    else
-                        Log("Nuclear fallback FAILED — returning stuck state");
-                }
-                catch (Exception ex)
-                {
-                    Log($"Nuclear fallback error: {ex.Message}");
-                    YieldPatches.SuppressYield = false;
-                }
-            }
         }
 
         return DetectDecisionPoint();
@@ -1526,8 +1507,24 @@ public class RunSimulator
         {
             if (combatRoom.IsPreFinished || !CombatManager.Instance.IsInProgress)
             {
-                RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
-                WaitForActionExecutor();
+                YieldPatches.SuppressYield = true;
+                try
+                {
+                    var nextActTask = RunManager.Instance.EnterNextAct();
+                    var deadline = DateTime.UtcNow.AddSeconds(10);
+                    while (!nextActTask.IsCompleted && DateTime.UtcNow < deadline)
+                    {
+                        _syncCtx.Pump();
+                        WaitForActionExecutor();
+                        if (nextActTask.IsCompleted) break;
+                        Thread.Sleep(10);
+                    }
+                    if (!nextActTask.IsCompleted)
+                        Log("EnterNextAct (DoProceed) timed out after 10s");
+                    _syncCtx.Pump();
+                    WaitForActionExecutor();
+                }
+                finally { YieldPatches.SuppressYield = false; }
                 return DetectDecisionPoint();
             }
         }
@@ -1549,7 +1546,7 @@ public class RunSimulator
         var player = _runState.Players[0];
 
         // Check game over (death)
-        if (player.Creature != null && player.Creature.IsDead)
+        if (player.Creature != null && player.Creature?.IsDead == true)
         {
             return GameOverState(false);
         }
@@ -1689,9 +1686,37 @@ public class RunSimulator
 
             if (CombatManager.Instance.IsInProgress && CombatManager.Instance.IsPlayPhase)
             {
+                // BUG-027 safety net: if energy=0 and hand is empty but cards remain in
+                // draw/discard piles, start-of-turn setup hasn't finished yet.  Pump with
+                // SuppressYield=true so Task.Yield() continuations (energy reset, draw)
+                // complete inline instead of hanging.
+                var pcs = player.PlayerCombatState;
+                bool energyZero = (pcs?.Energy ?? 1) == 0;
+                bool handEmpty  = (pcs?.Hand?.Cards?.Count ?? 1) == 0;
+                bool hasCards   = (pcs?.DrawPile?.Cards?.Count ?? 0) + (pcs?.DiscardPile?.Cards?.Count ?? 0) > 0;
+                if (energyZero && handEmpty && hasCards)
+                {
+                    Log("BUG-027: energy=0 + hand empty but deck not exhausted — pumping start-of-turn setup");
+                    YieldPatches.SuppressYield = true;
+                    try
+                    {
+                        for (int i = 0; i < 30; i++)
+                        {
+                            WaitForActionExecutor();
+                            _syncCtx.Pump();
+                            var p2 = player.PlayerCombatState;
+                            if ((p2?.Energy ?? 0) > 0 || (p2?.Hand?.Cards?.Count ?? 0) > 0) break;
+                            Thread.Sleep(10);
+                        }
+                    }
+                    finally
+                    {
+                        YieldPatches.SuppressYield = false;
+                    }
+                }
                 return CombatPlayState(player);
             }
-            if (!CombatManager.Instance.IsInProgress || (player.Creature != null && player.Creature.IsDead))
+            if (!CombatManager.Instance.IsInProgress || (player.Creature != null && player.Creature?.IsDead == true))
             {
                 return DetectPostCombatState(player, combatRoom);
             }
@@ -2076,13 +2101,31 @@ public class RunSimulator
         if (combatRoom.RoomType == RoomType.Boss)
         {
             Log("Boss defeated, entering next act");
+            // EnterNextAct() uses async continuations. If Harmony patches fail on newer CoreCLR,
+            // blocking with .GetResult() deadlocks because continuations need _syncCtx.Pump()
+            // to drain — which can't run while the main thread is blocked. Run as a Task and
+            // pump while waiting, with SuppressYield=true to make Task.Yield() a no-op when patches work.
+            YieldPatches.SuppressYield = true;
             try
             {
-                RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
+                var nextActTask = RunManager.Instance.EnterNextAct();
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!nextActTask.IsCompleted && DateTime.UtcNow < deadline)
+                {
+                    _syncCtx.Pump();
+                    WaitForActionExecutor();
+                    if (nextActTask.IsCompleted) break;
+                    Thread.Sleep(10);
+                }
+                if (nextActTask.IsCompleted && nextActTask.Exception != null)
+                    Log($"EnterNextAct exception: {nextActTask.Exception.InnerException?.Message}");
+                else if (!nextActTask.IsCompleted)
+                    Log("EnterNextAct timed out after 10s — proceeding");
                 _syncCtx.Pump();
                 WaitForActionExecutor();
             }
             catch (Exception ex) { Log($"EnterNextAct: {ex.Message}"); }
+            finally { YieldPatches.SuppressYield = false; }
             return DetectDecisionPoint();
         }
 
@@ -2504,6 +2547,42 @@ public class RunSimulator
         }
     }
 
+    /// <summary>
+    /// BUG-027: After TurnStarted fires, start-of-turn actions (energy reset, card draw)
+    /// are still pending as Task.Yield() continuations.  Without SuppressYield=true those
+    /// continuations get posted to ThreadPool and never complete in headless mode, leaving
+    /// energy=0 and hand empty for every subsequent end_turn call.
+    /// Call this immediately after detecting _turnStarted.IsSet or IsPlayPhase=true to
+    /// flush those continuations inline.
+    /// </summary>
+    private void PumpStartOfTurnSetup(Player player)
+    {
+        if (!CombatManager.Instance.IsPlayPhase) return;
+        YieldPatches.SuppressYield = true;
+        try
+        {
+            for (int i = 0; i < 60; i++)
+            {
+                WaitForActionExecutor();
+                _syncCtx.Pump();
+                var pcs = player.PlayerCombatState;
+                int drawLeft = (pcs?.DrawPile?.Cards?.Count ?? 0)
+                             + (pcs?.DiscardPile?.Cards?.Count ?? 0);
+                // Done when energy is restored, or cards appear in hand,
+                // or the deck is genuinely empty (nothing left to draw).
+                if ((pcs?.Energy ?? 0) > 0
+                    || (pcs?.Hand?.Cards?.Count ?? 0) > 0
+                    || drawLeft == 0)
+                    break;
+                Thread.Sleep(5);
+            }
+        }
+        finally
+        {
+            YieldPatches.SuppressYield = false;
+        }
+    }
+
     private void SpinWaitForCombatStable()
     {
         int maxIterations = 200;
@@ -2684,6 +2763,16 @@ public class RunSimulator
         // Vantom's Dismember move adding Wounds). In headless mode, these never complete
         // because there's no Godot scene tree, causing the ActionExecutor to deadlock.
         PatchCmdWait();
+
+        // Patch VFX helpers (PlayerHurtVignetteHelper.Play, NLowHpBorderVfx.Create) to no-ops.
+        // KinPriest.BeamMove damages the player → VFX chain crashes with NullReferenceException
+        // in headless mode → ActionExecutor dies → combat stuck after 10s timeout.
+        PatchVfx();
+
+        // Pre-populate the game's internal AssetCache with stub PackedScene entries.
+        // NLowHpBorderVfx.Create() calls AssetCache.Get("res://scenes/vfx/ui/vfx_low_hp_border.tscn")
+        // which returns null in headless (not in pak cache) → NullReferenceException.
+        PreloadVfxAssets();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3317,6 +3406,236 @@ public class RunSimulator
         {
             __result = new List<LocString>();
             return false;
+        }
+    }
+
+    // Patch PlayerHurtVignetteHelper.Play() and NLowHpBorderVfx.Create() to no-ops.
+    // When KinPriest.BeamMove() damages the player, the VFX chain calls these methods
+    // which crash with NullReferenceException in headless mode (missing Godot scene nodes),
+    // killing the ActionExecutor and leaving the combat stuck.
+    private static void PatchVfx()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.vfxpatch");
+            var cmdPileType = typeof(MegaCrit.Sts2.Core.Commands.CardPileCmd);
+            var asm = cmdPileType.Assembly;
+
+            // Patch PlayerHurtVignetteHelper.Play() → no-op
+            var vignetteType = asm.GetType("MegaCrit.Sts2.Core.Nodes.Vfx.PlayerHurtVignetteHelper");
+            if (vignetteType != null)
+            {
+                var play = vignetteType.GetMethod("Play",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+                if (play != null)
+                {
+                    var prefix = typeof(VfxPatches).GetMethod(nameof(VfxPatches.NoOpPrefix),
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                    harmony.Patch(play, new HarmonyMethod(prefix));
+                    Console.Error.WriteLine("[INFO] Patched PlayerHurtVignetteHelper.Play() to no-op");
+                }
+            }
+            else Console.Error.WriteLine("[WARN] PlayerHurtVignetteHelper type not found");
+
+            // Patch NLowHpBorderVfx.Create() → no-op (returns null; callers must handle)
+            var lowHpType = asm.GetType("MegaCrit.Sts2.Core.Nodes.Vfx.Ui.NLowHpBorderVfx");
+            if (lowHpType != null)
+            {
+                var create = lowHpType.GetMethod("Create",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                if (create != null)
+                {
+                    var prefix = typeof(VfxPatches).GetMethod(nameof(VfxPatches.NoOpPrefix),
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                    harmony.Patch(create, new HarmonyMethod(prefix));
+                    Console.Error.WriteLine("[INFO] Patched NLowHpBorderVfx.Create() to no-op");
+                }
+            }
+            else Console.Error.WriteLine("[WARN] NLowHpBorderVfx type not found");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] PatchVfx failed: {ex.Message}");
+        }
+    }
+
+    internal static class VfxPatches
+    {
+        public static bool NoOpPrefix() => false;
+    }
+
+    // Pre-populate the game's internal AssetCache with stub PackedScene entries so that
+    // VFX factory methods (NLowHpBorderVfx.Create etc.) don't crash with NullReferenceException
+    // when calling AssetCache.Get() for scene paths not present in the headless pak cache.
+    private static void PreloadVfxAssets()
+    {
+        try
+        {
+            var cmdPileType = typeof(MegaCrit.Sts2.Core.Commands.CardPileCmd);
+            var asm = cmdPileType.Assembly;
+
+            var assetCacheType = asm.GetType("MegaCrit.Sts2.Core.Assets.AssetCache")
+                ?? asm.GetTypes().FirstOrDefault(t => t.Name == "AssetCache");
+            if (assetCacheType == null)
+            {
+                Console.Error.WriteLine("[WARN] PreloadVfxAssets: AssetCache type not found");
+                return;
+            }
+
+            // AssetCache may have multiple per-type dictionary fields.
+            // Enumerate all static/instance Dictionary<string, *> fields and inject stubs
+            // for known missing VFX paths, using the field's value type as the stub type.
+            var allFields = assetCacheType.GetFields(
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            // Find the singleton instance — try static Instance/Current, then known manager types
+            object? assetCacheInstance = null;
+            foreach (var propName in new[] { "Instance", "Current", "Singleton" })
+            {
+                var p = assetCacheType.GetProperty(propName,
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (p != null) { assetCacheInstance = p.GetValue(null); break; }
+                var f = assetCacheType.GetField(propName,
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (f != null) { assetCacheInstance = f.GetValue(null); break; }
+            }
+            // Try ALL static fields on AssetCache itself (singleton may have any field name)
+            if (assetCacheInstance == null)
+            {
+                foreach (var f in assetCacheType.GetFields(
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public))
+                {
+                    if (f.FieldType == assetCacheType || f.FieldType.IsAssignableFrom(assetCacheType))
+                    {
+                        try { assetCacheInstance = f.GetValue(null); } catch { }
+                        if (assetCacheInstance != null) break;
+                    }
+                }
+            }
+            // Try static fields on known types that might hold AssetCache
+            if (assetCacheInstance == null)
+            {
+                foreach (var holderTypeName in new[] {
+                    "MegaCrit.Sts2.Core.Runs.RunManager",
+                    "MegaCrit.Sts2.Core.Assets.AssetManager",
+                    "MegaCrit.Sts2.Core.GameManager",
+                    "MegaCrit.Sts2.Core.Assets.AssetLoader",
+                    "MegaCrit.Sts2.Core.Assets.GameAssets",
+                })
+                {
+                    var hType = asm.GetType(holderTypeName);
+                    if (hType == null) continue;
+                    foreach (var sf in hType.GetFields(
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                    {
+                        if (sf.FieldType == assetCacheType)
+                        {
+                            try { assetCacheInstance = sf.GetValue(null); } catch { }
+                            if (assetCacheInstance != null) break;
+                        }
+                    }
+                    if (assetCacheInstance != null) break;
+                }
+            }
+            // Try known manager types (avoid asm.GetTypes() which throws ReflectionTypeLoadException)
+            if (assetCacheInstance == null)
+            {
+                foreach (var managerTypeName in new[] {
+                    "MegaCrit.Sts2.Core.Runs.RunManager",
+                    "MegaCrit.Sts2.Core.Assets.AssetManager",
+                    "MegaCrit.Sts2.Core.GameManager",
+                })
+                {
+                    var manType = asm.GetType(managerTypeName);
+                    if (manType == null) continue;
+                    var manInst = manType.GetProperty("Instance",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public)?.GetValue(null);
+                    if (manInst == null) continue;
+                    var instBindings = System.Reflection.BindingFlags.Instance |
+                                      System.Reflection.BindingFlags.Public |
+                                      System.Reflection.BindingFlags.NonPublic;
+                    foreach (var prop in manType.GetProperties(instBindings))
+                    {
+                        if (prop.PropertyType == assetCacheType)
+                        {
+                            try { assetCacheInstance = prop.GetValue(manInst); } catch { }
+                            if (assetCacheInstance != null) break;
+                        }
+                    }
+                    if (assetCacheInstance == null)
+                    {
+                        foreach (var fld in manType.GetFields(instBindings))
+                        {
+                            if (fld.FieldType == assetCacheType)
+                            {
+                                try { assetCacheInstance = fld.GetValue(manInst); } catch { }
+                                if (assetCacheInstance != null) break;
+                            }
+                        }
+                    }
+                    if (assetCacheInstance != null) break;
+                }
+            }
+            if (assetCacheInstance == null)
+            {
+                Console.Error.WriteLine($"[WARN] PreloadVfxAssets: could not find {assetCacheType.FullName} instance — VFX crashes may persist");
+                return;
+            }
+            Console.Error.WriteLine($"[INFO] PreloadVfxAssets: found {assetCacheType.FullName} instance");
+
+            int totalAdded = 0;
+            foreach (var field in allFields)
+            {
+                if (!field.FieldType.IsGenericType) continue;
+                var typeArgs = field.FieldType.GetGenericArguments();
+                if (typeArgs.Length != 2 || typeArgs[0] != typeof(string)) continue;
+
+                var dict = field.GetValue(assetCacheInstance);
+                if (dict == null) continue;
+
+                var valueType = typeArgs[1];
+                object? stub = null;
+                try
+                {
+                    if (valueType == typeof(Godot.PackedScene)) stub = new Godot.PackedScene();
+                    else if (valueType.IsClass) stub = Activator.CreateInstance(valueType);
+                }
+                catch { continue; }
+                if (stub == null) continue;
+
+                var dictType = dict.GetType();
+                var addMethod = dictType.GetMethod("set_Item");
+                if (addMethod == null) continue;
+
+                // VFX scene paths and resource paths known to be missing in headless
+                var paths = new[] {
+                    "res://scenes/vfx/ui/vfx_low_hp_border.tscn",
+                    "res://scenes/vfx/ui/vfx_gaseous_screen.tscn",
+                    "res://scenes/vfx/ui/vfx_epoch_chains.tscn",
+                    "res://images/enchantments/missing_enchantment.png",
+                };
+                foreach (var path in paths)
+                {
+                    try
+                    {
+                        // Only add if not already present
+                        var containsKey = dictType.GetMethod("ContainsKey");
+                        bool alreadyPresent = containsKey != null && (bool)containsKey.Invoke(dict, new object[] { path })!;
+                        if (!alreadyPresent)
+                        {
+                            addMethod.Invoke(dict, new object[] { path, stub });
+                            totalAdded++;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            Console.Error.WriteLine($"[INFO] PreloadVfxAssets: injected {totalAdded} stub entries across all caches in {assetCacheType.FullName}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] PreloadVfxAssets failed: {ex.Message}");
         }
     }
 

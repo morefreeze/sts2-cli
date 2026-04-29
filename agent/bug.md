@@ -159,6 +159,28 @@
 - **Fix**: Added special-case override in CombatPlayState hand card serialization: when card is ERADICATE and player energy is 0, set can_play to false. Same pattern as BUG-007 (Astral Pulse star cost).
 - **Relevant code**: Sts2Headless/RunSimulator.cs (CombatPlayState hand card serialization, ~line 1414)
 
+## [FIXED] BUG-027: DEF-mode enemy causes energy=0 + empty hand stuck (2026-04-24, fixed 2026-04-24)
+- **Decision type**: combat_play (end_turn when hand is empty, energy=0, vs DEF-mode enemy)
+- **Description**: When a DEF-mode enemy (e.g. Nibbit, Vine Shambler) processes its turn instantaneously inside Pump(), IsPlayPhase flips back to true before SuppressYield is cleared. The new player turn's start-of-turn setup (energy reset + card draw) contains Task.Yield() continuations that — when SuppressYield=false — get posted to ThreadPool and never complete. Result: every subsequent `end_turn` sees energy=0 + empty hand (round never advances).
+- **Root cause**: `TurnStarted` event fires at the START of player turn, BEFORE draw/energy reset actions complete. All DoEndTurn fallback loops ran with SuppressYield=false, so Task.Yield() in start-of-turn actions posted to ThreadPool and hung.
+- **Fix**: Added `PumpStartOfTurnSetup(Player player)` helper that sets SuppressYield=true, then pumps until energy>0 or cards appear in hand (or deck exhausted). Called in 4 locations in DoEndTurn: (1) immediately in the initial try-block when IsPlayPhase is already true after Pump(), (2) after the first fallback loop when _turnStarted.IsSet, (3) after the cancel+retry fallback loop, (4) after the nuclear fallback succeeds.
+- **Verification**: strategic_play.py confirmed correct round advancement (Energy:3 + new hand) after end_turn vs DEF-mode Nibbit. HP changes between turns confirm turns are advancing.
+- **Relevant code**: RunSimulator.cs (DoEndTurn, PumpStartOfTurnSetup ~line 2558)
+
+## [OPEN] BUG-028: Nuclear fallback fails for Wrigglers and AssassinRubyRaider (2026-04-24)
+- **Decision type**: combat_play (end_turn during Wriggler/AssassinRubyRaider fights)
+- **Description**: Wrigglers (potentially split mechanic) and AssassinRubyRaider cause `Nuclear fallback FAILED` — ActionExecutor.IsRunning=False but IsPlayPhase stays False. The enemy turn never completes. Pre-existing issue (confirmed by baseline test without BUG-027 fix — same failure).
+- **Status**: Not reproduced cleanly enough to diagnose. Likely related to special enemy mechanics (Wriggler split, Assassin steal) that create intermediate game states not handled by headless mode.
+- **Relevant code**: RunSimulator.cs (DoEndTurn nuclear fallback, ~line 1000)
+
+## [FIXED] BUG-029: VFX NullRef kills ActionExecutor during boss fights (2026-04-29, fixed 2026-04-29)
+- **Decision type**: combat_play (end_turn during KinPriest / any enemy with PlayerHurtVignette)
+- **Description**: `KinPriest.BeamMove()` damages the player → `PlayerHurtVignetteHelper.Play()` → `NLowHpBorderVfx.Create()` calls `AssetCache.Get("res://scenes/vfx/ui/vfx_low_hp_border.tscn")` → returns null in headless → NullReferenceException. The NRE throws from inside a continuation posted to `InlineSynchronizationContext.Post()`. This causes the async infrastructure to propagate the NRE into the ActionExecutor's task chain, killing `IsRunning` → fight reported as `crash/stuck`.
+- **Evidence**: 35,000+ `TaskHelper.LogTaskExceptions` log entries in crash_stderr.log. Floor=17 (KinPriest boss) always showed `crash/stuck` in eval before fix.
+- **Fix**: Catch `NullReferenceException` and `InvalidOperationException` per-callback in `InlineSynchronizationContext.Post()` drain loop and `Pump()`. VFX failures are non-fatal in headless mode — the exception is logged to stderr but execution continues normally.
+- **Verification**: 20-game eval shows game 14 (floor=17 seed) now ends as `[dead]` instead of `crash/stuck`. No crashes in 20 games.
+- **Relevant code**: RunSimulator.cs (`InlineSynchronizationContext.Post/Pump`, ~line 44)
+
 ## [FIXED] BUG-026: Attack Potion card_select deadlocks combat — all cards unplayable (2026-03-23, fixed 2026-03-23)
 - **Decision type**: combat_play (use_potion with Attack Potion)
 - **Description**: When Attack Potion is used, it triggers a card_select (choose from 3 attack cards). The game engine's async method awaits GetSelectedCards(), which creates a pending TaskCompletionSource. WaitForActionExecutor loops 1000 pumps but the executor can never finish because it's awaiting the user's card selection. After WaitForActionExecutor gives up (with IsRunning still true), all subsequent card plays and end_turn fail because the executor remains permanently "stuck".

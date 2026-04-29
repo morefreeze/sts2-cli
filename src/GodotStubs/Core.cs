@@ -56,10 +56,10 @@ public class Node : GodotObject
         return new Godot.Collections.Array<Node>(_children);
     }
 
-    public T? GetNodeOrNull<T>(string path) where T : class => null;
-    public T? GetNodeOrNull<T>(NodePath path) where T : class => null;
-    public T GetNode<T>(string path) where T : class => default!;
-    public T GetNode<T>(NodePath path) where T : class => default!;
+    public T? GetNodeOrNull<T>(string path) where T : class { try { return Activator.CreateInstance<T>(); } catch { return null; } }
+    public T? GetNodeOrNull<T>(NodePath path) where T : class { try { return Activator.CreateInstance<T>(); } catch { return null; } }
+    public T GetNode<T>(string path) where T : class { try { return Activator.CreateInstance<T>(); } catch { return default!; } }
+    public T GetNode<T>(NodePath path) where T : class { try { return Activator.CreateInstance<T>(); } catch { return default!; } }
 
     public virtual void AddChild(Node child, bool forceReadableName = false, InternalMode mode = InternalMode.Disabled)
     {
@@ -152,6 +152,13 @@ public static class GD
     public static void PrintRich(params object[] args) { }
     public static void PrintRich(string msg) { }
     public static Variant Str(params Variant[] args) => string.Join("", args.Select(a => a.ToString()));
+    private static readonly Random _rng = new Random();
+    public static float Randf() => (float)_rng.NextDouble();
+    public static double Randf_Range(double from, double to) => from + _rng.NextDouble() * (to - from);
+    public static float Randf_Range(float from, float to) => from + (float)_rng.NextDouble() * (to - from);
+    public static int Randi() => _rng.Next();
+    public static int Randi_Range(int from, int to) => _rng.Next(from, to + 1);
+    public static double Randfn(double mean, double deviation) => mean + deviation * (Math.Sqrt(-2.0 * Math.Log(_rng.NextDouble())) * Math.Cos(2.0 * Math.PI * _rng.NextDouble()));
 }
 
 public static class OS
@@ -178,7 +185,13 @@ public static class ProjectSettings
 public static class ResourceLoader
 {
     public enum CacheMode { Reuse, Replace, Ignore }
-    public static T? Load<T>(string path, string? typeHint = null, CacheMode cacheMode = CacheMode.Reuse) where T : class => null;
+    public static T? Load<T>(string path, string? typeHint = null, CacheMode cacheMode = CacheMode.Reuse) where T : class
+    {
+        // Return PackedScene stub — IS-A Resource, so (PackedScene)resource casts succeed
+        var scene = new PackedScene();
+        if (scene is T t) return t;
+        try { return Activator.CreateInstance<T>(); } catch { return null; }
+    }
     public static bool Exists(string path) => false;
     public static bool Exists(string path, string typeHint) => false;
 }
@@ -206,3 +219,4 @@ public class Viewport : Node
     public Vector2 GetMousePosition() => Vector2.Zero;
     public Rect2 GetVisibleRect() => new Rect2(0, 0, 1920, 1080);
 }
+

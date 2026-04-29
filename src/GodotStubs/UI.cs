@@ -371,11 +371,19 @@ public class AnimationPlayer : Node
     public void Stop(bool keepState = false) { }
 }
 
-// Particles
+// Particles — no-op stubs prevent headless crashes (KinPriest VFX, etc.)
 public class GpuParticles2D : Node2D
 {
+    public int Amount { get; set; }
     public bool Emitting { get; set; }
+    public float Lifetime { get; set; }
+    public float LifetimeRandomness { get; set; }
+    public bool OneShot { get; set; }
+    public bool LocalCoords { get; set; }
+    public float SpeedScale { get; set; }
+    public float Explosiveness { get; set; }
     public Material? ProcessMaterial { get; set; }
+    public void Restart() { }
 }
 
 // Sprite
