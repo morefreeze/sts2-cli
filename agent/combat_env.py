@@ -63,6 +63,10 @@ def _score_shop_relic(relic: dict) -> float:
     # Big positive: strength/dexterity per-turn gain
     if "each turn" in text and ("strength" in text or "vigor" in text): score += 4.0
     if "each combat" in text and ("block" in text or "armor" in text): score += 3.0
+    # Strength bonus (Red Skull type: gives +str) — skip if relic causes str loss
+    if "strength" in text and "lose" not in text: score += 2.0
+    # Vulnerable multiplier enhancement (Paper Phrog: +25% vs vulnerable)
+    if "vulnerable" in text: score += 2.0
     # Draw effects
     if "draw" in text and "card" in text: score += 2.0
     # Energy
