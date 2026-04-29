@@ -130,8 +130,11 @@ def _score_event_option(opt: dict) -> float:
     text = _re.sub(r'\[/?[a-z0-9_]+\]', ' ', raw)   # markup tags only
     score = 0.0
     # Strong negatives — losing Max HP is permanent and devastating
-    # Covers "lose max hp", "lose 10 max hp", "maximum hp", "lose N max hp"
-    if "lose max" in text or "maximum hp" in text or ("lose" in text and "max hp" in text):
+    # "lose max hp" directly, OR "lose {N} max hp" (lose N max hp), but NOT
+    # "lose {potion}. gain ... max hp" (which is gaining max hp after losing a potion)
+    _lose_max_hp = ("lose max" in text or "maximum hp" in text or
+                    bool(_re.search(r'lose\s+(?:\{[^}]+\}|\d+)\s+max\s*hp', text)))
+    if _lose_max_hp:
         score -= 10.0
     if "curse" in text:
         score -= 8.0
