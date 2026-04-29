@@ -398,6 +398,8 @@ def main():
                         help="Reinitialize value network when loading checkpoint (use when reward scale changes)")
     parser.add_argument("--obs-expand", type=int, default=0,
                         help="Old obs_size of checkpoint to expand from (e.g. 161 for 161→169 expansion)")
+    parser.add_argument("--vf-pretrain-chunks", type=int, default=0,
+                        help="Freeze policy for N 25k-step chunks at start so value network can calibrate (e.g. 2 = 50k steps VF-only)")
     parser.add_argument("--curriculum",  action="store_true")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")
@@ -478,6 +480,16 @@ def main():
                              curriculum=args.curriculum,
                              normal_clip=CLIP_RANGE,
                              normal_vf_coef=VF_COEF)
+
+    # VF pre-training: freeze policy for N chunks so value network can calibrate first.
+    # Useful when value network is reset (--reinit-value / --obs-expand).
+    if args.vf_pretrain_chunks > 0:
+        _freeze_actor(model)
+        model.vf_coef = 1.0           # maximize value learning while frozen
+        model.clip_range_vf = lambda _: 0.20  # wider VF clip for faster calibration
+        callback._vf_pretrain_remaining = args.vf_pretrain_chunks
+        print(f"  VF pre-training: actor frozen for {args.vf_pretrain_chunks} chunks "
+              f"({args.vf_pretrain_chunks * 25000} steps)")
 
     save_interval = 25_000
     eval_freq     = args.eval_freq

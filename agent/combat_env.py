@@ -146,7 +146,9 @@ def _score_event_option(opt: dict) -> float:
     if "torment" in title:
         score -= 5.0  # Neow's Torment adds a negative card
     if "take" in text and "damage" in text:
-        score -= 3.0
+        score -= 2.0  # one-time HP loss is recoverable; was -3 (too harsh for HP→MaxHP trades)
+    if "lose" in text and "hp" in text and "max" not in text:
+        score -= 2.0  # "Lose N HP" phrasing (same cost as take damage)
     if "downgrade" in text:
         score -= 4.0  # downgrading cards is very bad
     # Negative: adds basic/weak cards to deck
@@ -190,6 +192,8 @@ def _score_event_option(opt: dict) -> float:
         score += 3.0  # +dex permanently is strong defense
     if "energy" in text and "each turn" in text and "lose" not in text:
         score += 5.0  # extra energy per turn = unlimited scaling
+    elif "energy" in text and _gain and "lose" not in text:
+        score += 1.5  # one-time energy gain: small but real value
     return score
 
 
