@@ -47,6 +47,41 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 
 
+def _score_shop_relic(relic: dict) -> float:
+    """Score a shop relic for purchase desirability. Returns 0 if not worth buying."""
+    name_raw = relic.get("name") or {}
+    name = (name_raw.get("en", "") if isinstance(name_raw, dict) else str(name_raw)).lower()
+    desc_raw = relic.get("description") or {}
+    desc = (desc_raw.get("en", "") if isinstance(desc_raw, dict) else str(desc_raw)).lower()
+    text = name + " " + desc
+
+    # Hard pass on these
+    if "curse" in text: return -5.0
+    if "lose max" in text or "maximum hp" in text: return -3.0
+
+    score = 3.0  # baseline: relics are generally useful
+    # Big positive: strength/dexterity per-turn gain
+    if "each turn" in text and ("strength" in text or "vigor" in text): score += 4.0
+    if "each combat" in text and ("block" in text or "armor" in text): score += 3.0
+    # Draw effects
+    if "draw" in text and "card" in text: score += 2.0
+    # Energy
+    if "energy" in text and "start" in text: score += 3.0
+    # Healing
+    if "heal" in text or ("rest" in text and "hp" in text): score += 2.0
+    # Max HP
+    if "max hp" in text and ("gain" in text or "raise" in text or "increase" in text): score += 3.0
+    # Gold generation
+    if "gold" in text and ("gain" in text or "additional" in text or "drop" in text): score += 1.0
+    # Exhaust synergy
+    if "exhaust" in text: score += 1.5
+    # Potion slots
+    if "potion" in text and "slot" in text: score += 1.0
+    # Bad: adds wounds or curses
+    if "wound" in text and "add" in text: score -= 2.0
+    return score
+
+
 def _score_event_option(opt: dict) -> float:
     """Score an event option by keyword analysis. Higher = better."""
     title = (opt.get("title") or "").lower()
@@ -152,6 +187,15 @@ def greedy_action(state: dict) -> dict:
             if score_card(best) >= 6.0:
                 return {"cmd": "action", "action": "buy_card",
                         "args": {"card_index": best.get("index", 0)}}
+        # Buy a relic if score is high enough and affordable (threshold: keep 50g buffer)
+        RELIC_GOLD_THRESHOLD = 50
+        relics = [r for r in state.get("relics", [])
+                  if r.get("is_stocked") and r.get("cost", 999) <= gold - RELIC_GOLD_THRESHOLD]
+        if relics:
+            best_relic = max(relics, key=_score_shop_relic)
+            if _score_shop_relic(best_relic) >= 5.0:
+                return {"cmd": "action", "action": "buy_relic",
+                        "args": {"relic_index": best_relic.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
 
     return {"cmd": "action", "action": "proceed"}
