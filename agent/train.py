@@ -518,10 +518,15 @@ def main():
             vec_env = _make_vec_env(args.character, args.ascension, args.n_envs,
                                     floor, seed_offset=steps_done // 1000)
             model.set_env(vec_env)
+            old_vf_pretrain = getattr(callback, "_vf_pretrain_remaining", 0)
             callback = TrainCallback(args.steps, args.n_envs, N_STEPS,
-                                     curriculum=args.curriculum)
+                                     curriculum=args.curriculum,
+                                     normal_clip=CLIP_RANGE, normal_vf_coef=VF_COEF)
             callback._global_steps = steps_done
             callback._train_start  = time.time() - steps_done / 5.0  # approx
+            # Restore VF pre-training state if crash happened mid-pretrain
+            if old_vf_pretrain > 0:
+                callback._vf_pretrain_remaining = old_vf_pretrain
             continue
 
         steps_done += chunk
