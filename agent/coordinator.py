@@ -33,7 +33,7 @@ def _find_dotnet():
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT = os.path.join(PROJECT_ROOT, "Sts2Headless", "Sts2Headless.csproj")
+PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 CARDS_JSON = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
 CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 
@@ -624,6 +624,14 @@ class GameCoordinator:
                 if decision == "combat_play" and prev_decision != "combat_play":
                     self._combat_start_hp = state.get("player", {}).get("hp", "?")
                     combat_log = []
+                    # Inform RL agent of floor and entry HP for extra obs features
+                    if hasattr(self.rl, "set_combat_context"):
+                        player = state.get("player", {})
+                        hp = player.get("hp", 80)
+                        max_hp = max(player.get("max_hp", 80), 1)
+                        floor = self._floor(state)
+                        floor_int = int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1
+                        self.rl.set_combat_context(floor_int, hp / max_hp)
 
                 # Record combat steps
                 if decision == "combat_play":
@@ -702,6 +710,18 @@ class GameCoordinator:
                 prev_state = state
                 next_state = self._send(action)
 
+                # Handle C# stuck signal: enemy deadlock after 15s wait
+                if next_state and next_state.get("decision") == "stuck":
+                    floor = self._floor(prev_state)
+                    hp = prev_state.get("player", {}).get("hp", "?")
+                    max_hp = prev_state.get("player", {}).get("max_hp", "?")
+                    zh = self.lang == "zh"
+                    self._vlog(f"{'═'*50}")
+                    self._vlog(f"  {_c('引擎死锁' if zh else 'Engine deadlock (stuck)', 'red')} {'第' if zh else 'Floor '}{floor}{'层' if zh else ''}")
+                    self._vlog(f"{'═'*50}")
+                    return {"victory": False, "seed": seed, "steps": step,
+                            "floor": floor, "hp": hp, "max_hp": max_hp, "error": "stuck"}
+
                 # Detect stuck state: end_turn didn't advance (engine bug)
                 if (next_state and next_state.get("decision") == "combat_play"
                         and action.get("action") == "end_turn"
@@ -773,7 +793,7 @@ class GameCoordinator:
                 except Exception: pass
             self._proc = None
 
-    def _read_json(self, timeout: float = 3.0):
+    def _read_json(self, timeout: float = 20.0):
         if not self._proc: return None
         import select as _sel
         deadline = time.monotonic() + timeout
@@ -876,14 +896,14 @@ def main():
         if (i + 1) % 10 == 0:
             batch = results[max(0, i-9):i+1]
             batch_wins = sum(1 for r in batch if r.get("victory"))
-            batch_floors = [r.get("floor", 0) for r in batch if r.get("floor")]
+            batch_floors = [r["floor"] for r in batch if isinstance(r.get("floor"), int)]
             avg_floor = sum(batch_floors) / max(len(batch_floors), 1)
-            completed = sum(1 for r in batch if r.get("floor") is not None)
+            completed = sum(1 for r in batch if isinstance(r.get("floor"), int))
             # Compare with previous batch
             prev_start = max(0, i - 19)
             prev_batch = results[prev_start:prev_start + 10]
             if len(prev_batch) == 10 and prev_batch != batch:
-                prev_floors = [r.get("floor", 0) for r in prev_batch if r.get("floor")]
+                prev_floors = [r["floor"] for r in prev_batch if isinstance(r.get("floor"), int)]
                 prev_avg = sum(prev_floors) / max(len(prev_floors), 1)
                 if prev_avg > 0:
                     improvement = 100.0 * (avg_floor - prev_avg) / prev_avg
@@ -896,14 +916,14 @@ def main():
             print(f"  胜率: {_c(f'{batch_wins}/10', 'green' if batch_wins > 0 else 'red')} | "
                   f"完成: {completed}/10 | 平均层数: {avg_floor:.1f}{imp_str}")
             overall_wins = sum(1 for r in results if r.get("victory"))
-            overall_floors = [r.get("floor", 0) for r in results if r.get("floor")]
+            overall_floors = [r["floor"] for r in results if isinstance(r.get("floor"), int)]
             overall_avg = sum(overall_floors) / max(len(overall_floors), 1)
             print(f"  累计: {overall_wins}/{i+1} 胜 | 总平均层数: {overall_avg:.1f}")
             print()
 
     wins = sum(1 for r in results if r.get("victory"))
     pct = (100.0 * wins / args.n_games) if args.n_games > 0 else 0.0
-    all_floors = [r.get("floor", 0) for r in results if r.get("floor")]
+    all_floors = [r["floor"] for r in results if isinstance(r.get("floor"), int)]
     avg_floor = sum(all_floors) / max(len(all_floors), 1)
     print(f"\n{_c('═══ 最终总结 ═══', 'bold')}")
     print(f"  胜率: {wins}/{args.n_games} ({pct:.1f}%) | 平均层数: {avg_floor:.1f}")
