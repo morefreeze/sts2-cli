@@ -86,6 +86,29 @@ def _score_shop_relic(relic: dict) -> float:
     return score
 
 
+def _score_shop_potion(potion: dict) -> float:
+    """Score a shop potion for purchase desirability."""
+    name_raw = potion.get("name") or {}
+    name = (name_raw.get("en", "") if isinstance(name_raw, dict) else str(name_raw)).lower()
+    desc_raw = potion.get("description") or {}
+    desc = (desc_raw.get("en", "") if isinstance(desc_raw, dict) else str(desc_raw)).lower()
+    text = name + " " + desc
+
+    score = 3.0  # baseline: potions are generally useful
+    if "strength" in text: score += 3.0       # Strength/Flex Potion — huge for bosses
+    if "dexterity" in text: score += 2.0       # Speed Potion
+    if "duplicate" in text: score += 3.0       # Duplication Potion
+    if "draw" in text and "card" in text: score += 2.0   # Swift Potion
+    if "energy" in text: score += 2.0          # Energy Potion
+    if "block" in text: score += 1.5           # Block/Fortifier Potion
+    if "vulnerable" in text: score += 2.0      # Weak/Vulnerable applier
+    if "all enemies" in text: score += 1.5     # AOE damage
+    if "exhaust" in text: score += 1.0         # Elixir
+    if "artifact" in text: score += 2.0        # Ancient Potion
+    if "curse" in text: score -= 5.0           # Potion that adds curses
+    return score
+
+
 def _score_event_option(opt: dict) -> float:
     """Score an event option by keyword analysis. Higher = better."""
     title = (opt.get("title") or "").lower()
@@ -221,6 +244,16 @@ def greedy_action(state: dict) -> dict:
             if _score_shop_relic(best_relic) >= 5.0:
                 return {"cmd": "action", "action": "buy_relic",
                         "args": {"relic_index": best_relic.get("index", 0)}}
+        # Buy a potion if we have empty slots and it's affordable
+        held_potions = len(state.get("player", {}).get("potions", []))
+        if held_potions < 3:
+            shop_potions = [p for p in state.get("potions", [])
+                            if p.get("is_stocked") and p.get("cost", 999) <= gold]
+            if shop_potions:
+                best_potion = max(shop_potions, key=_score_shop_potion)
+                if _score_shop_potion(best_potion) >= 5.0:
+                    return {"cmd": "action", "action": "buy_potion",
+                            "args": {"potion_index": best_potion.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
 
     return {"cmd": "action", "action": "proceed"}
