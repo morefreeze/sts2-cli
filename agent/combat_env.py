@@ -235,8 +235,13 @@ def greedy_action(state: dict) -> dict:
                 best = pick_best_card(cards, threshold=0.0)
                 idx = best if best is not None else 0
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
+            elif len(cards) <= 5 and max_sel == 1:
+                # Small pool (2-5 cards): likely "choose 1 to ADD/discover" — pick best
+                best = pick_best_card(cards, threshold=0.0)
+                idx = best if best is not None else 0
+                return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             else:
-                # Event/other: remove/transform — pick worst card(s) up to max_select
+                # Larger pool (likely full deck): remove/transform — pick worst card(s)
                 scored = sorted(enumerate(cards), key=lambda x: score_card(x[1]))
                 selected = [str(scored[k][0]) for k in range(min(max_sel, len(scored)))]
                 return {"cmd": "action", "action": "select_cards",
