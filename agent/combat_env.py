@@ -424,8 +424,8 @@ class CombatEnv(gym.Env):
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
         dmg_reward = 0.15 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
-        # Increased from -0.25: HP conservation is the primary combat objective
-        hp_penalty = -0.35 * player_hp_lost / self._combat_start_player_max_hp
+        # Increased from -0.35: stronger HP conservation drives cumulative HP health across floors
+        hp_penalty = -0.50 * player_hp_lost / self._combat_start_player_max_hp
 
         # Block effectiveness: reward blocking incoming damage
         incoming = 0
@@ -437,7 +437,7 @@ class CombatEnv(gym.Env):
         block_reward = 0.0
         if incoming > 0 and player_block > 0:
             effective_block = min(player_block, incoming)
-            block_reward = 0.10 * effective_block / self._combat_start_player_max_hp
+            block_reward = 0.15 * effective_block / self._combat_start_player_max_hp
 
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
@@ -450,16 +450,19 @@ class CombatEnv(gym.Env):
         hp = _player_hp(state)
         max_hp = self._combat_start_player_max_hp
         hp_ratio = hp / max_hp
-        # Base win reward scaled by HP remaining — pure combat efficiency signal
-        reward = 2.0 * hp_ratio
-        # HP survival bonus tiers
+        # Steeper quadratic HP curve: winning with high HP is worth much more
+        # e.g. 100% HP → 3.0, 70% HP → 1.47, 50% HP → 0.75, 30% HP → 0.27
+        reward = 3.0 * hp_ratio * hp_ratio
+        # HP survival bonus tiers (stronger than before)
         if hp_ratio >= 0.9:
-            reward += 0.5
+            reward += 0.75
+        elif hp_ratio >= 0.8:
+            reward += 0.50
         elif hp_ratio >= 0.7:
             reward += 0.25
-        # Small floor weight so curriculum still has gradient (strategy layer owns this signal)
-        # Reduced 0.15→0.05/floor, cap 2.4→0.8 so HP efficiency dominates
-        floor_bonus = min((self._current_floor - 1) * 0.05, 0.8)
+        # Floor bonus: 0.10/floor (up from 0.05), cap 1.5 (up from 0.8)
+        # Incentivizes reaching higher floors without overwhelming HP signal
+        floor_bonus = min((self._current_floor - 1) * 0.10, 1.5)
         reward += floor_bonus
         return reward
 
