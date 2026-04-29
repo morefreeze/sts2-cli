@@ -632,8 +632,9 @@ class CombatEnv(gym.Env):
 
             use = False
             target_index = None
-            if ("heal" in text or "restore" in text) and "curse" not in text and hp_ratio < 0.30:
-                use = True  # health potion when critically low HP (any fight)
+            if ("heal" in text or "restore" in text) and "curse" not in text:
+                # Heal: any fight at 30%, elite/boss at 50%
+                use = hp_ratio < 0.30 or (is_tough and hp_ratio < 0.50)
             elif not is_tough:
                 continue  # other potions: save for elite/boss
             elif "strength" in text or "flex" in text:
@@ -641,19 +642,21 @@ class CombatEnv(gym.Env):
             elif "dexterity" in text:
                 use = True  # dexterity potion at elite/boss
             elif "energy" in text and "channel" not in text:
-                use = is_boss  # energy potion: best at boss for burst turn
+                use = is_tough  # energy potion: useful burst at both elite and boss
                 target_index = 0 if target_type == "anyenemy" else None
             elif "duplicat" in text:
-                use = is_boss  # duplicator/duplication at boss
-            elif "block" in text and hp_ratio < (0.70 if is_boss else 0.50):
-                use = True  # block potion: more aggressive at boss
+                # duplicator/duplication: boss always; elite if damaged (doubles best card = big swing)
+                use = is_boss or (is_elite and hp_ratio < 0.60)
+            elif "block" in text and hp_ratio < (0.70 if is_boss else 0.60):
+                use = True  # block potion: more aggressive at elite/boss
             elif "blessing" in text or "forge" in text:
                 use = is_tough  # upgrade hand at elite/boss
             elif "fire" in text or "explosive" in text:
                 use = is_tough  # damage potions at elite and boss
                 target_index = 0
-            elif "attack" in text and hp_ratio < (0.80 if is_boss else 0.50):
-                use = is_tough  # attack potion: more aggressive at boss
+            elif "attack" in text:
+                # attack potion: always at boss; at elite if HP < 60%
+                use = is_boss or (is_elite and hp_ratio < 0.60)
                 target_index = 0 if target_type == "anyenemy" else None
             elif "weak" in text or "fear" in text or "vulnerable" in text:
                 use = is_tough  # fear/weak potions apply debuffs — great at elite/boss

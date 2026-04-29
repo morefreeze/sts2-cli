@@ -59,12 +59,12 @@ class HpAwareMapStrategy(Act1SafeStrategy):
 
     Inherits Act1SafeStrategy's floor-based elite avoidance and adds
     HP-ratio penalties so a damaged run doesn't feed into an elite.
-    When HP > 70% and past floor 6, elites are actively preferred over
+    When HP > 75% and past floor 6, elites are actively preferred over
     monsters (relic gain is worth the risk).
     """
-    HP_DANGER = 0.35   # below this: strong elite avoidance
-    HP_LOW    = 0.55   # below this: moderate elite avoidance
-    HP_STRONG = 0.72   # above this (and floor > 6): slight elite preference
+    HP_DANGER = 0.40   # below this: strong elite avoidance
+    HP_LOW    = 0.60   # below this: moderate elite avoidance
+    HP_STRONG = 0.75   # above this (and floor > 6): slight elite preference
 
     ELITE_PREFER_FLOOR = 6  # only prefer elites after Act 1 mid-game
 
