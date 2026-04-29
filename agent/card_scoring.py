@@ -59,6 +59,7 @@ OVERRIDES: dict[str, float] = {
     "TREMBLE": 4.5,            # 1-cost Apply Vulnerable — combo piece with attack-heavy deck
 
     # === Strong cards (7-8) ===
+    "BARRICADE": 8.5,        # block persists between turns — enables massive block stacking
     "CARNAGE": 7.5,         # 20 damage for free (ethereal)
     "RECKLESS_CHARGE": 7.0, # 7 dmg + wound, still good DPE
     "CLEAVE": 7.0,          # AOE 8 damage
@@ -74,6 +75,9 @@ OVERRIDES: dict[str, float] = {
     "WHIRLWIND": 7.0,       # X-cost AOE
     "HEAVY_BLADE": 7.0,     # scales with str (3x multiplier)
     "SWORD_BOOMERANG": 7.0, # 3x3 random hits
+    "CLASH": 6.5,           # 0-cost, 14 dmg — great in attack-heavy decks
+    "BEAT_DOWN": 7.0,       # play N attacks from discard — strong reuse with good attacks
+    "ANOINTED": 6.0,        # put all rares from draw pile into hand — useful mid/late game
 
     # === STS2 colorless decent picks (5-7) ===
     "DRAMATIC_ENTRANCE": 7.0,  # free AOE damage on combat start (Ethereal, costs 0)
