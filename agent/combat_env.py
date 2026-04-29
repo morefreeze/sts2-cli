@@ -178,7 +178,15 @@ def greedy_action(state: dict) -> dict:
     elif decision == "card_reward":
         cards = state.get("cards", [])
         if cards:
-            best = pick_best_card(cards)
+            deck_size = state.get("player", {}).get("deck_size", 10)
+            # Raise pick threshold as deck grows: keep deck lean
+            if deck_size >= 20:
+                threshold = 6.5
+            elif deck_size >= 15:
+                threshold = 5.5
+            else:
+                threshold = 3.5
+            best = pick_best_card(cards, threshold=threshold)
             if best is not None:
                 return {"cmd": "action", "action": "select_card_reward",
                         "args": {"card_index": best}}
