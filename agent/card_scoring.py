@@ -42,6 +42,9 @@ OVERRIDES: dict[str, float] = {
     "CINDER": 5.5,             # dmg + forced exhaust top of draw (can trash good card)
     "BLOOD_WALL": 4.0,         # HP loss for block — net negative, avoid
     "BREAKTHROUGH": 6.0,       # AOE but costs HP — trade-off
+    "THUNDERCLAP": 7.0,        # 4 dmg + Vulnerable to ALL enemies — exceptional Vuln setup
+    "HEADBUTT": 5.5,           # 9 dmg + recycle from discard — better than auto-score
+    "EVIL_EYE": 6.0,           # block + extra block on exhaust — conditional
 
     # === Strong cards (7-8) ===
     "CARNAGE": 7.5,         # 20 damage for free (ethereal)
