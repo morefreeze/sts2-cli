@@ -392,7 +392,7 @@ def main():
     parser.add_argument("--reinit-value", action="store_true",
                         help="Reinitialize value network when loading checkpoint (use when reward scale changes)")
     parser.add_argument("--obs-expand", type=int, default=0,
-                        help="Old obs_size of checkpoint to expand from (e.g. 161 when adding floor+entry_hp)")
+                        help="Old obs_size of checkpoint to expand from (e.g. 161 for 161→169 expansion)")
     parser.add_argument("--curriculum",  action="store_true")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")

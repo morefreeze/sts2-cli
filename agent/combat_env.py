@@ -209,6 +209,17 @@ def _player_hp(state: dict) -> int:
     return state.get("player", {}).get("hp", 0)
 
 
+def _enemy_power_amount(enemy: dict, power_name: str) -> float:
+    """Return the amount of a named power on an enemy (0.0 if not present)."""
+    for p in (enemy.get("powers") or []):
+        pname = p.get("name", {})
+        if isinstance(pname, dict):
+            pname = pname.get("en", "")
+        if str(pname).lower() == power_name.lower():
+            return float(p.get("amount", 1))
+    return 0.0
+
+
 class CombatEnv(gym.Env):
     """
     Gymnasium environment for STS2 combat.
@@ -234,9 +245,10 @@ class CombatEnv(gym.Env):
         self.dry_run = dry_run
         self.max_floor = max_floor  # 0 = unlimited
 
-        # Extra features appended after enc.obs_size: [floor/17, entry_hp_ratio]
+        # Extra features appended after enc.obs_size:
+        #   [floor/17, entry_hp_ratio, e0_vuln, e0_weak, e1_vuln, e1_weak, e2_vuln, e2_weak]
         # extra_obs=False: legacy mode for checkpoints trained with 161-dim obs
-        self._EXTRA_OBS = 2 if extra_obs else 0
+        self._EXTRA_OBS = 8 if extra_obs else 0
         self.observation_space = Box(low=0.0, high=1.0,
                                      shape=(self.enc.obs_size + self._EXTRA_OBS,), dtype=np.float32)
         self.action_space = Discrete(41)
@@ -415,13 +427,18 @@ class CombatEnv(gym.Env):
         self.max_floor = max_floor
 
     def _encode(self, state: dict) -> np.ndarray:
-        """Encode state + optional floor and entry_hp extra features."""
+        """Encode state + optional extra features: floor, entry_hp, enemy vuln/weak × 3."""
         base = self.enc.encode(state)
         if self._EXTRA_OBS == 0:
             return base
         floor_norm = min(self._current_floor / 17.0, 1.0)
-        extra = np.array([floor_norm, self._combat_entry_hp_ratio], dtype=np.float32)
-        return np.concatenate([base, extra])
+        enemies = state.get("enemies", [])
+        extra = [floor_norm, self._combat_entry_hp_ratio]
+        for slot in range(3):
+            e = enemies[slot] if slot < len(enemies) else {}
+            extra.append(min(_enemy_power_amount(e, "Vulnerable") / 10.0, 1.0))
+            extra.append(min(_enemy_power_amount(e, "Weak") / 10.0, 1.0))
+        return np.concatenate([base, np.array(extra, dtype=np.float32)])
 
     def _init_combat_tracking(self, state: dict):
         self._prev_enemy_hp = _total_enemy_hp(state)

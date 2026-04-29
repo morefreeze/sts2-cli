@@ -182,7 +182,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
     verbose=True: show per-room summaries; for wins, show last combat step-by-step.
     """
-    # Auto-detect obs_size: legacy checkpoints use 161-dim, new use 163-dim
+    # Auto-detect obs_size: legacy=161, run11=169 (extra_obs adds 8 features)
     model_obs_size = model.observation_space.shape[0]
     extra_obs = (model_obs_size > 161)
 
