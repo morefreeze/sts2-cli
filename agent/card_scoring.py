@@ -42,8 +42,6 @@ OVERRIDES: dict[str, float] = {
     "CINDER": 5.5,             # dmg + forced exhaust top of draw (can trash good card)
     "BLOOD_WALL": 4.0,         # HP loss for block — net negative, avoid
     "BREAKTHROUGH": 6.0,       # AOE but costs HP — trade-off
-    "THUNDERCLAP": 7.0,        # 4 dmg + Vulnerable to ALL enemies — exceptional Vuln setup
-    "HEADBUTT": 5.5,           # 9 dmg + recycle from discard — better than auto-score
     "EVIL_EYE": 6.0,           # block + extra block on exhaust — conditional
 
     # === Strong cards (7-8) ===
@@ -83,7 +81,7 @@ OVERRIDES: dict[str, float] = {
     "RAMPAGE": 5.5,
     "SEARING_BLOW": 5.0,   # needs upgrades
     "SEVER_SOUL": 5.5,
-    "THUNDERCLAP": 6.0,    # AOE + vuln
+    "THUNDERCLAP": 7.0,    # AOE damage + Vulnerable to ALL enemies (strong setup)
     "TWIN_STRIKE": 6.0,    # 5x2 = 10 for 1
     "WILD_STRIKE": 5.5,    # 12 dmg, wound to draw
 
