@@ -107,6 +107,7 @@ def _score_shop_potion(potion: dict) -> float:
     if "all enemies" in text: score += 1.5     # AOE damage
     if "exhaust" in text: score += 1.0         # Elixir
     if "artifact" in text: score += 2.0        # Ancient Potion
+    if "heal" in text or "hp" in text: score += 2.0      # Health Potion — saves runs
     if "curse" in text: score -= 5.0           # Potion that adds curses
     return score
 
@@ -576,8 +577,7 @@ class CombatEnv(gym.Env):
         room_type = (state.get("context") or {}).get("room_type", "")
         is_boss  = "boss" in room_type.lower()
         is_elite = "elite" in room_type.lower()
-        if not (is_boss or is_elite):
-            return state  # save potions for tough fights
+        is_tough = is_boss or is_elite
 
         player = state.get("player", {})
         hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
@@ -594,7 +594,11 @@ class CombatEnv(gym.Env):
 
             use = False
             target_index = None
-            if "strength" in text or "flex" in text:
+            if ("heal" in text or "hp" in text) and "curse" not in text and hp_ratio < 0.30:
+                use = True  # health potion when critically low HP (any fight)
+            elif not is_tough:
+                continue  # other potions: save for elite/boss
+            elif "strength" in text or "flex" in text:
                 use = True  # always use strength at elite/boss
             elif "duplication" in text or "duplicate" in text:
                 use = is_boss  # save duplication for boss
