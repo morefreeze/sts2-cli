@@ -92,8 +92,9 @@ def _score_event_option(opt: dict) -> float:
     desc = (opt.get("description") or "").lower()
     text = title + " " + desc
     score = 0.0
-    # Strong negatives
-    if "lose max" in text or "maximum hp" in text:
+    # Strong negatives — losing Max HP is permanent and devastating
+    # Covers "lose max hp", "lose 10 max hp", "maximum hp", "lose N max hp"
+    if "lose max" in text or "maximum hp" in text or ("lose" in text and "max hp" in text):
         score -= 10.0
     if "curse" in text:
         score -= 8.0
