@@ -30,6 +30,10 @@ OVERRIDES: dict[str, float] = {
 
     # === STS2 new cards — top picks (8-9) ===
     "HOWL_FROM_BEYOND": 9.0,   # AOE that auto-replays from exhaust pile each turn
+    "APOTHEOSIS": 9.0,         # upgrade ALL cards (colorless) — enormous value
+    "AGGRESSION": 8.5,         # power: free upgraded Attack from discard each turn
+    "ADRENALINE": 8.0,         # 0-cost: gain 1 energy + draw 2 (no HP cost in STS2)
+    "SHOCKWAVE": 7.5,          # AOE Weak + Vulnerable to all enemies — huge setup
     "FORGOTTEN_RITUAL": 8.0,   # gain energy when exhaust — capped (generic formula over-scores)
     "HELLRAISER": 8.0,         # auto-plays Strike on draw — free attacks all game
     "MOLTEN_FIST": 8.0,        # doubles target's Vulnerable — huge damage multiplier
@@ -70,6 +74,18 @@ OVERRIDES: dict[str, float] = {
     "WHIRLWIND": 7.0,       # X-cost AOE
     "HEAVY_BLADE": 7.0,     # scales with str (3x multiplier)
     "SWORD_BOOMERANG": 7.0, # 3x3 random hits
+
+    # === STS2 colorless decent picks (5-7) ===
+    "DRAMATIC_ENTRANCE": 7.0,  # free AOE damage on combat start (Ethereal, costs 0)
+    "METAMORPHOSIS": 6.5,   # add N free Attacks to draw pile — extra resources
+    "BEAT_INTO_SHAPE": 6.5, # damage that scales with hits this turn — strong multi-hit
+    "PANACHE": 6.0,         # power: AOE damage every 5 cards played
+    "MASTER_OF_STRATEGY": 6.0, # draw 3, exhaust — card advantage
+    "ANGER": 5.0,           # damage + copy in discard (scaling but clogs deck)
+    "DARK_SHACKLES": 4.5,   # reduce enemy strength this turn — situational defensive
+    "BLIGHT_STRIKE": 6.5,   # damage + apply Doom — strong if Doom mechanic is real damage
+    "DISCOVERY": 5.5,       # choose 1 of 3 random cards free — card quality upgrade
+    "JACK_OF_ALL_TRADES": 5.0,  # add random colorless cards — inconsistent
 
     # === Decent cards (5-6) ===
     "ANGELIC_DEW": 5.5,
