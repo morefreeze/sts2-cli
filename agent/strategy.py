@@ -91,7 +91,10 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                 elif hp_ratio < self.HP_LOW:
                     p += 7
                 elif hp_ratio >= self.HP_STRONG and isinstance(floor, int) and floor > self.ELITE_PREFER_FLOOR:
-                    p -= 2  # healthy + mid-game: elites worth it for relics
+                    p -= 1.9  # healthy + mid-game: elites worth it for relics
+                    # Use 1.9 not 2.0: prevents Elite from tying Unknown/Event (p=4)
+                    # when both appear — tied priority resolves by index (Elite=0 wins), which
+                    # would silently prefer combat over a safe event room.
             scored.append((p, i, c))
         scored.sort()
         best = scored[0][2]
