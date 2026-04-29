@@ -182,18 +182,23 @@ def greedy_action(state: dict) -> dict:
 
     elif decision == "shop":
         gold = state.get("player", {}).get("gold", 0)
-        # Try to remove a card if affordable (thins deck)
         removal_cost = state.get("card_removal_cost")
-        if removal_cost and gold >= removal_cost:
-            return {"cmd": "action", "action": "remove_card"}
-        # Buy best card by score that we can afford — only if score >= 6.0
+        # Find best affordable card
         cards = [c for c in state.get("cards", [])
                  if c.get("is_stocked") and c.get("cost", 999) <= gold]
-        if cards:
-            best = max(cards, key=lambda c: score_card(c))
-            if score_card(best) >= 6.0:
-                return {"cmd": "action", "action": "buy_card",
-                        "args": {"card_index": best.get("index", 0)}}
+        best_card = max(cards, key=lambda c: score_card(c)) if cards else None
+        best_score = score_card(best_card) if best_card else 0.0
+        # Buy elite cards first (score ≥ 8.5) before spending gold on removal
+        if best_card and best_score >= 8.5:
+            return {"cmd": "action", "action": "buy_card",
+                    "args": {"card_index": best_card.get("index", 0)}}
+        # Remove a card if affordable (deck thinning is very valuable)
+        if removal_cost and gold >= removal_cost:
+            return {"cmd": "action", "action": "remove_card"}
+        # Buy good card (score ≥ 6.0) after removal opportunity checked
+        if best_card and best_score >= 6.0:
+            return {"cmd": "action", "action": "buy_card",
+                    "args": {"card_index": best_card.get("index", 0)}}
         # Buy a relic if score is high enough and affordable (threshold: keep 50g buffer)
         RELIC_GOLD_THRESHOLD = 50
         relics = [r for r in state.get("relics", [])
