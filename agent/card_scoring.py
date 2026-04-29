@@ -25,6 +25,24 @@ OVERRIDES: dict[str, float] = {
     "WARCRY": 7.0,          # draw with no downside
     "SHRUG_IT_OFF": 8.0,    # 8 block + draw 1
 
+    # === STS2 new cards — top picks (8-9) ===
+    "HOWL_FROM_BEYOND": 9.0,   # AOE that auto-replays from exhaust pile each turn
+    "FORGOTTEN_RITUAL": 8.0,   # gain energy when exhaust — capped (generic formula over-scores)
+    "HELLRAISER": 8.0,         # auto-plays Strike on draw — free attacks all game
+    "MOLTEN_FIST": 8.0,        # doubles target's Vulnerable — huge damage multiplier
+    "DISMANTLE": 7.5,          # 13 dmg; hits twice if Vulnerable (26 for 1 energy)
+    "POMMEL_STRIKE": 7.5,      # 9 dmg + draw 1 (generic formula gives 8.5, slightly lower)
+    "UNRELENTING": 7.5,        # 12 dmg + next Attack costs 0 — energy generation
+    "BLUDGEON": 7.5,           # simple heavy single-target damage
+    "SETUP_STRIKE": 7.0,       # 9 dmg + temporary strength this turn
+    "GRAPPLE": 7.0,            # dmg + deals extra per block gained this turn
+    "VICIOUS": 6.5,            # draw when you apply Vulnerable
+    "INFERNAL_BLADE": 7.0,     # add free random Attack to hand
+    "PERFECTED_STRIKE": 6.5,   # scales with Strike count (good early, less later)
+    "CINDER": 5.5,             # dmg + forced exhaust top of draw (can trash good card)
+    "BLOOD_WALL": 4.0,         # HP loss for block — net negative, avoid
+    "BREAKTHROUGH": 6.0,       # AOE but costs HP — trade-off
+
     # === Strong cards (7-8) ===
     "CARNAGE": 7.5,         # 20 damage for free (ethereal)
     "RECKLESS_CHARGE": 7.0, # 7 dmg + wound, still good DPE
