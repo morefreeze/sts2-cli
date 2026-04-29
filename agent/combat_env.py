@@ -169,6 +169,13 @@ def _score_event_option(opt: dict) -> float:
         score += 2.0
     if "colorless" in text and "card" in text:
         score += 2.0  # colorless cards add utility
+    # Permanent stat gains are very strong
+    if "strength" in text and "gain" in text and "enem" not in text and "lose" not in text:
+        score += 4.0  # +str permanently is game-warping for Ironclad
+    if "dexterity" in text and "gain" in text and "enem" not in text and "lose" not in text:
+        score += 3.0  # +dex permanently is strong defense
+    if "energy" in text and "each turn" in text and "lose" not in text:
+        score += 5.0  # extra energy per turn = unlimited scaling
     return score
 
 
