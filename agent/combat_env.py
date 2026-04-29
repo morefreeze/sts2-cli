@@ -594,7 +594,7 @@ class CombatEnv(gym.Env):
                 use = is_boss  # save duplication for boss
             elif "block" in text and hp_ratio < 0.50:
                 use = True  # block potion when damaged
-            elif "fire" in text or "explosive" in text or "attack" in text and "damage" in text:
+            elif "fire" in text or "explosive" in text:
                 use = is_boss  # damage potions only at boss
                 target_index = 0
 
