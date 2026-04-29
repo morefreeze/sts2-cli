@@ -136,6 +136,10 @@ def _score_event_option(opt: dict) -> float:
     # Strong positives
     if "rare" in text and ("card" in text or "obtain" in text or "random" in text):
         score += 8.0
+    elif "uncommon" in text and "card" in text:
+        score += 4.0  # uncommon card reward: decent, not as good as rare
+    elif "card" in text and ("obtain" in text or "choose" in text) and "curse" not in text:
+        score += 2.0  # generic card reward (common): better than nothing
     if "remove" in text and ("card" in text or "deck" in text):
         score += 6.0  # deck thinning = very valuable
     if "relic" in text and "add" not in text:
