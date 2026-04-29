@@ -47,6 +47,12 @@ OVERRIDES: dict[str, float] = {
     "BLOOD_WALL": 4.0,         # HP loss for block — net negative, avoid
     "BREAKTHROUGH": 6.0,       # AOE but costs HP — trade-off
     "EVIL_EYE": 6.0,           # block + extra block on exhaust — conditional
+    "DOMINATE": 6.5,           # apply Vuln + gain Str per Vuln on enemy — strong offensive
+    "TAUNT": 7.0,              # block + apply Vulnerable — efficient dual-purpose skill
+    "JUGGLING": 5.5,           # power: add copy of 3rd Attack played each turn — free attacks
+    "EXPECT_A_FIGHT": 5.0,     # gain 1 energy per Attack in hand — strong in attack-heavy decks
+    "ASHEN_STRIKE": 5.0,       # damage scales with exhaust pile — strong with exhaust synergy
+    "TREMBLE": 4.5,            # 1-cost Apply Vulnerable — combo piece with attack-heavy deck
 
     # === Strong cards (7-8) ===
     "CARNAGE": 7.5,         # 20 damage for free (ethereal)
@@ -123,7 +129,9 @@ SKIP_IDS = {"STRIKE_R", "DEFEND_R", "STRIKE_B", "DEFEND_B", "STRIKE_G",
             # STS2 naming variants
             "STRIKE_IRONCLAD", "DEFEND_IRONCLAD",
             "STRIKE_SILENT", "DEFEND_SILENT",
-            "STRIKE_DEFECT", "DEFEND_DEFECT"}
+            "STRIKE_DEFECT", "DEFEND_DEFECT",
+            # STS2 curses/status cards
+            "DOUBT", "REGRET", "SHAME", "VOID", "NORMALITY"}
 
 
 def score_card(card: dict) -> float:
