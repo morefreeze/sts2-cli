@@ -144,6 +144,8 @@ def _score_event_option(opt: dict) -> float:
         score -= 5.0  # Neow's Torment adds a negative card
     if "take" in text and "damage" in text:
         score -= 3.0
+    if "downgrade" in text:
+        score -= 4.0  # downgrading cards is very bad
     # Negative: adds basic/weak cards to deck
     if "add" in text and ("additional strike" in text or "additional defend" in text):
         score -= 3.0
