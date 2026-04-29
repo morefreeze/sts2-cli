@@ -122,7 +122,13 @@ def greedy_action(state: dict) -> dict:
         return {"cmd": "action", "action": "leave_room"}
 
     elif decision == "bundle_select":
-        return {"cmd": "action", "action": "select_bundle", "args": {"bundle_index": 0}}
+        bundles = state.get("bundles", [])
+        if len(bundles) >= 2:
+            scores = [sum(score_card(c) for c in b.get("cards", [])) for b in bundles]
+            best_idx = scores.index(max(scores))
+        else:
+            best_idx = 0
+        return {"cmd": "action", "action": "select_bundle", "args": {"bundle_index": best_idx}}
 
     elif decision == "card_select":
         cards = state.get("cards", [])
