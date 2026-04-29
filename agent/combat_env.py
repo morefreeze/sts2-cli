@@ -618,18 +618,31 @@ class CombatEnv(gym.Env):
             elif not is_tough:
                 continue  # other potions: save for elite/boss
             elif "strength" in text or "flex" in text:
-                use = True  # always use strength at elite/boss
+                use = True  # always use strength/flex at elite/boss
+            elif "dexterity" in text:
+                use = True  # dexterity potion at elite/boss
+            elif "energy" in text and "channel" not in text:
+                use = is_boss  # energy potion: best at boss for burst turn
+                target_index = 0 if target_type == "anyenemy" else None
             elif "duplicat" in text:
                 use = is_boss  # duplicator/duplication at boss
-            elif "block" in text and hp_ratio < 0.50:
-                use = True  # block potion when damaged
+            elif "block" in text and hp_ratio < (0.70 if is_boss else 0.50):
+                use = True  # block potion: more aggressive at boss
             elif "blessing" in text or "forge" in text:
                 use = is_tough  # upgrade hand at elite/boss
             elif "fire" in text or "explosive" in text:
                 use = is_tough  # damage potions at elite and boss
                 target_index = 0
-            elif "attack" in text and hp_ratio < 0.50:
-                use = is_tough  # attack potion at elite/boss when hurt
+            elif "attack" in text and hp_ratio < (0.80 if is_boss else 0.50):
+                use = is_tough  # attack potion: more aggressive at boss
+                target_index = 0 if target_type == "anyenemy" else None
+            elif "weak" in text or "fear" in text or "vulnerable" in text:
+                use = is_tough  # fear/weak potions apply debuffs — great at elite/boss
+                target_index = 0 if target_type == "anyenemy" else None
+            elif "power" in text or "ancient" in text:
+                use = is_boss  # power/ancient potion: save for boss
+            elif "speed" in text:
+                use = is_tough  # speed potion: dex bonus at elite/boss
 
             if not use:
                 continue
