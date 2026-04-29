@@ -308,7 +308,7 @@ def greedy_action(state: dict) -> dict:
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
             if shop_potions:
                 best_potion = max(shop_potions, key=_score_shop_potion)
-                if _score_shop_potion(best_potion) >= 5.0:
+                if _score_shop_potion(best_potion) >= 4.5:
                     return {"cmd": "action", "action": "buy_potion",
                             "args": {"potion_index": best_potion.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
