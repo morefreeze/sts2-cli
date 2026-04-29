@@ -491,6 +491,12 @@ class CombatEnv(gym.Env):
                                                "victory": state.get("victory", False)}
 
         if decision == "combat_play":
+            state = self._combat_check_heal(state)  # reactive heal if HP critical mid-fight
+            if state.get("decision") == "game_over":
+                self._game_alive = False
+                r = reward + self._terminal_reward(state)
+                return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
+                                                   "victory": state.get("victory", False)}
             self._current_state = state
             return self._encode(state), reward, False, False, {}
 
@@ -612,6 +618,43 @@ class CombatEnv(gym.Env):
         if state.get("victory", False):
             return 2.0
         return -2.0
+
+    def _combat_check_heal(self, state: dict) -> dict:
+        """Reactively use heal potions during combat when HP drops critically low.
+
+        Called on every combat_play state so we can heal mid-fight if HP tanks.
+        Only uses heal/restore potions; all other potions are handled at combat start.
+        """
+        player = state.get("player", {})
+        hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
+        if hp_ratio >= 0.35:
+            return state  # healthy enough, no heal needed
+        potions = player.get("potions", []) or []
+        for p in potions:
+            name_raw = p.get("name") or {}
+            name = (name_raw.get("en", "") if isinstance(name_raw, dict) else str(name_raw)).lower()
+            desc_raw = p.get("description") or {}
+            desc = (desc_raw.get("en", "") if isinstance(desc_raw, dict) else str(desc_raw)).lower()
+            text = name + " " + desc
+            if ("heal" in text or "restore" in text) and "curse" not in text:
+                pidx = p.get("index", 0)
+                target_type = (p.get("target_type") or "").lower()
+                args: dict = {"potion_index": pidx}
+                if target_type == "anyenemy":
+                    args["target_index"] = 0
+                new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
+                if new_state is None:
+                    break
+                state = new_state
+                if state.get("decision") not in ("combat_play",):
+                    break
+                # Re-check HP after heal — might need another heal potion
+                p2 = state.get("player", {})
+                hp_ratio = p2.get("hp", 80) / max(p2.get("max_hp", 80), 1)
+                if hp_ratio >= 0.35:
+                    break
+                potions = p2.get("potions", []) or []
+        return state
 
     def _greedy_use_potions(self, state: dict) -> dict:
         """Auto-use potions before RL policy acts (RL action space has no potion actions).
