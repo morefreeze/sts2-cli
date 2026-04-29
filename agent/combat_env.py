@@ -60,16 +60,18 @@ def _score_shop_relic(relic: dict) -> float:
     if "lose max" in text or "maximum hp" in text: return -3.0
 
     score = 3.0  # baseline: relics are generally useful
-    # Big positive: strength/dexterity per-turn gain
+    # Big positive: per-turn stat gains
     if "each turn" in text and ("strength" in text or "vigor" in text): score += 4.0
+    if "each turn" in text and ("block" in text or "dexterity" in text): score += 3.0
     if "each combat" in text and ("block" in text or "armor" in text): score += 3.0
+    if "start of combat" in text and ("strength" in text or "dexterity" in text): score += 3.0
     # Strength bonus (Red Skull type: gives +str) — skip if relic causes str loss
     if "strength" in text and "lose" not in text: score += 2.0
     # Vulnerable multiplier enhancement (Paper Phrog: +25% vs vulnerable)
-    if "vulnerable" in text: score += 2.0
+    if "vulnerable" in text and "enem" not in text: score += 2.0
     # Draw effects
     if "draw" in text and "card" in text: score += 2.0
-    # Energy
+    # Energy per combat start
     if "energy" in text and "start" in text: score += 3.0
     # Healing
     if "heal" in text or ("rest" in text and "hp" in text): score += 2.0
@@ -79,12 +81,16 @@ def _score_shop_relic(relic: dict) -> float:
     if "gold" in text and ("gain" in text or "additional" in text or "drop" in text): score += 1.0
     # Exhaust synergy
     if "exhaust" in text: score += 1.5
-    # Potion slots
-    if "potion" in text and "slot" in text: score += 1.0
+    # Potion slots (more potions = more options)
+    if "potion" in text and "slot" in text: score += 1.5
+    # Card upgrade (powerful long-term)
+    if "upgrade" in text and "card" in text: score += 2.0
     # Bad: adds wounds or curses
     if "wound" in text and "add" in text: score -= 2.0
     # Bad: enemies gain strength/buffs (e.g. Philosopher's Stone)
     if "enem" in text and "strength" in text: score -= 3.0
+    # Bad: HP costs (e.g. Runic Dome, Sozu)
+    if "hp" in text and "lose" in text and "start" in text: score -= 2.0
     return score
 
 
