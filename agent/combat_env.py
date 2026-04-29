@@ -234,8 +234,10 @@ class CombatEnv(gym.Env):
         self.dry_run = dry_run
         self.max_floor = max_floor  # 0 = unlimited
 
+        # Extra features appended after enc.obs_size: [floor/17, entry_hp_ratio]
+        self._EXTRA_OBS = 2
         self.observation_space = Box(low=0.0, high=1.0,
-                                     shape=(self.enc.obs_size,), dtype=np.float32)
+                                     shape=(self.enc.obs_size + self._EXTRA_OBS,), dtype=np.float32)
         self.action_space = Discrete(41)
 
         self._proc = None
@@ -245,6 +247,7 @@ class CombatEnv(gym.Env):
         self._prev_player_hp = 0
         self._combat_start_enemy_hp = 1
         self._combat_start_player_max_hp = 1
+        self._combat_entry_hp_ratio = 1.0  # HP ratio when combat started
         self._current_floor = 1
         self._game_alive = False
         self._read_buf = b""
@@ -256,7 +259,7 @@ class CombatEnv(gym.Env):
 
         if self.dry_run:
             self._current_state = _dummy_combat_state()
-            return self.enc.encode(self._current_state), {}
+            return self._encode(self._current_state), {}
 
         # Try to advance to next combat in the current run
         if self._game_alive and self._current_state is not None:
@@ -270,7 +273,7 @@ class CombatEnv(gym.Env):
             if state and state.get("decision") == "combat_play":
                 self._init_combat_tracking(state)
                 self._current_state = state
-                return self.enc.encode(state), {}
+                return self._encode(state), {}
 
         # Start a fresh game process + run
         self._kill_proc()
@@ -282,28 +285,28 @@ class CombatEnv(gym.Env):
         if state is None:
             self._game_alive = False
             self._current_state = _dummy_combat_state()
-            return self.enc.encode(self._current_state), {}
+            return self._encode(self._current_state), {}
 
         self._game_alive = True
         state = self._advance_to_combat(state)
         if state is None or state.get("decision") != "combat_play":
             self._game_alive = False
             self._current_state = _dummy_combat_state()
-            return self.enc.encode(self._current_state), {}
+            return self._encode(self._current_state), {}
 
         self._init_combat_tracking(state)
         self._current_state = state
         self._combat_steps = 0
-        return self.enc.encode(state), {}
+        return self._encode(state), {}
 
     def step(self, action: int):
         if self.dry_run or self._current_state is None:
-            return np.zeros(self.enc.obs_size, dtype=np.float32), -2.0, True, False, {}
+            return np.zeros(self.enc.obs_size + self._EXTRA_OBS, dtype=np.float32), -2.0, True, False, {}
 
         self._combat_steps += 1
         if self._combat_steps > self.max_combat_steps:
             # Combat too long — treat as defeat to avoid wasting time
-            last_obs = self.enc.encode(self._current_state)
+            last_obs = self._encode(self._current_state)
             return last_obs, -2.0, True, False, {"timeout": True}
 
         cmd = self.enc.decode(int(action), self._current_state)
@@ -325,14 +328,14 @@ class CombatEnv(gym.Env):
             if state and state.get("decision") == "combat_play" and \
                     state.get("round") == self._current_state.get("round"):
                 # Still stuck — kill this combat
-                last_obs = self.enc.encode(self._current_state)
+                last_obs = self._encode(self._current_state)
                 self._game_alive = False
                 self._kill_proc()
                 return last_obs, -2.0, True, False, {"stuck": True}
 
         if state is None:
             self._game_alive = False
-            last_obs = self.enc.encode(self._current_state)
+            last_obs = self._encode(self._current_state)
             cmd_str = json.dumps(getattr(self, "_last_cmd", None))
             floor = self._current_floor
             hand_size = len(self._current_state.get("hand", []))
@@ -347,7 +350,7 @@ class CombatEnv(gym.Env):
         if state.get("decision") == "stuck":
             self._game_alive = False
             self._kill_proc()
-            last_obs = self.enc.encode(self._current_state)
+            last_obs = self._encode(self._current_state)
             return last_obs, -2.0, True, False, {"crashed": True, "floor": self._current_floor}
 
         decision = state.get("decision", "")
@@ -356,7 +359,7 @@ class CombatEnv(gym.Env):
         # Use last known combat obs for terminal states (NOT zeros — zeros
         # confuse the value function because they're too similar to sparse
         # combat states, causing gradient pollution that collapses entropy)
-        last_obs = self.enc.encode(self._current_state)
+        last_obs = self._encode(self._current_state)
 
         if decision == "game_over":
             self._game_alive = False
@@ -366,7 +369,7 @@ class CombatEnv(gym.Env):
 
         if decision == "combat_play":
             self._current_state = state
-            return self.enc.encode(state), reward, False, False, {}
+            return self._encode(state), reward, False, False, {}
 
         # Mid-combat card_select (e.g. boss mechanics, card effects that trigger selection)
         # Auto-handle these without ending the episode — they appear in Boss/Monster/Elite rooms
@@ -387,7 +390,7 @@ class CombatEnv(gym.Env):
                         break
                 if state.get("decision") == "combat_play":
                     self._current_state = state
-                    return self.enc.encode(state), reward, False, False, {}
+                    return self._encode(state), reward, False, False, {}
                 if state.get("decision") == "game_over":
                     self._game_alive = False
                     r = reward + self._terminal_reward(state)
@@ -410,6 +413,13 @@ class CombatEnv(gym.Env):
     def set_max_floor(self, max_floor: int) -> None:
         self.max_floor = max_floor
 
+    def _encode(self, state: dict) -> np.ndarray:
+        """Encode state + floor and entry_hp extra features."""
+        base = self.enc.encode(state)
+        floor_norm = min(self._current_floor / 17.0, 1.0)
+        extra = np.array([floor_norm, self._combat_entry_hp_ratio], dtype=np.float32)
+        return np.concatenate([base, extra])
+
     def _init_combat_tracking(self, state: dict):
         self._prev_enemy_hp = _total_enemy_hp(state)
         self._prev_player_hp = _player_hp(state)
@@ -417,6 +427,8 @@ class CombatEnv(gym.Env):
         self._combat_start_player_max_hp = max(state.get("player", {}).get("max_hp", 1), 1)
         floor = state.get("floor") or state.get("context", {}).get("floor", 1)
         self._current_floor = int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1
+        hp = state.get("player", {}).get("hp", self._combat_start_player_max_hp)
+        self._combat_entry_hp_ratio = hp / self._combat_start_player_max_hp
 
     def _shaping_reward(self, next_state: dict) -> float:
         cur_enemy_hp = _total_enemy_hp(next_state)

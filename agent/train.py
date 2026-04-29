@@ -331,6 +331,50 @@ def _reinit_value_network(model) -> None:
         print(f"  Warning: could not reinit value network: {e}")
 
 
+def _expand_obs_checkpoint(checkpoint_path: str, vec_env, device: str,
+                           old_obs_size: int, hyperparams: dict) -> "MaskablePPO":
+    """Load a checkpoint with smaller obs_size and expand its input layers.
+
+    Expands the first linear layer of both policy_net and value_net from
+    old_obs_size → current obs_size by zero-padding the new feature columns.
+    All other weights are copied unchanged. Value network is always reinit'd
+    since the reward scale typically changes when obs_size changes.
+    """
+    new_obs_size = vec_env.observation_space.shape[0]
+    # Load old model without env to bypass obs_space mismatch check
+    old_model = MaskablePPO.load(checkpoint_path, env=None, device=device)
+    old_ts = getattr(old_model, "num_timesteps", 0)
+
+    # Create new model with correct obs size
+    policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+    new_model = MaskablePPO(
+        "MlpPolicy", vec_env, verbose=0, device=device,
+        policy_kwargs=policy_kwargs, **hyperparams
+    )
+
+    # Copy weights, expanding input layers
+    old_sd = old_model.policy.state_dict()
+    new_sd = new_model.policy.state_dict()
+    expanded = []
+    for name in list(new_sd.keys()):
+        if name not in old_sd:
+            continue
+        old_p, new_p = old_sd[name], new_sd[name]
+        if old_p.shape == new_p.shape:
+            new_sd[name] = old_p.clone()
+        elif old_p.dim() == 2 and old_p.shape[1] == old_obs_size and new_p.shape[1] == new_obs_size:
+            new_sd[name].zero_()
+            new_sd[name][:, :old_obs_size] = old_p
+            expanded.append(f"{name} {list(old_p.shape)}→{list(new_p.shape)}")
+        # shapes differ for other reason — keep random init for that layer
+
+    new_model.policy.load_state_dict(new_sd)
+    new_model.num_timesteps = old_ts
+    print(f"  Obs expanded {old_obs_size}→{new_obs_size}, layers: {expanded}")
+    _reinit_value_network(new_model)  # reward scale changes with obs change
+    return new_model
+
+
 def _make_vec_env(character: str, ascension: int, n_envs: int,
                   max_floor: int, seed_offset: int = 0) -> SubprocVecEnv | DummyVecEnv:
     makers = [make_env(character, ascension, i + seed_offset, max_floor=max_floor)
@@ -347,6 +391,8 @@ def main():
     parser.add_argument("--checkpoint",  default=None)
     parser.add_argument("--reinit-value", action="store_true",
                         help="Reinitialize value network when loading checkpoint (use when reward scale changes)")
+    parser.add_argument("--obs-expand", type=int, default=0,
+                        help="Old obs_size of checkpoint to expand from (e.g. 161 when adding floor+entry_hp)")
     parser.add_argument("--curriculum",  action="store_true")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")
@@ -379,21 +425,29 @@ def main():
     if args.checkpoint:
         print(f"  Loading checkpoint: {args.checkpoint}")
         tb_log = os.path.join(CHECKPOINT_DIR, "tb_logs")
-        model = MaskablePPO.load(
-            args.checkpoint, env=vec_env, device=device,
-            custom_objects={"tensorboard_log": tb_log},
-        )
-        # Override hyperparameters that affect learning speed/quality
-        model.n_steps        = N_STEPS
-        model.batch_size     = BATCH_SIZE
-        model.n_epochs       = N_EPOCHS
-        model.ent_coef       = ENT_COEF
-        model.vf_coef        = VF_COEF
-        model.learning_rate  = LR
-        model.clip_range     = lambda _: CLIP_RANGE
-        model.clip_range_vf  = lambda _: CLIP_RANGE
-        if args.reinit_value:
-            _reinit_value_network(model)
+        _hp = dict(n_steps=N_STEPS, batch_size=BATCH_SIZE, n_epochs=N_EPOCHS,
+                   learning_rate=LR, gamma=GAMMA, ent_coef=ENT_COEF,
+                   clip_range=CLIP_RANGE, vf_coef=VF_COEF, max_grad_norm=0.5,
+                   tensorboard_log=tb_log)
+        if args.obs_expand:
+            model = _expand_obs_checkpoint(
+                args.checkpoint, vec_env, device, args.obs_expand, _hp)
+        else:
+            model = MaskablePPO.load(
+                args.checkpoint, env=vec_env, device=device,
+                custom_objects={"tensorboard_log": tb_log},
+            )
+            # Override hyperparameters that affect learning speed/quality
+            model.n_steps        = N_STEPS
+            model.batch_size     = BATCH_SIZE
+            model.n_epochs       = N_EPOCHS
+            model.ent_coef       = ENT_COEF
+            model.vf_coef        = VF_COEF
+            model.learning_rate  = LR
+            model.clip_range     = lambda _: CLIP_RANGE
+            model.clip_range_vf  = lambda _: CLIP_RANGE
+            if args.reinit_value:
+                _reinit_value_network(model)
         # Recreate rollout buffer with new n_steps
         try:
             from sb3_contrib.common.maskable.buffers import MaskableRolloutBuffer
