@@ -561,12 +561,78 @@ class CombatEnv(gym.Env):
             return 2.0
         return -2.0
 
+    def _greedy_use_potions(self, state: dict) -> dict:
+        """Auto-use potions before RL policy acts (RL action space has no potion actions).
+
+        Strategy: use strength/flex/duplication at boss/elite fights; block if low HP.
+        Fire/explosive potions target enemy 0 and are used at elite+ fights.
+        """
+        room_type = (state.get("context") or {}).get("room_type", "")
+        is_boss  = "boss" in room_type.lower()
+        is_elite = "elite" in room_type.lower()
+        if not (is_boss or is_elite):
+            return state  # save potions for tough fights
+
+        player = state.get("player", {})
+        hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
+        potions = player.get("potions", []) or []
+
+        for p in potions:
+            name_raw = p.get("name") or {}
+            name = (name_raw.get("en", "") if isinstance(name_raw, dict) else str(name_raw)).lower()
+            desc_raw = p.get("description") or {}
+            desc = (desc_raw.get("en", "") if isinstance(desc_raw, dict) else str(desc_raw)).lower()
+            text = name + " " + desc
+            target_type = (p.get("target_type") or "").lower()
+            pidx = p.get("index", 0)
+
+            use = False
+            target_index = None
+            if "strength" in text or "flex" in text:
+                use = True  # always use strength at elite/boss
+            elif "duplication" in text or "duplicate" in text:
+                use = is_boss  # save duplication for boss
+            elif "block" in text and hp_ratio < 0.50:
+                use = True  # block potion when damaged
+            elif "fire" in text or "explosive" in text or "attack" in text and "damage" in text:
+                use = is_boss  # damage potions only at boss
+                target_index = 0
+
+            if not use:
+                continue
+
+            args: dict = {"potion_index": pidx}
+            if target_type == "anyenemy" or target_index is not None:
+                args["target_index"] = target_index or 0
+            new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
+            if new_state is None:
+                break
+            # Resolve card_select (Attack Potion picks a card) or proceed
+            for _ in range(10):
+                if new_state.get("decision") == "card_select":
+                    new_state = self._send(greedy_action(new_state))
+                elif new_state.get("decision") in ("combat_play", "game_over"):
+                    break
+                else:
+                    break
+                if new_state is None:
+                    break
+            if new_state is None or new_state.get("decision") == "game_over":
+                return new_state or state
+            state = new_state
+            # Refresh potion list from updated state
+            potions = (state.get("player") or {}).get("potions", []) or []
+
+        return state
+
     def _advance_to_combat(self, state: dict) -> dict:
         for _ in range(200):
             if state is None:
                 return {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
-            if state.get("decision") in ("combat_play", "game_over"):
+            if state.get("decision") == "game_over":
                 return state
+            if state.get("decision") == "combat_play":
+                return self._greedy_use_potions(state)
             cmd = greedy_action(state)
             state = self._send(cmd)
         return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
