@@ -347,11 +347,24 @@ class CombatEnv(gym.Env):
                 # Curriculum: restart to keep fighting easy enemies
                 self._game_alive = False
                 self._kill_proc()
-            state = self._advance_to_combat(self._current_state)
-            if state and state.get("decision") == "combat_play":
-                self._init_combat_tracking(state)
-                self._current_state = state
-                return self._encode(state), {}
+            else:
+                state = self._advance_to_combat(self._current_state)
+                if state and state.get("decision") == "combat_play":
+                    self._init_combat_tracking(state)
+                    self._current_state = state
+                    return self._encode(state), {}
+                # Advance failed — game ended (natural game_over or crash).
+                # Signal game_over via info instead of silently restarting:
+                # eval_rl.py checks info["game_over"] to end the eval game correctly.
+                self._game_alive = False
+                self._kill_proc()
+                self._current_state = _dummy_combat_state()
+                crashed = (state is None or state.get("decision") == "stuck")
+                return self._encode(self._current_state), {
+                    "game_over": True,
+                    "crashed": crashed,
+                    "victory": bool(state and state.get("victory", False)),
+                }
 
         # Start a fresh game process + run
         self._kill_proc()

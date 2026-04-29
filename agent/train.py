@@ -269,7 +269,12 @@ def run_eval(model, character: str, n_games: int = 5) -> dict:
             if last_info.get("combat_won"):
                 ep_combat_wins += 1
                 # Advance to the next combat via reset(); CombatEnv resumes the run
-                obs, _ = env_wrapped.reset()
+                obs, reset_info = env_wrapped.reset()
+                if reset_info.get("game_over"):
+                    run_over = True
+                    last_info = reset_info
+                    if reset_info.get("victory"):
+                        run_won = True
             else:
                 # game_over, crash, timeout, stuck — run ended
                 run_over = True
