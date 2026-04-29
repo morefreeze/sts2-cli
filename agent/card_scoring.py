@@ -34,6 +34,7 @@ OVERRIDES: dict[str, float] = {
     "HELLRAISER": 8.0,         # auto-plays Strike on draw — free attacks all game
     "MOLTEN_FIST": 8.0,        # doubles target's Vulnerable — huge damage multiplier
     "DISMANTLE": 7.5,          # 13 dmg; hits twice if Vulnerable (26 for 1 energy)
+    "BLADE_OF_INK": 6.0,       # this turn: +1 str per Attack — scales with attack-heavy turns
     "POMMEL_STRIKE": 7.5,      # 9 dmg + draw 1 (generic formula gives 8.5, slightly lower)
     "UNRELENTING": 7.5,        # 12 dmg + next Attack costs 0 — energy generation
     "BLUDGEON": 7.5,           # simple heavy single-target damage
