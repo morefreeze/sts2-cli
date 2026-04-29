@@ -721,8 +721,8 @@ class CombatEnv(gym.Env):
                 use = is_tough  # damage potions at elite and boss
                 target_index = 0
             elif "attack" in text:
-                # attack potion: always at boss; at elite if HP < 60%
-                use = is_boss or (is_elite and hp_ratio < 0.60)
+                # attack potion: always at elite/boss — killing faster = less damage taken
+                use = is_tough
                 target_index = 0 if target_type == "anyenemy" else None
             elif "weak" in text or "fear" in text or "vulnerable" in text:
                 use = is_tough  # fear/weak potions apply debuffs — great at elite/boss
