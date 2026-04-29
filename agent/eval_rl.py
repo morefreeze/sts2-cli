@@ -182,6 +182,10 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
     verbose=True: show per-room summaries; for wins, show last combat step-by-step.
     """
+    # Auto-detect obs_size: legacy checkpoints use 161-dim, new use 163-dim
+    model_obs_size = model.observation_space.shape[0]
+    extra_obs = (model_obs_size > 161)
+
     floors, wins, combat_wins_list = [], [], []
     for i in range(n_games):
         if fixed_seeds:
@@ -191,10 +195,10 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
         if verbose:
             env = _VerboseCombatEnv(character=character, seed=game_seed,
-                                    seed_prefix=f"eval_{i}", max_floor=0)
+                                    seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs)
         else:
             env = CombatEnv(character=character, seed=game_seed,
-                            seed_prefix=f"eval_{i}", max_floor=0)
+                            seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs)
         env_wrapped = ActionMasker(env, mask_fn)
         obs, _ = env_wrapped.reset()
         ep_combat_wins = 0

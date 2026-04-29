@@ -222,7 +222,7 @@ class CombatEnv(gym.Env):
 
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
                  ascension: int = 0, seed: str = None, dry_run: bool = False,
-                 seed_prefix: str = "t", max_floor: int = 0):
+                 seed_prefix: str = "t", max_floor: int = 0, extra_obs: bool = True):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
@@ -235,7 +235,8 @@ class CombatEnv(gym.Env):
         self.max_floor = max_floor  # 0 = unlimited
 
         # Extra features appended after enc.obs_size: [floor/17, entry_hp_ratio]
-        self._EXTRA_OBS = 2
+        # extra_obs=False: legacy mode for checkpoints trained with 161-dim obs
+        self._EXTRA_OBS = 2 if extra_obs else 0
         self.observation_space = Box(low=0.0, high=1.0,
                                      shape=(self.enc.obs_size + self._EXTRA_OBS,), dtype=np.float32)
         self.action_space = Discrete(41)
@@ -414,8 +415,10 @@ class CombatEnv(gym.Env):
         self.max_floor = max_floor
 
     def _encode(self, state: dict) -> np.ndarray:
-        """Encode state + floor and entry_hp extra features."""
+        """Encode state + optional floor and entry_hp extra features."""
         base = self.enc.encode(state)
+        if self._EXTRA_OBS == 0:
+            return base
         floor_norm = min(self._current_floor / 17.0, 1.0)
         extra = np.array([floor_norm, self._combat_entry_hp_ratio], dtype=np.float32)
         return np.concatenate([base, extra])
