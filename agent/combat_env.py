@@ -174,15 +174,18 @@ def greedy_action(state: dict) -> dict:
         cards = state.get("cards", [])
         if cards:
             room_type = state.get("context", {}).get("room_type", "")
+            max_sel = max(state.get("max_select", 1), 1)
             if room_type == "RestSiteRoom":
-                # SMITH upgrade: pick best card to maximize upgrade value
-                best = pick_best_card(cards, threshold=0.0)  # always upgrade something
+                # SMITH upgrade: always single-card selection
+                best = pick_best_card(cards, threshold=0.0)
                 idx = best if best is not None else 0
+                return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             else:
-                # Remove/transform: pick worst card
-                worst = pick_worst_card(cards, threshold=10.0)
-                idx = worst if worst is not None else 0
-            return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
+                # Remove/transform: pick worst card(s) up to max_select
+                scored = sorted(enumerate(cards), key=lambda x: score_card(x[1]))
+                selected = [str(scored[k][0]) for k in range(min(max_sel, len(scored)))]
+                return {"cmd": "action", "action": "select_cards",
+                        "args": {"indices": ",".join(selected)}}
         return {"cmd": "action", "action": "skip_select"}
 
     elif decision == "shop":
