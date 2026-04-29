@@ -225,12 +225,12 @@ def greedy_action(state: dict) -> dict:
             room_type = state.get("context", {}).get("room_type", "")
             max_sel = max(state.get("max_select", 1), 1)
             combat_rooms = ("RestSiteRoom", "Boss", "Monster", "Elite", "CombatRoom")
-            if room_type == "RestSiteRoom":
-                # SMITH upgrade: always single-card selection
+            if "rest" in room_type.lower():
+                # SMITH upgrade: always single-card selection, pick best
                 best = pick_best_card(cards, threshold=0.0)
                 idx = best if best is not None else 0
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
-            elif room_type in ("Boss", "Monster", "Elite", "CombatRoom"):
+            elif room_type in ("Boss", "Monster", "Elite", "CombatRoom") or not room_type:
                 # Mid-combat select (potion: pick best; boss mechanic: rare, pick best as heuristic)
                 best = pick_best_card(cards, threshold=0.0)
                 idx = best if best is not None else 0
