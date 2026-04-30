@@ -106,7 +106,9 @@ class _VerboseCombatEnv(CombatEnv):
         for _ in range(200):
             if state is None:
                 return {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
-            if state.get("decision") in ("combat_play", "game_over"):
+            if state.get("decision") == "combat_play":
+                return self._greedy_use_potions(state)
+            if state.get("decision") == "game_over":
                 return state
             dec = state.get("decision", "")
             self._log_room(state, dec)
