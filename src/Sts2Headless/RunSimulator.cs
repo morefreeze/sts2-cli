@@ -39,46 +39,14 @@ namespace Sts2Headless;
 internal class InlineSynchronizationContext : SynchronizationContext
 {
     private readonly Queue<(SendOrPostCallback, object?)> _queue = new();
-    private bool _executing;
-    // Capture the main thread ID so that timer callbacks from ThreadPool always
-    // enqueue rather than execute inline — prevents game async continuations from
-    // running on non-main threads and bypassing our context for subsequent awaits.
-    private readonly int _mainThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
 
     public override void Post(SendOrPostCallback d, object? state)
     {
-        // Always enqueue when called from a non-main thread (e.g. Cmd.Wait(1f) timer).
-        // Running inline on a ThreadPool thread would cause subsequent await continuations
-        // to post to ThreadPool's default SyncCtx instead of ours, breaking the pump loop.
-        if (_executing || System.Threading.Thread.CurrentThread.ManagedThreadId != _mainThreadId)
-        {
-            lock (_queue) { _queue.Enqueue((d, state)); }
-            return;
-        }
-
-        // Execute inline immediately, then drain any nested posts
-        _executing = true;
-        try
-        {
-            d(state);
-            // Drain any callbacks queued during execution.
-            // Exceptions from individual continuations (e.g. VFX NullRef in headless mode)
-            // are caught per-callback so they don't kill the ActionExecutor.
-            while (true)
-            {
-                (SendOrPostCallback cb, object? st) item;
-                lock (_queue) { if (_queue.Count == 0) break; item = _queue.Dequeue(); }
-                try { item.cb(item.st); }
-                catch (Exception ex) when (ex is NullReferenceException || ex is InvalidOperationException)
-                {
-                    Console.Error.WriteLine($"[WARN] SyncCtx swallowed non-fatal continuation exception: {ex.GetType().Name}: {ex.Message}");
-                }
-            }
-        }
-        finally
-        {
-            _executing = false;
-        }
+        // Always enqueue — never execute inline. Inline execution caused infinite loops
+        // when game background async loops (while(true){await Task.Yield();...}) post their
+        // next continuation while the current one is running, keeping Pump() busy forever.
+        // Callers must use Pump() to drain the queue.
+        lock (_queue) { _queue.Enqueue((d, state)); }
     }
 
     public override void Send(SendOrPostCallback d, object? state)
@@ -88,19 +56,23 @@ internal class InlineSynchronizationContext : SynchronizationContext
 
     public void Pump()
     {
-        // Drain any remaining queued callbacks.
-        // Per-callback exception handling prevents VFX NullRef from killing the ActionExecutor.
-        while (true)
+        // Process only items that were in the queue when Pump() was called.
+        // Items added DURING this Pump() call are left for the next call.
+        // This prevents infinite loops: a background loop's next iteration is queued
+        // but not run until the caller calls Pump() again (bounded by Thread.Sleep loops).
+        int countToProcess;
+        lock (_queue) { countToProcess = _queue.Count; }
+        for (int i = 0; i < countToProcess; i++)
         {
             (SendOrPostCallback cb, object? st) item;
             lock (_queue) { if (_queue.Count == 0) break; item = _queue.Dequeue(); }
-            _executing = true;
             try { item.cb(item.st); }
-            catch (Exception ex) when (ex is NullReferenceException || ex is InvalidOperationException)
+            catch (Exception ex)
             {
-                Console.Error.WriteLine($"[WARN] SyncCtx.Pump swallowed non-fatal exception: {ex.GetType().Name}: {ex.Message}");
+                // Swallow ALL exceptions from game VFX/async callbacks (NLowHpBorderVfx etc.)
+                // that would otherwise escape Pump() and crash DoEndTurn/DoPlayCard callers.
+                Console.Error.WriteLine($"[WARN] SyncCtx.Pump swallowed exception: {ex.GetType().Name}: {ex.Message}");
             }
-            finally { _executing = false; }
         }
     }
 }
@@ -215,6 +187,11 @@ public class RunSimulator
     private static readonly LocLookup _loc = new();
     private bool _eventOptionChosen;
     private int _lastEventOptionCount;
+
+    // Tracked for crash-recovery: UnhandledException handler writes these to stdout
+    // before the process exits, so Python gets a clean game_over instead of EOF.
+    public static volatile int LastKnownPlayerHp = 80;
+    public static volatile bool LastActionWasKillingBlow = false;
 
     // Pending rewards for card selection (populated after combat, before proceeding)
     private List<Reward>? _pendingRewards;
@@ -835,7 +812,7 @@ public class RunSimulator
 
         // Call EnterMapCoord directly (same as what MoveToMapCoordAction does in TestMode)
         // This avoids the action executor which can swallow errors silently.
-        RunManager.Instance.EnterMapCoord(coord).GetAwaiter().GetResult();
+        PumpWhileWaiting(RunManager.Instance.EnterMapCoord(coord), 5.0, "EnterMapCoord");
         _syncCtx.Pump();
         WaitForActionExecutor();
 
@@ -896,9 +873,54 @@ public class RunSimulator
 
         var handCountBefore = hand.Count;
 
+        // Track for crash-recovery: if process crashes during post-combat cleanup,
+        // the UnhandledException handler uses these to write a sensible game_over response.
+        var combatState = CombatManager.Instance.DebugOnlyGetState();
+        var aliveEnemies = combatState?.Enemies?.Count(e => e != null && e.IsAlive) ?? 0;
+        LastKnownPlayerHp = player.Creature?.CurrentHp ?? 0;
+        LastActionWasKillingBlow = (hand.Count == 1 && aliveEnemies == 1);
+
         var playAction = new PlayCardAction(card, target);
-        RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
-        WaitForActionExecutor();
+        try
+        {
+            RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
+        }
+        catch (Exception ex)
+        {
+            // VFX/async code (e.g. Whirlwind.OnPlay, NLowHpBorderVfx.Create) can throw
+            // synchronously through ActionQueueChanged/TaskHelper, crashing the process.
+            // Catch here and return defeat rather than killing the process.
+            Log($"DoPlayCard: sync exception in EnqueueWithoutSynchronizing: {ex.GetType().Name}: {ex.Message}");
+            return GameOverState(false);
+        }
+        // SuppressYield=true during card execution so on-death / on-hit async effects
+        // (Task.Yield calls IL-patched in sts2.dll) complete inline instead of posting
+        // continuations to InlineSyncCtx and stalling when main thread is blocked.
+        YieldPatches.SuppressYield = true;
+        try
+        {
+            WaitForActionExecutor();
+
+            // Always drain pending async continuations while SuppressYield=true so that
+            // on-death / post-combat effects triggered by the card complete synchronously
+            // before we return. Without this, SuppressYield flips to false and the
+            // remaining continuations get posted to a thread-pool context that never
+            // drains, leaving the game in a half-ended state → hang → Python 60s timeout.
+            // Loop breaks immediately if executor is idle (fast path for normal cards).
+            for (int i = 0; i < 3000; i++)
+            {
+                _syncCtx.Pump();
+                var ae = RunManager.Instance?.ActionExecutor;
+                if (ae == null || !ae.IsRunning)
+                {
+                    _syncCtx.Pump();
+                    break;
+                }
+                if (i % 5 == 4) Thread.Sleep(1);
+            }
+
+        }
+        finally { YieldPatches.SuppressYield = false; }
 
         // Check if card play had no effect (hand unchanged, same card still at same index)
         var handAfter = pcs.Hand.Cards;
@@ -922,14 +944,14 @@ public class RunSimulator
         if (!CombatManager.Instance.IsPlayPhase)
         {
             // Might be between phases — pump and check
-            _syncCtx.Pump();
+            try { _syncCtx.Pump(); } catch (Exception ex) { Log($"DoEndTurn pre-check pump: {ex.GetType().Name}: {ex.Message}"); }
             if (!CombatManager.Instance.IsPlayPhase)
             {
                 if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true)
                     return DetectDecisionPoint();
                 // Brief wait for ThreadPool if sync context didn't catch it
                 Thread.Sleep(100);
-                _syncCtx.Pump();
+                try { _syncCtx.Pump(); } catch (Exception ex) { Log($"DoEndTurn pre-check pump2: {ex.GetType().Name}: {ex.Message}"); }
                 if (!CombatManager.Instance.IsPlayPhase)
                     return DetectDecisionPoint();
             }
@@ -938,7 +960,8 @@ public class RunSimulator
         // Ensure no actions are still running before ending turn
         WaitForActionExecutor();
 
-        Log($"Ending turn (round={CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0})");
+        int roundAtEndTurn = CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0;
+        Log($"Ending turn (round={roundAtEndTurn})");
         _turnStarted.Reset();
         _combatEnded.Reset();
 
@@ -951,12 +974,30 @@ public class RunSimulator
         YieldPatches.SuppressYield = true;
         try
         {
-            PlayerCmd.EndTurn(player, canBackOut: false);
-            _syncCtx.Pump();
+            try { PlayerCmd.EndTurn(player, canBackOut: false); }
+            catch (Exception ex)
+            {
+                // VFX code (e.g. NLowHpBorderVfx.Create during enemy attack) can throw
+                // synchronously through TaskHelper/ActionExecutor, propagating to here.
+                // Return defeat rather than crashing the process.
+                Log($"DoEndTurn: sync exception in PlayerCmd.EndTurn: {ex.GetType().Name}: {ex.Message}");
+                return GameOverState(false);
+            }
+
+            // Wrap individual Pump() calls in the wait loop so any exception that escapes
+            // Pump()'s internal catch (e.g. AggregateException wrappers) doesn't kill the process.
+            void SafePump() {
+                try { _syncCtx.Pump(); }
+                catch (Exception ex) {
+                    Log($"DoEndTurn: SafePump swallowed exception: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            SafePump();
 
             // Fast path: DEF-mode enemies process instantaneously inside Pump()
             if (CombatManager.Instance.IsInProgress && CombatManager.Instance.IsPlayPhase)
-                PumpStartOfTurnSetup(player);
+                PumpStartOfTurnSetup(player, roundAtEndTurn);
 
             // Fallback wait: up to 3s for enemy turn to complete.
             // NOTE: Task.Yield/Cmd.Wait Harmony patches may fail on newer CoreCLR —
@@ -967,10 +1008,28 @@ public class RunSimulator
                 bool isBossRoom = (_runState?.CurrentRoom as CombatRoom)?.RoomType == RoomType.Boss;
                 int waitIter = isBossRoom ? 1000 : 300; // 10s for boss, 3s for normal
                 bool prevExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
+
+                // Early burst: executor idle at start → newly spawned enemies (Wriggler split,
+                // Nibbit spawn) need rapid pumping to kick off their first action processing.
+                // This handles the case where Task.Yield() Harmony patch failed on .NET 10.
+                if (!prevExecutorRunning)
+                {
+                    for (int earlyBurst = 0; earlyBurst < 500; earlyBurst++)
+                    {
+                        SynchronizationContext.SetSynchronizationContext(_syncCtx);
+                        SafePump();
+                        if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
+                        if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) goto AfterWait;
+                        if (CombatManager.Instance.IsPlayPhase) goto AfterWait;
+                        if (earlyBurst % 10 == 9) Thread.Sleep(1); // yield occasionally
+                    }
+                    prevExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
+                }
+
                 for (int i = 0; i < waitIter; i++)   // waitIter × 10ms
                 {
                     SynchronizationContext.SetSynchronizationContext(_syncCtx);
-                    _syncCtx.Pump();
+                    SafePump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) break;
                     if (CombatManager.Instance.IsPlayPhase) break;
@@ -982,7 +1041,7 @@ public class RunSimulator
                         for (int burst = 0; burst < 300; burst++)
                         {
                             SynchronizationContext.SetSynchronizationContext(_syncCtx);
-                            _syncCtx.Pump();
+                            SafePump();
                             if (CombatManager.Instance.IsPlayPhase || !CombatManager.Instance.IsInProgress) goto AfterWait;
                             if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
                             Thread.Sleep(1);
@@ -994,7 +1053,7 @@ public class RunSimulator
                 AfterWait:
                 // Flush start-of-turn setup if turn started
                 if (_turnStarted.IsSet || CombatManager.Instance.IsPlayPhase)
-                    PumpStartOfTurnSetup(player);
+                    PumpStartOfTurnSetup(player, roundAtEndTurn);
 
                 // Player died asynchronously (HP=0 but IsDead not set yet due to Harmony patch failure):
                 // return game_over directly instead of stuck to avoid cr spike on player death.
@@ -1013,9 +1072,22 @@ public class RunSimulator
                     Log($"EndTurn stuck after {(isBossRoom ? "10s(boss)" : "3s")} — returning stuck signal. Round={stuckState?.RoundNumber}, " +
                         $"Enemies=[{string.Join(",", stuckEnemies ?? new())}], " +
                         $"ActionExecutor.IsRunning={RunManager.Instance.ActionExecutor.IsRunning}");
+                    // Non-boss stuck: treat as player defeat for clean episode termination
+                    // instead of "stuck" crash signal which inflates crash rate and corrupts training.
+                    if (!isBossRoom)
+                        return GameOverState(false);
                     return new Dictionary<string, object?> { ["decision"] = "stuck" };
                 }
             }
+
+        }
+        catch (Exception ex)
+        {
+            // Belt-and-suspenders: catch any exception that escapes the inner SafePump/PlayerCmd
+            // try-catches (e.g. from async continuation re-throws or unhandled async paths).
+            // Return defeat instead of letting the exception propagate and corrupt game state.
+            Log($"DoEndTurn: outer catch: {ex.GetType().Name}: {ex.Message}");
+            return GameOverState(false);
         }
         finally
         {
@@ -1327,7 +1399,11 @@ public class RunSimulator
                 target = combatState?.Enemies?.FirstOrDefault(e => e != null && e.IsAlive);
             }
         }
-        // All other target types (None, All, etc.) → leave target as null
+        // All other target types (None, All, etc.):
+        // Fall back to player.Creature so self-heal potions (e.g. BloodPotion, TargetType.None)
+        // don't throw "single target potion during combat, but the target ID is null".
+        if (target == null && CombatManager.Instance.IsInProgress)
+            target = player.Creature;
 
         Log($"Using potion: {potion.GetType().Name} at slot {idx} target={target?.GetType().Name ?? "none"}");
         try
@@ -1476,7 +1552,7 @@ public class RunSimulator
     private Dictionary<string, object?> DoLeaveRoom(Player player)
     {
         Log("Leaving room");
-        try { RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult(); }
+        try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); }
         catch { }
         _syncCtx.Pump();
         WaitForActionExecutor();
@@ -1488,7 +1564,7 @@ public class RunSimulator
             Log("Force leaving non-combat room to map");
             try
             {
-                RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult();
+                PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)");
                 _syncCtx.Pump();
                 WaitForActionExecutor();
             }
@@ -1529,7 +1605,8 @@ public class RunSimulator
             }
         }
 
-        RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
+        try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); }
+        catch { }
         WaitForActionExecutor();
         return DetectDecisionPoint();
     }
@@ -1720,14 +1797,17 @@ public class RunSimulator
             {
                 return DetectPostCombatState(player, combatRoom);
             }
-            // Fallback: brief wait
-            for (int i = 0; i < 20; i++)
+            // Fallback: wait up to ~2s for combat state to resolve (killing-blow transitions
+            // can take >100ms for async EndCombat / reward generation to complete)
+            for (int i = 0; i < 400; i++)
             {
                 _syncCtx.Pump();
                 Thread.Sleep(5);
                 if (CombatManager.Instance.IsPlayPhase) return CombatPlayState(player);
                 if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
             }
+            // Final check after full wait: if combat ended, go to post-combat; else assume still in play
+            if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
             return CombatPlayState(player);
         }
 
@@ -2054,37 +2134,52 @@ public class RunSimulator
         Log($"Post-combat: RoomType={combatRoom.RoomType}, IsPreFinished={combatRoom.IsPreFinished}");
         _syncCtx.Pump();
 
-        // Generate rewards manually instead of using TestMode auto-accept
+        // Generate rewards manually instead of using TestMode auto-accept.
+        // Pump-while-waiting: Harmony patches fail on CoreCLR 10.0.5 so Task.Yield()
+        // continuations post to InlineSyncCtx but .GetResult() would deadlock because
+        // main thread is blocked. We pump InlineSyncCtx while waiting for completion.
         if (_pendingRewards == null && !_rewardsProcessed)
         {
             _goldBeforeCombat = player.Gold;
             try
             {
+                Log("[DBG-POSTCOMBAT] Creating RewardsSet");
                 var rewardsSet = new RewardsSet(player).WithRewardsFromRoom(combatRoom);
-                var rewards = rewardsSet.GenerateWithoutOffering().GetAwaiter().GetResult();
+                Log("[DBG-POSTCOMBAT] Calling GenerateWithoutOffering");
+                var genTask = rewardsSet.GenerateWithoutOffering();
+                Log($"[DBG-POSTCOMBAT] GenerateWithoutOffering task started, IsCompleted={genTask.IsCompleted}");
+                var rewards = PumpWhileWaiting(genTask, 10.0, "GenerateWithoutOffering");
+                Log($"[DBG-POSTCOMBAT] GenerateWithoutOffering done, rewards={(rewards == null ? "null" : "ok")}");
                 _syncCtx.Pump();
 
-                // Auto-collect gold and potions, but present card choices to agent
-                var cardRewards = new List<CardReward>();
-                foreach (var reward in rewards)
+                if (rewards == null)
                 {
-                    if (reward is GoldReward || reward is MegaCrit.Sts2.Core.Rewards.RelicReward
-                        || reward is MegaCrit.Sts2.Core.Rewards.PotionReward)
-                    {
-                        try { reward.OnSelectWrapper().GetAwaiter().GetResult(); _syncCtx.Pump(); }
-                        catch (Exception ex) { Log($"Auto-collect reward: {ex.Message}"); }
-                    }
-                    else if (reward is CardReward cr)
-                    {
-                        cardRewards.Add(cr);
-                    }
+                    Log("GenerateWithoutOffering returned null — skipping rewards");
                 }
-
-                if (cardRewards.Count > 0)
+                else
                 {
-                    _pendingCardReward = cardRewards[0];
-                    _pendingRewards = rewards;
-                    return CardRewardState(player, combatRoom);
+                    // Auto-collect gold and potions, but present card choices to agent
+                    var cardRewards = new List<CardReward>();
+                    foreach (var reward in rewards)
+                    {
+                        if (reward is GoldReward || reward is MegaCrit.Sts2.Core.Rewards.RelicReward
+                            || reward is MegaCrit.Sts2.Core.Rewards.PotionReward)
+                        {
+                            try { PumpWhileWaiting(reward.OnSelectWrapper(), 5.0, "OnSelectWrapper"); _syncCtx.Pump(); }
+                            catch (Exception ex) { Log($"Auto-collect reward: {ex.Message}"); }
+                        }
+                        else if (reward is CardReward cr)
+                        {
+                            cardRewards.Add(cr);
+                        }
+                    }
+
+                    if (cardRewards.Count > 0)
+                    {
+                        _pendingCardReward = cardRewards[0];
+                        _pendingRewards = rewards;
+                        return CardRewardState(player, combatRoom);
+                    }
                 }
 
                 _pendingRewards = null;
@@ -2171,18 +2266,18 @@ public class RunSimulator
 
     private void ForceToMap()
     {
-        try
-        {
-            RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
-            _syncCtx.Pump();
-        }
+        Log("[DBG-FORCEMAP] Calling ProceedFromTerminalRewardsScreen");
+        try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); }
         catch { }
+        _syncCtx.Pump();
 
         if (_runState?.CurrentRoom is not MapRoom)
         {
-            try { RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult(); _syncCtx.Pump(); }
+            Log("[DBG-FORCEMAP] Entering MapRoom");
+            try { PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)"); _syncCtx.Pump(); }
             catch (Exception ex) { Log($"ForceToMap: {ex.Message}"); }
         }
+        Log("[DBG-FORCEMAP] Done");
     }
 
     private Dictionary<string, object?> EventChoiceState(EventRoom eventRoom)
@@ -2211,16 +2306,12 @@ public class RunSimulator
         if (localEvent == null || localEvent.IsFinished)
         {
             Log($"Event {localEvent?.GetType().Name ?? "null"} finished, proceeding");
-            try
-            {
-                RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
-                _syncCtx.Pump();
-            }
+            try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); _syncCtx.Pump(); }
             catch { }
             // Force to map if still in event room
             if (_runState?.CurrentRoom is EventRoom)
             {
-                try { RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult(); _syncCtx.Pump(); }
+                try { PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)"); _syncCtx.Pump(); }
                 catch { }
             }
             return _runState?.CurrentRoom is MapRoom ? MapSelectState() : DetectDecisionPoint();
@@ -2230,7 +2321,7 @@ public class RunSimulator
         if (currentOptions == null || currentOptions.Count == 0)
         {
             Log($"Event {localEvent.GetType().Name} has no options, auto-skipping");
-            try { RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult(); _syncCtx.Pump(); }
+            try { PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)"); _syncCtx.Pump(); }
             catch { }
             return MapSelectState();
         }
@@ -2469,9 +2560,9 @@ public class RunSimulator
 
         try
         {
-            treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
+            PumpWhileWaiting(treasureRoom.DoNormalRewards(), 5.0, "DoNormalRewards");
             _syncCtx.Pump();
-            treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
+            PumpWhileWaiting(treasureRoom.DoExtraRewardsIfNeeded(), 5.0, "DoExtraRewardsIfNeeded");
             _syncCtx.Pump();
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("relic picking session"))
@@ -2482,9 +2573,9 @@ public class RunSimulator
             _syncCtx.Pump();
             try
             {
-                treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
+                PumpWhileWaiting(treasureRoom.DoNormalRewards(), 5.0, "DoNormalRewards");
                 _syncCtx.Pump();
-                treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
+                PumpWhileWaiting(treasureRoom.DoExtraRewardsIfNeeded(), 5.0, "DoExtraRewardsIfNeeded");
                 _syncCtx.Pump();
             }
             catch (Exception retryEx) { Log($"Treasure rewards retry failed: {retryEx.Message}"); }
@@ -2539,12 +2630,41 @@ public class RunSimulator
                     if (!executor.IsRunning) break;
                     Thread.Sleep(1);
                 }
+                if (executor.IsRunning)
+                    Log("[DBG-WAE] WaitForActionExecutor timed out (executor still running after 1s)");
             }
         }
         catch (Exception ex)
         {
             Log($"WaitForActionExecutor exception: {ex.Message}");
         }
+    }
+
+    // Pump InlineSyncCtx while waiting for an async Task to complete.
+    // Harmony patches fail on CoreCLR 10.0.5, so Task.Yield() continuations post to
+    // InlineSyncCtx rather than running inline. Blocking with .GetResult() deadlocks;
+    // this helper drains the queue in a loop so continuations can make progress.
+    private void PumpWhileWaiting(Task task, double timeoutSeconds = 5.0, string? label = null)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (!task.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            SynchronizationContext.SetSynchronizationContext(_syncCtx);
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            if (task.IsCompleted) break;
+            Thread.Sleep(1);
+        }
+        if (!task.IsCompleted)
+            Log($"PumpWhileWaiting[{label ?? "task"}] timed out after {timeoutSeconds}s");
+        else if (task.IsFaulted)
+            Log($"PumpWhileWaiting[{label ?? "task"}] faulted: {task.Exception?.InnerException?.Message}");
+    }
+
+    private T? PumpWhileWaiting<T>(Task<T> task, double timeoutSeconds = 5.0, string? label = null)
+    {
+        PumpWhileWaiting((Task)task, timeoutSeconds, label);
+        return task.IsCompletedSuccessfully ? task.Result : default;
     }
 
     /// <summary>
@@ -2555,13 +2675,16 @@ public class RunSimulator
     /// Call this immediately after detecting _turnStarted.IsSet or IsPlayPhase=true to
     /// flush those continuations inline.
     /// </summary>
-    private void PumpStartOfTurnSetup(Player player)
+    private void PumpStartOfTurnSetup(Player player, int prevRound = -1)
     {
         if (!CombatManager.Instance.IsPlayPhase) return;
         YieldPatches.SuppressYield = true;
         try
         {
-            for (int i = 0; i < 60; i++)
+            // Hard 5s deadline: each WaitForActionExecutor can take up to 1s; without a
+            // deadline a stuck executor would loop 60 × 1s = 60s → Python timeout crash.
+            var deadline = DateTime.UtcNow.AddSeconds(5.0);
+            for (int i = 0; i < 60 && DateTime.UtcNow < deadline; i++)
             {
                 WaitForActionExecutor();
                 _syncCtx.Pump();
@@ -2570,9 +2693,14 @@ public class RunSimulator
                              + (pcs?.DiscardPile?.Cards?.Count ?? 0);
                 // Done when energy is restored, or cards appear in hand,
                 // or the deck is genuinely empty (nothing left to draw).
-                if ((pcs?.Energy ?? 0) > 0
+                bool turnDataReady = (pcs?.Energy ?? 0) > 0
                     || (pcs?.Hand?.Cards?.Count ?? 0) > 0
-                    || drawLeft == 0)
+                    || drawLeft == 0;
+                // Also require round to have advanced past prevRound so DetectDecisionPoint()
+                // doesn't return stale round=N — Python stuck detection fires if round unchanged.
+                int curRound = CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0;
+                bool roundAdvanced = prevRound <= 0 || curRound > prevRound;
+                if (turnDataReady && roundAdvanced)
                     break;
                 Thread.Sleep(5);
             }

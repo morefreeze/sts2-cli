@@ -1,5 +1,21 @@
 # STS2-CLI Bug Tracker
 
+## [FIXED] BUG-034: Whirlwind NullRef + round-stale stuck causing cr=6% in Run 16 (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (play_card WHIRLWIND; end_turn after any fast-path enemy turn)
+- **Description**: Two related crash causes contributing ~3-4% each to cr=6%:
+  1. `Whirlwind.OnPlay()` throws `NullReferenceException` in headless (missing Godot creature reference). DoPlayCard catches it and returns GameOverState(false), but the card should simply not be acquired.
+  2. `PumpStartOfTurnSetup` exits when `energy > 0` before `RoundNumber` increments. `DetectDecisionPoint()` returns `combat_play` with stale round=N. Python stuck detection sees end_turn returning same round+HP → sends 5 proceeds → kills process → `crashed=True`.
+- **Fix**:
+  1. Lowered `WHIRLWIND` score from 7.0 to 1.0 in `card_scoring.py` so agent stops acquiring it.
+  2. Added `prevRound` parameter to `PumpStartOfTurnSetup` — keeps pumping until both turn data ready AND `RoundNumber > prevRound`.
+- **Relevant code**: RunSimulator.cs (PumpStartOfTurnSetup); agent/card_scoring.py (WHIRLWIND)
+
+## [FIXED] BUG-033: BloodPotion crash — TargetType.None self-heal potion needs player.Creature target in combat (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (use_potion during combat)
+- **Description**: `BloodPotion` has `TargetType.None` but the game engine's `UsePotionAction.ExecuteAction()` internally classifies it as a "single target" potion. When `target=null` (the BUG-002 fix), the game throws `InvalidOperationException: Attempted to execute UsePotionAction with single target potion during combat, but the target ID is null!`
+- **Fix**: Added fallback: when `target == null && CombatManager.Instance.IsInProgress`, set `target = player.Creature`.
+- **Relevant code**: Sts2Headless/RunSimulator.cs (DoUsePotion, line ~1401)
+
 ## [FIXED] BUG-001: Potion index shifts after use, causing invalid index errors (2026-03-22, fixed 2026-03-22)
 - **Decision type**: combat_play
 - **Description**: After using a potion at index 0, remaining potions shift indices but the old indices are still referenced.
@@ -189,12 +205,26 @@
 - **Fix**: IL-patch `lib/sts2.dll` via Mono.Cecil to replace both Cmd.Wait() overloads with `return Task.CompletedTask`. Added to setup.sh (Patch 3) so future installs apply the fix permanently.
 - **Relevant code**: setup.sh (Patch 3), lib/sts2.dll
 
-## [FIXED] BUG-031: KinPriest crash — GpuParticles2D.Amount missing from GodotStubs (2026-04-30, fixed 2026-04-30)
+## [FIXED] BUG-031: DetectPostCombatState deadlock — GenerateWithoutOffering blocks main thread with SuppressYield=false (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (play_card with hand=1 enemies=1 — killing the last enemy)
+- **Description**: `DetectPostCombatState()` calls `rewardsSet.GenerateWithoutOffering().GetAwaiter().GetResult()` without SuppressYield=true. The async method contains `await Task.Yield()` calls (IL-patched in sts2.dll). With SuppressYield=false, continuations post to `InlineSyncCtx`, but main thread is blocked on `.GetResult()` → permanent deadlock. Same applies to `OnSelectWrapper().GetResult()`.
+- **Evidence**: All 9+ crash log entries have `hand=1 enemies=1 play_card` or `end_turn` pattern — all represent the combat-ending action where the last enemy dies and rewards are generated. cr=11% steady.
+- **Fix**: Wrapped `GenerateWithoutOffering().GetResult()` and `OnSelectWrapper().GetResult()` in `DetectPostCombatState` with `YieldPatches.SuppressYield = true` / finally block. Also added `SuppressYield=true` to `DoPlayCard`'s `WaitForActionExecutor()` call so on-death async effects complete inline.
+- **Relevant code**: RunSimulator.cs (`DetectPostCombatState` ~line 2083, `DoPlayCard` ~line 899)
+
+## [FIXED] BUG-032: KinPriest crash — GpuParticles2D.Amount missing from GodotStubs (2026-04-30, fixed 2026-04-30)
 - **Decision type**: combat_play (end_turn during KinPriest boss fight)
 - **Description**: KinPriest (and KinFollower) emit VFX via `GpuParticles2D.Amount` property setter. This method was not stubbed in GodotStubs, causing "Method not found: 'Void Godot.GpuParticles2D.set_Amount(Int32)'" exceptions that killed the ActionExecutor.
 - **Evidence**: 87 "EndTurn stuck after Ns — KinFollower/KinPriest" entries in crash_stderr.log. Error message "Method not found: 'Void Godot.GpuParticles2D.set_Amount'" in log.
 - **Fix**: Added `Amount`, `Lifetime`, `LifetimeRandomness`, `OneShot`, `LocalCoords`, `SpeedScale`, `Explosiveness`, `Restart()` to GpuParticles2D and CpuParticles2D in GodotStubs/UI.cs and ExtraGodotTypes.cs.
 - **Relevant code**: src/GodotStubs/UI.cs (GpuParticles2D), src/GodotStubs/ExtraGodotTypes.cs (CpuParticles2D)
+
+## [FIXED] BUG-033: BloodPotion crash — TargetType.None self-heal potion needs player.Creature target in combat (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (use_potion during combat)
+- **Description**: `BloodPotion` has `TargetType.None` but the game engine's `UsePotionAction.ExecuteAction()` internally classifies it as a "single target" potion. When `target=null` (the BUG-002 fix), the game throws `InvalidOperationException: Attempted to execute UsePotionAction with single target potion during combat, but the target ID is null!`. This unobserved async exception is rethrown by the .NET finalizer thread, crashing the process. Evidence: ~7% cr rate in Run 16, 2x per crash_stderr.log entry.
+- **Root cause**: BUG-002 fix removed the catch-all `target = player.Creature` fallback. BloodPotion has `TargetType.None` but still requires a creature target in combat.
+- **Fix**: Added fallback: when `target == null && CombatManager.Instance.IsInProgress`, set `target = player.Creature`. This covers all TargetType.None potions used in combat (BloodPotion, Fortifier, etc.) which should all target the player.
+- **Relevant code**: Sts2Headless/RunSimulator.cs (DoUsePotion, line ~1401)
 
 ## [FIXED] BUG-026: Attack Potion card_select deadlocks combat — all cards unplayable (2026-03-23, fixed 2026-03-23)
 - **Decision type**: combat_play (use_potion with Attack Potion)

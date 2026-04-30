@@ -77,7 +77,7 @@ OVERRIDES: dict[str, float] = {
     "BLOODLETTING": 7.0,    # free energy
     "RAGE": 7.0,            # block on attack plays
     "DROPKICK": 8.0,        # 5 dmg + draw + energy if vuln target
-    "WHIRLWIND": 7.0,       # X-cost AOE
+    "WHIRLWIND": 1.0,       # X-cost AOE — causes NullRef crash in headless (BUG-034)
     "HEAVY_BLADE": 7.0,     # scales with str (3x multiplier)
     "SWORD_BOOMERANG": 7.0, # 3x3 random hits
     "CLASH": 6.5,           # 0-cost, 14 dmg — great in attack-heavy decks
