@@ -64,7 +64,7 @@ class HpAwareMapStrategy(Act1SafeStrategy):
     """
     HP_DANGER = 0.40   # below this: strong elite avoidance
     HP_LOW    = 0.60   # below this: moderate elite avoidance
-    HP_STRONG = 0.75   # above this (and floor > 6): slight elite preference
+    HP_STRONG = 0.85   # above this (and floor > 6): slight elite preference
 
     ELITE_PREFER_FLOOR = 6  # only prefer elites after Act 1 mid-game
 
@@ -91,10 +91,11 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                 elif hp_ratio < self.HP_LOW:
                     p += 7
                 elif hp_ratio >= self.HP_STRONG and isinstance(floor, int) and floor > self.ELITE_PREFER_FLOOR and floor <= 12:
-                    p -= 1.9  # healthy + mid-game: elites worth it for relics
+                    p -= 1.9  # very healthy (85%+) + mid-game: elites worth it for relics
                     # Use 1.9 not 2.0: prevents Elite from tying Unknown/Event (p=4)
                     # when both appear — tied priority resolves by index (Elite=0 wins), which
                     # would silently prefer combat over a safe event room.
+                    # HP_STRONG raised to 0.85: runs at 75-85% HP shouldn't seek elites.
                 elif isinstance(floor, int) and floor >= 13:
                     p += 3  # pre-boss zone: save HP for boss fight, avoid elites
             scored.append((p, i, c))
@@ -107,26 +108,29 @@ class HpAwareMapStrategy(Act1SafeStrategy):
 def rest_site_action(state: dict, options: list[dict]) -> dict:
     """Decide heal vs upgrade at a rest site based on current HP ratio and floor.
 
-    Rules:
-    - floor >= 11 (pre-boss zone): heal if HP < 85%, otherwise upgrade
-    - HP < 70%  → always heal (survival first)
-    - HP >= 70% → upgrade if SMITH is available, else heal
-    - Fallback  → first enabled option
+    Rules (graduated thresholds):
+    - floor >= 11 (pre-boss): heal if HP < 85%, otherwise upgrade
+    - floor >= 6  (mid-game): heal if HP < 80%, otherwise upgrade
+    - floor <  6  (early):    heal if HP < 75%, otherwise upgrade
     """
     player = state.get("player", {})
     hp = player.get("hp", 0)
     max_hp = max(player.get("max_hp", 80), 1)
     hp_ratio = hp / max_hp
     floor = state.get("floor") or state.get("context", {}).get("floor", 0)
-    pre_boss = isinstance(floor, int) and floor >= 11
+
+    if isinstance(floor, int) and floor >= 11:
+        heal_threshold = 0.85
+    elif isinstance(floor, int) and floor >= 6:
+        heal_threshold = 0.80
+    else:
+        heal_threshold = 0.75
 
     enabled = [o for o in options if o.get("is_enabled", True)]
     heal  = next((o for o in enabled if "heal"  in (o.get("option_id") or "").lower()), None)
     smith = next((o for o in enabled if "smith" in (o.get("option_id") or "").lower()), None)
 
-    if pre_boss and hp_ratio < 0.85:
-        choice = heal or (enabled[0] if enabled else None)
-    elif hp_ratio < 0.75 or smith is None:
+    if hp_ratio < heal_threshold or smith is None:
         choice = heal or (enabled[0] if enabled else None)
     else:
         choice = smith or heal or (enabled[0] if enabled else None)

@@ -163,6 +163,9 @@ def _score_event_option(opt: dict) -> float:
         score += 2.0  # generic card reward (common): better than nothing
     if "remove" in text and ("card" in text or "deck" in text):
         score += 6.0  # deck thinning = very valuable
+    # Removing cards at HP cost (e.g. Precarious Shears): net value reduced vs free removal
+    if "remove" in text and ("card" in text or "deck" in text) and "hp" in text and "curse" not in text:
+        score -= 3.0
     if "relic" in text and "add" not in text:
         score += 5.0  # relics without downside
     elif "relic" in text:
