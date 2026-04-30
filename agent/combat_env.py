@@ -277,9 +277,28 @@ def greedy_action(state: dict) -> dict:
 
     elif decision == "shop":
         gold = state.get("player", {}).get("gold", 0)
+        player = state.get("player", {})
+        hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
+        held_potions = len(player.get("potions", []))
         floor = state.get("floor") or state.get("context", {}).get("floor", 0)
         removal_cost = state.get("card_removal_cost")
         pre_boss = isinstance(floor, int) and floor >= 11
+
+        # Emergency: buy health potion first when HP is critically low (< 50%)
+        # Without this, the agent spends all gold on cards/relics and enters next fight
+        # with low HP and no heal potion.
+        if hp_ratio < 0.50 and held_potions < 3:
+            shop_potions = [p for p in state.get("potions", [])
+                            if p.get("is_stocked") and p.get("cost", 999) <= gold]
+            for sp in shop_potions:
+                sp_name = (sp.get("name") or {})
+                sp_name = (sp_name.get("en", "") if isinstance(sp_name, dict) else str(sp_name)).lower()
+                sp_desc = (sp.get("description") or {})
+                sp_desc = (sp_desc.get("en", "") if isinstance(sp_desc, dict) else str(sp_desc)).lower()
+                if ("heal" in sp_name + sp_desc or "restore" in sp_name + sp_desc) and "curse" not in sp_name + sp_desc:
+                    return {"cmd": "action", "action": "buy_potion",
+                            "args": {"potion_index": sp.get("index", 0)}}
+
         # Find best affordable card
         cards = [c for c in state.get("cards", [])
                  if c.get("is_stocked") and c.get("cost", 999) <= gold]
@@ -308,7 +327,6 @@ def greedy_action(state: dict) -> dict:
                 return {"cmd": "action", "action": "buy_relic",
                         "args": {"relic_index": best_relic.get("index", 0)}}
         # Buy a potion if we have empty slots and it's affordable
-        held_potions = len(state.get("player", {}).get("potions", []))
         if held_potions < 3:
             shop_potions = [p for p in state.get("potions", [])
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
@@ -507,11 +525,10 @@ class CombatEnv(gym.Env):
                 )
             )
             if is_killing_blow:
-                # Cap reward at 0.5 to prevent crash exploitation:
-                # step_penalty makes crashing in ~3 steps give 0.5-0.01=0.49 reward,
-                # vs winning legitimately in ~15 steps gives 3.75-0.045=3.70.
-                # Crashing is never more profitable than actually winning.
-                reward = min(0.5, self._combat_win_reward(self._current_state))
+                # Combat won (last enemy killed), but C# crashed in post-combat cleanup.
+                # Give full win reward — BUG-031 fix makes this very rare, so no exploitation risk.
+                # _game_alive must be False (already set above) so reset() starts a fresh game.
+                reward = self._combat_win_reward(self._current_state)
                 print(f"\n[CRASH→WIN] floor={floor} reward={reward:.2f}",
                       file=sys.stderr, flush=True)
                 return last_obs, reward, True, False, {
@@ -634,29 +651,17 @@ class CombatEnv(gym.Env):
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
         dmg_reward = 0.15 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
-        # Increased from -0.35: stronger HP conservation drives cumulative HP health across floors
         hp_penalty = -0.50 * player_hp_lost / self._combat_start_player_max_hp
-
-        # Block effectiveness: reward blocking incoming damage
-        incoming = 0
-        for e in next_state.get("enemies", []):
-            for it in (e.get("intents") or []):
-                if it.get("type", "").lower() == "attack":
-                    incoming += it.get("damage", 0) * (it.get("hits") or 1)
-        player_block = next_state.get("player", {}).get("block", 0)
-        block_reward = 0.0
-        if incoming > 0 and player_block > 0:
-            effective_block = min(player_block, incoming)
-            block_reward = 0.15 * effective_block / self._combat_start_player_max_hp
 
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
 
-        # Small step penalty: discourages stalling/timeout (200 steps → -0.60).
-        # Small enough not to push the agent to suicide in hard fights,
-        # but eliminates the locally-optimal "spam block forever" strategy.
+        # Step penalty: discourages stalling / timeout (200 steps → -0.60).
+        # block_reward removed: it made pure-blocking per-step positive (0.019 > 0.003 step_penalty),
+        # causing policy collapse into "block forever, never attack" → 60%+ timeout rate.
+        # Blocking is still incentivized implicitly by hp_penalty (blocking prevents damage).
         step_penalty = -0.003
-        return dmg_reward + hp_penalty + block_reward + step_penalty
+        return dmg_reward + hp_penalty + step_penalty
 
     def _combat_win_reward(self, state: dict) -> float:
         hp = _player_hp(state)
