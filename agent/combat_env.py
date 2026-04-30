@@ -408,6 +408,7 @@ class CombatEnv(gym.Env):
                 self._game_alive = False
                 self._kill_proc()
                 self._current_state = _dummy_combat_state()
+                self._init_combat_tracking(self._current_state)  # prevent stale max_hp=1
                 crashed = (state is None or state.get("decision") == "stuck")
                 return self._encode(self._current_state), {
                     "game_over": True,
@@ -425,6 +426,7 @@ class CombatEnv(gym.Env):
         if state is None:
             self._game_alive = False
             self._current_state = _dummy_combat_state()
+            self._init_combat_tracking(self._current_state)  # prevent stale max_hp=1
             return self._encode(self._current_state), {}
 
         self._game_alive = True
@@ -432,6 +434,7 @@ class CombatEnv(gym.Env):
         if state is None or state.get("decision") != "combat_play":
             self._game_alive = False
             self._current_state = _dummy_combat_state()
+            self._init_combat_tracking(self._current_state)  # prevent stale max_hp=1
             return self._encode(self._current_state), {}
 
         self._init_combat_tracking(state)
@@ -633,8 +636,10 @@ class CombatEnv(gym.Env):
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
 
-        # No step penalty — avoids incentivizing fast death spiral
-        step_penalty = 0.0
+        # Small step penalty: discourages stalling/timeout (200 steps → -0.60).
+        # Small enough not to push the agent to suicide in hard fights,
+        # but eliminates the locally-optimal "spam block forever" strategy.
+        step_penalty = -0.003
         return dmg_reward + hp_penalty + block_reward + step_penalty
 
     def _combat_win_reward(self, state: dict) -> float:
