@@ -677,9 +677,12 @@ class CombatEnv(gym.Env):
             reward += 0.50
         elif hp_ratio >= 0.7:
             reward += 0.25
-        # Floor bonus: 0.10/floor (up from 0.05), cap 1.5 (up from 0.8)
-        # Incentivizes reaching higher floors without overwhelming HP signal
-        floor_bonus = min((self._current_floor - 1) * 0.10, 1.5)
+        # Floor bonus: Act 1 (floor≤15) = 0.10/floor; Act 2+ gets +0.15/floor above 15.
+        # Raises incentive to push into Act 2 beyond the Act 1 boss.
+        if self._current_floor <= 15:
+            floor_bonus = (self._current_floor - 1) * 0.10
+        else:
+            floor_bonus = 1.4 + (self._current_floor - 15) * 0.15
         reward += floor_bonus
         return reward
 
