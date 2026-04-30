@@ -453,6 +453,11 @@ class CombatEnv(gym.Env):
         if self.dry_run or self._current_state is None:
             return np.zeros(self.enc.obs_size + self._EXTRA_OBS, dtype=np.float32), -2.0, True, False, {}
 
+        # Detect dead process (e.g. potion crash in _greedy_use_potions during reset)
+        if not self._game_alive:
+            return (self._encode(self._current_state), -2.0, True, False,
+                    {"crashed": True, "floor": self._current_floor})
+
         self._combat_steps += 1
         if self._combat_steps > self.max_combat_steps:
             # Combat too long — treat as defeat to avoid wasting time
@@ -502,7 +507,11 @@ class CombatEnv(gym.Env):
                 )
             )
             if is_killing_blow:
-                reward = self._combat_win_reward(self._current_state)
+                # Cap reward at 0.5 to prevent crash exploitation:
+                # step_penalty makes crashing in ~3 steps give 0.5-0.01=0.49 reward,
+                # vs winning legitimately in ~15 steps gives 3.75-0.045=3.70.
+                # Crashing is never more profitable than actually winning.
+                reward = min(0.5, self._combat_win_reward(self._current_state))
                 print(f"\n[CRASH→WIN] floor={floor} reward={reward:.2f}",
                       file=sys.stderr, flush=True)
                 return last_obs, reward, True, False, {
@@ -702,6 +711,7 @@ class CombatEnv(gym.Env):
                     args["target_index"] = 0
                 new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
                 if new_state is None:
+                    self._game_alive = False
                     break
                 state = new_state
                 if state.get("decision") not in ("combat_play",):
@@ -814,11 +824,15 @@ class CombatEnv(gym.Env):
             if not use:
                 continue
 
-            args: dict = {"potion_index": pidx}
-            if target_type == "anyenemy" or target_index is not None:
-                args["target_index"] = target_index or 0
+            # Always send target_index: targeted potions need enemy 0, non-targeted ignore it.
+            # Omitting it causes C# to crash with "target ID is null" for single-target potions.
+            args: dict = {
+                "potion_index": pidx,
+                "target_index": target_index if target_index is not None else 0,
+            }
             new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
             if new_state is None:
+                self._game_alive = False
                 break
             # Resolve card_select (Attack Potion picks a card) or proceed
             for _ in range(10):
