@@ -675,7 +675,10 @@ class CombatEnv(gym.Env):
         """
         player = state.get("player", {})
         hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
-        if hp_ratio >= 0.40:
+        room_type = (state.get("context") or {}).get("room_type", "")
+        is_boss = "boss" in room_type.lower()
+        heal_threshold = 0.50 if is_boss else 0.40
+        if hp_ratio >= heal_threshold:
             return state  # healthy enough, no heal needed
         potions = player.get("potions", []) or []
         for p in potions:
@@ -754,11 +757,10 @@ class CombatEnv(gym.Env):
                 else:
                     use = hp_ratio < 0.30
             elif "block" in text:
-                # Block potion: use when incoming damage is threatening regardless of fight type
-                # - Incoming > 50% of remaining HP (will take a serious hit)
-                # - OR standard HP-ratio threshold at elite/boss
+                # Block potion: always use at boss (30 block is always worth it vs boss attacks);
+                # at elite/threatening: use when damaged or incoming is severe
                 threatening = incoming_dmg > 0 and unblocked_dmg >= hp_cur * 0.45
-                use = threatening or (is_tough and hp_ratio < (0.70 if is_boss else 0.60))
+                use = is_boss or threatening or (is_elite and hp_ratio < 0.60)
             elif not is_tough and not is_late_game:
                 continue  # other potions: save for elite/boss (but use freely in late game)
             elif not is_tough:
@@ -799,6 +801,8 @@ class CombatEnv(gym.Env):
                 use = is_boss  # power/ancient potion: save for boss
             elif "speed" in text:
                 use = is_tough  # speed potion: dex bonus at elite/boss
+            elif is_boss:
+                use = True  # boss fight: dump any remaining unmatched potion
 
             if not use:
                 continue
