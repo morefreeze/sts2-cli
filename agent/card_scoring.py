@@ -57,6 +57,11 @@ OVERRIDES: dict[str, float] = {
     "EXPECT_A_FIGHT": 5.0,     # gain 1 energy per Attack in hand — strong in attack-heavy decks
     "ASHEN_STRIKE": 5.0,       # damage scales with exhaust pile — strong with exhaust synergy
     "TREMBLE": 4.5,            # 1-cost Apply Vulnerable — combo piece with attack-heavy deck
+    "RUPTURE": 4.5,            # power: +1 Str when losing HP from card — synergy with OFFERING/BRUTALITY
+    "FEROCITY": 6.5,           # power: +1 Str per Attack played — snowballs in attack-heavy deck
+    "HEARTSEEKER": 7.0,        # 8 dmg + 1 Vulnerable — efficient attack/debuff combo
+    "OBLITERATE": 7.5,         # 20 dmg Exhaust — high single-hit for 1 energy
+    "PREDATOR": 6.5,           # 15 dmg + conditional draw — good damage with upside
 
     # === Strong cards (7-8) ===
     "BARRICADE": 8.5,        # block persists between turns — enables massive block stacking
