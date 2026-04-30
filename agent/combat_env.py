@@ -737,17 +737,37 @@ class CombatEnv(gym.Env):
             # Damage that bypasses current block (what we'll actually take)
             unblocked_dmg = max(0, incoming_dmg - blk_cur)
 
+            # Late-game (floor 10+): survivability matters more than saving potions
+            is_late_game = self._current_floor >= 10
+
             if ("heal" in text or "restore" in text) and "curse" not in text:
-                # Heal: any fight at 30%, elite/boss at 50%
-                use = hp_ratio < 0.30 or (is_tough and hp_ratio < 0.50)
+                # Heal thresholds: boss=50%, elite/late-game=40%, any=30%
+                if is_boss:
+                    use = hp_ratio < 0.50
+                elif is_elite or is_late_game:
+                    use = hp_ratio < 0.40
+                else:
+                    use = hp_ratio < 0.30
             elif "block" in text:
                 # Block potion: use when incoming damage is threatening regardless of fight type
                 # - Incoming > 50% of remaining HP (will take a serious hit)
                 # - OR standard HP-ratio threshold at elite/boss
                 threatening = incoming_dmg > 0 and unblocked_dmg >= hp_cur * 0.45
                 use = threatening or (is_tough and hp_ratio < (0.70 if is_boss else 0.60))
+            elif not is_tough and not is_late_game:
+                continue  # other potions: save for elite/boss (but use freely in late game)
             elif not is_tough:
-                continue  # other potions: save for elite/boss
+                # Late-game monster fights: use offensive/utility potions when damaged
+                if "strength" in text or "flex" in text or "energy" in text:
+                    use = hp_ratio < 0.60  # use offensive boost if damaged
+                elif "fire" in text or "explosive" in text or "attack" in text:
+                    use = hp_ratio < 0.50
+                    target_index = 0 if target_type == "anyenemy" else None
+                elif "weak" in text or "fear" in text or "vulnerable" in text:
+                    use = hp_ratio < 0.50
+                    target_index = 0 if target_type == "anyenemy" else None
+                else:
+                    continue  # save specialty potions for boss
             elif "strength" in text or "flex" in text:
                 use = True  # always use strength/flex at elite/boss
             elif "dexterity" in text:
