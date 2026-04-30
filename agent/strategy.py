@@ -90,11 +90,13 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                     p += 15
                 elif hp_ratio < self.HP_LOW:
                     p += 7
-                elif hp_ratio >= self.HP_STRONG and isinstance(floor, int) and floor > self.ELITE_PREFER_FLOOR:
+                elif hp_ratio >= self.HP_STRONG and isinstance(floor, int) and floor > self.ELITE_PREFER_FLOOR and floor <= 12:
                     p -= 1.9  # healthy + mid-game: elites worth it for relics
                     # Use 1.9 not 2.0: prevents Elite from tying Unknown/Event (p=4)
                     # when both appear — tied priority resolves by index (Elite=0 wins), which
                     # would silently prefer combat over a safe event room.
+                elif isinstance(floor, int) and floor >= 13:
+                    p += 3  # pre-boss zone: save HP for boss fight, avoid elites
             scored.append((p, i, c))
         scored.sort()
         best = scored[0][2]
@@ -124,7 +126,7 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
 
     if pre_boss and hp_ratio < 0.85:
         choice = heal or (enabled[0] if enabled else None)
-    elif hp_ratio < 0.70 or smith is None:
+    elif hp_ratio < 0.75 or smith is None:
         choice = heal or (enabled[0] if enabled else None)
     else:
         choice = smith or heal or (enabled[0] if enabled else None)

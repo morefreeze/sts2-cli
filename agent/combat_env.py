@@ -211,12 +211,11 @@ def greedy_action(state: dict) -> dict:
         if cards:
             deck_size = state.get("player", {}).get("deck_size", 10)
             # Raise pick threshold as deck grows: keep deck lean
-            if deck_size >= 20:
+            # Always require 5.5+ — ANGER/FLEX (5.0) bloat the deck and slow cycling.
+            if deck_size >= 18:
                 threshold = 6.5
-            elif deck_size >= 15:
-                threshold = 5.5
             else:
-                threshold = 3.5
+                threshold = 5.5
             best = pick_best_card(cards, threshold=threshold)
             if best is not None:
                 return {"cmd": "action", "action": "select_card_reward",
@@ -481,6 +480,25 @@ class CombatEnv(gym.Env):
             floor = self._current_floor
             hand_size = len(self._current_state.get("hand", []))
             n_enemies = len(self._current_state.get("enemies", []))
+
+            # Killing-blow crash: the last enemy died (from play_card or from poison/power
+            # during end_turn), and C# crashed in DetectPostCombatState post-combat cleanup.
+            # The combat WAS won. Give combat_win_reward instead of -2.0 crash penalty.
+            cmd = getattr(self, "_last_cmd", {})
+            action = cmd.get("action", "") if isinstance(cmd, dict) else ""
+            is_killing_blow = (
+                n_enemies == 1 and (
+                    action == "play_card" or action == "end_turn"
+                )
+            )
+            if is_killing_blow:
+                reward = self._combat_win_reward(self._current_state)
+                print(f"\n[CRASH→WIN] floor={floor} reward={reward:.2f}",
+                      file=sys.stderr, flush=True)
+                return last_obs, reward, True, False, {
+                    "floor": floor, "combat_won": True,
+                }
+
             print(f"\n[CRASH] floor={floor} cmd={cmd_str} hand={hand_size} enemies={n_enemies}",
                   file=sys.stderr, flush=True)
             return last_obs, -2.0, True, False, {"crashed": True, "floor": floor}
@@ -866,9 +884,9 @@ class CombatEnv(gym.Env):
         try:
             self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
             self._proc.stdin.flush()
-            # DoEndTurn can take up to ~15s (3s wait + 5s cancel + nuclear fallback).
-            # Use 20s timeout to avoid false crash on slow enemy turns.
-            return self._read_json(timeout_sec=20.0)
+            # DoEndTurn takes ~3-15s; killing blow triggers DetectPostCombatState
+            # which can take up to ~10s for reward generation. Use 60s to be safe.
+            return self._read_json(timeout_sec=60.0)
         except Exception:
             self._kill_proc()
             return None
