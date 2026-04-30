@@ -274,7 +274,9 @@ def greedy_action(state: dict) -> dict:
 
     elif decision == "shop":
         gold = state.get("player", {}).get("gold", 0)
+        floor = state.get("floor") or state.get("context", {}).get("floor", 0)
         removal_cost = state.get("card_removal_cost")
+        pre_boss = isinstance(floor, int) and floor >= 11
         # Find best affordable card
         cards = [c for c in state.get("cards", [])
                  if c.get("is_stocked") and c.get("cost", 999) <= gold]
@@ -287,8 +289,10 @@ def greedy_action(state: dict) -> dict:
         # Remove a card if affordable (deck thinning is very valuable)
         if removal_cost and gold >= removal_cost:
             return {"cmd": "action", "action": "remove_card"}
-        # Buy good card (score ≥ 6.0) after removal opportunity checked
-        if best_card and best_score >= 6.0:
+        # Pre-boss zone (floor 11+): lower threshold to 5.5 to snag decent cards
+        card_buy_threshold = 5.5 if pre_boss else 6.0
+        # Buy good card after removal opportunity checked
+        if best_card and best_score >= card_buy_threshold:
             return {"cmd": "action", "action": "buy_card",
                     "args": {"card_index": best_card.get("index", 0)}}
         # Buy a relic if score is high enough and affordable (threshold: keep 50g buffer)
