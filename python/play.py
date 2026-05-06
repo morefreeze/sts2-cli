@@ -21,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 LIB_DIR = os.path.join(ROOT, "lib")
 SAVE_DIR = os.path.join(ROOT, "saves")
-CURRENT_SAVE_SCHEMA_VERSION = 14
+
 
 def _find_dotnet():
     """Find .NET SDK binary."""
@@ -44,6 +44,15 @@ def _find_dotnet():
 DOTNET = _find_dotnet()
 
 
+def _is_wsl():
+    """Check if running inside WSL."""
+    try:
+        with open("/proc/version", "r") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
 def _find_game_dir():
     """Auto-detect STS2 Steam install directory."""
     import platform
@@ -56,6 +65,19 @@ def _find_game_dir():
             os.path.join(base, "data_sts2_macos_x86_64"),
         ]
     elif system == "Linux":
+        if _is_wsl():
+            # WSL: scan Windows drives for Steam install
+            for drv in ["/mnt/c", "/mnt/d", "/mnt/e", "/mnt/f", "/mnt/g"]:
+                for steam in [
+                    f"{drv}/Program Files (x86)/Steam",
+                    f"{drv}/Program Files/Steam",
+                    f"{drv}/SteamLibrary",
+                    f"{drv}/Games/Steam",
+                    f"{drv}/Steam",
+                ]:
+                    d = f"{steam}/steamapps/common/Slay the Spire 2/data_sts2_windows_x86_64"
+                    candidates.append(d)
+        # Native Linux Steam
         for steam in ["~/.steam/steam", "~/.local/share/Steam"]:
             candidates.append(os.path.expanduser(f"{steam}/steamapps/common/Slay the Spire 2"))
     elif system == "Windows":
@@ -143,10 +165,9 @@ def ensure_setup():
             print("❌ Failed to copy sts2.dll")
             sys.exit(1)
 
-    # Set STS2_GAME_DIR env var for runtime DLL resolution
-    game_dir = _find_game_dir()
-    if game_dir:
-        os.environ["STS2_GAME_DIR"] = game_dir
+    # Set STS2_GAME_DIR env var for runtime DLL resolution (point to lib/ where DLLs were copied)
+    if "STS2_GAME_DIR" not in os.environ:
+        os.environ["STS2_GAME_DIR"] = LIB_DIR
 
     # Check if built
     exe_dir = os.path.join(ROOT, "src", "Sts2Headless", "bin", "Debug", "net9.0")
@@ -203,8 +224,13 @@ def _id_to_name(model_id):
 
 def show_native_save(save_path):
     """Parse and display a native current_run.save file."""
-    with open(save_path) as f:
-        data = json.load(f)
+    try:
+        with open(save_path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"{t('Error:','错误:')} Save file is not valid JSON: {save_path}")
+        print(f"  {e}")
+        sys.exit(1)
 
     print(f"\n{'═' * 60}")
     print(f"  {t('Native Save File', '游戏原生存档')}")
@@ -228,7 +254,8 @@ def show_native_save(save_path):
     if room:
         room_type = room.get("room_type", "?")
         enc = room.get("encounter_id") or room.get("event_id") or ""
-        print(f"  {t('Room','当前房间')}: {room_type}" + (f" ({_id_to_name(enc)})" if enc else ""))
+        room_type_display = t(room_type, ROOM_TYPE_ZH.get(room_type, room_type))
+        print(f"  {t('Room','当前房间')}: {room_type_display}" + (f" ({_id_to_name(enc)})" if enc else ""))
 
     visited = data.get("visited_map_coords", [])
     if visited:
@@ -369,12 +396,49 @@ def t(en, zh=None):
         return en
     if LANG == "en":
         return en
+    if LANG == "both":
+        return f"{en} / {zh}"
     return zh
 
-RARITY_ZH = {"Common": "普通", "Uncommon": "罕见", "Rare": "稀有"}
+# Card rarities — keys match sts2 CardRarity.ToString(); ZHS from localization_zhs/gameplay_ui.json CARD_RARITY.*
+RARITY_ZH = {
+    "Basic": "基础",
+    "Common": "普通",
+    "Uncommon": "罕见",
+    "Rare": "稀有",
+    "Curse": "诅咒",
+    "Status": "状态",
+    "Token": "衍生",
+    "Event": "事件",
+    "Quest": "任务",
+    "Ancient": "先古",
+}
+# Matches localization_zhs/card_keywords.json (display only)
+CARD_KW_ZH = {
+    "Exhaust": "消耗", "Innate": "固有", "Ethereal": "虚无", "Retain": "保留",
+    "Sly": "奇巧", "Eternal": "永恒", "Unplayable": "不能被打出",
+}
+# End of title line (restrictive / rules)
+CARD_KW_SUFFIX_ORDER = ("Exhaust", "Unplayable", "Eternal")
+# Before description as [A/B/C]
+CARD_KW_PREFIX_ORDER = ("Innate", "Ethereal", "Retain", "Sly")
+
 CARD_TYPE_ZH = {"Attack": "攻击", "Skill": "技能", "Power": "能力", "Status": "状态", "Curse": "诅咒"}
 NODE_TYPE_ZH = {"Monster": "怪物", "Elite": "精英", "Boss": "Boss", "RestSite": "休息处",
-                "Shop": "商店", "Treasure": "宝箱", "Event": "事件", "Unknown": "未知", "Ancient": "远古"}
+                "Shop": "商店", "Treasure": "宝箱", "Event": "事件", "Unknown": "未知", "Ancient": "远古",
+                "CombatRoom": "战斗", "EliteRoom": "精英", "BossRoom": "Boss",
+                "RestSiteRoom": "休息站", "ShopRoom": "商店", "EventRoom": "事件",
+                "TreasureRoom": "宝箱", "MapRoom": "地图"}
+ROOM_TYPE_ZH = {
+    "CombatRoom": "战斗",
+    "EventRoom": "事件",
+    "RestSiteRoom": "休息站",
+    "ShopRoom": "商店",
+    "TreasureRoom": "宝箱",
+    "BossRoom": "Boss",
+    "EliteRoom": "精英",
+    "MapRoom": "地图",
+}
 
 # ─── Game display ───
 
@@ -420,6 +484,118 @@ def card_desc(card):
     stats = card.get("stats") or {}
     return resolve_template(d, stats)  # always resolve (handles energyPrefix etc.)
 
+
+def _card_kw_label(kw):
+    return t(kw, CARD_KW_ZH.get(kw, kw))
+
+
+def split_card_keywords(keywords):
+    """Split into (prefix, suffix) for layout; uses live ``keywords`` from state each call."""
+    raw = [k for k in (keywords or []) if k]
+    if not raw:
+        return [], []
+    suffix_set = set(CARD_KW_SUFFIX_ORDER)
+    suffix = [k for k in raw if k in suffix_set]
+    prefix_rest = [k for k in raw if k not in suffix_set]
+
+    prefix_ordered = []
+    used = set()
+    for k in CARD_KW_PREFIX_ORDER:
+        if k in prefix_rest:
+            prefix_ordered.append(k)
+            used.add(k)
+    for k in prefix_rest:
+        if k not in used:
+            prefix_ordered.append(k)
+            used.add(k)
+
+    suffix_ordered = sorted(suffix, key=lambda k: CARD_KW_SUFFIX_ORDER.index(k))
+    return prefix_ordered, suffix_ordered
+
+
+def format_card_suffix_keywords(suffix_list):
+    if not suffix_list:
+        return ""
+    inner = " ".join(c(_card_kw_label(k), "dim") for k in suffix_list)
+    return f" [{inner}]"
+
+
+def format_card_prefix_tag(prefix_list):
+    if not prefix_list:
+        return ""
+    return "[" + "/".join(_card_kw_label(k) for k in prefix_list) + "]"
+
+
+def card_description_display_lines(card):
+    """Lines under the title row; [前缀词条] merges into first line, then remaining loc lines."""
+    cd_d = card_desc(card)
+    prefix, _suf = split_card_keywords(card.get("keywords"))
+    tag = format_card_prefix_tag(prefix)
+    if not cd_d:
+        return [tag] if tag else []
+
+    lines = [ln.strip() for ln in cd_d.split("\n") if ln.strip()]
+    if not lines:
+        return [tag] if tag else []
+
+    if len(lines) == 1:
+        return [f"{tag}{lines[0]}" if tag else lines[0]]
+
+    out = []
+    if tag:
+        out.append(f"{tag}{lines[0]}")
+        out.extend(lines[1:])
+    else:
+        out.extend(lines)
+    return out
+
+
+def combat_hand_inline_stat_str(stats, *, card=None, osty=None):
+    """Title-row 伤/挡 from RunSimulator ``stats`` (DynamicVars, keys lowercased).
+
+    Plain ``damage`` is used for Strike-like cards; many attacks use ``calculateddamage``
+    or companion hits use ``ostydamage``. Some Necrobinder cards add Osty HP to the card
+    total in text but only expose the base in ``stats``—merge using combat ``osty`` blob.
+    """
+    if not stats:
+        stats = {}
+    parts = []
+    cid = (card or {}).get("id") or ""
+    osty_ok = bool(osty and osty.get("alive"))
+
+    dmg = None
+    if cid == "CARD.UNLEASH" and osty_ok:
+        base = stats.get("calculateddamage")
+        if base is None:
+            base = stats.get("damage")
+        if base is not None:
+            hp = osty.get("hp")
+            dmg = int(base) + int(hp) if isinstance(hp, (int, float)) else int(base)
+    elif cid == "CARD.PROTECTOR" and osty_ok:
+        base = stats.get("calculateddamage")
+        if base is None:
+            base = stats.get("damage")
+        if base is not None:
+            mhp = osty.get("max_hp")
+            dmg = int(base) + int(mhp) if isinstance(mhp, (int, float)) else int(base)
+
+    if dmg is None:
+        v = stats.get("damage")
+        if v is None:
+            v = stats.get("calculateddamage")
+        if v is None:
+            v = stats.get("ostydamage")
+        if v is not None:
+            dmg = int(v)
+
+    if dmg is not None:
+        parts.append(c(f"{dmg}{t('dmg','伤')}", "red"))
+    blk = stats.get("block")
+    if blk is not None:
+        parts.append(c(f"{blk}{t('blk','挡')}", "blue"))
+    return " ".join(parts)
+
+
 def relic_str(r):
     """Format a relic with name and resolved description."""
     if isinstance(r, dict) and "name" in r:
@@ -461,21 +637,15 @@ def show_player(p, show_deck=False):
         cards = p.get("deck", [])
         if cards:
             print(f"  {c(t('Deck:','牌组:'), 'bold')}")
-            KW_ZH = {"Exhaust": "消耗", "Innate": "固有", "Ethereal": "虚无", "Retain": "保留", "Sly": "奇巧", "Eternal": "永恒", "Unplayable": "不能被打出"}
             for cd in cards:
                 up = c("+", "green") if cd.get("upgraded") else ""
                 ctype_zh = CARD_TYPE_ZH.get(cd.get("type",""), cd.get("type",""))
-                kws = cd.get("keywords") or []
-                kw_str = " ".join(c(t(k, KW_ZH.get(k, k)), "dim") for k in kws)
-                kw_str = f" [{kw_str}]" if kw_str else ""
-                cd_d = card_desc(cd)
-                print(f"    {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(t(cd.get('type',''), ctype_zh), 'dim')}{kw_str}")
-                if cd_d:
-                    print(f"      {c(cd_d, 'dim')}")
-                stats = cd.get("stats") or {}
-                aug_parts = _format_upgrade_preview(stats, cd.get("after_upgrade"), cd.get("cost"))
-                if aug_parts:
-                    print(f"      {c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
+                _pre, suf = split_card_keywords(cd.get("keywords"))
+                suf_part = format_card_suffix_keywords(suf)
+                rare = cd.get("rarity")
+                rare_part = f" {c(t(rare, RARITY_ZH.get(rare, rare)), 'dim')}" if rare else ""
+                print(f"    {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(t(cd.get('type',''), ctype_zh), 'dim')}{rare_part}{suf_part}")
+                print_card_detail_extension(cd, indent="      ")
 
 def show_combat(state):
     rnd = state.get("round", 0)
@@ -608,35 +778,20 @@ def show_combat(state):
         if star_cost > 0:
             cost_str += f"+{c(f'{star_cost}⭐', 'yellow')}"
 
-        # Show damage/block inline, plus description for non-trivial cards
-        stats = card.get("stats") or {}
-        stat_parts = []
-        if "damage" in stats: stat_parts.append(c(f"{stats['damage']}{t('dmg','伤')}", "red"))
-        if "block" in stats: stat_parts.append(c(f"{stats['block']}{t('blk','挡')}", "blue"))
-        stat_str = " ".join(stat_parts)
+        # Damage/block inline on title row; suffix keywords (e.g. 消耗) at end of title row
+        stat_str = combat_hand_inline_stat_str(
+            card.get("stats") or {}, card=card, osty=state.get("osty")
+        )
 
-        # Show description if card has no damage/block (so effect isn't obvious from stats)
-        cd_d = card_desc(card)
-        extra_desc = ""
-        if cd_d and "damage" not in stats and "block" not in stats:
-            # No damage/block — show full description inline
-            extra_desc = f"  {c(cd_d.replace(chr(10), ' '), 'dim')}"
-        elif cd_d and any(k not in ("damage", "block") for k in stats):
-            # Has extra effects beyond damage/block — show last line
-            lines = cd_d.split("\n")
-            if len(lines) > 1:
-                extra_desc = f"  {c(lines[-1], 'dim')}"
-
-        # Show keywords (Innate, Exhaust, Ethereal, etc.)
-        KW_ZH = {"Exhaust": "消耗", "Innate": "固有", "Ethereal": "虚无", "Retain": "保留", "Sly": "奇巧", "Eternal": "永恒", "Unplayable": "不能被打出"}
-        kws = card.get("keywords") or []
-        kw_str = " ".join(c(t(k, KW_ZH.get(k, k)), "dim") for k in kws) if kws else ""
-        if kw_str: kw_str = f" [{kw_str}]"
+        _pre, suf = split_card_keywords(card.get("keywords"))
+        suf_part = format_card_suffix_keywords(suf)
         ench = card.get("enchantment")
         ench_str = f" {c(n(ench), 'magenta')}" if ench else ""
 
-        print(f"  {mark} [{card['index']}] {c(n(card['name']), type_color)}{ench_str} ({cost_str}) {stat_str}{kw_str}{extra_desc}"
+        print(f"  {mark} [{card['index']}] {c(n(card['name']), type_color)}{ench_str} ({cost_str}) {stat_str}{suf_part}"
               + (f"  {c('→','yellow')}" if target == "AnyEnemy" else ""))
+
+        print_card_detail_extension(card, indent="      ")
 
 def show_map(state, send_fn=None):
     """Show map at map_select. Fetches full map if send_fn available."""
@@ -693,12 +848,34 @@ def _format_upgrade_preview(stats, aug, current_cost=None):
             else:
                 parts.append(c(f"{old}→{new_val}", "green"))
     # Keyword changes (e.g., Discovery removes Exhaust)
-    KW_ZH = {"Exhaust": "消耗", "Innate": "固有", "Ethereal": "虚无", "Retain": "保留", "Sly": "奇巧", "Eternal": "永恒", "Unplayable": "不能被打出"}
     for kw in (aug.get("removed_keywords") or []):
-        parts.append(c(f"-{t(kw, KW_ZH.get(kw, kw))}", "green"))
+        parts.append(c(f"-{_card_kw_label(kw)}", "green"))
     for kw in (aug.get("added_keywords") or []):
-        parts.append(c(f"+{t(kw, KW_ZH.get(kw, kw))}", "yellow"))
+        parts.append(c(f"+{_card_kw_label(kw)}", "yellow"))
     return parts
+
+
+def print_card_detail_extension(card, indent="      "):
+    """Description (with [prefix/keywords]) + upgrade preview; indent matches title row spacing."""
+    for line in card_description_display_lines(card):
+        if line:
+            print(f"{indent}{c(line, 'dim')}")
+    stats = card.get("stats") or {}
+    aug_parts = _format_upgrade_preview(stats, card.get("after_upgrade"), card.get("cost"))
+    if aug_parts:
+        print(f"{indent}{c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
+
+
+def card_pick_quantity_hint(mn, mx):
+    """Short hint for prompts / help (N–M cards)."""
+    if mn == mx:
+        if mn == 1:
+            return t("pick 1 card", "选 1 张")
+        return t(f"pick exactly {mn} cards", f"须选 {mn} 张")
+    if mn == 0:
+        return t(f"pick 0–{mx} cards (or s to skip)", f"可选 0–{mx} 张（或 s 跳过）")
+    return t(f"pick {mn}–{mx} cards", f"须选 {mn}–{mx} 张")
+
 
 def show_card_reward(state):
     print(f"\n{'─' * 60}")
@@ -708,7 +885,8 @@ def show_card_reward(state):
     print(f"  {c(t('Card Reward','卡牌奖励'), 'bold')} — {t('choose one (or skip)','选一张（或跳过）')}")
     show_player(state.get("player", {}))
     print()
-    for card in state.get("cards", []):
+    cards = state.get("cards", [])
+    for card in cards:
         ctype = card.get("type", "?")
         rarity = card.get("rarity", "Common")
         cost = card.get("cost", "?")
@@ -716,16 +894,17 @@ def show_card_reward(state):
         rarity_zh = RARITY_ZH.get(rarity, rarity)
         rarity_label = t(rarity, rarity_zh)
         rarity_color = {"Rare": "yellow", "Uncommon": "cyan"}.get(rarity, "dim")
-        stats = card.get("stats") or {}
-        cd_desc = card_desc(card)
+        _pre, suf = split_card_keywords(card.get("keywords"))
+        suf_part = format_card_suffix_keywords(suf)
+        print(f"  [{card['index']}] {c(n(card['name']), type_color)} ({cost}) {c(rarity_label, rarity_color)}{suf_part}")
+        print_card_detail_extension(card, indent="      ")
 
-        print(f"  [{card['index']}] {c(n(card['name']), type_color)} ({cost}) {c(rarity_label, rarity_color)}")
-        if cd_desc:
-            print(f"      {c(cd_desc, 'dim')}")
-        # Show upgrade preview
-        aug_parts = _format_upgrade_preview(stats, card.get("after_upgrade"), card.get("cost"))
-        if aug_parts:
-            print(f"      {c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
+    print()
+    if cards:
+        hi = len(cards) - 1
+        print(f"  {c(t(f'Pick one card: type index 0–{hi}, or s to skip.', f'请选择一张：输入编号 0–{hi}，或 s 跳过。'), 'yellow')}")
+    else:
+        print(f"  {c(t('No cards to pick.', '没有可选卡牌。'), 'dim')}")
 
 def show_shop(state):
     print(f"\n{'─' * 60}")
@@ -741,13 +920,10 @@ def show_shop(state):
         sale = c(t(" SALE"," 打折"), "yellow") if card.get("on_sale") else ""
         ctype_zh = CARD_TYPE_ZH.get(card.get("type",""), card.get("type",""))
         cc = card.get("card_cost", "?")
-        print(f"  [{card['index']}] {n(card['name'])} ({cc}) {c(t(card.get('type','?'), ctype_zh), 'dim')} — {affordable}{t('g','金')}{sale}")
-        cd_desc = card_desc(card)
-        if cd_desc:
-            print(f"      {c(cd_desc, 'dim')}")
-        aug_parts = _format_upgrade_preview(card.get("stats") or {}, card.get("after_upgrade"), card.get("card_cost"))
-        if aug_parts:
-            print(f"      {c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
+        _pre, suf = split_card_keywords(card.get("keywords"))
+        suf_part = format_card_suffix_keywords(suf)
+        print(f"  [{card['index']}] {n(card['name'])} ({cc}) {c(t(card.get('type','?'), ctype_zh), 'dim')}{suf_part} — {affordable}{t('g','金')}{sale}")
+        print_card_detail_extension(card, indent="      ")
 
     print(f"\n  {c(t('Relics:','遗物:'), 'bold')}")
     for r in state.get("relics", []):
@@ -1066,8 +1242,12 @@ def _draw_conn(buf, from_col, to_col, W):
         if 0 <= mid < len(buf):
             buf[mid] = ch
 
-def get_input(prompt, valid_options=None, state=None):
-    """Get user input with validation. Supports meta-commands: help, map, deck, potions."""
+def get_input(prompt, valid_options=None, state=None, multi_select=False, multi_min=1, multi_max=1):
+    """Get user input with validation. Supports meta-commands: help, map, deck, potions.
+
+    If multi_select is True, accept comma-separated tokens; each must be in valid_options,
+    and the count must be between multi_min and multi_max (inclusive).
+    """
     while True:
         try:
             raw = input(f"\n{c('>', 'green')} {prompt}: ").strip().lower()
@@ -1095,6 +1275,7 @@ def get_input(prompt, valid_options=None, state=None):
     地图:    输入路径编号 (0, 1, 2)
     战斗:    卡牌编号 / {c('e', 'yellow')} 结束回合 / {c('p0', 'yellow')} 使用药水
     奖励:    卡牌编号 / {c('s', 'yellow')} 跳过
+    多选:    按提示选择张数（须选 N–M 张 / 可选 0–M 张等），编号逗号分隔，例如 {c('0,1,2', 'yellow')}
     休息:    选项编号
     事件:    选项编号 / {c('leave', 'yellow')} 离开
     商店:    {c('c0', 'yellow')} 买卡 / {c('r0', 'yellow')} 遗物 / {c('p0', 'yellow')} 药水 / {c('rm', 'yellow')} 移除 / {c('leave', 'yellow')} 离开
@@ -1116,6 +1297,7 @@ def get_input(prompt, valid_options=None, state=None):
     Map:     path number (0, 1, 2)
     Combat:  card index / {c('e', 'yellow')} end turn / {c('p0', 'yellow')} use potion
     Reward:  card index / {c('s', 'yellow')} skip
+    Multi:   when prompted for N–M cards (or 0–M optional), comma-separate indices, e.g. {c('0,1,2', 'yellow')}
     Rest:    option index
     Event:   option index / {c('leave', 'yellow')} leave
     Shop:    {c('c0', 'yellow')} card / {c('r0', 'yellow')} relic / {c('p0', 'yellow')} potion / {c('rm', 'yellow')} remove / {c('leave', 'yellow')} leave
@@ -1149,7 +1331,7 @@ def get_input(prompt, valid_options=None, state=None):
                     print("  Map not available.")
             elif state:
                 ctx = state.get("context", {})
-                print(f"  {c(n(ctx.get('act_name','?')), 'bold')} Floor {ctx.get('floor','?')}")
+                print(f"  {c(n(ctx.get('act_name','?')), 'bold')} {t('Floor','层')} {ctx.get('floor','?')}")
             continue
         if raw == "save":
             if hasattr(get_input, '_save_fn'):
@@ -1175,9 +1357,29 @@ def get_input(prompt, valid_options=None, state=None):
                 raise KeyboardInterrupt("abandon")
             continue
 
-        if valid_options and raw not in valid_options:
-            print(f"  {t('Invalid. Options:','无效。选项:')} {', '.join(sorted(valid_options))}")
-            continue
+        if valid_options:
+            if multi_select and multi_max > 1:
+                if multi_min == 0 and raw == "s" and "s" in valid_options:
+                    return raw
+                parts = [p.strip() for p in raw.split(",") if p.strip()]
+                if not parts:
+                    print(f"  {t('Invalid. Options:','无效。选项:')} {', '.join(sorted(valid_options))}")
+                    continue
+                if len(parts) < multi_min or len(parts) > multi_max:
+                    q = card_pick_quantity_hint(multi_min, multi_max)
+                    print(f"  {q} — {t(f'Use {multi_min}-{multi_max} comma-separated indices (e.g. 0,1).', f'逗号分隔输入 {multi_min}–{multi_max} 个编号（例 0,1）。')}")
+                    continue
+                if len(parts) != len(set(parts)):
+                    print(f"  {t('Duplicate indices.','编号重复。')}")
+                    continue
+                bad = [p for p in parts if p not in valid_options]
+                if bad:
+                    print(f"  {t('Invalid. Options:','无效。选项:')} {', '.join(sorted(valid_options))}")
+                    continue
+                return ",".join(parts)
+            if raw not in valid_options:
+                print(f"  {t('Invalid. Options:','无效。选项:')} {', '.join(sorted(valid_options))}")
+                continue
         return raw
 
 # ─── Main game loop ───
@@ -1191,29 +1393,46 @@ def _save_game(save_path, character, seed, action_log):
 
 def _load_game(save_path):
     """Read action replay save file. Returns (character, seed, actions)."""
-    with open(save_path) as f:
-        data = json.load(f)
+    try:
+        with open(save_path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"{t('Error:','错误:')} Save file is not valid JSON: {save_path}")
+        print(f"  {e}")
+        sys.exit(1)
+    if "actions" not in data:
+        print(f"{t('Error:','错误:')} Not a replay save file (missing 'actions' key): {save_path}")
+        sys.exit(1)
     return data["character"], data["seed"], data["actions"]
 
 def _list_saves():
-    """List available save files."""
+    """List available save files (replay .json and native .save files)."""
     if not os.path.isdir(SAVE_DIR):
         return []
     saves = []
     for f in sorted(os.listdir(SAVE_DIR)):
+        path = os.path.join(SAVE_DIR, f)
         if f.endswith(".json"):
-            path = os.path.join(SAVE_DIR, f)
+            # Only list .json files that are replay saves (have "actions" key)
             try:
                 with open(path) as fh:
                     d = json.load(fh)
+                if "actions" not in d:
+                    continue  # skip non-replay JSON files
                 saves.append({
-                    "file": f, "path": path,
+                    "file": f, "path": path, "type": "replay",
                     "character": d.get("character", "?"),
                     "seed": d.get("seed", "?"),
                     "actions": len(d.get("actions", [])),
                 })
             except Exception:
                 pass
+        elif f.endswith(".save"):
+            # Native save files
+            saves.append({
+                "file": f, "path": path, "type": "native",
+                "character": "?", "seed": "?", "actions": "—",
+            })
     return saves
 
 class _QuitRequested(Exception):
@@ -1324,9 +1543,13 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
             print("Failed to start simulator")
             return
 
+        game_lang = "en" if LANG == "en" else "zh"
         if native_save_path:
             print(f"  {t('Loading game save...','加载游戏存档...')}")
-            state = send({"cmd": "load_save", "path": native_save_path}, record=False)
+            state = send(
+                {"cmd": "load_save", "path": native_save_path, "lang": game_lang},
+                record=False,
+            )
             if state and state.get("type") == "error":
                 print(f"  {c(t('Error:','错误:'), 'red')} {state.get('message', '?')}")
                 return
@@ -1337,7 +1560,6 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
             print(f"  {c(t('Save loaded!','存档加载成功!'), 'green')}")
         else:
             # Map display lang to game engine lang: "both" falls back to "zh".
-            game_lang = "en" if LANG == "en" else "zh"
             state = send({
                 "cmd": "start_run",
                 "character": character,
@@ -1345,6 +1567,9 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 "ascension": ascension,
                 "lang": game_lang,
             }, record=False)
+            if state and state.get("type") == "error":
+                print(f"  {c(t('Error:','错误:'), 'red')} {state.get('message', '?')}")
+                return
 
             # Replay saved actions silently
             if replay_actions:
@@ -1358,18 +1583,21 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                         return
                 print(f"\r  {c(t('Replay complete!','回放完成!'), 'green')}" + " " * 30)
                 print()
-        print(f"\n{c('Slay the Spire 2 — Headless CLI', 'bold')}")
+        print(f"\n{c(t('Slay the Spire 2 — Headless CLI', '杀戮尖塔 2 — 无头模式'), 'bold')}")
         if native_save_path:
             p = state.get("player", {}) if state else {}
             ctx = state.get("context", {}) if state else {}
             print(f"{t('Character','角色')}: {n(p.get('name','?'))}  "
                   f"{t('Act','幕')}: {ctx.get('act','?')} ({n(ctx.get('act_name','?'))})  "
-                  f"HP: {p.get('hp','?')}/{p.get('max_hp','?')}  "
+                  f"{t('HP','生命')}: {p.get('hp','?')}/{p.get('max_hp','?')}  "
                   f"{t('Gold','金')}: {p.get('gold','?')}")
         else:
             asc_str = f"  {t('Ascension','渐进难度')}: {ascension}" if ascension > 0 else ""
             print(f"{t('Character','角色')}: {character}  {t('Seed','种子')}: {actual_seed}{asc_str}")
         print(f"{t('Type','输入')} {c('help', 'cyan')} {t('for available commands.','查看可用命令。')}\n")
+
+        _auto_last_fingerprint = None
+        _auto_stuck_count = 0
 
         while True:
             if not state:
@@ -1468,6 +1696,18 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                         choice = str(card["index"])
                     else:
                         choice = "e"
+
+                    # Stuck detection: if state fingerprint repeats, force end_turn
+                    fp = (tuple(c.get("index") for c in hand), energy)
+                    if fp == _auto_last_fingerprint:
+                        _auto_stuck_count += 1
+                        if _auto_stuck_count >= 5:
+                            print(f"  {c(t('[auto] Stuck state detected, forcing end_turn','[auto] 检测到卡住状态，强制结束回合'), 'yellow')}")
+                            choice = "e"
+                            _auto_stuck_count = 0
+                    else:
+                        _auto_last_fingerprint = fp
+                        _auto_stuck_count = 0
                 else:
                     choice = get_input(t("Play card [index], (e)nd turn, (p0) potion", "出牌 [编号], (e)结束回合, (p0)药水"), set(valid.keys()) | {"help"}, state=state)
                     if choice == "help":
@@ -1492,11 +1732,15 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     # Use potion
                     pidx = int(choice[1:])
                     args = {"potion_index": pidx}
-                    # Ask for target if needed
-                    if enemies:
-                        tgt = get_input("Target enemy [index] or self (s)", state=state)
-                        if tgt != "s" and tgt.isdigit():
-                            args["target_index"] = int(tgt)
+                    pots = state.get("player", {}).get("potions", [])
+                    pot_meta = next((p for p in pots if p and p.get("index") == pidx), None)
+                    if pot_meta and pot_meta.get("target_type") == "AnyEnemy" and enemies:
+                        tgt = get_input(
+                            t("Target enemy [index]", "选择敌人 [编号]"),
+                            {str(e["index"]) for e in enemies},
+                            state=state,
+                        )
+                        args["target_index"] = int(tgt)
                     state = send({"cmd": "action", "action": "use_potion", "args": args})
                 else:
                     card = valid[choice]
@@ -1521,7 +1765,11 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 if auto:
                     choice = "0" if cards else "s"
                 else:
-                    choice = get_input(t("Pick card [index] or (s)kip", "选择卡牌 [编号] 或 (s)跳过"), set(valid.keys()), state=state)
+                    choice = get_input(
+                        t("Reward: card index 0–n or (s)kip — see list above", "卡牌奖励：输入编号（见上方）或 (s)跳过"),
+                        set(valid.keys()),
+                        state=state,
+                    )
 
                 if choice == "s":
                     state = send({"cmd": "action", "action": "skip_card_reward"})
@@ -1542,10 +1790,10 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     bidx = b["index"]
                     print(f"  {c(f'Pack [{bidx}]:', 'yellow')}")
                     for cd in b.get("cards", []):
-                        cd_desc = card_desc(cd)
-                        print(f"    {n(cd['name'])} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')}")
-                        if cd_desc:
-                            print(f"      {c(cd_desc, 'dim')}")
+                        _p, sf = split_card_keywords(cd.get("keywords"))
+                        sp = format_card_suffix_keywords(sf)
+                        print(f"    {n(cd['name'])} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')}{sp}")
+                        print_card_detail_extension(cd, indent="      ")
                 valid = {str(b["index"]): b for b in bundles}
                 if auto:
                     choice = "0"
@@ -1561,22 +1809,20 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     print(f"  {c(n(ctx.get('act_name','?')), 'dim')} {t('Floor','层')} {ctx.get('floor','?')}")
                 min_sel = state.get("min_select", 1)
                 max_sel = state.get("max_select", 1)
-                print(f"  {c(t('Choose cards','选择卡牌'), 'bold')} ({t('select','选择')} {min_sel}-{max_sel})")
+                print(f"  {c(t('Choose cards','选择卡牌'), 'bold')} — {card_pick_quantity_hint(min_sel, max_sel)}")
                 show_player(state.get("player", {}))
                 print()
                 cards = state.get("cards", [])
                 for cd in cards:
                     up = c("+", "green") if cd.get("upgraded") else ""
-                    stats = cd.get("stats") or {}
                     ctype_zh = CARD_TYPE_ZH.get(cd.get("type", ""), cd.get("type", ""))
                     ctype_label = t(cd.get("type", ""), ctype_zh)
-                    cd_desc_text = card_desc(cd)
-                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(ctype_label, 'dim')}")
-                    if cd_desc_text:
-                        print(f"      {c(cd_desc_text, 'dim')}")
-                    aug_parts = _format_upgrade_preview(stats, cd.get("after_upgrade"), cd.get("cost"))
-                    if aug_parts:
-                        print(f"      {c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
+                    rare = cd.get("rarity")
+                    rare_part = f" {c(t(rare, RARITY_ZH.get(rare, rare)), 'dim')}" if rare else ""
+                    _p, sf = split_card_keywords(cd.get("keywords"))
+                    sp = format_card_suffix_keywords(sf)
+                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(ctype_label, 'dim')}{rare_part}{sp}")
+                    print_card_detail_extension(cd, indent="      ")
 
                 valid = {str(cd["index"]): cd for cd in cards}
                 if min_sel == 0:
@@ -1586,9 +1832,23 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 old_deck_cards = [n(cd.get("name","?")) for cd in state.get("player",{}).get("deck",[])]
 
                 if auto:
-                    choice = "0"
+                    if not cards:
+                        choice = "s" if min_sel == 0 else "0"
+                    else:
+                        n_pick = min(max_sel, len(cards))
+                        n_pick = max(n_pick, min(min_sel, len(cards)))
+                        choice = ",".join(str(cards[i]["index"]) for i in range(n_pick))
                 else:
-                    choice = get_input(t("Choose card(s) [index] or (s)kip", "选择卡牌 [编号] 或 (s)跳过"), set(valid.keys()), state=state)
+                    multi = max_sel > 1 or min_sel > 1
+                    qhint = card_pick_quantity_hint(min_sel, max_sel)
+                    choice = get_input(
+                        t(f"Card indices, comma — {qhint} or (s)kip", f"卡牌编号逗号分隔 — {qhint}，或 (s)跳过"),
+                        set(valid.keys()),
+                        state=state,
+                        multi_select=multi,
+                        multi_min=min_sel,
+                        multi_max=max_sel,
+                    )
 
                 if choice == "s":
                     state = send({"cmd": "action", "action": "skip_select"})
@@ -1714,7 +1974,7 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     elif new_deck != old_deck:
                         changes.append(f"{t('Deck','牌组')}: {old_deck} → {new_deck}")
                     if new_hp != old_hp or new_max_hp != old_max_hp:
-                        changes.append(f"HP: {old_hp}/{old_max_hp} → {new_hp}/{new_max_hp}")
+                        changes.append(f"{t('HP','生命')}: {old_hp}/{old_max_hp} → {new_hp}/{new_max_hp}")
                     if new_gold != old_gold:
                         diff = new_gold - old_gold
                         changes.append(f"{t('Gold','金')}: {'+' if diff > 0 else ''}{diff}")
@@ -1795,6 +2055,23 @@ if __name__ == "__main__":
 
     LANG = args.lang
 
+    # Mutual exclusion: conflicting flags
+    if args.load is not None:
+        if args.saves:
+            parser.error("Cannot combine --load with --saves")
+        if args.save_info is not None:
+            parser.error("Cannot combine --load with --save-info")
+        if args.continue_save is not None:
+            parser.error("Cannot combine --load with --continue")
+    if args.saves:
+        if args.save_info is not None:
+            parser.error("Cannot combine --saves with --save-info")
+        if args.continue_save is not None:
+            parser.error("Cannot combine --saves with --continue")
+    if args.save_info is not None:
+        if args.continue_save is not None:
+            parser.error("Cannot combine --save-info with --continue")
+
     if args.save_info is not None:
         p = args.save_info
         if not os.path.isabs(p):
@@ -1810,11 +2087,16 @@ if __name__ == "__main__":
         if saves:
             print(f"\n{'─' * 50}")
             for s in saves:
-                print(f"  {s['file']}  {s['character']}  seed:{s['seed']}  actions:{s['actions']}")
+                stype = s.get("type", "replay")
+                if stype == "native":
+                    print(f"  {s['file']}  [{t('native save','原生存档')}]")
+                else:
+                    print(f"  {s['file']}  {s['character']}  {t('seed','种子')}:{s['seed']}  {t('actions','步操作')}:{s['actions']}")
             print(f"{'─' * 50}")
-            print(f"  Load: python3 play.py --load saves/<file>")
+            print(f"  {t('Replay saves:','回放存档:')} python3 play.py --load saves/<file>")
+            print(f"  {t('Native saves:','原生存档:')} python3 play.py --continue saves/<file>")
         else:
-            print("No saves found.")
+            print(t("No saves found.", "没有找到存档。"))
         sys.exit(0)
 
     load_path = None

@@ -14,6 +14,31 @@ class Program
         WriteIndented = false,
     };
 
+    /// <summary>
+    /// Locate the directory containing sts2.dll: STS2_LIB env, walk up from BaseDirectory, then BaseDirectory/lib.
+    /// </summary>
+    private static string ResolveLibDirectory()
+    {
+        var envLib = Environment.GetEnvironmentVariable("STS2_LIB");
+        if (!string.IsNullOrWhiteSpace(envLib))
+        {
+            var p = Path.GetFullPath(envLib.Trim());
+            if (Directory.Exists(p) && File.Exists(Path.Combine(p, "sts2.dll")))
+                return p;
+        }
+
+        var dir = AppContext.BaseDirectory;
+        for (var depth = 0; depth < 16 && !string.IsNullOrEmpty(dir); depth++)
+        {
+            var candidate = Path.Combine(dir, "lib");
+            if (Directory.Exists(candidate) && File.Exists(Path.Combine(candidate, "sts2.dll")))
+                return Path.GetFullPath(candidate);
+            dir = Directory.GetParent(dir)?.FullName ?? "";
+        }
+
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "lib"));
+    }
+
     static void Main(string[] args)
     {
         // Prevent unhandled exceptions from crashing the process
@@ -27,10 +52,7 @@ class Program
             e.SetObserved();
         };
 
-        // Set up assembly resolution to find game DLLs
-        var libDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "lib");
-        if (!Directory.Exists(libDir))
-            libDir = Path.Combine(AppContext.BaseDirectory, "lib");
+        var libDir = ResolveLibDirectory();
 
         AssemblyLoadContext.Default.Resolving += (ctx, name) =>
         {
@@ -133,7 +155,8 @@ class Program
                 }
                 if (saveJson == null)
                     return new Dictionary<string, object?> { ["type"] = "error", ["message"] = "Provide 'path' or 'json' for load_save" };
-                return sim.LoadSave(saveJson);
+                var loadLang = cmd.TryGetProperty("lang", out var le) ? (le.GetString() ?? "en") : "en";
+                return sim.LoadSave(saveJson, loadLang);
             }
             case "get_map":
                 return sim.GetFullMap();

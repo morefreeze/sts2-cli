@@ -25,4 +25,3 @@ def test_quit_save_defaults_to_save_dir(monkeypatch):
     assert path is not None
     assert path.startswith(play.SAVE_DIR)
     assert path.endswith(".save")
-

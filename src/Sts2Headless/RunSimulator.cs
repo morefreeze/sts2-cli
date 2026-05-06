@@ -142,7 +142,24 @@ internal class LocLookup
 
     // Convenience helpers using ModelId
     public string Card(string entry) => Bilingual("cards", entry + ".title");
-    public string Monster(string entry) => Bilingual("monsters", entry + ".name");
+    public string Monster(string entry)
+    {
+        var key = entry + ".name";
+        var result = Bilingual("monsters", key);
+        // If no dedicated entry, fall back to the base segment key (e.g. DECIMILLIPEDE_SEGMENT_FRONT → DECIMILLIPEDE_SEGMENT)
+        if (result == key)
+        {
+            var lastUnderscore = entry.LastIndexOf('_');
+            if (lastUnderscore > 0)
+            {
+                var baseEntry = entry[..lastUnderscore];
+                var baseKey = baseEntry + ".name";
+                var baseResult = Bilingual("monsters", baseKey);
+                if (baseResult != baseKey) return baseResult;
+            }
+        }
+        return result;
+    }
     public string Relic(string entry) => Bilingual("relics", entry + ".title");
     public string Potion(string entry) => Bilingual("potions", entry + ".title");
     public string Power(string entry) => Bilingual("powers", entry + ".title");
@@ -178,7 +195,10 @@ internal class LocLookup
 /// </summary>
 public class RunSimulator
 {
-    private const int CurrentSaveSchemaVersion = 14;
+    private static int? _expectedSaveSchemaVersion;
+    private static bool _expectedSaveSchemaVersionReady;
+    private static readonly object _expectedSaveSchemaVersionLock = new();
+
     private RunState? _runState;
     private static bool _modelDbInitialized;
     private static readonly InlineSynchronizationContext _syncCtx = new();
@@ -463,10 +483,11 @@ public class RunSimulator
     }
 
     // ─── Game actions ───
-    public Dictionary<string, object?> LoadSave(string saveJson)
+    public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
     {
         try
         {
+            _loc.Lang = lang;
             EnsureModelDbInitialized();
 
             Log("Loading save file...");
@@ -550,6 +571,104 @@ public class RunSimulator
         }
     }
 
+    /// <summary>
+    /// Expected run save <c>schema_version</c> (lazy: first load_save only, so StartRun never fails on reflection).
+    /// Order: <c>STS2_SAVE_SCHEMA_VERSION</c> env → reflect sts2.dll → unknown, defer to SaveManager.
+    /// </summary>
+    private static int? GetExpectedSaveSchemaVersion()
+    {
+        if (_expectedSaveSchemaVersionReady)
+            return _expectedSaveSchemaVersion;
+        lock (_expectedSaveSchemaVersionLock)
+        {
+            if (_expectedSaveSchemaVersionReady)
+                return _expectedSaveSchemaVersion;
+            _expectedSaveSchemaVersion = ResolveExpectedSaveSchemaVersion();
+            _expectedSaveSchemaVersionReady = true;
+            return _expectedSaveSchemaVersion;
+        }
+    }
+
+    private static int? ResolveExpectedSaveSchemaVersion()
+    {
+        var env = Environment.GetEnvironmentVariable("STS2_SAVE_SCHEMA_VERSION");
+        if (!string.IsNullOrWhiteSpace(env) && int.TryParse(env.Trim(), out var envVer))
+            return envVer;
+
+        var reflected = TryReflectLatestSaveSchemaVersion();
+        if (reflected.HasValue)
+            return reflected.Value;
+
+        Console.Error.WriteLine(
+            "[Sts2Headless] Could not read save schema from sts2.dll; deferring schema compatibility " +
+            "to SaveManager.FromJson. Set STS2_SAVE_SCHEMA_VERSION to enforce a specific version.");
+        return null;
+    }
+
+    /// <summary>Find static parameterless GetLatestSchemaVersion (or close) on sts2; supports int/uint/long.</summary>
+    private static int? TryReflectLatestSaveSchemaVersion()
+    {
+        var asm = typeof(SerializableRun).Assembly;
+        Type[] types;
+        try
+        {
+            types = asm.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            types = ex.Types.Where(t => t != null).Cast<Type>().ToArray();
+        }
+
+        var candidates = new List<(int score, string typeName, int value)>();
+        foreach (var t in types)
+        {
+            MethodInfo? m;
+            try
+            {
+                foreach (var name in new[] { "GetLatestSchemaVersion", "GetLatestVersion" })
+                {
+                    m = t.GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                        null, Type.EmptyTypes, null);
+                    if (m == null) continue;
+                    var tn = t.FullName ?? "";
+                    // Avoid unrelated static GetLatestVersion() elsewhere in the assembly.
+                    if (name == "GetLatestVersion" && !tn.Contains("Saves", StringComparison.Ordinal))
+                        continue;
+
+                    var conv = TryConvertSchemaNumber(m.Invoke(null, null));
+                    if (!conv.HasValue) continue;
+
+                    var score = name == "GetLatestSchemaVersion" ? 100 : 0;
+                    if (tn.Contains("Saves", StringComparison.Ordinal)) score += 50;
+                    if (tn.Contains("Schema", StringComparison.Ordinal) || tn.Contains("Migration", StringComparison.Ordinal))
+                        score += 25;
+                    candidates.Add((score, tn, conv.Value));
+                }
+            }
+            catch
+            {
+                // type may not support full reflection on this runtime
+            }
+        }
+
+        if (candidates.Count == 0)
+            return null;
+
+        var best = candidates.OrderByDescending(c => c.score).ThenBy(c => c.typeName).First();
+        return best.value;
+    }
+
+    private static int? TryConvertSchemaNumber(object? value) => value switch
+    {
+        int i => i,
+        uint u => u <= int.MaxValue ? (int)u : null,
+        long l => l >= int.MinValue && l <= int.MaxValue ? (int)l : null,
+        short s => s,
+        ushort us => us,
+        byte b => b,
+        _ => null,
+    };
+
     private static bool ValidateSaveSchemaVersion(string saveJson, out string error)
     {
         error = "";
@@ -571,9 +690,10 @@ public class RunSimulator
                 return false;
             }
 
-            if (schemaVersion != CurrentSaveSchemaVersion)
+            var expected = GetExpectedSaveSchemaVersion();
+            if (expected.HasValue && schemaVersion != expected.Value)
             {
-                error = $"expected v{CurrentSaveSchemaVersion}, got v{schemaVersion}";
+                error = $"expected v{expected.Value}, got v{schemaVersion}";
                 return false;
             }
 
@@ -711,7 +831,7 @@ public class RunSimulator
             Log($"Serialized save: {saveJson.Length} chars");
 
             var dir = System.IO.Path.GetDirectoryName(outputPath);
-            if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+            if (!string.IsNullOrEmpty(dir))
                 System.IO.Directory.CreateDirectory(dir);
             System.IO.File.WriteAllText(outputPath, saveJson);
             Log($"Save written to: {outputPath}");
@@ -1412,6 +1532,11 @@ public class RunSimulator
             RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(action);
             WaitForActionExecutor();
             _syncCtx.Pump();
+
+            // Effect may require card_select before the potion slot clears — do not discard as "stuck".
+            if (_cardSelector.HasPending || _cardSelector.HasPendingReward)
+                return DetectDecisionPoint();
+
             // Verify potion was consumed
             var afterPotions = player.Potions?.ToList() ?? new();
             if (afterPotions.Contains(potion))
@@ -1638,13 +1763,16 @@ public class RunSimulator
                 {
                     var stats = new Dictionary<string, object?>();
                     try { foreach (var dv in card.DynamicVars.Values) stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
+                    var bkws = card.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
                     return new Dictionary<string, object?>
                     {
                         ["name"] = _loc.Card(card.Id.Entry),
                         ["cost"] = card.EnergyCost?.GetResolved() ?? 0,
                         ["type"] = card.Type.ToString(),
+                        ["rarity"] = card.Rarity.ToString(),
                         ["description"] = _loc.Bilingual("cards", card.Id.Entry + ".description"),
                         ["stats"] = stats.Count > 0 ? stats : null,
+                        ["keywords"] = bkws?.Count > 0 ? bkws : null,
                     };
                 }).ToList(),
             }).ToList();
@@ -1667,6 +1795,7 @@ public class RunSimulator
             {
                 var stats = new Dictionary<string, object?>();
                 try { foreach (var dv in cr.Card.DynamicVars.Values) stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
+                var rrkws = cr.Card.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
@@ -1677,6 +1806,7 @@ public class RunSimulator
                     ["rarity"] = cr.Card.Rarity.ToString(),
                     ["description"] = _loc.Bilingual("cards", cr.Card.Id.Entry + ".description"),
                     ["stats"] = stats.Count > 0 ? stats : null,
+                    ["keywords"] = rrkws?.Count > 0 ? rrkws : null,
                     ["after_upgrade"] = GetUpgradedInfo(cr.Card),
                 };
             }).ToList();
@@ -1701,6 +1831,7 @@ public class RunSimulator
             {
                 var stats = new Dictionary<string, object?>();
                 try { foreach (var dv in card.DynamicVars.Values) stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
+                var selkws = card.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
@@ -1708,9 +1839,11 @@ public class RunSimulator
                     ["name"] = _loc.Card(card.Id.Entry),
                     ["cost"] = card.EnergyCost?.GetResolved() ?? 0,
                     ["type"] = card.Type.ToString(),
+                    ["rarity"] = card.Rarity.ToString(),
                     ["upgraded"] = card.IsUpgraded,
                     ["stats"] = stats.Count > 0 ? stats : null,
                     ["description"] = _loc.Bilingual("cards", card.Id.Entry + ".description"),
+                    ["keywords"] = selkws?.Count > 0 ? selkws : null,
                     ["after_upgrade"] = GetUpgradedInfo(card),
                 };
             }).ToList();
@@ -1965,7 +2098,8 @@ public class RunSimulator
             }
             catch { }
 
-            var starCost = c.BaseStarCost;
+            // Use CurrentStarCost (combat-modified) for UI/can_play; BaseStarCost ignores temporary reductions.
+            var starCost = c.CurrentStarCost;
             var cardInfo = new Dictionary<string, object?>
             {
                 ["index"] = i,
@@ -1973,6 +2107,7 @@ public class RunSimulator
                 ["name"] = _loc.Card(c.Id.Entry),
                 ["cost"] = c.EnergyCost?.GetResolved() ?? 0,
                 ["type"] = c.Type.ToString(),
+                ["rarity"] = c.Rarity.ToString(),
                 ["can_play"] = c.CanPlay(out _, out _),
                 ["target_type"] = c.TargetType.ToString(),
                 ["stats"] = stats.Count > 0 ? stats : null,
@@ -2238,6 +2373,7 @@ public class RunSimulator
         {
             var stats = new Dictionary<string, object?>();
             try { foreach (var dv in c.DynamicVars.Values) stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
+            var crkws = c.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
             return new Dictionary<string, object?>
             {
                 ["index"] = i,
@@ -2248,6 +2384,7 @@ public class RunSimulator
                 ["rarity"] = c.Rarity.ToString(),
                 ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
                 ["stats"] = stats.Count > 0 ? stats : null,
+                ["keywords"] = crkws?.Count > 0 ? crkws : null,
                 ["after_upgrade"] = GetUpgradedInfo(c),
             };
         }).ToList();
@@ -2501,14 +2638,17 @@ public class RunSimulator
                     }
                 }
                 catch { }
+                var shopkws = card?.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
                     ["name"] = _loc.Card(entry),
                     ["type"] = card?.Type.ToString() ?? "?",
+                    ["rarity"] = card?.Rarity.ToString() ?? "?",
                     ["card_cost"] = cardCost,
                     ["description"] = _loc.Bilingual("cards", entry + ".description"),
                     ["stats"] = stats.Count > 0 ? stats : null,
+                    ["keywords"] = shopkws?.Count > 0 ? shopkws : null,
                     ["after_upgrade"] = card != null ? GetUpgradedInfo(card) : null,
                     ["cost"] = e.Cost,
                     ["is_stocked"] = e.IsStocked,
@@ -2618,6 +2758,11 @@ public class RunSimulator
 
             // Pump the synchronization context to execute any pending continuations
             _syncCtx.Pump();
+
+            // Executor may stay "running" while the game awaits headless card selection / reward (e.g. Attack Potion).
+            // Spinning here would time out and downstream code could mis-handle an in-flight potion use (BUG-026).
+            if (_cardSelector.HasPending || _cardSelector.HasPendingReward)
+                return;
 
             var executor = RunManager.Instance.ActionExecutor;
             if (executor.IsRunning)

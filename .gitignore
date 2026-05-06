@@ -19,3 +19,4 @@ CLAUDE.md
 .venv*/
 .env
 checkpoints/
+saves/*
