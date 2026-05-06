@@ -179,10 +179,15 @@ class _VerboseCombatEnv(CombatEnv):
 
 def run_eval_verbose(model, character: str, n_games: int = 10,
                      fixed_seeds: bool = False, seed_offset: int = 0,
-                     verbose: bool = False) -> dict:
+                     verbose: bool = False,
+                     replay_actions: list = None,
+                     load_seed: str = None,
+                     native_save_path: str = None) -> dict:
     """Full-run eval with per-game floor breakdown.
 
     verbose=True: show per-room summaries; for wins, show last combat step-by-step.
+    replay_actions/load_seed: replay action log after start_run.
+    native_save_path: load a binary .save via load_save instead of start_run.
     """
     # Auto-detect obs_size: legacy=161, run11=169 (extra_obs adds 8 features)
     model_obs_size = model.observation_space.shape[0]
@@ -190,17 +195,24 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
     floors, wins, combat_wins_list = [], [], []
     for i in range(n_games):
-        if fixed_seeds:
+        if load_seed:
+            game_seed = load_seed
+        elif fixed_seeds:
             game_seed = f"eval_fixed_{i + seed_offset}"
         else:
             game_seed = f"eval_r{random.randint(0, 0xFFFFFF):06x}_{i}"
 
+        env_kwargs = dict(character=character, seed=game_seed,
+                          seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs)
+        if replay_actions:
+            env_kwargs["replay_actions"] = replay_actions
+        if native_save_path:
+            env_kwargs["native_save_path"] = native_save_path
+
         if verbose:
-            env = _VerboseCombatEnv(character=character, seed=game_seed,
-                                    seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs)
+            env = _VerboseCombatEnv(**env_kwargs)
         else:
-            env = CombatEnv(character=character, seed=game_seed,
-                            seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs)
+            env = CombatEnv(**env_kwargs)
         env_wrapped = ActionMasker(env, mask_fn)
         obs, _ = env_wrapped.reset()
         ep_combat_wins = 0
@@ -337,6 +349,8 @@ def _latest_checkpoint(checkpoints_dir: str = "checkpoints") -> str:
 
 
 def main():
+    import json as _json
+
     p = argparse.ArgumentParser()
     p.add_argument("checkpoint", nargs="?", default=None,
                    help="Path to checkpoint zip (default: latest in checkpoints/)")
@@ -348,20 +362,56 @@ def main():
                    help="Offset for fixed seed index (use with --fixed-seeds)")
     p.add_argument("--verbose", action="store_true", default=False,
                    help="Per-room summaries + detailed last-combat trace on wins")
+    p.add_argument("--load", default=None,
+                   help="Replay actions from a play.py save (.json) before agent takes over")
     args = p.parse_args()
+
+    replay_actions = None
+    load_seed = None
+    native_save_path = None
+    character = args.character
+    n_games = args.n_games
+    if args.load:
+        load_path = os.path.abspath(args.load)
+        if load_path.endswith(".save"):
+            native_save_path = load_path
+        else:
+            with open(load_path) as f:
+                save = _json.load(f)
+            if "actions" not in save:
+                print(f"Error: {load_path} is not a play.py replay save (no 'actions' key)")
+                sys.exit(1)
+            character = save.get("character", character)
+            load_seed = save.get("seed")
+            replay_actions = save["actions"]
+        # Result is deterministic post-load; default to 1 game unless user passed --n-games.
+        if "--n-games" not in sys.argv and "-n" not in sys.argv:
+            n_games = 1
 
     checkpoint = args.checkpoint or _latest_checkpoint()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = MaskablePPO.load(checkpoint, device=device)
 
-    seed_mode = "fixed" if args.fixed_seeds else "random"
+    seed_mode = ("native_save" if native_save_path
+                 else "loaded" if load_seed
+                 else "fixed" if args.fixed_seeds
+                 else "random")
     print(f"Checkpoint    : {checkpoint}")
     print(f"Internal steps: {getattr(model, 'num_timesteps', '?')}")
-    print(f"Running {args.n_games} games ({seed_mode} seeds, max_floor=unlimited)...")
+    if native_save_path:
+        print(f"Native save   : {native_save_path}")
+    elif args.load:
+        print(f"Loaded save   : {args.load}")
+        print(f"  character   : {character}")
+        print(f"  seed        : {load_seed}")
+        print(f"  actions     : {len(replay_actions)}")
+    print(f"Running {n_games} games ({seed_mode} seeds, max_floor=unlimited)...")
 
-    stats = run_eval_verbose(model, args.character, n_games=args.n_games,
+    stats = run_eval_verbose(model, character, n_games=n_games,
                              fixed_seeds=args.fixed_seeds, seed_offset=args.seed_offset,
-                             verbose=args.verbose)
+                             verbose=args.verbose,
+                             replay_actions=replay_actions, load_seed=load_seed,
+                             native_save_path=native_save_path)
     print(f"---")
     print(f"avg_floor      : {stats['avg_floor']:.1f}")
     print(f"max_floor      : {stats['max_floor']}")

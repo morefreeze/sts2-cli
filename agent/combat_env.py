@@ -372,7 +372,8 @@ class CombatEnv(gym.Env):
 
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
                  ascension: int = 0, seed: str = None, dry_run: bool = False,
-                 seed_prefix: str = "t", max_floor: int = 0, extra_obs: bool = True):
+                 seed_prefix: str = "t", max_floor: int = 0, extra_obs: bool = True,
+                 replay_actions: list = None, native_save_path: str = None):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
@@ -405,6 +406,10 @@ class CombatEnv(gym.Env):
         self._read_buf = b""
         self._combat_steps = 0
         self.max_combat_steps = 200  # floor 4+ fights can take 100+ steps with a learning policy
+
+        self._replay_actions = list(replay_actions) if replay_actions else []
+        self._replay_pending = bool(self._replay_actions)
+        self._native_save_path = native_save_path
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -446,15 +451,43 @@ class CombatEnv(gym.Env):
         self._start_proc()
         run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}_{random.randint(0,99999)}"
         self._run_counter += 1
-        state = self._send({"cmd": "start_run", "character": self.character,
-                            "seed": run_seed, "ascension": self.ascension})
-        if state is None:
+        if self._native_save_path:
+            state = self._send({"cmd": "load_save",
+                                "path": self._native_save_path, "lang": "en"})
+        else:
+            state = self._send({"cmd": "start_run", "character": self.character,
+                                "seed": run_seed, "ascension": self.ascension})
+        if state is None or state.get("type") == "error":
             self._game_alive = False
             self._current_state = _dummy_combat_state()
             self._init_combat_tracking(self._current_state)  # prevent stale max_hp=1
-            return self._encode(self._current_state), {}
+            return self._encode(self._current_state), {
+                "load_failed": bool(self._native_save_path),
+                "message": (state or {}).get("message", "") if state else "",
+            }
 
         self._game_alive = True
+
+        # Replay any saved actions (one-shot, on first reset only)
+        if self._replay_pending:
+            for cmd in self._replay_actions:
+                state = self._send(cmd)
+                if state is None:
+                    self._game_alive = False
+                    self._current_state = _dummy_combat_state()
+                    self._init_combat_tracking(self._current_state)
+                    return self._encode(self._current_state), {"replay_failed": True}
+                if state.get("decision") == "game_over":
+                    self._game_alive = False
+                    self._current_state = _dummy_combat_state()
+                    self._init_combat_tracking(self._current_state)
+                    return self._encode(self._current_state), {
+                        "game_over": True,
+                        "victory": bool(state.get("victory", False)),
+                        "from_replay": True,
+                    }
+            self._replay_pending = False
+
         state = self._advance_to_combat(state)
         if state is None or state.get("decision") != "combat_play":
             self._game_alive = False
