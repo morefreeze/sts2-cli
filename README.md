@@ -112,20 +112,13 @@ Train a combat agent with MaskablePPO (requires `requirements-agent.txt`):
 # Single training run
 python3 agent/train.py --character Ironclad --steps 100000
 
-# Autonomous train-eval loop (runs unattended for hours)
-python3 agent/train_loop.py --character Ironclad --n-eval-games 15
-
-# Parallel evaluation (4x faster eval phase)
-python3 agent/train_loop.py --character Ironclad --n-eval-games 15 --n-eval-workers 4
-
-# Custom milestones
-python3 agent/train_loop.py --milestones 10000,25000,50000,100000
-
-# Auto-resumes from latest checkpoint after interruption
-python3 agent/train_loop.py --character Ironclad
+# Resume from a checkpoint with curriculum schedule
+python3 agent/train.py --character Ironclad --steps 200000 \
+    --checkpoint checkpoints/ppo_ironclad_100k.zip --curriculum
 ```
 
-The loop trains to each milestone, saves a checkpoint, evaluates with full game runs (RL combat + heuristic strategy), and appends results to `training_log.jsonl`.
+`agent/train.py` saves a checkpoint every 10k steps and tags the run-best model;
+re-launch with `--checkpoint` to resume after interruption.
 
 ### Evaluate a Trained Model
 
@@ -275,20 +268,12 @@ sts2.dll (游戏引擎, IL patched)
 # 单次训练
 python3 agent/train.py --character Ironclad --steps 100000
 
-# 自动训练-评估循环（无人值守，运行数小时）
-python3 agent/train_loop.py --character Ironclad --n-eval-games 15
-
-# 并行评估（4 线程加速评估阶段）
-python3 agent/train_loop.py --character Ironclad --n-eval-games 15 --n-eval-workers 4
-
-# 自定义里程碑
-python3 agent/train_loop.py --milestones 10000,25000,50000,100000
-
-# 中断后自动从最新 checkpoint 恢复
-python3 agent/train_loop.py --character Ironclad
+# 从 checkpoint 恢复，启用课程式难度调度
+python3 agent/train.py --character Ironclad --steps 200000 \
+    --checkpoint checkpoints/ppo_ironclad_100k.zip --curriculum
 ```
 
-训练循环会在每个里程碑保存 checkpoint，运行完整游戏评估（RL 战斗 + 策略决策），并将结果追加到 `training_log.jsonl`。每 10k 步自动存盘，崩溃不会丢失进度。
+`agent/train.py` 每 10k 步保存 checkpoint 并标记 run-best 模型；中断后用 `--checkpoint` 重启即可恢复。
 
 ### 评估训练好的模型
 
