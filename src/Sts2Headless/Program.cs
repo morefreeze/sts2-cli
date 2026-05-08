@@ -41,10 +41,38 @@ class Program
 
     static void Main(string[] args)
     {
-        // Prevent unhandled exceptions from crashing the process
+        // On unhandled exceptions: log to stderr and write a game_over JSON to stdout
+        // BEFORE the process exits. This lets Python decode a proper terminal state
+        // instead of getting EOF (which marks the episode as "crashed" with -2.0 reward).
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             Console.Error.WriteLine($"[FATAL] Unhandled: {e.ExceptionObject}");
+            try
+            {
+                // Note: Python's killing-blow fix already handles state==None for
+                // play_card/hand=1/enemies=1, but this handler covers other rare paths.
+                var opts = new System.Text.Json.JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
+                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+                };
+                var response = new Dictionary<string, object?>
+                {
+                    ["type"] = "decision",
+                    ["decision"] = "game_over",
+                    ["won"] = false,
+                    ["victory"] = false,
+                    ["player"] = new Dictionary<string, object?> {
+                        ["hp"] = RunSimulator.LastActionWasKillingBlow
+                            ? RunSimulator.LastKnownPlayerHp  // player survived — use real HP
+                            : 0,                               // player died — hp=0
+                        ["max_hp"] = 80
+                    },
+                };
+                Console.Out.WriteLine(System.Text.Json.JsonSerializer.Serialize(response, opts));
+                Console.Out.Flush();
+            }
+            catch { }
         };
         TaskScheduler.UnobservedTaskException += (_, e) =>
         {

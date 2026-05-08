@@ -13,8 +13,14 @@ import subprocess
 import sys
 import time
 
+# Allow running this file as a script: ensure the repo root is on sys.path so
+# `from agent.rl_agent import RLAgent` resolves.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Import play.py display functions for combat replay
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "python"))
 try:
     import play as _play
     _has_play = True
@@ -305,51 +311,13 @@ class GameCoordinator:
                             selected.append(self._card_str(cards[idx]))
                 self._vlog(f"[{prefix}] {label}: {', '.join(selected) if selected else indices}")
 
-    def _print_combat_hp_summary(self, combat_hp_log):
-        """Print per-combat HP cost summary, sorted by loss (highest first)."""
-        if not combat_hp_log:
-            return
-        zh = self.lang == "zh"
-        self._vlog("")
-        self._vlog(f"{'─'*55}")
-        self._vlog(f"  {_c('战斗血量消耗统计' if zh else 'Combat HP Cost Summary', 'bold')}")
-        self._vlog(f"{'─'*55}")
+    def _replay_combat(self, combat_log, final_state=None):
+        """Replay the last combat — one line per round showing cards played + enemy intents.
 
-        losses = [e["hp_loss"] for e in combat_hp_log]
-        avg_loss = sum(losses) / max(len(losses), 1)
-        max_loss = max(losses)
-        min_loss = min(losses)
-        total_loss = sum(losses)
-
-        sorted_log = sorted(combat_hp_log, key=lambda e: e["hp_loss"], reverse=True)
-        for entry in sorted_log:
-            loss = entry["hp_loss"]
-            floor = entry["floor"]
-            enemies_name = entry["enemies"][:30]
-            hp_before = entry["hp_before"]
-            hp_after = entry["hp_after"]
-            if loss >= avg_loss * 1.5 and loss > 5:
-                flag = _c(" ⚠高消耗" if zh else " ⚠HIGH", "red")
-            elif loss == 0:
-                flag = _c(" 无伤" if zh else " clean", "green")
-            else:
-                flag = ""
-            loss_color = "red" if loss > avg_loss else ("green" if loss == 0 else "yellow")
-            floor_str = _c(f"第{floor}层" if zh else f"F{floor}", "cyan")
-            hp_change = _c(f"{hp_before}→{hp_after}", "dim")
-            loss_str = _c(f"-{loss}HP", loss_color)
-            self._vlog(f"  {floor_str} {enemies_name}  {hp_change}  {loss_str}{flag}")
-
-        self._vlog(f"{'─'*55}")
-        self._vlog(f"  {'平均' if zh else 'Avg'}: {_c(f'-{avg_loss:.1f}HP', 'yellow')}  "
-                   f"{'最高' if zh else 'Max'}: {_c(f'-{max_loss}HP', 'red')}  "
-                   f"{'最低' if zh else 'Min'}: {_c(f'-{min_loss}HP', 'green')}  "
-                   f"{'总计' if zh else 'Total'}: {_c(f'-{total_loss}HP', 'dim')}  "
-                   f"({'共' if zh else ''}{len(combat_hp_log)}{'战' if zh else ' combats'})")
-        self._vlog(f"{'─'*55}")
-
-    def _replay_combat(self, combat_log):
-        """Replay the last combat — one line per round showing cards played + enemy intents."""
+        If `final_state` is provided and the player died during the enemy turn
+        (i.e. last logged combat_play state had hp>0 but final hp<=0), append a
+        synthetic round line showing the killing intent and damage taken.
+        """
         if not combat_log:
             return
         zh = self.lang == "zh"
@@ -432,6 +400,46 @@ class GameCoordinator:
         if skipped > 0:
             self._vlog(f"  {_c(f'... {skipped}回合空过 ...' if zh else f'... {skipped} rounds skipped ...', 'dim')}")
 
+        # Death-during-enemy-turn synthetic round: if player ended their last
+        # logged turn with hp>0 but final state shows defeat (hp<=0 or
+        # victory=false), the killing blow happened in the enemy turn we never
+        # got a combat_play state for. Surface what we DO know: the intents
+        # that were visible at end_turn (= what enemy was about to do) plus
+        # the damage taken.
+        if final_state is not None and rounds:
+            last_rnd = max(rounds.keys())
+            last_logged = rounds[last_rnd]
+            last_hp = last_logged["hp_end"]
+            final_hp = final_state.get("player", {}).get("hp")
+            final_decision = final_state.get("decision")
+            died_in_enemy_turn = (
+                final_decision == "game_over"
+                and not final_state.get("victory", False)
+                and isinstance(last_hp, int) and last_hp > 0
+                and isinstance(final_hp, int) and final_hp <= 0
+            )
+            if died_in_enemy_turn:
+                damage = last_hp - final_hp
+                # Re-format the same enemies dict from the last logged turn:
+                # those intents were visible to the agent right before end_turn,
+                # so they describe what just killed the player.
+                def _fmt_enemy(e):
+                    hp_label = _c(f"{e['hp']}HP", "green")
+                    return f"{_c(e['name'], 'cyan')} {hp_label} {e['intent']}"
+                enemy_str = " | ".join(_fmt_enemy(e) for e in last_logged["enemies"])
+                death_label = (
+                    f"回合{last_rnd + 1}（死于敌方回合）"
+                    if zh else f"R{last_rnd + 1} (died in enemy turn)"
+                )
+                hp_str = f"{_c(str(last_hp), 'red')}→{_c(str(final_hp), 'red')}"
+                dmg_str = _c(
+                    f"−{damage}HP" if not zh else f"−{damage}生命",
+                    "red",
+                )
+                self._vlog(
+                    f"  {_c(death_label, 'bold')} HP:{hp_str} {dmg_str} | {enemy_str}"
+                )
+
         total = len(combat_log)
         plays = sum(1 for e in combat_log if (e.get("action") or {}).get("action") == "play_card")
         self._vlog(f"  {'总计' if zh else 'Total'}: {total}{'步' if zh else ' steps'}, {plays}{'张牌' if zh else ' cards played'}")
@@ -464,15 +472,23 @@ class GameCoordinator:
             hp_loss = entry["hp_loss"]
             if hp_loss >= avg_loss * 1.5:
                 flag = _c("⚠", "red")
-            elif hp_loss == 0:
+            elif hp_loss <= 0:
                 flag = _c("✓", "green")
             else:
                 flag = " "
-            hp_color = "red" if hp_loss > avg_loss else ("green" if hp_loss == 0 else "yellow")
+            if hp_loss < 0:
+                hp_color = "green"
+                loss_str = f"+{-hp_loss}HP"
+            elif hp_loss == 0:
+                hp_color = "green"
+                loss_str = f"-0HP"
+            else:
+                hp_color = "red" if hp_loss > avg_loss else "yellow"
+                loss_str = f"-{hp_loss}HP"
             self._vlog(f"  {flag} {_c(f'第{floor}层' if zh else f'F{floor}', 'bold')} "
                        f"{enemies} | "
                        f"{_c(f'{hp_before}→{hp_after}', hp_color)} | "
-                       f"{_c(f'-{hp_loss}HP', hp_color)}")
+                       f"{_c(loss_str, hp_color)}")
 
     def _enemy_intent(self, enemy):
         """Format enemy intent as a short string — handles both `intents` (array) and `intent` (single)."""
@@ -673,10 +689,14 @@ class GameCoordinator:
                         self._vlog(f"  {outcome} at Floor {floor}, HP: {hp}/{max_hp}")
                         self._vlog(f"{'═'*50}")
 
-                    # On defeat, replay the last combat
+                    # On defeat, replay the last combat. Pass `state` (the final
+                    # game_over state) so the replay can synthesize a "died in
+                    # enemy turn" line when the player's last logged combat_play
+                    # state had hp>0 but the killing blow landed before the next
+                    # player turn could be observed.
                     log = combat_log if combat_log else last_combat_log
                     if self.verbose and not victory and log:
-                        self._replay_combat(log)
+                        self._replay_combat(log, final_state=state)
 
                     # Print combat HP summary
                     if combat_hp_log:
@@ -771,10 +791,15 @@ class GameCoordinator:
             self._kill_proc()
 
     def _start_proc(self):
+        # Engine stderr is appended to /tmp/coord_engine.log so STUCK/crash
+        # diagnostics survive (was DEVNULL, hiding the cause of boss stucks).
+        if not hasattr(self, "_engine_log_f") or self._engine_log_f is None:
+            self._engine_log_f = open("/tmp/coord_engine.log", "a", buffering=1)
+            self._engine_log_f.write(f"\n=== game start {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         self._proc = subprocess.Popen(
             [DOTNET, "run", "--no-build", "--project", PROJECT],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self._engine_log_f,
             text=True, bufsize=1, cwd=PROJECT_ROOT
         )
         self._read_json()
@@ -883,13 +908,38 @@ def main():
     import random as _rng
     for i in range(args.n_games):
         seed = f"eval_{args.character.lower()}_{i}_{_rng.randint(0,99999)}"
+        print()
+        print(_c("█" * 60, "blue"))
+        print(f"{_c('▶ Game', 'bold')} {_c(f'{i+1}/{args.n_games}', 'cyan')}  "
+              f"{_c('seed:', 'dim')} {_c(seed, 'yellow')}")
+        print(_c("█" * 60, "blue"))
         result = coord.run_game(args.character, seed, args.ascension)
         results.append(result)
-        status = "WIN" if result.get("victory") else "LOSS"
+        if result.get("victory"):
+            status, color = "WIN", "green"
+        else:
+            err = result.get("error")
+            hp_now = result.get("hp")
+            if err == "stuck":
+                status, color = "STUCK", "yellow"  # engine deadlock at boss
+            elif err == "room_timeout":
+                status, color = "TIMEOUT", "yellow"
+            elif err == "eof":
+                status, color = "EOF", "red"
+            elif err == "timeout":
+                status, color = "STEP-LIMIT", "yellow"
+            elif err == "start_failed":
+                status, color = "START-FAIL", "red"
+            elif isinstance(hp_now, int) and hp_now > 0:
+                # Engine returned game_over(victory=false) but hp>0:
+                # non-boss stuck path (RunSimulator.cs:1077) reports as defeat.
+                status, color = "STUCK?", "yellow"
+            else:
+                status, color = "DEFEAT", "red"  # genuine death (hp=0)
         floor = result.get('floor', 0)
         hp = result.get('hp', '?')
         mhp = result.get('max_hp', '?')
-        print(f"  Game {i+1:3d}: {_c(status, 'green' if status == 'WIN' else 'red')} | "
+        print(f"  Game {i+1:3d}: {_c(status, color)} | "
               f"floor={floor} | hp={hp}/{mhp}")
 
         # Per-10-game summary

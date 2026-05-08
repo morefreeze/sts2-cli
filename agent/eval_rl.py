@@ -261,18 +261,14 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                 if last_info.get("combat_won"):
                     ep_combat_wins += 1
                     floor_won = last_info.get("floor", 0)
-                    if floor_won >= 15:
-                        run_won = True
+                    obs, reset_info = env_wrapped.reset()
+                    # reset() returns game_over info when run ended during advance
+                    # (crash or legit game_over between combats)
+                    if reset_info.get("game_over"):
                         run_over = True
-                    else:
-                        obs, reset_info = env_wrapped.reset()
-                        # reset() returns game_over info when run ended during advance
-                        # (crash or legit game_over between combats)
-                        if reset_info.get("game_over"):
-                            run_over = True
-                            last_info = reset_info
-                            if reset_info.get("victory"):
-                                run_won = True
+                        last_info = reset_info
+                        if reset_info.get("victory"):
+                            run_won = True
                 else:
                     run_over = True
                     if last_info.get("victory"):

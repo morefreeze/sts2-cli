@@ -13,7 +13,7 @@ Usage:
     python3 agent/train.py --steps 500000 --curriculum
     python3 agent/train.py --steps 500000 --checkpoint checkpoints/ppo_ironclad_75k.zip --curriculum
 """
-import argparse, os, signal, time, numpy as np
+import argparse, os, signal, sys, time, numpy as np
 import torch
 import torch.nn as nn
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
@@ -75,10 +75,12 @@ def _unfreeze_actor(model) -> None:
         p.requires_grad_(True)
 
 
-def make_env(character: str, ascension: int, worker_id: int = 0, max_floor: int = 0):
+def make_env(character: str, ascension: int, worker_id: int = 0, max_floor: int = 0,
+             native_save_path: str = None):
     def _init():
         env = CombatEnv(character=character, ascension=ascension,
-                        seed_prefix=f"w{worker_id}", max_floor=max_floor)
+                        seed_prefix=f"w{worker_id}", max_floor=max_floor,
+                        native_save_path=native_save_path)
         return ActionMasker(env, mask_fn)
     return _init
 
@@ -381,8 +383,14 @@ def _expand_obs_checkpoint(checkpoint_path: str, vec_env, device: str,
 
 
 def _make_vec_env(character: str, ascension: int, n_envs: int,
-                  max_floor: int, seed_offset: int = 0) -> SubprocVecEnv | DummyVecEnv:
-    makers = [make_env(character, ascension, i + seed_offset, max_floor=max_floor)
+                  max_floor: int, seed_offset: int = 0,
+                  load_saves: list = None) -> SubprocVecEnv | DummyVecEnv:
+    """Spawn n_envs subprocesses. If `load_saves` is given (list of .save paths),
+    each env is round-robin assigned one — every reset reloads from that save,
+    which concentrates rollouts on a specific game state (e.g. pre-boss)."""
+    saves = load_saves or []
+    makers = [make_env(character, ascension, i + seed_offset, max_floor=max_floor,
+                       native_save_path=(saves[i % len(saves)] if saves else None))
               for i in range(n_envs)]
     return SubprocVecEnv(makers) if n_envs > 1 else DummyVecEnv(makers)
 
@@ -403,6 +411,11 @@ def main():
     parser.add_argument("--curriculum",  action="store_true")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")
+    parser.add_argument("--load-save",   default=None,
+                        help="Path to a single .save file. All envs reload from it on reset — "
+                             "use to concentrate training on a specific state (e.g. pre-boss).")
+    parser.add_argument("--load-save-dir", default=None,
+                        help="Directory of .save files. Envs are round-robin assigned different saves.")
     args = parser.parse_args()
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -412,7 +425,7 @@ def main():
     N_STEPS    = 512    # was 2048 — 4x more gradient updates/hour
     BATCH_SIZE = 128    # was 256
     N_EPOCHS   = 1      # was 2 — halves per-chunk VF gradient updates, prevents fl≤6 ev overshoot
-    LR         = 2e-5   # restored: 3e-5 caused cr 0%→8% and floor collapse after first update
+    LR         = 1e-5   # 2e-5 → 1e-5 (May 8): more conservative updates to fight 3706k drift
     ENT_COEF   = 0.08   # Run10: 0.10→0.08 slight reduction for more exploitation at floor 15+
     GAMMA      = 0.99
     CLIP_RANGE = 0.05   # was 0.1 — tighter clipping limits per-update policy change
@@ -420,12 +433,28 @@ def main():
 
     initial_floor = CURRICULUM_SCHEDULE[0][1] if args.curriculum else 0
     suffix = " + curriculum" if args.curriculum else ""
+
+    load_saves = []
+    if args.load_save:
+        load_saves = [os.path.abspath(args.load_save)]
+    elif args.load_save_dir:
+        import glob
+        load_saves = sorted(glob.glob(os.path.join(args.load_save_dir, "*.save")))
+        if not load_saves:
+            print(f"  ⚠ No .save files in {args.load_save_dir}"); sys.exit(1)
+    if load_saves:
+        suffix += f" + load_saves×{len(load_saves)}"
+
     print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs"
           f" | device={device}{suffix}")
     print(f"  n_steps={N_STEPS} batch={BATCH_SIZE} lr={LR} ent={ENT_COEF} "
           f"hp_penalty=-0.50 floor_bonus=0.10×floor(cap1.5) hp_curve=quadratic")
+    if load_saves:
+        for s in load_saves:
+            print(f"  load_save: {s}")
 
-    vec_env = _make_vec_env(args.character, args.ascension, args.n_envs, initial_floor)
+    vec_env = _make_vec_env(args.character, args.ascension, args.n_envs, initial_floor,
+                            load_saves=load_saves)
 
     policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
@@ -532,7 +561,7 @@ def main():
         steps_done += chunk
         ckpt = os.path.join(CHECKPOINT_DIR,
                             f"ppo_{args.character.lower()}_{(checkpoint_base + steps_done) // 1000}k.zip")
-        model.save(ckpt)
+        model.save(ckpt, exclude=["env", "_episode_storage", "_vec_normalize_env"])
         print(f"\n  [save] {ckpt}", flush=True)
 
         # Periodic evaluation

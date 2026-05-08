@@ -1,5 +1,32 @@
 # STS2-CLI Bug Tracker
 
+## [FIXED] BUG-038: AssetCache.GetCompressedTexture2D InvalidCastException — boss STUCK at floor 17 (2026-05-06, fixed 2026-05-06)
+- **Decision type**: combat_play (during Vantom Round 3 DismemberMove, KinPriest Round 4, possibly others)
+- **Description**: `MegaCrit.Sts2.Core.Assets.AssetCache.GetCompressedTexture2D(string path)` does an internal `castclass CompressedTexture2D` that throws `InvalidCastException: Unable to cast object of type 'Godot.PackedScene' to type 'Godot.CompressedTexture2D'`. The cached entry is a PackedScene (likely from `PreloadVfxAssets` or game-side loading), and the unchecked cast faults the surrounding async task. The faulted task leaves ActionExecutor in a broken state on the enemy turn, the game never returns to PlayPhase, and after 10s the engine emits the boss-stuck signal → coordinator reports `STUCK` (floor=17, hp>0, no win).
+- **Evidence**: `/tmp/coord_engine.log` contained ~25 `InvalidCastException ... at AssetCache.GetCompressedTexture2D` entries each followed by `[WARN] Unobserved task exception` and `[SIM] EndTurn stuck after 10s(boss) — Round=3, Enemies=[Vantom(hp=166)]` (and similar for KinPriest Round 4). 20-game eval pre-fix: 2/20 STUCK at floor=17 hp>0; post-fix: 0/20 STUCK, boss combat completes (genuine wins or genuine deaths instead).
+- **Fix**: IL-patch all `AssetCache.Get*(path)` methods (`GetScene`, `GetTexture2D`, `GetMaterial`, `GetCompressedTexture2D`) by replacing every `castclass T` instruction with `isinst T`. `isinst` returns null on type mismatch instead of throwing — downstream NREs are already swallowed by `InlineSyncCtx.Pump` (BUG-029). Persisted as Patch 5 in setup.sh.
+- **Relevant code**: setup.sh (Patch 5 block, after Patch 4); lib/sts2.dll patched in-place
+
+## [FIXED] BUG-037: Vantom.DismemberMove NullRef on NGame.DoHitStop — boss cr=2-3% (2026-04-30, fixed 2026-04-30)
+- **Decision type**: combat_play (end_turn during Vantom boss Round 3)
+- **Description**: After Cmd.Wait IL patch fixed the deadlock (BUG-014/BUG-030), `Vantom.DismemberMove` still throws `NullReferenceException` at `callvirt NGame.DoHitStop(2, 1)`. The game code correctly null-checks NCombatRoom.get_Instance() and NGame.get_Instance() elsewhere (RadialBlur, ScreenShake) but forgot the guard before DoHitStop. In headless, NGame.Instance=null → callvirt on null → NullRef → faulted task → ActionExecutor dies → TurnStarted never fires → 10s boss timeout → stuck signal → cr.
+- **Evidence**: All cr events in Run 16 training show `Enemies=[Vantom(hp=16X)]`, Round=3, consistent NullRef stack trace pointing to `Vantom.DismemberMove`.
+- **Fix**: IL-patch `Vantom/<DismemberMove>d__34::MoveNext` to add `dup; brfalse SKIP; ldc.i4.2; ldc.i4.1; callvirt DoHitStop; br AFTER; SKIP: pop; AFTER:` null guard pattern (same as the RadialBlur/ScreenShake guards already in the same method). Applied standalone (not part of setup.sh Patch 4 addition) at 2026-04-30 16:49.
+- **Relevant code**: setup.sh Patch 4; lib/sts2.dll patched in-place (mtime Apr 30 16:49)
+
+## [FIXED] BUG-036: Shop buy_potion fails with NullRef — purchase never completes (2026-04-30, fixed 2026-04-30)
+- **Decision type**: shop (buy_potion)
+- **Description**: `DoBuyPotion` calls `entry.OnTryPurchaseWrapper(...).GetAwaiter().GetResult()` which blocks the main thread. UI animation code runs and throws `NullReferenceException` (missing VFX slot reference). Exception is caught+logged, but potion is NOT added to player inventory. Same root cause in `DoBuyCard` and `DoBuyRelic`.
+- **Evidence**: Repeated "Buy potion failed: Object reference not set to an instance of an object." in crash_stderr.log across all Run 16 training episodes.
+- **Fix**: Replaced `GetAwaiter().GetResult()` with `SuppressYield=true` + pump-while-wait loop (same as BUG-031 fix). Also logs exception type for future diagnosis. Applied to DoBuyCard, DoBuyRelic, DoBuyPotion.
+- **Relevant code**: RunSimulator.cs (DoBuyCard ~line 1182, DoBuyRelic ~line 1208, DoBuyPotion ~line 1234)
+
+## [FIXED] BUG-035: card_select "add N from pool" picks WORST cards instead of BEST (2026-04-30, fixed 2026-04-30)
+- **Decision type**: card_select (event room with multi-card pool)
+- **Description**: Events like "满屋芝士" (add 2 from 8 commons) have max_sel=2, pool=8. The card_select handler's condition `len(cards) <= 5 and max_sel == 1` only catches single-card discoveries. Pools with max_sel>=2 or len>5 fell into the "large pool = removal" branch and picked the WORST cards. Example: cheese event → picked Blood Wall (4.0) + Tremble (4.5) instead of best 2 powers.
+- **Fix**: Changed condition to `max_sel >= 2 or len(cards) <= 10` → picks BEST N cards. Only large single-select pools (len > 10, max_sel = 1) use the "remove worst" path.
+- **Relevant code**: agent/combat_env.py (card_select handler, lines ~265-276)
+
 ## [FIXED] BUG-034: Whirlwind NullRef + round-stale stuck causing cr=6% in Run 16 (2026-04-30, fixed 2026-04-30)
 - **Decision type**: combat_play (play_card WHIRLWIND; end_turn after any fast-path enemy turn)
 - **Description**: Two related crash causes contributing ~3-4% each to cr=6%:

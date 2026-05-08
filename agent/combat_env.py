@@ -17,7 +17,8 @@ import numpy as np
 from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
 from agent.strategy import Act1SafeStrategy, HpAwareMapStrategy, MapStrategy, rest_site_action
-from agent.card_scoring import score_card, pick_best_card, pick_worst_card
+from agent.card_scoring import (score_card, score_card_in_deck, pick_best_card,
+                                  pick_worst_card, deck_quality_score, _card_id_norm)
 
 # Swappable map strategy — change globally via set_map_strategy()
 _map_strategy: MapStrategy = HpAwareMapStrategy()
@@ -29,18 +30,31 @@ def set_map_strategy(strategy: MapStrategy):
     _map_strategy = strategy
 
 def _find_dotnet():
-    """Find .NET SDK binary across platforms."""
-    for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
-              os.path.expanduser("~/.dotnet/dotnet"),
-              "/usr/local/share/dotnet/dotnet",
-              "dotnet"]:
+    """Return a command prefix list for .NET SDK. On Apple Silicon, prefers ARM64 dotnet."""
+    import platform
+    candidates = [
+        os.path.expanduser("~/.dotnet-arm64/dotnet"),
+        os.path.expanduser("~/.dotnet/dotnet"),
+        "/usr/local/share/dotnet/dotnet",
+        "dotnet",
+    ]
+    for p in candidates:
         try:
             r = subprocess.run([p, "--version"], capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
-                return p
+                return [p]
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
-    return "dotnet"
+    # On macOS ARM64, try arch -arm64 dotnet to load ARM64 managed assemblies
+    if platform.system() == "Darwin":
+        try:
+            r = subprocess.run(["arch", "-arm64", "dotnet", "--version"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return ["arch", "-arm64", "dotnet"]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return ["dotnet"]
 
 DOTNET = _find_dotnet()
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -212,14 +226,18 @@ def greedy_action(state: dict) -> dict:
     elif decision == "card_reward":
         cards = state.get("cards", [])
         if cards:
-            deck_size = state.get("player", {}).get("deck_size", 10)
-            # Raise pick threshold as deck grows: keep deck lean
-            # Always require 5.5+ — ANGER/FLEX (5.0) bloat the deck and slow cycling.
-            if deck_size >= 18:
+            deck = state.get("player", {}).get("deck") or []
+            deck_size = state.get("player", {}).get("deck_size", len(deck) or 10)
+            floor = state.get("floor") or state.get("context", {}).get("floor", 1)
+            in_act2 = isinstance(floor, int) and floor >= 16
+            if in_act2:
+                threshold = 5.5 if deck_size < 18 else 6.0
+            elif deck_size >= 18:
                 threshold = 6.5
             else:
                 threshold = 5.5
-            best = pick_best_card(cards, threshold=threshold)
+            # Pass deck for synergy-aware picks (boosts cards that fit the archetype).
+            best = pick_best_card(cards, threshold=threshold, deck=deck)
             if best is not None:
                 return {"cmd": "action", "action": "select_card_reward",
                         "args": {"card_index": best}}
@@ -262,15 +280,19 @@ def greedy_action(state: dict) -> dict:
                 best = pick_best_card(cards, threshold=0.0)
                 idx = best if best is not None else 0
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
-            elif len(cards) <= 5 and max_sel == 1:
-                # Small pool (2-5 cards): likely "choose 1 to ADD/discover" — pick best
-                best = pick_best_card(cards, threshold=0.0)
-                idx = best if best is not None else 0
-                return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             else:
-                # Larger pool (likely full deck): remove/transform — pick worst card(s)
-                scored = sorted(enumerate(cards), key=lambda x: score_card(x[1]))
-                selected = [str(scored[k][0]) for k in range(min(max_sel, len(scored)))]
+                # Distinguish "add N from external pool" vs "remove/transform from deck"
+                # External event pools (discover/cheese) never contain Strikes/Defends.
+                # Deck selections (remove/transform) always include the player's junk cards.
+                has_junk = any(score_card(c) < 3.0 for c in cards)
+                is_deck_selection = has_junk or len(cards) > 10
+                if not is_deck_selection:
+                    # External pool (no junk, small-ish): event "add N cards" — pick best N
+                    scored_by = sorted(enumerate(cards), key=lambda x: score_card(x[1]), reverse=True)
+                else:
+                    # Deck selection (remove/transform): pick worst N
+                    scored_by = sorted(enumerate(cards), key=lambda x: score_card(x[1]))
+                selected = [str(scored_by[k][0]) for k in range(min(max_sel, len(scored_by)))]
                 return {"cmd": "action", "action": "select_cards",
                         "args": {"indices": ",".join(selected)}}
         return {"cmd": "action", "action": "skip_select"}
@@ -299,31 +321,46 @@ def greedy_action(state: dict) -> dict:
                     return {"cmd": "action", "action": "buy_potion",
                             "args": {"potion_index": sp.get("index", 0)}}
 
-        # Find best affordable card
-        cards = [c for c in state.get("cards", [])
-                 if c.get("is_stocked") and c.get("cost", 999) <= gold]
-        best_card = max(cards, key=lambda c: score_card(c)) if cards else None
-        best_score = score_card(best_card) if best_card else 0.0
-        # Buy elite cards first (score ≥ 8.5) before spending gold on removal
-        if best_card and best_score >= 8.5:
+        in_act2 = isinstance(floor, int) and floor >= 16
+        deck = state.get("player", {}).get("deck", []) or []
+
+        # === REMOVAL FIRST when deck has Strike/Defend basics ===
+        # Aggressive change (2026-05-07): in Act 1, deck thinning is the highest-leverage
+        # gold spend — a removed Strike compounds across every shuffle, vs a single card
+        # buy. Always remove when affordable and there's any Strike/Defend in the deck.
+        n_strikes = sum(1 for c in deck if "STRIKE" in _card_id_norm(c) and "STRIKE_DUMMY" not in _card_id_norm(c))
+        n_defends = sum(1 for c in deck if "DEFEND" in _card_id_norm(c))
+        has_basic = (n_strikes + n_defends) >= 2
+        has_junk = any(score_card(c) < 3.5 for c in deck)
+        if removal_cost and gold >= removal_cost and (has_basic or has_junk):
+            return {"cmd": "action", "action": "remove_card"}
+
+        # Find best affordable card — deck-aware so synergy cards rank higher.
+        cards_avail = [c for c in state.get("cards", [])
+                       if c.get("is_stocked") and c.get("cost", 999) <= gold]
+        best_card = max(cards_avail, key=lambda c: score_card_in_deck(c, deck)) if cards_avail else None
+        best_score = score_card_in_deck(best_card, deck) if best_card else 0.0
+        # Buy elite cards first (score ≥ 8.0 with synergy)
+        if best_card and best_score >= 8.0:
             return {"cmd": "action", "action": "buy_card",
                     "args": {"card_index": best_card.get("index", 0)}}
-        # Remove a card if affordable (deck thinning is very valuable)
-        if removal_cost and gold >= removal_cost:
-            return {"cmd": "action", "action": "remove_card"}
-        # Pre-boss zone (floor 11+): lower threshold to 5.5 to snag decent cards
-        card_buy_threshold = 5.5 if pre_boss else 6.0
-        # Buy good card after removal opportunity checked
+        # Lower thresholds across the board (more aggressive shop usage)
+        if in_act2:
+            card_buy_threshold = 4.5
+        elif pre_boss:
+            card_buy_threshold = 5.0
+        else:
+            card_buy_threshold = 5.5
         if best_card and best_score >= card_buy_threshold:
             return {"cmd": "action", "action": "buy_card",
                     "args": {"card_index": best_card.get("index", 0)}}
-        # Buy a relic if score is high enough and affordable (threshold: keep 50g buffer)
-        RELIC_GOLD_THRESHOLD = 50
+        # Buy a relic — smaller buffer (25g vs 50g), lower threshold (4.0 vs 5.0).
+        RELIC_GOLD_THRESHOLD = 25
         relics = [r for r in state.get("relics", [])
                   if r.get("is_stocked") and r.get("cost", 999) <= gold - RELIC_GOLD_THRESHOLD]
         if relics:
             best_relic = max(relics, key=_score_shop_relic)
-            if _score_shop_relic(best_relic) >= 5.0:
+            if _score_shop_relic(best_relic) >= 4.0:
                 return {"cmd": "action", "action": "buy_relic",
                         "args": {"relic_index": best_relic.get("index", 0)}}
         # Buy a potion if we have empty slots and it's affordable
@@ -406,6 +443,9 @@ class CombatEnv(gym.Env):
         self._read_buf = b""
         self._combat_steps = 0
         self.max_combat_steps = 200  # floor 4+ fights can take 100+ steps with a learning policy
+        # Run-level deck-quality milestones (paid once per crossing per game).
+        # Cleared when a fresh run starts (in reset's start_run branch).
+        self._milestones_paid: set = set()
 
         self._replay_actions = list(replay_actions) if replay_actions else []
         self._replay_pending = bool(self._replay_actions)
@@ -451,6 +491,7 @@ class CombatEnv(gym.Env):
         self._start_proc()
         run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}_{random.randint(0,99999)}"
         self._run_counter += 1
+        self._milestones_paid.clear()  # new run — re-arm deck-quality milestones
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
@@ -517,6 +558,9 @@ class CombatEnv(gym.Env):
 
         cmd = self.enc.decode(int(action), self._current_state)
         self._last_cmd = cmd
+        # Capture pre-action state so end_turn intent-aware shaping can read
+        # the block/intents the agent committed to before the enemy turn fires.
+        pre_state = self._current_state
         state = self._send(cmd)
 
         # Detect stuck: end_turn ignored by engine (round/HP unchanged)
@@ -583,6 +627,11 @@ class CombatEnv(gym.Env):
 
         decision = state.get("decision", "")
         reward = self._shaping_reward(state)
+        # _intent_block_reward disabled — even with incoming>0 gating, it
+        # reproduced the block-forever collapse (Run 18: cwr 81%→5%, to=92%
+        # at step 53k). Blocking with attack intents present is the *common*
+        # case in combat, so the gate didn't actually exclude stalling.
+        # Re-enable only with a "must also deal damage this turn" requirement.
 
         # Use last known combat obs for terminal states (NOT zeros — zeros
         # confuse the value function because they're too similar to sparse
@@ -682,7 +731,13 @@ class CombatEnv(gym.Env):
         cur_enemy_hp = _total_enemy_hp(next_state)
         cur_player_hp = _player_hp(next_state)
         enemy_hp_lost = max(self._prev_enemy_hp - cur_enemy_hp, 0)
+        # Base damage reward = 0.15 × frac of starting enemy HP. At Act 1 boss
+        # (floor 17+) we add an extra 0.10 so each fraction of boss HP burned
+        # gives stronger signal — boss combats are long, every chunk matters,
+        # and 0% win rate means policy needs more "got close" signal.
         dmg_reward = 0.15 * enemy_hp_lost / self._combat_start_enemy_hp
+        if self._current_floor >= 17:
+            dmg_reward += 0.10 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
         hp_penalty = -0.50 * player_hp_lost / self._combat_start_player_max_hp
 
@@ -695,6 +750,47 @@ class CombatEnv(gym.Env):
         # Blocking is still incentivized implicitly by hp_penalty (blocking prevents damage).
         step_penalty = -0.003
         return dmg_reward + hp_penalty + step_penalty
+
+    def _intent_block_reward(self, pre_state: dict) -> float:
+        """Reward block matched to incoming attack damage at end_turn.
+
+        Avoids the 'block forever' collapse seen in past runs: bonus is 0 when
+        no enemy intent shows attack damage. This means the only turns where
+        defensive play is rewarded are turns with imminent threat — agent has
+        no incentive to stockpile block on safe turns (e.g. boss DORMANT).
+
+        BygoneEffigy-style telegraphed slashes (sleep → buff → slash) are the
+        target use-case: the slash intent shows large damage in the turn
+        before the kill, and matching block to that damage now gives a clear
+        positive signal. Capped so a fully blocked single-turn fatal attack
+        is worth ~0.10 — comparable to one floor of floor_bonus.
+        """
+        if pre_state is None:
+            return 0.0
+        incoming = 0
+        for e in pre_state.get("enemies", []) or []:
+            if e.get("alive") is False:
+                continue
+            for it in (e.get("intents") or []):
+                if (it.get("type") or "").lower() != "attack":
+                    continue
+                try:
+                    dmg = int(it.get("damage", 0) or 0)
+                    hits = int(it.get("hits", 1) or 1)
+                except (TypeError, ValueError):
+                    continue
+                if dmg > 0 and hits > 0:
+                    incoming += dmg * hits
+        if incoming <= 0:
+            return 0.0
+        block = pre_state.get("player", {}).get("block", 0) or 0
+        try:
+            block = int(block)
+        except (TypeError, ValueError):
+            return 0.0
+        blocked = min(block, incoming)
+        max_hp = max(self._combat_start_player_max_hp, 1)
+        return 0.10 * blocked / max_hp
 
     def _combat_win_reward(self, state: dict) -> float:
         hp = _player_hp(state)
@@ -711,13 +807,32 @@ class CombatEnv(gym.Env):
         elif hp_ratio >= 0.7:
             reward += 0.25
         # Floor bonus: Act 1 (floor≤15) = 0.10/floor; Act 2+ gets +0.15/floor above 15.
-        # Raises incentive to push into Act 2 beyond the Act 1 boss.
         if self._current_floor <= 15:
             floor_bonus = (self._current_floor - 1) * 0.10
         else:
             floor_bonus = 1.4 + (self._current_floor - 15) * 0.15
         reward += floor_bonus
+        # Deck-quality milestone bonus — paid ONCE per run when crossing each
+        # of {5, 10, 15} for the first time, scaled by deck quality 0–10.
+        # Encourages building a strong deck early; passive Strikes/Defends
+        # → low deck_quality → small or zero bonus.
+        reward += self._milestone_reward(state)
         return reward
+
+    def _milestone_reward(self, state: dict) -> float:
+        """One-shot reward when the run first crosses a milestone floor with a
+        decent deck. Bounded ≤0.6 per milestone to avoid policy distortion."""
+        floor = self._current_floor
+        bonus = 0.0
+        deck = state.get("player", {}).get("deck") or []
+        for milestone in (5, 10, 15):
+            if floor >= milestone and milestone not in self._milestones_paid:
+                self._milestones_paid.add(milestone)
+                q = deck_quality_score(deck)  # 0..10
+                # Map quality 4.5 → 0, 8.5 → 0.6 (roughly linear above 4.5)
+                m_bonus = max(0.0, min((q - 4.5) * 0.15, 0.6))
+                bonus += m_bonus
+        return bonus
 
     def _terminal_reward(self, state: dict) -> float:
         if state.get("victory", False):
@@ -805,11 +920,14 @@ class CombatEnv(gym.Env):
 
             # Late-game (floor 10+): survivability matters more than saving potions
             is_late_game = self._current_floor >= 10
+            is_act2 = self._current_floor >= 16
 
             if ("heal" in text or "restore" in text) and "curse" not in text:
-                # Heal thresholds: boss=50%, elite/late-game=40%, any=30%
+                # Heal thresholds: boss=60%, Act2=50%, elite/late-game=40%, any=30%
                 if is_boss:
-                    use = hp_ratio < 0.50
+                    use = hp_ratio < 0.60  # boss: heal more aggressively
+                elif is_act2:
+                    use = hp_ratio < 0.50  # Act 2 fights are much harder
                 elif is_elite or is_late_game:
                     use = hp_ratio < 0.40
                 else:
@@ -909,7 +1027,7 @@ class CombatEnv(gym.Env):
         crash_log = os.path.join(PROJECT_ROOT, "crash_stderr.log")
         self._crash_log_f = open(crash_log, "a")
         self._proc = subprocess.Popen(
-            [DOTNET, "run", "--no-build", "--project", PROJECT],
+            DOTNET + ["run", "--no-build", "--project", PROJECT],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=self._crash_log_f, cwd=PROJECT_ROOT,
             start_new_session=True,  # own process group — killed with os.killpg
