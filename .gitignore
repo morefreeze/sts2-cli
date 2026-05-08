@@ -14,9 +14,19 @@ obj/
 logs/
 agent/__pycache__/
 play_*.py
-CLAUDE.md
 .venv312/
 .venv*/
 .env
 checkpoints/
 saves/*
+
+# runtime artifacts
+training_run*.log
+crash_stderr.log
+data/
+
+# local Claude / MCP state (not tracked)
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+.mcp.json

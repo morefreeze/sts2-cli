@@ -25,6 +25,8 @@ python3 python/play.py            # auto-setup on first run
 - `setup.sh` auto-installs pyenv, pyenv-virtualenv, Python, creates the venv, and installs dependencies
 - Dependencies: `pytest` (for tests), `requirements-agent.txt` (for RL/LLM agents)
 
+**Always use `.venv/bin/python`** for any Python invocation in this repo (training, eval, coordinator, scripts). The system `python3` lacks the project deps (`tensorboard`, `sb3-contrib`, etc.) and will fail with `ModuleNotFoundError`. Either `source .venv/bin/activate` once per shell or invoke as `.venv/bin/python ...` directly.
+
 ### Build
 ```bash
 dotnet build src/Sts2Headless/Sts2Headless.csproj
@@ -63,6 +65,17 @@ python3 agent/sts2_bridge.py replay /tmp/game.jsonl --until 42 --port 9876
 ```bash
 python3 python/play_full_run.py --seed test_seed --character Ironclad
 ```
+
+## Scratch / Temp Scripts
+
+One-off scripts (perf probes, debugging, experiments) go to `/tmp/sts2-cli/`, NOT the repo root. Only promote to the repo after the script has been used repeatedly and proven useful.
+
+```bash
+mkdir -p /tmp/sts2-cli
+# write throwaway scripts here, e.g. /tmp/sts2-cli/test_speed.py
+```
+
+Rationale: keeps the repo clean of dead scratch files; promotion is an explicit signal that something deserves version control.
 
 ## Architecture
 

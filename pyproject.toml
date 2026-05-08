@@ -1,0 +1,19 @@
+[project]
+name = "sts2-cli"
+version = "0.1.0"
+description = "Slay the Spire 2 headless CLI with RL training"
+requires-python = ">=3.11"
+dependencies = [
+    "stable-baselines3>=2.3",
+    "sb3-contrib>=2.3",
+    "gymnasium>=0.29",
+    "anthropic>=0.40",
+    "torch>=2.2",
+    "tensorboard",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
