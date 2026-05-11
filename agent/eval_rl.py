@@ -6,7 +6,7 @@ Usage:
     python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --n-games 20
     python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --verbose
 """
-import argparse, os, random, signal, sys
+import argparse, json, os, random, signal, sys, time
 import numpy as np
 import torch
 
@@ -15,6 +15,7 @@ from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv, greedy_action
 from agent.train import mask_fn
+from agent.card_scoring import score_card_in_deck, deck_quality_score
 
 
 _GAME_TIMEOUT_SEC = 300  # 5 min per game — kills deadlocked C# processes
@@ -36,6 +37,56 @@ def _card_id(c: dict) -> str:
     if cid.upper().startswith("CARD."):
         cid = cid[5:]
     return cid
+
+
+def _card_name(c: dict) -> str:
+    n = c.get("name", {})
+    if isinstance(n, dict):
+        return n.get("en", str(n))
+    return str(n)
+
+
+def _is_boss_combat_round1(state: dict) -> bool:
+    if not isinstance(state, dict) or state.get("decision") != "combat_play":
+        return False
+    if state.get("round", 0) != 1:
+        return False
+    room_type = (state.get("context") or {}).get("room_type", "")
+    return "boss" in str(room_type).lower()
+
+
+def _write_boss_deck_record(state: dict, *, checkpoint: str, character: str,
+                            game_seed: str, game_index: int, jsonl_path: str) -> None:
+    deck = state.get("player", {}).get("deck") or []
+    if not deck:
+        return
+    cards = []
+    for c in deck:
+        try:
+            sc = score_card_in_deck(c, deck)
+        except Exception:
+            sc = None
+        cards.append({
+            "id": _card_id(c),
+            "name": _card_name(c),
+            "score": round(sc, 3) if sc is not None else None,
+        })
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "checkpoint": os.path.basename(str(checkpoint)) if checkpoint else None,
+        "character": character,
+        "seed": game_seed,
+        "game_index": game_index,
+        "floor": state.get("floor"),
+        "act": state.get("act"),
+        "room_type": (state.get("context") or {}).get("room_type", ""),
+        "deck_size": len(deck),
+        "deck_quality": round(deck_quality_score(deck), 3),
+        "cards": cards,
+    }
+    os.makedirs(os.path.dirname(jsonl_path) or ".", exist_ok=True)
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _fmt_hand(state: dict) -> str:
@@ -182,12 +233,16 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                      verbose: bool = False,
                      replay_actions: list = None,
                      load_seed: str = None,
-                     native_save_path: str = None) -> dict:
+                     native_save_path: str = None,
+                     boss_deck_log_path: str = None,
+                     checkpoint_name: str = None) -> dict:
     """Full-run eval with per-game floor breakdown.
 
     verbose=True: show per-room summaries; for wins, show last combat step-by-step.
     replay_actions/load_seed: replay action log after start_run.
     native_save_path: load a binary .save via load_save instead of start_run.
+    boss_deck_log_path: when set, append a JSONL record of the deck + per-card
+        scores at the start of each boss combat (one record per boss-floor).
     """
     # Auto-detect obs_size: legacy=161, run11=169 (extra_obs adds 8 features)
     model_obs_size = model.observation_space.shape[0]
@@ -221,6 +276,9 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         run_over = False
         timed_out = False
         all_combat_logs = []  # list of (floor, steps_log)
+        # Track which boss floors we've already logged this run, so each boss
+        # combat (Act 1 / Act 2 / Act 3) records exactly once at round 1.
+        logged_boss_floors: set = set()
 
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(_GAME_TIMEOUT_SEC)
@@ -235,6 +293,14 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
                 while not done:
                     state_snap = env._current_state
+                    if boss_deck_log_path and _is_boss_combat_round1(state_snap):
+                        fl = state_snap.get("floor", 0)
+                        if fl not in logged_boss_floors:
+                            _write_boss_deck_record(
+                                state_snap, checkpoint=checkpoint_name,
+                                character=character, game_seed=game_seed,
+                                game_index=i, jsonl_path=boss_deck_log_path)
+                            logged_boss_floors.add(fl)
                     masks = env_wrapped.action_masks()
                     action, _ = model.predict(obs, deterministic=True, action_masks=masks)
 
@@ -315,12 +381,15 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                     result = "won"
                 print(f"  [combat fl={fl}] HP {hp_b}→{hp_a} [{result}]")
 
-            # For wins: print last combat step-by-step
-            if run_won and all_combat_logs:
+            # Print last combat step-by-step for wins OR for boss-reach (fl≥17) defeats —
+            # the latter is what we need to debug "got close to boss kill" scenarios.
+            if all_combat_logs:
                 last_fl, _, _, last_steps = all_combat_logs[-1]
-                print(f"\n  === Last combat (fl={last_fl}) step-by-step ===")
-                for step in last_steps:
-                    print(step)
+                if run_won or (isinstance(last_fl, int) and last_fl >= 14):
+                    label = "WIN" if run_won else f"DEFEAT (deep, fl={last_fl})"
+                    print(f"\n  === Last combat (fl={last_fl}) [{label}] step-by-step ===")
+                    for step in last_steps:
+                        print(step)
             print()
 
     return {
@@ -360,7 +429,12 @@ def main():
                    help="Per-room summaries + detailed last-combat trace on wins")
     p.add_argument("--load", default=None,
                    help="Replay actions from a play.py save (.json) before agent takes over")
+    p.add_argument("--deck-log", default="data/eval_decks.jsonl",
+                   help="JSONL file to append deck + per-card scores at the start of each "
+                        "boss combat. Pass 'none' to disable.")
     args = p.parse_args()
+    boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
+                          else args.deck_log)
 
     replay_actions = None
     load_seed = None
@@ -407,7 +481,9 @@ def main():
                              fixed_seeds=args.fixed_seeds, seed_offset=args.seed_offset,
                              verbose=args.verbose,
                              replay_actions=replay_actions, load_seed=load_seed,
-                             native_save_path=native_save_path)
+                             native_save_path=native_save_path,
+                             boss_deck_log_path=boss_deck_log_path,
+                             checkpoint_name=checkpoint)
     print(f"---")
     print(f"avg_floor      : {stats['avg_floor']:.1f}")
     print(f"max_floor      : {stats['max_floor']}")
