@@ -45,6 +45,19 @@ CURRICULUM_SCHEDULE = [
     (0.00, 0),    # full game immediately — maximize fl≤∞ exposure for Act1 Boss clear
 ]
 
+# HP curriculum (B2 plan, May 20): when training from boss snapshots, force
+# player HP at boss entry to follow this schedule. The HP-sweep on 11150k at the
+# hp=68 snapshot showed: hp<70 → 0% win, hp=87 → 27%, hp=100 → 60%, hp=150 → 97%.
+# Start with hp=120 (strong winning signal, ~85% win) so the policy gets dense
+# reward; gradually lower to natural HP. Activate with --hp-curriculum (only
+# meaningful when --load-save / --load-save-dir is also set).
+HP_CURRICULUM_SCHEDULE = [
+    (0.00, 120),  # high signal: ~85% win baseline
+    (0.30, 100),  # 60% win
+    (0.60,  80),  # 20% win
+    (0.85,   0),  # 0 = no override, use natural HP from snapshot
+]
+
 
 def mask_fn(env):
     return env.action_masks()
@@ -94,17 +107,28 @@ def _curriculum_phase(progress: float) -> tuple[int, int]:
     return max_floor, phase
 
 
+def _hp_curriculum_phase(progress: float) -> tuple[int, int]:
+    """Return (hp_override, phase_index) for HP curriculum progress.
+    hp_override=0 means 'no override' (use natural snapshot HP)."""
+    hp, phase = 0, 0
+    for i, (frac, h) in enumerate(HP_CURRICULUM_SCHEDULE):
+        if progress >= frac:
+            hp, phase = h, i
+    return hp, phase
+
+
 class TrainCallback(BaseCallback):
     """Progress display + curriculum updates + episode stats collection."""
 
     def __init__(self, total_steps: int, n_envs: int, n_steps_per_iter: int,
-                 curriculum: bool = False,
+                 curriculum: bool = False, hp_curriculum: bool = False,
                  normal_clip: float = 0.05, normal_vf_coef: float = 0.10):
         super().__init__()
         self.total_steps = total_steps
         self.n_envs = n_envs
         self.n_steps_per_iter = n_steps_per_iter
         self.curriculum = curriculum
+        self.hp_curriculum = hp_curriculum
         self._normal_clip = normal_clip
         self._normal_vf_coef = normal_vf_coef
         self._iter_start = time.time()
@@ -113,6 +137,7 @@ class TrainCallback(BaseCallback):
         self._global_steps = 0
         self._last_print = 0
         self._last_curriculum_phase = -1
+        self._last_hp_curriculum_phase = -1
         self._chunk_count = 0
         # VF pre-training: freeze policy for N chunks after each floor transition
         # so VF can calibrate before policy gradient resumes. Prevents collapse
@@ -153,6 +178,14 @@ class TrainCallback(BaseCallback):
                 self._last_curriculum_phase = phase
                 self._apply_max_floor(max_floor)
 
+        # HP curriculum update (independent of max_floor curriculum)
+        if self.hp_curriculum:
+            progress = self._global_steps / max(self.total_steps, 1)
+            hp_override, hp_phase = _hp_curriculum_phase(progress)
+            if hp_phase != self._last_hp_curriculum_phase:
+                self._last_hp_curriculum_phase = hp_phase
+                self._apply_hp_override(hp_override)
+
         now = time.time()
         if now - self._last_print >= 3.0:
             self._last_print = now
@@ -187,6 +220,14 @@ class TrainCallback(BaseCallback):
             print(f"\n  [curriculum] Phase → fl≤{floor_str}", flush=True)
         except Exception as e:
             print(f"\n  [curriculum] WARNING: _apply_max_floor failed: {e}", flush=True)
+
+    def _apply_hp_override(self, hp: int):
+        label = f"hp={hp}" if hp > 0 else "hp=natural"
+        try:
+            self.training_env.env_method("set_hp_after_load", hp)
+            print(f"\n  [hp-curriculum] Phase → {label}", flush=True)
+        except Exception as e:
+            print(f"\n  [hp-curriculum] WARNING: _apply_hp_override failed: {e}", flush=True)
 
     def _on_rollout_end(self):
         now = time.time()
@@ -353,7 +394,7 @@ def _expand_obs_checkpoint(checkpoint_path: str, vec_env, device: str,
     old_ts = getattr(old_model, "num_timesteps", 0)
 
     # Create new model with correct obs size
-    policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+    policy_kwargs = dict(net_arch=dict(pi=[512, 512], vf=[512, 512]))
     new_model = MaskablePPO(
         "MlpPolicy", vec_env, verbose=0, device=device,
         policy_kwargs=policy_kwargs, **hyperparams
@@ -384,14 +425,34 @@ def _expand_obs_checkpoint(checkpoint_path: str, vec_env, device: str,
 
 def _make_vec_env(character: str, ascension: int, n_envs: int,
                   max_floor: int, seed_offset: int = 0,
-                  load_saves: list = None) -> SubprocVecEnv | DummyVecEnv:
-    """Spawn n_envs subprocesses. If `load_saves` is given (list of .save paths),
-    each env is round-robin assigned one — every reset reloads from that save,
-    which concentrates rollouts on a specific game state (e.g. pre-boss)."""
+                  load_saves: list = None,
+                  mix_save_envs: int = -1) -> SubprocVecEnv | DummyVecEnv:
+    """Spawn n_envs subprocesses.
+    - If `load_saves` is empty: all envs are random fresh runs.
+    - If `load_saves` is non-empty and mix_save_envs == -1: ALL envs round-robin
+      load from saves (legacy boss-only training).
+    - If 0 ≤ mix_save_envs ≤ n_envs: that many envs load from saves (round-robin),
+      the rest run fresh random games. This gives the policy both full-game exposure
+      AND concentrated boss-fight practice in the same training batch."""
     saves = load_saves or []
-    makers = [make_env(character, ascension, i + seed_offset, max_floor=max_floor,
-                       native_save_path=(saves[i % len(saves)] if saves else None))
-              for i in range(n_envs)]
+    if not saves:
+        n_save_envs = 0
+    elif mix_save_envs < 0:
+        n_save_envs = n_envs  # legacy: all envs use saves
+    else:
+        n_save_envs = max(0, min(mix_save_envs, n_envs))
+    # Pool mode: when multiple saves are provided, every save-env receives the
+    # full pool and picks a random snapshot per reset (CombatEnv handles list).
+    # When only one save is provided, behave as before (single-save mode).
+    pool = saves if len(saves) > 1 else None
+    makers = []
+    for i in range(n_envs):
+        if i < n_save_envs:
+            sp = pool if pool is not None else saves[i % len(saves)]
+        else:
+            sp = None
+        makers.append(make_env(character, ascension, i + seed_offset,
+                               max_floor=max_floor, native_save_path=sp))
     return SubprocVecEnv(makers) if n_envs > 1 else DummyVecEnv(makers)
 
 
@@ -409,6 +470,10 @@ def main():
     parser.add_argument("--vf-pretrain-chunks", type=int, default=0,
                         help="Freeze policy for N 25k-step chunks at start so value network can calibrate (e.g. 2 = 50k steps VF-only)")
     parser.add_argument("--curriculum",  action="store_true")
+    parser.add_argument("--hp-curriculum", action="store_true",
+                        help="Enable HP curriculum (B2: phases 120→100→80→natural) when "
+                             "training with --load-save or --load-save-dir. Only useful "
+                             "with snapshot pool — overrides player HP after each load.")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")
     parser.add_argument("--load-save",   default=None,
@@ -416,7 +481,20 @@ def main():
                              "use to concentrate training on a specific state (e.g. pre-boss).")
     parser.add_argument("--load-save-dir", default=None,
                         help="Directory of .save files. Envs are round-robin assigned different saves.")
+    parser.add_argument("--mix-save-envs", type=int, default=-1,
+                        help="Number of envs that load from saves (rest run fresh games). "
+                             "Default -1 = all envs use saves (legacy). Set to e.g. 2 for "
+                             "mixed training: 2 envs from saves + 2 random.")
+    parser.add_argument("--ent-coef", type=float, default=None,
+                        help="Override entropy coefficient (default: 0.08 hardcoded). "
+                             "Use higher (e.g. 0.15) for boss-only training to escape policy collapse.")
+    parser.add_argument("--save-dir", default=None,
+                        help="Override checkpoint output dir (default: checkpoints/). "
+                             "Use 'checkpoints_boss/' for boss-focused training.")
     args = parser.parse_args()
+    global CHECKPOINT_DIR
+    if args.save_dir:
+        CHECKPOINT_DIR = os.path.abspath(args.save_dir)
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -425,11 +503,18 @@ def main():
     N_STEPS    = 512    # was 2048 — 4x more gradient updates/hour
     BATCH_SIZE = 128    # was 256
     N_EPOCHS   = 1      # was 2 — halves per-chunk VF gradient updates, prevents fl≤6 ev overshoot
-    LR         = 1e-5   # 2e-5 → 1e-5 (May 8): more conservative updates to fight 3706k drift
-    ENT_COEF   = 0.08   # Run10: 0.10→0.08 slight reduction for more exploitation at floor 15+
-    GAMMA      = 0.99
-    CLIP_RANGE = 0.05   # was 0.1 — tighter clipping limits per-update policy change
-    VF_COEF    = 0.10   # was 0.25 — much slower VF learning to prevent ev overshoot on floor transitions
+    LR         = 2e-5   # restored for fresh 512x512 training (May 8) — 1e-5 was for 3706k continuation
+    ENT_COEF   = 0.08 if args.ent_coef is None else float(args.ent_coef)
+    # Run10: 0.10→0.08 slight reduction for more exploitation at floor 15+.
+    # --ent-coef overrides for boss-only training (recommended 0.15+ to escape stuck policy).
+    GAMMA      = 0.99   # REVERTED 2026-05-18: gamma=0.95 caused 3-day regression
+                        # from 8827k baseline (13.1) → 10057k (11.0). Switching gamma
+                        # on a loaded ckpt invalidates its value function (calibrated
+                        # for ~100-step horizon), and shorter horizon under-rewards
+                        # long-term deck/relic setup needed for boss (floor 17).
+    GAE_LAMBDA = 0.95   # REVERTED 2026-05-18 paired with gamma revert.
+    CLIP_RANGE = 0.05
+    VF_COEF    = 0.10
 
     initial_floor = CURRICULUM_SCHEDULE[0][1] if args.curriculum else 0
     suffix = " + curriculum" if args.curriculum else ""
@@ -443,7 +528,11 @@ def main():
         if not load_saves:
             print(f"  ⚠ No .save files in {args.load_save_dir}"); sys.exit(1)
     if load_saves:
-        suffix += f" + load_saves×{len(load_saves)}"
+        if args.mix_save_envs >= 0:
+            n_save = max(0, min(args.mix_save_envs, args.n_envs))
+            suffix += f" + mix({n_save}/{args.n_envs} envs from saves×{len(load_saves)})"
+        else:
+            suffix += f" + load_saves×{len(load_saves)}"
 
     print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs"
           f" | device={device}{suffix}")
@@ -454,15 +543,16 @@ def main():
             print(f"  load_save: {s}")
 
     vec_env = _make_vec_env(args.character, args.ascension, args.n_envs, initial_floor,
-                            load_saves=load_saves)
+                            load_saves=load_saves, mix_save_envs=args.mix_save_envs)
 
-    policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+    policy_kwargs = dict(net_arch=dict(pi=[512, 512], vf=[512, 512]))
 
     if args.checkpoint:
         print(f"  Loading checkpoint: {args.checkpoint}")
         tb_log = os.path.join(CHECKPOINT_DIR, "tb_logs")
         _hp = dict(n_steps=N_STEPS, batch_size=BATCH_SIZE, n_epochs=N_EPOCHS,
-                   learning_rate=LR, gamma=GAMMA, ent_coef=ENT_COEF,
+                   learning_rate=LR, gamma=GAMMA, gae_lambda=GAE_LAMBDA,
+                   ent_coef=ENT_COEF,
                    clip_range=CLIP_RANGE, vf_coef=VF_COEF, max_grad_norm=0.5,
                    tensorboard_log=tb_log)
         if args.obs_expand:
@@ -480,6 +570,8 @@ def main():
             model.ent_coef       = ENT_COEF
             model.vf_coef        = VF_COEF
             model.learning_rate  = LR
+            model.gamma          = GAMMA       # 0.99 → 0.95
+            model.gae_lambda     = GAE_LAMBDA  # 0.95 → 0.9
             model.clip_range     = lambda _: CLIP_RANGE
             model.clip_range_vf  = lambda _: CLIP_RANGE
             if args.reinit_value:
@@ -500,13 +592,15 @@ def main():
             "MlpPolicy", vec_env, verbose=0, device=device,
             policy_kwargs=policy_kwargs,
             n_steps=N_STEPS, batch_size=BATCH_SIZE, n_epochs=N_EPOCHS,
-            learning_rate=LR, gamma=GAMMA, ent_coef=ENT_COEF,
+            learning_rate=LR, gamma=GAMMA, gae_lambda=GAE_LAMBDA,
+            ent_coef=ENT_COEF,
             clip_range=CLIP_RANGE, vf_coef=VF_COEF, max_grad_norm=0.5,
             tensorboard_log=os.path.join(CHECKPOINT_DIR, "tb_logs"),
         )
 
     callback = TrainCallback(args.steps, args.n_envs, N_STEPS,
                              curriculum=args.curriculum,
+                             hp_curriculum=args.hp_curriculum,
                              normal_clip=CLIP_RANGE,
                              normal_vf_coef=VF_COEF)
 
@@ -550,9 +644,11 @@ def main():
             old_vf_pretrain = getattr(callback, "_vf_pretrain_remaining", 0)
             callback = TrainCallback(args.steps, args.n_envs, N_STEPS,
                                      curriculum=args.curriculum,
+                                     hp_curriculum=args.hp_curriculum,
                                      normal_clip=CLIP_RANGE, normal_vf_coef=VF_COEF)
             callback._global_steps = steps_done
             callback._train_start  = time.time() - steps_done / 5.0  # approx
+            callback._last_hp_curriculum_phase = -1  # force re-apply after env restart
             # Restore VF pre-training state if crash happened mid-pretrain
             if old_vf_pretrain > 0:
                 callback._vf_pretrain_remaining = old_vf_pretrain

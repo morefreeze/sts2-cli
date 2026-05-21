@@ -22,8 +22,11 @@ saves/*
 
 # runtime artifacts
 training_run*.log
+training_boss*.log
 crash_stderr.log
 data/
+checkpoints_boss/
+checkpoints_256x256/
 
 # local Claude / MCP state (not tracked)
 .claude/scheduled_tasks.json

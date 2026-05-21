@@ -235,6 +235,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                      load_seed: str = None,
                      native_save_path: str = None,
                      boss_deck_log_path: str = None,
+                     boss_snapshot_dir: str = None,
+                     boss_snapshot_min_hp: int = 50,
                      checkpoint_name: str = None) -> dict:
     """Full-run eval with per-game floor breakdown.
 
@@ -279,6 +281,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         # Track which boss floors we've already logged this run, so each boss
         # combat (Act 1 / Act 2 / Act 3) records exactly once at round 1.
         logged_boss_floors: set = set()
+        snapshotted_boss_floors: set = set()  # boss snapshot save dedup, per game
 
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(_GAME_TIMEOUT_SEC)
@@ -301,6 +304,35 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                                 character=character, game_seed=game_seed,
                                 game_index=i, jsonl_path=boss_deck_log_path)
                             logged_boss_floors.add(fl)
+                    if boss_snapshot_dir and _is_boss_combat_round1(state_snap):
+                        fl = (state_snap.get("floor")
+                              or state_snap.get("context", {}).get("floor")
+                              or env._current_floor)
+                        hp = state_snap.get("player", {}).get("hp", 0)
+                        if (fl not in snapshotted_boss_floors
+                                and isinstance(hp, (int, float))
+                                and hp >= boss_snapshot_min_hp):
+                            os.makedirs(boss_snapshot_dir, exist_ok=True)
+                            safe_seed = "".join(c if c.isalnum() else "_" for c in str(game_seed))
+                            snap_name = f"{safe_seed}_fl{fl}_hp{int(hp)}.save"
+                            snap_path = os.path.join(boss_snapshot_dir, snap_name)
+                            save_result = env._send({"cmd": "write_continue_save",
+                                                     "path": snap_path})
+                            if save_result and save_result.get("success"):
+                                meta_path = snap_path + ".meta.json"
+                                with open(meta_path, "w") as mf:
+                                    json.dump({
+                                        "seed": game_seed,
+                                        "character": character,
+                                        "floor": fl,
+                                        "hp_at_boss": int(hp),
+                                        "save_path": snap_path,
+                                        "checkpoint": (os.path.basename(str(checkpoint_name))
+                                                       if checkpoint_name else None),
+                                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                    }, mf, indent=2)
+                                print(f"  [snapshot] {snap_name} (hp={int(hp)})")
+                            snapshotted_boss_floors.add(fl)
                     masks = env_wrapped.action_masks()
                     action, _ = model.predict(obs, deterministic=True, action_masks=masks)
 
@@ -432,6 +464,12 @@ def main():
     p.add_argument("--deck-log", default="data/eval_decks.jsonl",
                    help="JSONL file to append deck + per-card scores at the start of each "
                         "boss combat. Pass 'none' to disable.")
+    p.add_argument("--boss-snapshot-dir", default=None,
+                   help="Directory to write C# game-state save when entering Boss combat "
+                        "at round 1 with HP >= --boss-snapshot-min-hp. One save per boss "
+                        "floor per game. Pair with agent/boss_retry.py to diagnose boss loss.")
+    p.add_argument("--boss-snapshot-min-hp", type=int, default=50,
+                   help="Only snapshot when player HP at boss-entry is >= this (default 50).")
     args = p.parse_args()
     boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
                           else args.deck_log)
@@ -483,6 +521,8 @@ def main():
                              replay_actions=replay_actions, load_seed=load_seed,
                              native_save_path=native_save_path,
                              boss_deck_log_path=boss_deck_log_path,
+                             boss_snapshot_dir=args.boss_snapshot_dir,
+                             boss_snapshot_min_hp=args.boss_snapshot_min_hp,
                              checkpoint_name=checkpoint)
     print(f"---")
     print(f"avg_floor      : {stats['avg_floor']:.1f}")

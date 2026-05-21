@@ -154,7 +154,16 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
         heal_threshold = 0.75
 
     # Below this we always heal regardless of upgrade opportunities.
-    CRITICAL_HEAL = 0.30
+    # Raised 2026-05-19 (verbose eval evidence): with old 0.30, Act 1 runs died
+    # because at 40/85 HP (47%) the agent SMITH'd then walked into Elite at 40.
+    # Act 1 has no recovery slack; one upgrade is worth ~0.5-1 floor, but
+    # 30% HP heal is worth ~2-3 floors of survival cushion.
+    if isinstance(floor, int) and floor <= 9:
+        CRITICAL_HEAL = 0.55  # Act 1: prioritize survival
+    elif isinstance(floor, int) and floor <= 15:
+        CRITICAL_HEAL = 0.40  # Act 2 body: balance
+    else:
+        CRITICAL_HEAL = 0.30  # Pre-boss zone: upgrades matter more (boss is one fight)
 
     enabled = [o for o in options if o.get("is_enabled", True)]
     heal  = next((o for o in enabled if "heal"  in (o.get("option_id") or "").lower()), None)
@@ -162,8 +171,14 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
 
     has_must_upgrade = smith is not None and best_smith_target(deck) is not None
 
+    # SMITH-override pays off when many combats remain; loses when boss is next.
+    # Floor 14+ = pre-boss zone (boss at 17, max 2 fights remain), so HEAL wins.
+    # Earlier scope (10+) regressed -1.0 floor by removing too many good SMITHs.
+    pre_boss_zone = isinstance(floor, int) and floor >= 14
     if hp_ratio < CRITICAL_HEAL and heal is not None:
         choice = heal
+    elif pre_boss_zone and hp_ratio < heal_threshold and heal is not None:
+        choice = heal  # boss prep: HEAL over SMITH at floor 14+
     elif has_must_upgrade:
         choice = smith
     elif hp_ratio < heal_threshold and heal is not None:

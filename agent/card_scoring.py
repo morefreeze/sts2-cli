@@ -334,6 +334,195 @@ def best_smith_target(deck: list[dict]) -> int | None:
     return best_idx
 
 
+# --- Pairwise card-card synergy (subagent-generated) -------------------
+# Loaded from data/card_synergies.py. Each entry: card_id → list of (other_id, score)
+# tuples. When picking card B for the deck, sum synergy(A, B) for each A already
+# in the deck — gives a deck-context-aware bonus that captures real combos
+# (e.g. UNRELENTING + BLUDGEON, DEMON_FORM + LIMIT_BREAK).
+try:
+    from data.card_synergies import SYNERGIES as _PAIRWISE_SYNERGIES
+except ImportError:
+    _PAIRWISE_SYNERGIES = {}
+
+PAIRWISE_WEIGHT = 0.4   # Multiplier on summed pairwise synergy. 0.4 caps a single
+                        # iconic 3.0-pair at +1.2; multiple weak pairs sum but get
+                        # capped further by the per-card overall clamp.
+PAIRWISE_CAP = 2.5      # Maximum pairwise bonus per card pick (prevents runaway
+                        # for cards that synergize with many deck members).
+
+
+def pairwise_synergy_bonus(card_id: str, deck: list[dict]) -> float:
+    """Sum of synergy scores between card_id and every card already in deck.
+    Multi-copy in deck multiplies (e.g. 2 INFLAMEs in deck = 2× synergy).
+    Returns 0 if no synergies match. Capped at PAIRWISE_CAP."""
+    if not _PAIRWISE_SYNERGIES or not deck or card_id not in _PAIRWISE_SYNERGIES:
+        return 0.0
+    pairs = dict(_PAIRWISE_SYNERGIES[card_id])  # other_id → score
+    total = 0.0
+    for c in deck:
+        other = _card_id_norm(c)
+        if other in pairs:
+            total += pairs[other]
+    return min(total * PAIRWISE_WEIGHT, PAIRWISE_CAP)
+
+
+# --- 4-dimension deck capability scoring (May 11) -----------------------
+# Rate the deck across four axes — attack output, defense, energy gen, draw —
+# then bias new card picks toward the weakest axis. Prevents over-stacking
+# attacks at the cost of defense (which was the failure mode in 5692k boss
+# fights: deck had strong damage but couldn't survive incoming AoE).
+
+# Target "good deck" levels — used as deficit reference. A deck whose per-card
+# average reaches these is well-rounded.
+DIM_BASELINES = {"attack": 3.0, "defense": 1.5, "energy": 0.20, "draw": 0.25}
+
+
+def card_dimensions(card: dict) -> dict[str, float]:
+    """How much this card contributes to each dimension. Per-card scalars,
+    not per-energy — so a 0-cost draw card is correctly scored without
+    division blow-up."""
+    cid = _card_id_norm(card)
+    if cid in SKIP_IDS:
+        return {"attack": 0.0, "defense": 0.0, "energy": 0.0, "draw": 0.0}
+    ctype = (card.get("type") or "").lower()
+    raw_cost = card.get("cost", 1)
+    if not isinstance(raw_cost, (int, float)):
+        raw_cost = 1
+    cost = max(raw_cost, 1)
+    stats = card.get("stats") or {}
+    res = {"attack": 0.0, "defense": 0.0, "energy": 0.0, "draw": 0.0}
+    dmg = stats.get("damage", 0) or 0
+    if ctype == "attack" and dmg > 0:
+        res["attack"] = dmg / cost
+    blk = stats.get("block", 0) or 0
+    if blk > 0:
+        res["defense"] = blk / cost
+    e = stats.get("energy", 0) or 0
+    if e > 0:
+        res["energy"] = float(e)
+    d = stats.get("draw", 0) or 0
+    if d > 0:
+        res["draw"] = float(d)
+    # Powers: strength-gain count as attack potential (4 dmg-equiv per 1 str
+    # over a fight averaging ~4 attacks); energy-per-turn powers count as energy.
+    if ctype == "power":
+        desc = str(card.get("description", "")).lower()
+        if "strength" in desc and "lose" not in desc and "enem" not in desc:
+            res["attack"] += 4.0
+        if "dexterity" in desc:
+            res["defense"] += 2.5
+        if "energy" in desc and ("each turn" in desc or "every turn" in desc):
+            res["energy"] += 1.0
+        if "draw" in desc and ("each turn" in desc or "every turn" in desc):
+            res["draw"] += 1.0
+    return res
+
+
+def score_deck_dimensions(deck: list[dict]) -> dict[str, float]:
+    """Per-card average across 4 dimensions. Useful for diagnosing which axis
+    the deck is weak on."""
+    if not deck:
+        return {"attack": 0.0, "defense": 0.0, "energy": 0.0, "draw": 0.0}
+    totals = {"attack": 0.0, "defense": 0.0, "energy": 0.0, "draw": 0.0}
+    for c in deck:
+        d = card_dimensions(c)
+        for k, v in d.items():
+            totals[k] += v
+    n = len(deck)
+    return {k: v / n for k, v in totals.items()}
+
+
+# --- Learned deck predictor (May 12) -----------------------------------
+# Loaded lazily from data/deck_predictor.pkl. Predicts max_floor for a deck;
+# we use the marginal lift "predicted(deck + card) − predicted(deck)" as a bonus.
+_PREDICTOR_PIPELINE = None
+_PREDICTOR_LOADED = False
+
+
+def _load_predictor():
+    global _PREDICTOR_PIPELINE, _PREDICTOR_LOADED
+    if _PREDICTOR_LOADED:
+        return _PREDICTOR_PIPELINE
+    _PREDICTOR_LOADED = True
+    try:
+        import pickle as _pk
+        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                              "..", "data", "deck_predictor.pkl")
+        if not _os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            blob = _pk.load(f)
+        _PREDICTOR_PIPELINE = blob.get("pipeline")
+        return _PREDICTOR_PIPELINE
+    except Exception:
+        return None
+
+
+def _deck_features(deck: list[dict], floor_crossed: int = 10) -> list[float]:
+    """Same feature layout as agent/train_deck_predictor.py FEATURE_NAMES.
+    `floor_crossed` defaults to 10 — the deck is evaluated as if at the fl=10
+    milestone for relative comparison; what matters is the *difference* in
+    prediction between (deck) and (deck + new_card)."""
+    if not deck:
+        return [floor_crossed, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    dims = score_deck_dimensions(deck)
+    arch = compute_deck_archetype(deck)
+    return [
+        float(floor_crossed),
+        float(len(deck)),
+        float(deck_quality_score(deck)),
+        float(dims["attack"]),
+        float(dims["defense"]),
+        float(dims["energy"]),
+        float(dims["draw"]),
+        float(arch.get("str_gain", 0)),
+        float(arch.get("str_user", 0)),
+        float(arch.get("exhaust_payload", 0)),
+        float(arch.get("exhaust_fuel", 0)),
+        float(arch.get("block_payload", 0)),
+    ]
+
+
+PREDICTOR_WEIGHT = 0.3   # bonus = predictor_lift × this. Predictor outputs floors;
+                          # 1-floor lift → +0.3 bonus.
+PREDICTOR_CAP = 1.2       # hard cap to prevent runaway bonuses from a confident model.
+
+
+def predictor_lift_bonus(card: dict, deck: list[dict]) -> float:
+    """Marginal predicted-floor lift from adding `card` to `deck`.
+    Returns 0 if no model is loaded yet (data still being collected)."""
+    pipe = _load_predictor()
+    if pipe is None or not deck:
+        return 0.0
+    try:
+        import numpy as _np
+        before = _np.array([_deck_features(deck)])
+        after  = _np.array([_deck_features(deck + [card])])
+        lift = float(pipe.predict(after)[0] - pipe.predict(before)[0])
+    except Exception:
+        return 0.0
+    return max(-PREDICTOR_CAP, min(lift * PREDICTOR_WEIGHT, PREDICTOR_CAP))
+
+
+def dimension_balance_bonus(card: dict, deck: list[dict]) -> float:
+    """Bonus when this card fills a dimension the deck is weak in.
+    Score-bias toward balanced decks: a defense-poor deck gets nudged toward
+    block cards; a low-energy deck toward energy-gen; etc."""
+    if not deck or len(deck) < 5:
+        return 0.0  # too early — let synergy logic dominate
+    dims = score_deck_dimensions(deck)
+    contrib = card_dimensions(card)
+    bonus = 0.0
+    for dim, baseline in DIM_BASELINES.items():
+        if dims[dim] < baseline and contrib[dim] > 0:
+            # Larger deficit + stronger card contribution → bigger bonus.
+            # Normalized so a typical "fills the gap perfectly" card gets ~0.4.
+            deficit = (baseline - dims[dim]) / baseline  # 0..1
+            relative_fill = contrib[dim] / baseline       # often >=1 for good cards
+            bonus += deficit * min(relative_fill, 1.5) * 0.5
+    return min(bonus, 1.2)
+
+
 # --- Deck-archetype synergy ---------------------------------------------
 # Cards that GIVE strength (a Strength build wants more attacks).
 STRENGTH_GAIN_CARDS = {"DEMON_FORM", "INFLAME", "LIMIT_BREAK", "SPOT_WEAKNESS",
@@ -415,6 +604,28 @@ def score_card_in_deck(card: dict, deck: list[dict]) -> float:
         bonus -= 1.5
     if cid in EXHAUST_PAYLOAD_CARDS and arch["exhaust_payload"] >= 2:
         bonus -= 1.0
+
+    # Pairwise card-card synergies — captures specific iconic combos
+    # (UNRELENTING+BLUDGEON, DEMON_FORM+LIMIT_BREAK, BARRICADE+JUGGERNAUT, etc.)
+    # that the coarse archetype categories above miss.
+    bonus += pairwise_synergy_bonus(cid, deck)
+
+    # 4-dim balance bonus — nudge picks toward dimensions the deck lacks.
+    bonus += dimension_balance_bonus(card, deck)
+
+    # Learned predictor lift — data-driven nudge based on which decks
+    # historically reached deeper floors. Zero until enough games collected.
+    bonus += predictor_lift_bonus(card, deck)
+
+    # Deck-size pressure (May 14): penalize picks when deck is already large.
+    # Optimal STS deck is ~20-30 cards; too small (lose to RNG draws),
+    # too large (key cards rarely appear). Curve: free below 25, gradual
+    # penalty up to -1.5 at deck size 40+.
+    n = len(deck)
+    if n >= 25:
+        # Linear ramp: 0 at n=25, -1.5 at n=40
+        size_penalty = -min((n - 25) * 0.10, 1.5)
+        bonus += size_penalty
 
     return max(0.0, min(base + bonus, 10.0))
 

@@ -396,6 +396,13 @@ def _enemy_power_amount(enemy: dict, power_name: str) -> float:
     return 0.0
 
 
+# Extra reward paid once per Boss-room combat win, on top of _combat_win_reward.
+# Boss combats at floor 17/Act 1 / Act 2+ are the chokepoint where training stalled
+# (0% win rate across 2.3M steps). +10.0 dominates the per-step hp_penalty/floor_bonus
+# scale and pushes the policy to actually clear the fight, not just survive nearby.
+BOSS_CLEAR_BONUS = 10.0
+
+
 class CombatEnv(gym.Env):
     """
     Gymnasium environment for STS2 combat.
@@ -410,7 +417,8 @@ class CombatEnv(gym.Env):
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
                  ascension: int = 0, seed: str = None, dry_run: bool = False,
                  seed_prefix: str = "t", max_floor: int = 0, extra_obs: bool = True,
-                 replay_actions: list = None, native_save_path: str = None):
+                 replay_actions: list = None, native_save_path: str = None,
+                 set_hp_after_load: int = None):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
@@ -438,18 +446,43 @@ class CombatEnv(gym.Env):
         self._combat_start_enemy_hp = 1
         self._combat_start_player_max_hp = 1
         self._combat_entry_hp_ratio = 1.0  # HP ratio when combat started
+        self._current_combat_room_type = ""  # captured at combat start; used by boss-clear bonus
         self._current_floor = 1
         self._game_alive = False
         self._read_buf = b""
         self._combat_steps = 0
-        self.max_combat_steps = 200  # floor 4+ fights can take 100+ steps with a learning policy
+        self._dealt_damage_this_turn = False  # tracked for intent-block anti-stall gate
+        self.max_combat_steps = 1000  # 200→1000 (May 9): boss/elite fights legitimately take
+                                       # 300-600 steps; 200 cap was creating fake "to=89%" timeouts
+                                       # mid-fight, which corrupted PPO advantage estimation.
         # Run-level deck-quality milestones (paid once per crossing per game).
         # Cleared when a fresh run starts (in reset's start_run branch).
         self._milestones_paid: set = set()
+        # Deck-history JSONL — milestone snapshots + outcome rows for the learned
+        # deck predictor (see agent/train_deck_predictor.py). Set DECK_HISTORY=
+        # in environment to enable; empty disables recording.
+        self._deck_history_path = os.environ.get("DECK_HISTORY_PATH",
+            os.path.join(PROJECT_ROOT, "data", "deck_history.jsonl"))
+        # Per-run state for the predictor: max floor seen, milestones captured
+        self._run_max_floor = 1
+        self._run_id = None
+        self._run_milestone_records: list = []  # buffered rows until outcome known
 
         self._replay_actions = list(replay_actions) if replay_actions else []
         self._replay_pending = bool(self._replay_actions)
-        self._native_save_path = native_save_path
+        # native_save_path can be a string (fixed save) or a list[str] (snapshot pool —
+        # picked uniformly at random on each reset, so a vec-env spreads over the pool).
+        if isinstance(native_save_path, (list, tuple)):
+            self._save_pool = list(native_save_path)
+            self._native_save_path = self._save_pool[0] if self._save_pool else None
+        else:
+            self._save_pool = None
+            self._native_save_path = native_save_path
+        # When set, send {"cmd": "set_player", "hp": N} right after load_save so the
+        # subsequent combat starts at N HP. Used by boss_retry.py to sweep "how much
+        # HP does the agent need to clear the boss".
+        self._set_hp_after_load = (None if set_hp_after_load is None
+                                   else int(set_hp_after_load))
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -457,6 +490,13 @@ class CombatEnv(gym.Env):
         if self.dry_run:
             self._current_state = _dummy_combat_state()
             return self._encode(self._current_state), {}
+
+        # Snapshot pool: pick a random save per reset and force a fresh load
+        # below (don't try to continue the previous run — we want fresh boss
+        # variety each episode).
+        if self._save_pool:
+            self._native_save_path = random.choice(self._save_pool)
+            self._game_alive = False
 
         # Try to advance to next combat in the current run
         if self._game_alive and self._current_state is not None:
@@ -492,9 +532,14 @@ class CombatEnv(gym.Env):
         run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}_{random.randint(0,99999)}"
         self._run_counter += 1
         self._milestones_paid.clear()  # new run — re-arm deck-quality milestones
+        self._run_max_floor = 1
+        self._run_id = f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
+        self._run_milestone_records = []
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
+            if state is not None and state.get("type") != "error" and self._set_hp_after_load is not None:
+                self._send({"cmd": "set_player", "hp": self._set_hp_after_load})
         else:
             state = self._send({"cmd": "start_run", "character": self.character,
                                 "seed": run_seed, "ascension": self.ascension})
@@ -626,12 +671,25 @@ class CombatEnv(gym.Env):
             return last_obs, -2.0, True, False, {"crashed": True, "floor": self._current_floor}
 
         decision = state.get("decision", "")
+        if self._current_floor > self._run_max_floor:
+            self._run_max_floor = self._current_floor
         reward = self._shaping_reward(state)
-        # _intent_block_reward disabled — even with incoming>0 gating, it
-        # reproduced the block-forever collapse (Run 18: cwr 81%→5%, to=92%
-        # at step 53k). Blocking with attack intents present is the *common*
-        # case in combat, so the gate didn't actually exclude stalling.
-        # Re-enable only with a "must also deal damage this turn" requirement.
+
+        # Track per-turn damage dealt (used by intent_block_reward gating below)
+        if state is not None and cmd.get("action") == "play_card":
+            cur_enemy_hp = _total_enemy_hp(state)
+            prev_enemy_hp = _total_enemy_hp(pre_state) if pre_state else cur_enemy_hp
+            if cur_enemy_hp < prev_enemy_hp:
+                self._dealt_damage_this_turn = True
+            # Q3b power-safe-turn bonus DISABLED 2026-05-19 — small positive
+            # per-card reward accumulates over 1M steps into stall-favoring drift.
+
+        # All end_turn reward shaping (Q3a intent-block, Q3c wasted-energy)
+        # DISABLED 2026-05-19 — all attempts to nudge turn-level behavior caused
+        # drift collapse. The base reward signal (hp_penalty + combat_win_reward
+        # + step_penalty) is sufficient. Reset damage tracker for next turn.
+        if cmd.get("action") == "end_turn":
+            self._dealt_damage_this_turn = False
 
         # Use last known combat obs for terminal states (NOT zeros — zeros
         # confuse the value function because they're too similar to sparse
@@ -644,6 +702,8 @@ class CombatEnv(gym.Env):
             if state.get("victory", False):
                 # Boss kill: also award combat_win_reward so victory > regular combat win
                 r += self._combat_win_reward(state)
+            self._run_max_floor = max(self._run_max_floor, self._current_floor)
+            self._emit_run_outcome(state, bool(state.get("victory", False)))
             return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
                                                "victory": state.get("victory", False)}
 
@@ -654,6 +714,8 @@ class CombatEnv(gym.Env):
                 r = reward + self._terminal_reward(state)
                 if state.get("victory", False):
                     r += self._combat_win_reward(state)
+                self._run_max_floor = max(self._run_max_floor, self._current_floor)
+                self._emit_run_outcome(state, bool(state.get("victory", False)))
                 return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
                                                    "victory": state.get("victory", False)}
             self._current_state = state
@@ -684,6 +746,8 @@ class CombatEnv(gym.Env):
                     r = reward + self._terminal_reward(state)
                     if state.get("victory", False):
                         r += self._combat_win_reward(state)
+                    self._run_max_floor = max(self._run_max_floor, self._current_floor)
+                    self._emit_run_outcome(state, bool(state.get("victory", False)))
                     return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
                                                        "victory": state.get("victory", False)}
 
@@ -702,6 +766,10 @@ class CombatEnv(gym.Env):
 
     def set_max_floor(self, max_floor: int) -> None:
         self.max_floor = max_floor
+
+    def set_hp_after_load(self, hp: int) -> None:
+        """Update the post-load HP override at runtime. 0 or negative disables."""
+        self._set_hp_after_load = (None if (hp is None or hp <= 0) else int(hp))
 
     def _encode(self, state: dict) -> np.ndarray:
         """Encode state + optional extra features: floor, entry_hp, enemy vuln/weak × 3."""
@@ -726,6 +794,11 @@ class CombatEnv(gym.Env):
         self._current_floor = int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1
         hp = state.get("player", {}).get("hp", self._combat_start_player_max_hp)
         self._combat_entry_hp_ratio = hp / self._combat_start_player_max_hp
+        self._dealt_damage_this_turn = False  # fresh combat starts with no damage logged
+        # Capture room_type at combat start: by the time _combat_win_reward fires,
+        # the state may have transitioned to card_reward and room_type is stale.
+        room_type = (state.get("context") or {}).get("room_type", "")
+        self._current_combat_room_type = str(room_type)
 
     def _shaping_reward(self, next_state: dict) -> float:
         cur_enemy_hp = _total_enemy_hp(next_state)
@@ -751,21 +824,17 @@ class CombatEnv(gym.Env):
         step_penalty = -0.003
         return dmg_reward + hp_penalty + step_penalty
 
-    def _intent_block_reward(self, pre_state: dict) -> float:
-        """Reward block matched to incoming attack damage at end_turn.
+    def _intent_block_reward(self, pre_state: dict, dealt_damage_this_turn: bool) -> float:
+        """Reward block matched to incoming attack damage at end_turn — but only
+        if the agent ALSO dealt damage this turn (anti-stall) AND blocked at
+        least 80% of incoming (anti-half-block-spam).
 
-        Avoids the 'block forever' collapse seen in past runs: bonus is 0 when
-        no enemy intent shows attack damage. This means the only turns where
-        defensive play is rewarded are turns with imminent threat — agent has
-        no incentive to stockpile block on safe turns (e.g. boss DORMANT).
-
-        BygoneEffigy-style telegraphed slashes (sleep → buff → slash) are the
-        target use-case: the slash intent shows large damage in the turn
-        before the kill, and matching block to that damage now gives a clear
-        positive signal. Capped so a fully blocked single-turn fatal attack
-        is worth ~0.10 — comparable to one floor of floor_bonus.
+        History: prior versions collapsed at cwr<20%. Two new gates added (May 14):
+          1. dealt_damage_this_turn — pure stall (all blocks, no attacks) gets 0.
+          2. blocked/incoming >= 0.8 — only "good defensive turn" qualifies.
+        Capped at 0.05 (half of prior 0.10) to keep magnitude small.
         """
-        if pre_state is None:
+        if pre_state is None or not dealt_damage_this_turn:
             return 0.0
         incoming = 0
         for e in pre_state.get("enemies", []) or []:
@@ -788,24 +857,70 @@ class CombatEnv(gym.Env):
             block = int(block)
         except (TypeError, ValueError):
             return 0.0
+        # Require blocking at least 80% of incoming to qualify
+        if block < incoming * 0.8:
+            return 0.0
         blocked = min(block, incoming)
         max_hp = max(self._combat_start_player_max_hp, 1)
-        return 0.10 * blocked / max_hp
+        return 0.05 * blocked / max_hp
+
+    def _power_safe_turn_reward(self, card: dict, pre_state: dict) -> float:
+        """+0.05 when playing a Power card on a 'safe' turn (no enemy attack
+        intent). Encourages saving expensive setup for non-attack windows."""
+        if pre_state is None or not isinstance(card, dict):
+            return 0.0
+        if (card.get("type") or "").lower() != "power":
+            return 0.0
+        for e in pre_state.get("enemies", []) or []:
+            if e.get("alive") is False:
+                continue
+            for it in (e.get("intents") or []):
+                if (it.get("type") or "").lower() == "attack":
+                    return 0.0  # there's incoming damage; not safe
+        return 0.05
+
+    def _wasted_energy_penalty(self, pre_state: dict) -> float:
+        """At end_turn, penalty if the player ended with ≥2 unspent energy AND
+        had playable cards in hand. -0.02 per (small but adds up over a run).
+        Acceptable to leave 1 energy (holding for next-turn setup); 2+ is waste."""
+        if pre_state is None:
+            return 0.0
+        player = pre_state.get("player", {})
+        energy = player.get("energy", 0) or 0
+        try:
+            energy = int(energy)
+        except (TypeError, ValueError):
+            return 0.0
+        if energy < 2:
+            return 0.0
+        # Check for playable cards (cost <= energy, not unplayable status)
+        hand = pre_state.get("hand", []) or []
+        for c in hand:
+            try:
+                cost = int(c.get("cost", 99) or 99)
+            except (TypeError, ValueError):
+                continue
+            cid = (c.get("id") or "")
+            if isinstance(cid, dict):
+                cid = cid.get("en", "")
+            cid = str(cid).upper()
+            if "WOUND" in cid or "BURN" in cid or "SLIMED" in cid or "DAZE" in cid:
+                continue  # status cards can't be played voluntarily
+            if cost <= energy:
+                return -0.02  # had option, didn't use it
+        return 0.0
 
     def _combat_win_reward(self, state: dict) -> float:
         hp = _player_hp(state)
         max_hp = self._combat_start_player_max_hp
+        # hp_ratio is end_hp / start_hp_of_this_combat (not max_hp_of_run)
+        # so a "no-damage win" returns ratio 1.0 even if combat started low-hp.
         hp_ratio = hp / max_hp
-        # Steeper quadratic HP curve: winning with high HP is worth much more
-        # e.g. 100% HP → 3.0, 70% HP → 1.47, 50% HP → 0.75, 30% HP → 0.27
+        # REVERTED 2026-05-19: Q1 0-damage bonus DISABLED. With max_combat_steps=1000,
+        # the +2.0/+0.75/+0.50/+0.25 tiers made "block-then-kill" locally optimal —
+        # agent drifted to stalling, hit cwr 82%→13%/to=84% collapse twice. Original
+        # 8827k baseline (avg_floor=13.1) used only the quadratic curve below.
         reward = 3.0 * hp_ratio * hp_ratio
-        # HP survival bonus tiers (stronger than before)
-        if hp_ratio >= 0.9:
-            reward += 0.75
-        elif hp_ratio >= 0.8:
-            reward += 0.50
-        elif hp_ratio >= 0.7:
-            reward += 0.25
         # Floor bonus: Act 1 (floor≤15) = 0.10/floor; Act 2+ gets +0.15/floor above 15.
         if self._current_floor <= 15:
             floor_bonus = (self._current_floor - 1) * 0.10
@@ -817,22 +932,76 @@ class CombatEnv(gym.Env):
         # Encourages building a strong deck early; passive Strikes/Defends
         # → low deck_quality → small or zero bonus.
         reward += self._milestone_reward(state)
+        if self._current_combat_room_type == "Boss":
+            reward += BOSS_CLEAR_BONUS
         return reward
 
     def _milestone_reward(self, state: dict) -> float:
         """One-shot reward when the run first crosses a milestone floor with a
-        decent deck. Bounded ≤0.6 per milestone to avoid policy distortion."""
+        decent deck. Bounded ≤0.6 per milestone to avoid policy distortion.
+        Also writes a deck snapshot row (buffered) for the predictor dataset."""
         floor = self._current_floor
         bonus = 0.0
         deck = state.get("player", {}).get("deck") or []
         for milestone in (5, 10, 15):
             if floor >= milestone and milestone not in self._milestones_paid:
                 self._milestones_paid.add(milestone)
-                q = deck_quality_score(deck)  # 0..10
-                # Map quality 4.5 → 0, 8.5 → 0.6 (roughly linear above 4.5)
+                q = deck_quality_score(deck)
                 m_bonus = max(0.0, min((q - 4.5) * 0.15, 0.6))
                 bonus += m_bonus
+                # Buffer milestone record — final outcome appended in
+                # _emit_run_outcome when the run ends.
+                self._buffer_milestone_record(milestone, deck, q)
         return bonus
+
+    def _buffer_milestone_record(self, milestone: int, deck: list, quality: float):
+        """Save a deck snapshot for later outcome correlation."""
+        if not self._deck_history_path:
+            return
+        try:
+            from agent.card_scoring import (score_deck_dimensions,
+                                            compute_deck_archetype, _card_id_norm)
+        except ImportError:
+            return
+        try:
+            dims = score_deck_dimensions(deck)
+            arch = compute_deck_archetype(deck)
+            cards = [_card_id_norm(c) for c in deck]
+        except Exception:
+            return
+        self._run_milestone_records.append({
+            "event": "milestone",
+            "run_id": self._run_id,
+            "floor_crossed": milestone,
+            "deck_size": len(deck),
+            "deck_quality": round(quality, 3),
+            "dims": {k: round(v, 3) for k, v in dims.items()},
+            "archetype": arch,
+            "cards": cards,
+            "ts": time.time(),
+        })
+
+    def _emit_run_outcome(self, state: dict, victory: bool):
+        """Flush buffered milestone records to disk with the final outcome appended.
+        Called once per run from terminal paths (game_over, crash, etc.)."""
+        if not self._deck_history_path or not self._run_milestone_records:
+            return
+        outcome = {
+            "event": "outcome",
+            "run_id": self._run_id,
+            "max_floor": int(self._run_max_floor),
+            "won": bool(victory),
+            "ts": time.time(),
+        }
+        try:
+            os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
+            with open(self._deck_history_path, "a") as f:
+                for rec in self._run_milestone_records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                f.write(json.dumps(outcome, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # never let logging break training
+        self._run_milestone_records = []
 
     def _terminal_reward(self, state: dict) -> float:
         if state.get("victory", False):
@@ -849,7 +1018,16 @@ class CombatEnv(gym.Env):
         hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
         room_type = (state.get("context") or {}).get("room_type", "")
         is_boss = "boss" in room_type.lower()
-        heal_threshold = 0.50 if is_boss else 0.40
+        # Floor-graduated 2026-05-19: Act 1 deaths often had unused heal potions at HP=20-30%
+        # because old 0.40 threshold fires too late (one more enemy hit = dead). Act 1 has
+        # no margin; better to burn the potion than die holding it.
+        floor = state.get("floor") or state.get("context", {}).get("floor", 99)
+        if is_boss:
+            heal_threshold = 0.50
+        elif isinstance(floor, int) and floor <= 9:
+            heal_threshold = 0.55  # Act 1: heal aggressively
+        else:
+            heal_threshold = 0.40
         if hp_ratio >= heal_threshold:
             return state  # healthy enough, no heal needed
         potions = player.get("potions", []) or []
@@ -923,15 +1101,18 @@ class CombatEnv(gym.Env):
             is_act2 = self._current_floor >= 16
 
             if ("heal" in text or "restore" in text) and "curse" not in text:
-                # Heal thresholds: boss=60%, Act2=50%, elite/late-game=40%, any=30%
+                # Heal thresholds 2026-05-19: raised Act 1 monster from 0.30→0.50.
+                # Verbose eval showed runs entering Act 1 elite at HP=40-45 with unused
+                # heal potions then dying in one combat. Better to burn the potion at
+                # 50% HP than die at 17% holding it.
                 if is_boss:
-                    use = hp_ratio < 0.60  # boss: heal more aggressively
+                    use = hp_ratio < 0.60
                 elif is_act2:
-                    use = hp_ratio < 0.50  # Act 2 fights are much harder
+                    use = hp_ratio < 0.50
                 elif is_elite or is_late_game:
-                    use = hp_ratio < 0.40
+                    use = hp_ratio < 0.50
                 else:
-                    use = hp_ratio < 0.30
+                    use = hp_ratio < 0.50  # Act 1 monster: heal aggressively
             elif "block" in text:
                 # Block potion: always use at boss (30 block is always worth it vs boss attacks);
                 # at elite/threatening: use when damaged or incoming is severe
