@@ -246,7 +246,11 @@ class TrainCallback(BaseCallback):
             if self._vf_pretrain_remaining == 0:
                 _unfreeze_actor(self.model)
                 self.model.vf_coef       = self._normal_vf_coef
-                self.model.clip_range_vf = lambda _: self._normal_clip
+                # Bind clip via a local so the lambda closure does NOT capture `self`
+                # (capturing self → callback → model → SubprocVecEnv → Process →
+                # AuthenticationString → cloudpickle refuses to serialize on save).
+                _clip_val = float(self._normal_clip)
+                self.model.clip_range_vf = lambda _: _clip_val
                 print(f"\n  [curriculum] Actor unfrozen at chunk {self._chunk_count}; "
                       f"VF calibrated — fl≤6 deaths→adv≈0, wins→adv≈+4",
                       flush=True)
