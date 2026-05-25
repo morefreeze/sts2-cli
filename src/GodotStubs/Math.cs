@@ -68,6 +68,11 @@ public struct Color
 
     public Color(float r, float g, float b, float a = 1f) { R = r; G = g; B = b; A = a; }
     public Color(string htmlColor) { R = 1; G = 1; B = 1; A = 1; }
+    // Added 2026-05-25 after Steam game update introduced calls to
+    // `new Color(otherColor, alpha)` (alpha-replace overload).
+    // Crash signature: System.MissingMethodException: 'Void Godot.Color..ctor(Godot.Color, Single)'
+    // 70+ occurrences/50MB of crash_stderr → faulted task → 10s STUCK → cr/to spike.
+    public Color(Color c, float a) { R = c.R; G = c.G; B = c.B; A = a; }
 
     public Color Lerp(Color to, float weight) => new(
         R + (to.R - R) * weight, G + (to.G - G) * weight,
