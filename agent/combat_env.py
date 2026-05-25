@@ -402,6 +402,16 @@ def _enemy_power_amount(enemy: dict, power_name: str) -> float:
 # scale and pushes the policy to actually clear the fight, not just survive nearby.
 BOSS_CLEAR_BONUS = 10.0
 
+# One-shot reward when entering a Boss combat with HP > BOSS_ENTRY_HP_FLOOR,
+# paid REGARDLESS of combat outcome. Decouples "deliver HP to boss" from
+# "clear boss". HP-sweep diagnostic (May 25) showed boss-policy CAN win at
+# hp≥80 (27%/53%/77% at 80/100/120), so the bottleneck is Acts 1-2 leakage
+# leaving the player at hp 44-68 — squarely in the 0%-win dead zone. Reward
+# every extra HP delivered above the dead zone so the policy explicitly
+# learns "save HP for the boss room".
+BOSS_ENTRY_HP_FLOOR = 50.0    # below this, no bonus (already in the 0% dead zone)
+BOSS_ENTRY_HP_WEIGHT = 0.2    # bonus = (hp - floor) × weight. hp=100 → +10, hp=80 → +6
+
 
 class CombatEnv(gym.Env):
     """
@@ -447,6 +457,7 @@ class CombatEnv(gym.Env):
         self._combat_start_player_max_hp = 1
         self._combat_entry_hp_ratio = 1.0  # HP ratio when combat started
         self._current_combat_room_type = ""  # captured at combat start; used by boss-clear bonus
+        self._pending_boss_entry_reward = 0.0  # one-shot HP-at-boss-entry bonus, paid on first step
         self._current_floor = 1
         self._game_alive = False
         self._read_buf = b""
@@ -675,6 +686,13 @@ class CombatEnv(gym.Env):
             self._run_max_floor = self._current_floor
         reward = self._shaping_reward(state)
 
+        # B5: pay HP-at-boss-entry bonus on the first step of a Boss combat.
+        # Set by _init_combat_tracking when room_type=="Boss" and hp>floor;
+        # cleared after paying so it only fires once per combat.
+        if self._pending_boss_entry_reward > 0:
+            reward += self._pending_boss_entry_reward
+            self._pending_boss_entry_reward = 0.0
+
         # Track per-turn damage dealt (used by intent_block_reward gating below)
         if state is not None and cmd.get("action") == "play_card":
             cur_enemy_hp = _total_enemy_hp(state)
@@ -799,6 +817,12 @@ class CombatEnv(gym.Env):
         # the state may have transitioned to card_reward and room_type is stale.
         room_type = (state.get("context") or {}).get("room_type", "")
         self._current_combat_room_type = str(room_type)
+        # B5 plan (May 25): pay HP-at-boss-entry bonus on the FIRST step of a Boss
+        # combat (paid regardless of outcome — see BOSS_ENTRY_HP_* constants).
+        if self._current_combat_room_type == "Boss" and hp > BOSS_ENTRY_HP_FLOOR:
+            self._pending_boss_entry_reward = (hp - BOSS_ENTRY_HP_FLOOR) * BOSS_ENTRY_HP_WEIGHT
+        else:
+            self._pending_boss_entry_reward = 0.0
 
     def _shaping_reward(self, next_state: dict) -> float:
         cur_enemy_hp = _total_enemy_hp(next_state)
