@@ -161,7 +161,12 @@ class TrainCallback(BaseCallback):
             if done:
                 self._recent_episodes += 1
                 floor = info.get("floor", 0)
-                if floor:
+                # Only append floor when the RUN ends (not on every combat win),
+                # so the average reflects per-game max_floor (eval-style metric)
+                # rather than combat-weighted average dominated by Acts 1-2.
+                run_ended = (info.get("game_over") or info.get("crashed")
+                             or info.get("timeout") or info.get("stuck"))
+                if floor and run_ended:
                     self._recent_floors.append(floor)
                 if info.get("combat_won"):
                     self._recent_combat_wins += 1
