@@ -494,6 +494,34 @@ echo "🏗️ Building..."
 $DOTNET build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -5
 
 echo ""
+echo "🩺 Smoke test (1 Ironclad run — surfaces game-API stub gaps from updates)..."
+# Run a single quick game; capture crash_stderr into a tmp file so we don't
+# pollute the project root (and so we can inspect cleanly).
+SMOKE_LOG="$(mktemp -t sts2_smoke.XXXXXX)"
+PYTHON_BIN=".venv/bin/python"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="python3"
+STS2_GAME_DIR="$GAME_DIR" "$PYTHON_BIN" python/play_full_run.py 1 Ironclad 2>"$SMOKE_LOG" > /tmp/sts2_smoke_stdout.log
+SMOKE_EXIT=$?
+# Check for the canonical "game updated, stub missing" error patterns.
+# MissingMethodException → stub gap (most common after game update).
+# Other patterns can be added here as they're discovered.
+STUB_GAPS=$(LC_ALL=C grep -aE "MissingMethodException|MissingFieldException|TypeLoadException" "$SMOKE_LOG" 2>/dev/null | sort -u | head -5)
+if [[ -n "$STUB_GAPS" ]]; then
+    echo ""
+    echo "⚠️  Smoke test surfaced game-API stub gaps:"
+    echo "$STUB_GAPS" | sed 's/^/    /'
+    echo ""
+    echo "    These usually mean the game updated and added new API calls we don't stub."
+    echo "    Fix: add the missing overload/field/type to src/GodotStubs/ then rebuild."
+    echo "    See git log for past examples (e.g. e614db6 — Color(Color,float))."
+fi
+if (( SMOKE_EXIT != 0 )); then
+    echo "⚠️  Smoke test exit code $SMOKE_EXIT — check $SMOKE_LOG"
+elif [[ -z "$STUB_GAPS" ]]; then
+    echo "    ✓ smoke test passed (no stub gaps detected)"
+fi
+
+echo ""
 echo "✅ Setup complete!"
 echo ""
 echo "To play:"
