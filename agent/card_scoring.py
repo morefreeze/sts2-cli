@@ -439,21 +439,52 @@ _PREDICTOR_PIPELINE = None
 _PREDICTOR_LOADED = False
 
 
+_PREDICTOR_VERSION = None  # "v1" or "v2"; set during _load_predictor
+_CARD_DB = None            # cached card_id → metadata lookup (for v2)
+
+
+def _load_card_db():
+    """Lazy-load data/card_metadata.json. Returns empty dict if missing."""
+    global _CARD_DB
+    if _CARD_DB is not None:
+        return _CARD_DB
+    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                         "..", "data", "card_metadata.json")
+    if not _os.path.exists(path):
+        _CARD_DB = {}
+        return _CARD_DB
+    try:
+        import json as _json
+        with open(path) as f:
+            _CARD_DB = _json.load(f)
+    except Exception:
+        _CARD_DB = {}
+    return _CARD_DB
+
+
 def _load_predictor():
-    global _PREDICTOR_PIPELINE, _PREDICTOR_LOADED
+    """Prefer v2 (data/deck_predictor_v2.pkl, 30-dim card-aware features) over
+    v1 (data/deck_predictor.pkl, 12-dim deck-only). Falls back gracefully if
+    only one exists."""
+    global _PREDICTOR_PIPELINE, _PREDICTOR_LOADED, _PREDICTOR_VERSION
     if _PREDICTOR_LOADED:
         return _PREDICTOR_PIPELINE
     _PREDICTOR_LOADED = True
     try:
         import pickle as _pk
-        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                              "..", "data", "deck_predictor.pkl")
-        if not _os.path.exists(path):
-            return None
-        with open(path, "rb") as f:
-            blob = _pk.load(f)
-        _PREDICTOR_PIPELINE = blob.get("pipeline")
-        return _PREDICTOR_PIPELINE
+        # Try v2 first; v1 fallback
+        for path_rel, default_ver in [("data/deck_predictor_v2.pkl", "v2"),
+                                       ("data/deck_predictor.pkl", "v1")]:
+            path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                 "..", path_rel)
+            if not _os.path.exists(path):
+                continue
+            with open(path, "rb") as f:
+                blob = _pk.load(f)
+            _PREDICTOR_PIPELINE = blob.get("pipeline")
+            _PREDICTOR_VERSION = blob.get("version", default_ver)
+            return _PREDICTOR_PIPELINE
+        return None
     except Exception:
         return None
 
@@ -487,13 +518,105 @@ PREDICTOR_WEIGHT = 0.3   # bonus = predictor_lift × this. Predictor outputs flo
                           # 1-floor lift → +0.3 bonus.
 PREDICTOR_CAP = 1.2       # hard cap to prevent runaway bonuses from a confident model.
 
+# v2 inference uses a separate scale: it predicts run.max_floor directly given
+# (deck features + candidate features); the model's training y mean is ~10.5
+# so we center the prediction. v2 variance across candidates at one decision
+# point is typically ±0.5-1 floor, so weight 0.4 / cap 1.0 keeps it on par
+# with v1 in effective contribution to score_card_in_deck.
+PREDICTOR_V2_CENTER = 10.5
+PREDICTOR_V2_WEIGHT = 0.4
+PREDICTOR_V2_CAP = 1.0
+
+# v2 feature-extraction vocab — must stay synced with train_deck_predictor_v2.py
+_V2_TYPES = ["Attack", "Skill", "Power"]
+_V2_RARITIES = ["Common", "Uncommon", "Rare"]
+
+
+def _card_metadata(card: dict, card_db: dict) -> tuple:
+    """Return (cost, type, rarity) for a card, preferring its own fields then
+    falling back to card_db lookup by normalized id."""
+    cost = card.get("cost")
+    ctype = card.get("type")
+    crarity = card.get("rarity")
+    if cost is None or not ctype or not crarity:
+        cid = _card_id_norm(card)
+        meta = card_db.get(cid)
+        if meta:
+            if cost is None: cost = meta.get("cost")
+            if not ctype: ctype = meta.get("type")
+            if not crarity: crarity = meta.get("rarity")
+    return cost, ctype, crarity
+
+
+def _deck_features_v2(deck: list[dict], candidate: dict,
+                      floor: int = 10, hp_ratio: float = 0.7) -> list[float]:
+    """30-dim features for v2 predictor (matches train_deck_predictor_v2.py).
+
+    floor and hp_ratio default to neutral mid-game values when unknown — the
+    most important features at any single decision are constant across the
+    3 candidates anyway; what matters is differential candidate ranking.
+    """
+    card_db = _load_card_db()
+    if not deck:
+        deck_dims = {"attack": 0, "defense": 0, "energy": 0, "draw": 0}
+        deck_arch = {"str_gain": 0, "str_user": 0,
+                     "exhaust_payload": 0, "exhaust_fuel": 0, "block_payload": 0}
+    else:
+        deck_dims = score_deck_dimensions(deck)
+        deck_arch = compute_deck_archetype(deck)
+    n_cost = [0, 0, 0, 0]
+    n_type = [0, 0, 0]
+    n_rar = [0, 0, 0]
+    for c in deck:
+        cost, ctype, crarity = _card_metadata(c, card_db)
+        if cost is not None:
+            n_cost[min(int(cost), 3)] += 1
+        if ctype in _V2_TYPES:
+            n_type[_V2_TYPES.index(ctype)] += 1
+        if crarity in _V2_RARITIES:
+            n_rar[_V2_RARITIES.index(crarity)] += 1
+    cand_cost, cand_type, cand_rar = _card_metadata(candidate, card_db)
+    cand_cost_v = float(cand_cost) if cand_cost is not None else -1.0
+    cand_type_oh = [1.0 if cand_type == t else 0.0 for t in _V2_TYPES]
+    cand_rar_oh = [1.0 if cand_rar == r else 0.0 for r in _V2_RARITIES]
+    cand_upg = 1.0 if candidate.get("upgraded") else 0.0
+    return [
+        float(deck_dims.get("attack", 0)),
+        float(deck_dims.get("defense", 0)),
+        float(deck_dims.get("energy", 0)),
+        float(deck_dims.get("draw", 0)),
+        float(deck_arch.get("str_gain", 0)),
+        float(deck_arch.get("str_user", 0)),
+        float(deck_arch.get("exhaust_payload", 0)),
+        float(deck_arch.get("exhaust_fuel", 0)),
+        float(deck_arch.get("block_payload", 0)),
+        float(n_cost[0]), float(n_cost[1]), float(n_cost[2]), float(n_cost[3]),
+        float(n_type[0]), float(n_type[1]), float(n_type[2]),
+        float(n_rar[0]), float(n_rar[1]), float(n_rar[2]),
+        float(len(deck)),
+        float(floor),
+        float(hp_ratio),
+        cand_cost_v,
+        cand_type_oh[0], cand_type_oh[1], cand_type_oh[2],
+        cand_rar_oh[0], cand_rar_oh[1], cand_rar_oh[2],
+        cand_upg,
+    ]
+
 
 def predictor_lift_bonus(card: dict, deck: list[dict]) -> float:
-    """Marginal predicted-floor lift from adding `card` to `deck`.
-    Returns 0 if no model is loaded yet (data still being collected)."""
+    """Predictor-driven bonus added to score_card_in_deck.
+
+    v1: marginal predicted lift = pred(deck + card) − pred(deck), uses the
+        12-dim deck-only feature schema.
+    v2: returns 0 here — v2 needs the full candidate set to normalize, so the
+        actual v2 bonus is computed once by pick_best_card via
+        predictor_v2_set_bonuses() and added on top of base scoring.
+    Returns 0 if no model is loaded."""
     pipe = _load_predictor()
     if pipe is None or not deck:
         return 0.0
+    if _PREDICTOR_VERSION == "v2":
+        return 0.0  # handled set-aware in pick_best_card
     try:
         import numpy as _np
         before = _np.array([_deck_features(deck)])
@@ -502,6 +625,38 @@ def predictor_lift_bonus(card: dict, deck: list[dict]) -> float:
     except Exception:
         return 0.0
     return max(-PREDICTOR_CAP, min(lift * PREDICTOR_WEIGHT, PREDICTOR_CAP))
+
+
+def predictor_v2_set_bonuses(cards: list[dict], deck: list[dict]) -> list[float]:
+    """For v2 predictor: compute one bonus per offered card, normalized
+    within the choice set so absolute prediction bias cancels and only the
+    DIFFERENTIAL ranking signal survives.
+
+    Returns a list aligned with `cards` (same length, same order); all zeros
+    if v2 isn't loaded or no deck is provided.
+
+    Why normalize: v2 predicts run.max_floor and includes floor/hp_ratio
+    features that dominate the absolute output (~0.7+ permutation importance).
+    Within a single card_reward decision floor/hp/deck are CONSTANT across
+    candidates, so the absolute prediction is constant too; only the small
+    candidate-feature-driven variance (~0.05-0.2 floors) carries the actual
+    ranking signal. Subtracting the set mean isolates that signal."""
+    pipe = _load_predictor()
+    if pipe is None or _PREDICTOR_VERSION != "v2" or not deck or not cards:
+        return [0.0] * len(cards)
+    try:
+        import numpy as _np
+        feats = _np.array([_deck_features_v2(deck, c) for c in cards])
+        preds = pipe.predict(feats)
+        mean = float(preds.mean())
+        out = []
+        for p in preds:
+            lift = float(p) - mean
+            out.append(max(-PREDICTOR_V2_CAP, min(lift * PREDICTOR_V2_WEIGHT,
+                                                  PREDICTOR_V2_CAP)))
+        return out
+    except Exception:
+        return [0.0] * len(cards)
 
 
 def dimension_balance_bonus(card: dict, deck: list[dict]) -> float:
@@ -642,12 +797,15 @@ def deck_quality_score(deck: list[dict]) -> float:
 def pick_best_card(cards: list[dict], threshold: float = 3.5,
                    deck: list[dict] = None) -> int | None:
     """Return index of the best card above threshold, or None to skip.
-    If `deck` is provided, uses deck-aware scoring (synergy bonuses)."""
+    If `deck` is provided, uses deck-aware scoring (synergy bonuses) and the
+    v2 set-normalized predictor bonus (when v2 model is loaded)."""
     if not cards:
         return None
     scorer = (lambda c: score_card_in_deck(c, deck)) if deck else score_card
-    scored = [(i, scorer(c)) for i, c in enumerate(cards)]
-    scored.sort(key=lambda x: x[1], reverse=True)
+    base = [scorer(c) for c in cards]
+    set_bonus = predictor_v2_set_bonuses(cards, deck) if deck else [0.0] * len(cards)
+    scored = sorted(enumerate(b + s for b, s in zip(base, set_bonus)),
+                    key=lambda x: x[1], reverse=True)
     best_idx, best_score = scored[0]
     if best_score >= threshold:
         return best_idx
