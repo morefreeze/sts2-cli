@@ -178,6 +178,20 @@ AOE_VALUE = 1.5             # AOE bonus
 POWER_BONUS = 1.5           # powers persist, extra value
 RARITY_BONUS = {"Common": 0.0, "Uncommon": 0.5, "Rare": 1.0}
 
+# Cards whose OnPlay throws NullReferenceException in headless mode (the
+# game expects some manager/VFX singleton that doesn't exist when running
+# without Godot). Playing them inside a combat poisons the async task chain,
+# stalls ActionExecutor for ~10s, and trashes training metrics (cwr→13%,
+# cr→85%). Until we patch the underlying call in setup.sh's IL pass, we
+# blacklist them in pick_best_card so the agent never adds them to its deck.
+# Identified 2026-05-26 from training_run_full8 collapse at chunk 53.2%:
+#   System.NullReferenceException at FlashOfSteel.OnPlay
+#   System.NullReferenceException at Whirlwind.OnPlay
+# (Whirlwind was already known from memory: BUG-034 / commit 936231d; the
+# Steam-update May 22 reopened the same NullRef path that the C# fix had
+# addressed.)
+BROKEN_CARDS = {"FLASH_OF_STEEL", "WHIRLWIND"}
+
 # Threshold above which an un-upgraded card should be a SMITH target at the next
 # rest site. Calibrated so DEMON_FORM/BARRICADE/HOWL_FROM_BEYOND/LIMIT_BREAK and
 # top draw/energy enablers (OFFERING/SHRUG_IT_OFF/POMMEL_STRIKE) all qualify, but
@@ -199,7 +213,11 @@ def score_card(card: dict) -> float:
     """Score a card 0-10 based on its effectiveness.
 
     card: dict with keys: id, cost, type, rarity, stats, name, keywords
-    """
+
+    Broken cards (BROKEN_CARDS — crash combat in headless mode) get score 0
+    so they're never selected by any deck-less scoring path either."""
+    if _card_id_norm(card) in BROKEN_CARDS:
+        return 0.0
     card_id = card.get("id", "")
     if isinstance(card_id, dict):
         card_id = card_id.get("en", str(card_id))
@@ -729,7 +747,12 @@ def compute_deck_archetype(deck: list[dict]) -> dict:
 
 def score_card_in_deck(card: dict, deck: list[dict]) -> float:
     """Score a card with deck-context bonuses. Reward cards that fit the
-    archetype the deck is building toward; lightly penalize redundant payloads."""
+    archetype the deck is building toward; lightly penalize redundant payloads.
+
+    Broken cards (crash combat in headless) get score 0 here so they're
+    rejected by every caller — card_reward picks, shop buys, event rewards."""
+    if _card_id_norm(card) in BROKEN_CARDS:
+        return 0.0
     base = score_card(card)
     if not deck:
         return base
@@ -798,17 +821,26 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
                    deck: list[dict] = None) -> int | None:
     """Return index of the best card above threshold, or None to skip.
     If `deck` is provided, uses deck-aware scoring (synergy bonuses) and the
-    v2 set-normalized predictor bonus (when v2 model is loaded)."""
+    v2 set-normalized predictor bonus (when v2 model is loaded).
+
+    Cards in BROKEN_CARDS are force-skipped (they crash combat in headless)."""
     if not cards:
         return None
+    # Filter broken cards before scoring so they're never picked, even if their
+    # synergy/predictor scores rank highest.
+    valid = [(i, c) for i, c in enumerate(cards) if _card_id_norm(c) not in BROKEN_CARDS]
+    if not valid:
+        return None  # all offered cards are blacklisted → skip
+    valid_cards = [c for _, c in valid]
     scorer = (lambda c: score_card_in_deck(c, deck)) if deck else score_card
-    base = [scorer(c) for c in cards]
-    set_bonus = predictor_v2_set_bonuses(cards, deck) if deck else [0.0] * len(cards)
+    base = [scorer(c) for c in valid_cards]
+    set_bonus = (predictor_v2_set_bonuses(valid_cards, deck)
+                 if deck else [0.0] * len(valid_cards))
     scored = sorted(enumerate(b + s for b, s in zip(base, set_bonus)),
                     key=lambda x: x[1], reverse=True)
-    best_idx, best_score = scored[0]
+    best_valid_idx, best_score = scored[0]
     if best_score >= threshold:
-        return best_idx
+        return valid[best_valid_idx][0]  # remap to original cards index
     return None
 
 
