@@ -478,6 +478,7 @@ class CombatEnv(gym.Env):
         self._run_max_floor = 1
         self._run_id = None
         self._run_milestone_records: list = []  # buffered rows until outcome known
+        self._run_card_pick_records: list = []   # buffered card-reward decisions (per pick, see _buffer_card_pick)
 
         self._replay_actions = list(replay_actions) if replay_actions else []
         self._replay_pending = bool(self._replay_actions)
@@ -546,6 +547,7 @@ class CombatEnv(gym.Env):
         self._run_max_floor = 1
         self._run_id = f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
         self._run_milestone_records = []
+        self._run_card_pick_records = []
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
@@ -1005,10 +1007,63 @@ class CombatEnv(gym.Env):
             "ts": time.time(),
         })
 
+    def _buffer_card_pick(self, state: dict, cmd: dict):
+        """Record one card_reward decision (deck_before + offered options + picked).
+        Each per-run buffer flushes to disk in _emit_run_outcome along with
+        milestones and the outcome row. Trains the deck predictor on actual
+        decision counterfactuals (you saw these 3 options with this deck and
+        picked X / SKIP — what was the future floor?), much denser signal than
+        the 3 milestone snapshots per run."""
+        if not self._deck_history_path:
+            return
+        try:
+            from agent.card_scoring import _card_id_norm
+        except ImportError:
+            return
+        cards = state.get("cards") or []
+        if not cards:
+            return
+        action = cmd.get("action", "")
+        args = cmd.get("args", {}) or {}
+        picked = None
+        if action == "select_card_reward":
+            idx = args.get("card_index", -1)
+            if isinstance(idx, int) and 0 <= idx < len(cards):
+                picked = _card_id_norm(cards[idx])
+        elif action == "skip_card_reward":
+            picked = "SKIP"
+        else:
+            return  # not a card_reward action — skip
+        deck = state.get("player", {}).get("deck") or []
+        floor = state.get("floor") or state.get("context", {}).get("floor", 1)
+        opts = []
+        for c in cards:
+            opts.append({
+                "id": _card_id_norm(c),
+                "cost": c.get("cost"),
+                "rarity": c.get("rarity"),
+                "type": c.get("type"),
+                "upgraded": c.get("upgraded", False),
+            })
+        self._run_card_pick_records.append({
+            "event": "card_pick",
+            "run_id": self._run_id,
+            "floor": int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1,
+            "hp": state.get("player", {}).get("hp"),
+            "max_hp": state.get("player", {}).get("max_hp"),
+            "deck_before_ids": [_card_id_norm(c) for c in deck],
+            "deck_size": len(deck),
+            "options": opts,
+            "picked": picked,
+            "ts": time.time(),
+        })
+
     def _emit_run_outcome(self, state: dict, victory: bool):
-        """Flush buffered milestone records to disk with the final outcome appended.
-        Called once per run from terminal paths (game_over, crash, etc.)."""
-        if not self._deck_history_path or not self._run_milestone_records:
+        """Flush buffered milestone + card_pick records to disk with the final
+        outcome appended. Called once per run from terminal paths (game_over,
+        crash, etc.)."""
+        has_any = self._run_milestone_records or self._run_card_pick_records
+        if not self._deck_history_path or not has_any:
             return
         outcome = {
             "event": "outcome",
@@ -1021,6 +1076,8 @@ class CombatEnv(gym.Env):
             os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
             with open(self._deck_history_path, "a") as f:
                 for rec in self._run_milestone_records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                for rec in self._run_card_pick_records:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 f.write(json.dumps(outcome, ensure_ascii=False) + "\n")
         except Exception:
@@ -1225,6 +1282,11 @@ class CombatEnv(gym.Env):
             if state.get("decision") == "combat_play":
                 return self._greedy_use_potions(state)
             cmd = greedy_action(state)
+            # Log every card_reward decision (deck_before + offered options + picked)
+            # for the deck predictor's training set. Old milestone/outcome events
+            # remain unchanged — this is a strictly-additive event stream.
+            if state.get("decision") == "card_reward":
+                self._buffer_card_pick(state, cmd)
             state = self._send(cmd)
         return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
 
