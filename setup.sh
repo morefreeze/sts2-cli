@@ -229,8 +229,8 @@ foreach (var type in module.Types)
 }
 
 // Patch 4: Generic null guards for `static get_Instance()` singletons in monster/
-// power/event/VFX state machines. Many enemy moves call XManager.get_Instance() then
-// immediately invoke a method on the result; in headless mode the singleton is often
+// power/event/VFX/card state machines. Many state-machine moves call XManager.get_Instance()
+// then immediately invoke a method on the result; in headless mode the singleton is often
 // null, so the unguarded callvirt throws NullReferenceException inside the async task
 // chain → faulted task → ActionExecutor stalls → 10s boss-stuck signal → eval reports
 // STUCK with hp>0 (BUG-037 / BUG-038 / BUG-039 family).
@@ -241,9 +241,11 @@ foreach (var type in module.Types)
 // effect-style methods (Trigger/Play/Update/get_*/etc.) — load-bearing methods like
 // ExecuteAttack are NOT patched, so game logic invariants stay intact.
 //
-// Namespace whitelist: Models.Monsters, Models.Powers, Models.Events, Nodes.Vfx —
-// i.e. paths where a missing VFX/audio call is benign. Card/UI/CombatManager logic is
-// excluded because their singleton interactions carry game state.
+// Namespace whitelist: Models.Monsters, Models.Powers, Models.Events, Nodes.Vfx, AND
+// Models.Cards (added 2026-05-27 after FlashOfSteel.OnPlay / Whirlwind.OnPlay surfaced
+// the same NullRef pattern post-Steam-update). The sink-allowlist guarantee still
+// holds — only known-cosmetic calls are nullable; OnPlay's actual damage/draw/etc.
+// logic isn't touched because those aren't in IsSkippableSink.
 {
     bool ShouldGuardType(TypeDefinition declaringType)
     {
@@ -251,6 +253,7 @@ foreach (var type in module.Types)
         if (ns.Contains("Models.Monsters")) return true;
         if (ns.Contains("Models.Powers")) return true;
         if (ns.Contains("Models.Events")) return true;
+        if (ns.Contains("Models.Cards")) return true;
         if (ns.Contains("Nodes.Vfx")) return true;
         return false;
     }
@@ -281,6 +284,12 @@ foreach (var type in module.Types)
         // NDebugAudioManager.Play/Stop are pure audio sinks (full-name match avoids
         // matching load-bearing methods like CombatManager.PlayCard).
         if (name == "Play" || name == "Stop") return true;
+        // UI / settings (SaveManager.PrefsSave + chain). Cards like FlashOfSteel and
+        // Whirlwind call SaveManager.get_Instance().get_PrefsSave().get_FastMode() to
+        // toggle animation speed — purely cosmetic. Without the guard SaveManager
+        // returns null in headless and the property callvirt explodes.
+        if (name == "get_PrefsSave") return true;
+        if (name == "get_FastMode") return true;
         return false;
     }
 
