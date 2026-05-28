@@ -822,7 +822,9 @@ def deck_quality_score(deck: list[dict]) -> float:
 # Monte-Carlo rollout signal (Phase 3 simulator). Off by default because
 # 4s/decision overhead is fine for eval but kills training throughput.
 import os as _os_mc
-_MC_ROLLOUT_ENABLED = _os_mc.environ.get("STS2_MC_ROLLOUT", "").lower() in ("1", "true", "on")
+_MC_ENV = _os_mc.environ.get("STS2_MC_ROLLOUT", "").lower()
+_MC_ROLLOUT_ENABLED = _MC_ENV in ("1", "true", "on", "ensemble", "replace")
+_MC_MODE = "replace" if _MC_ENV == "replace" else "ensemble"
 
 
 def set_mc_rollout_enabled(flag: bool) -> None:
@@ -881,9 +883,17 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
     valid_cards = [c for _, c in valid]
     scorer = (lambda c: score_card_in_deck(c, deck)) if deck else score_card
     base = [scorer(c) for c in valid_cards]
-    # Set-aware bonus: MC rollout > v2 predictor (richer signal when enabled)
+    # Set-aware bonus combination:
+    #   STS2_MC_ROLLOUT=replace → MC bonus replaces v2 (Phase 3 step 2)
+    #   STS2_MC_ROLLOUT=ensemble (or =1 default in ensemble mode) → 0.5 MC + 0.5 v2
+    #   off → v2 only (existing path)
     if _MC_ROLLOUT_ENABLED and deck:
-        set_bonus = _mc_rollout_bonuses(valid_cards, deck)
+        v2 = predictor_v2_set_bonuses(valid_cards, deck)
+        mc = _mc_rollout_bonuses(valid_cards, deck)
+        if _MC_MODE == "replace":
+            set_bonus = mc
+        else:  # "ensemble" default
+            set_bonus = [0.5 * a + 0.5 * b for a, b in zip(v2, mc)]
     else:
         set_bonus = (predictor_v2_set_bonuses(valid_cards, deck)
                      if deck else [0.0] * len(valid_cards))
