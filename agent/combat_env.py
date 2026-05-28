@@ -236,6 +236,15 @@ def greedy_action(state: dict) -> dict:
                 threshold = 6.5
             else:
                 threshold = 5.5
+            # Provide game-state context for MC rollout (no-op when STS2_MC_ROLLOUT
+            # is off — the v2 predictor path doesn't read it).
+            from agent.card_scoring import set_mc_context as _set_mc_ctx
+            player = state.get("player", {}) or {}
+            _set_mc_ctx(
+                hp=int(player.get("hp", 80) or 80),
+                max_hp=int(player.get("max_hp", 80) or 80),
+                floor=int(floor) if isinstance(floor, (int, float)) and floor > 0 else 5,
+            )
             # Pass deck for synergy-aware picks (boosts cards that fit the archetype).
             best = pick_best_card(cards, threshold=threshold, deck=deck)
             if best is not None:

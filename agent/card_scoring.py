@@ -817,11 +817,58 @@ def deck_quality_score(deck: list[dict]) -> float:
     return sum(scores) / len(scores) if scores else 0.0
 
 
+# MC-rollout opt-in flag. Set via env (STS2_MC_ROLLOUT=1) or directly from
+# a calling script. When True, pick_best_card replaces the v2 set bonus with
+# Monte-Carlo rollout signal (Phase 3 simulator). Off by default because
+# 4s/decision overhead is fine for eval but kills training throughput.
+import os as _os_mc
+_MC_ROLLOUT_ENABLED = _os_mc.environ.get("STS2_MC_ROLLOUT", "").lower() in ("1", "true", "on")
+
+
+def set_mc_rollout_enabled(flag: bool) -> None:
+    global _MC_ROLLOUT_ENABLED
+    _MC_ROLLOUT_ENABLED = bool(flag)
+
+
+# Per-decision game-state context (hp / floor) for MC rollout. Callers set
+# this right before they call pick_best_card so the rollout can build a
+# realistic CombatState. Module-level rather than threading new args through
+# every score_card_in_deck call site.
+_MC_CONTEXT: dict = {"hp": 80, "max_hp": 80, "floor": 5}
+
+
+def set_mc_context(hp: int, max_hp: int, floor: int) -> None:
+    _MC_CONTEXT["hp"] = int(hp)
+    _MC_CONTEXT["max_hp"] = int(max_hp)
+    _MC_CONTEXT["floor"] = int(floor)
+
+
+def _mc_rollout_bonuses(cards: list[dict], deck: list[dict]) -> list[float]:
+    """Look up MC rollout scoring for these options. Returns 0s on failure
+    so picks fall back to heuristic + v2 cleanly."""
+    if not _MC_ROLLOUT_ENABLED or not cards or not deck:
+        return [0.0] * len(cards)
+    try:
+        from agent.sim.rollout_recursive import score_candidates_via_rollout
+        deck_ids = [_card_id_norm(c) for c in deck]
+        return score_candidates_via_rollout(
+            cards, deck_ids,
+            hp=_MC_CONTEXT["hp"], max_hp=_MC_CONTEXT["max_hp"],
+            floor=_MC_CONTEXT["floor"], n_sims=15,
+        )
+    except Exception:
+        return [0.0] * len(cards)
+
+
 def pick_best_card(cards: list[dict], threshold: float = 3.5,
                    deck: list[dict] = None) -> int | None:
     """Return index of the best card above threshold, or None to skip.
     If `deck` is provided, uses deck-aware scoring (synergy bonuses) and the
     v2 set-normalized predictor bonus (when v2 model is loaded).
+
+    When STS2_MC_ROLLOUT=1 (env var) and `set_mc_context()` has been called
+    with valid game state, the MC rollout signal REPLACES the v2 bonus
+    (richer-but-slower forward simulation outranks the deck-only regressor).
 
     Cards in BROKEN_CARDS are force-skipped (they crash combat in headless)."""
     if not cards:
@@ -834,8 +881,12 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
     valid_cards = [c for _, c in valid]
     scorer = (lambda c: score_card_in_deck(c, deck)) if deck else score_card
     base = [scorer(c) for c in valid_cards]
-    set_bonus = (predictor_v2_set_bonuses(valid_cards, deck)
-                 if deck else [0.0] * len(valid_cards))
+    # Set-aware bonus: MC rollout > v2 predictor (richer signal when enabled)
+    if _MC_ROLLOUT_ENABLED and deck:
+        set_bonus = _mc_rollout_bonuses(valid_cards, deck)
+    else:
+        set_bonus = (predictor_v2_set_bonuses(valid_cards, deck)
+                     if deck else [0.0] * len(valid_cards))
     scored = sorted(enumerate(b + s for b, s in zip(base, set_bonus)),
                     key=lambda x: x[1], reverse=True)
     best_valid_idx, best_score = scored[0]
