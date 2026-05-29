@@ -52,6 +52,11 @@ class CombatState:
     # Enemies (active in combat)
     enemies: list[Enemy] = field(default_factory=list)
 
+    # Active powers — each entry: {"trigger": "on_turn_start"|"on_lose_hp"|...,
+    # "effects": [Effect, ...]}. Populated when a Power card resolves; fired by
+    # combat_step lifecycle hooks at matching events.
+    powers: list[dict] = field(default_factory=list)
+
     # Per-turn counters / flags
     turn: int = 1
     attacks_played_this_turn: int = 0

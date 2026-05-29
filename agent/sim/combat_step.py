@@ -272,12 +272,13 @@ def apply_effect(state: CombatState, effect: dict[str, Any],
         # Keywords don't have immediate effect during play (handled at draw / turn).
         return
 
-    # Trigger wrappers — store for later evaluation
+    # Trigger wrappers — register as an active power so the body fires at the
+    # matching lifecycle event (start_turn, end_turn, on_lose_hp, on_exhaust,
+    # after each Attack play, etc). The body is itself a list of Effect dicts
+    # that fire via apply_effect when the trigger condition is met.
     if kind in {"on_turn_start", "on_turn_end", "on_lose_hp", "on_exhaust",
                 "on_play_attack", "on_other_trigger", "on_nth_play_add_copy"}:
-        # We DON'T apply the effects now; we register a power-style hook.
-        state.statuses[f"_trigger_{kind}_count"] = state.statuses.get(
-            f"_trigger_{kind}_count", 0) + 1
+        state.powers.append({"trigger": kind, "effects": effect.get("effects", [])})
         return
 
     if kind == "if":
@@ -351,6 +352,8 @@ def play_card(state: CombatState, hand_idx: int, target_idx: int = 0,
     played = state.hand.pop(hand_idx)
     # Pending flags reset
     state.statuses.pop("_pending_self_exhaust", None)
+    attacks_before = state.attacks_played_this_turn
+    exhausts_before = state.cards_exhausted_this_turn
     # Apply normal_text effects (we're using non-upgraded for now; v3 plan: track
     # upgraded state per-card in the deck).
     for eff in data["parsed"]["normal"]:
@@ -362,6 +365,12 @@ def play_card(state: CombatState, hand_idx: int, target_idx: int = 0,
     else:
         # Default: discard.
         state.discard_pile.append(played)
+    # Fire on_play_attack powers if an attack happened (any deal_damage hit)
+    if state.attacks_played_this_turn > attacks_before:
+        fire_powers(state, "on_play_attack", rng)
+    # Fire on_exhaust powers if anything exhausted during this play
+    if state.cards_exhausted_this_turn > exhausts_before:
+        fire_powers(state, "on_exhaust", rng)
     # Add-copy hooks
     for where in ("discard", "hand", "draw"):
         n = state.statuses.pop(f"_pending_add_copy__{where}", 0)
@@ -382,35 +391,54 @@ def _resolve_cost(cost_raw: str, state: CombatState) -> int:
         return 1
 
 
-def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
-    """End the player turn: run enemy intents → status decay → start_turn."""
+def fire_powers(state: CombatState, trigger: str,
+                rng: random.Random | None = None) -> None:
+    """Apply every active power whose `trigger` matches. Used by lifecycle
+    hooks (start/end of turn, on_lose_hp, on_exhaust, etc.). Powers stay
+    registered after firing; they re-fire on every matching event."""
     rng = rng or random.Random(state.rng_seed)
-    # 1. Enemies act
+    hp_before = state.hp
+    for p in list(state.powers):  # copy in case effects add new powers
+        if p["trigger"] != trigger:
+            continue
+        for eff in p.get("effects", []):
+            apply_effect(state, eff, 0, rng)
+
+
+def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
+    """End the player turn: fire end-of-turn powers → enemies act →
+    status decay → start_turn → fire start-of-turn powers → draw."""
+    rng = rng or random.Random(state.rng_seed)
+    # 1. End-of-turn powers (e.g. status-decay-style effects)
+    fire_powers(state, "on_turn_end", rng)
+    # 2. Enemies act
     for e in state.enemies:
         if e.hp <= 0:
             continue
         intent = e.intent
         if intent.get("type") == "attack":
             dmg = intent.get("damage", 0)
-            # Apply enemy Strength
             dmg += e.statuses.get("Strength", 0)
             if e.statuses.get("Weak", 0) > 0:
                 dmg = int(dmg * 0.75)
             dmg = _player_incoming(state, dmg)
+            hp_before = state.hp
             for _ in range(intent.get("hits", 1)):
                 state.take_damage(dmg)
                 if not state.alive():
                     return
-        # else: debuff/buff/sleep intents not fully resolved here — Phase 2
-        # focuses on damage exchange first.
-    # 2. End-of-turn decay (for both player and enemies' Vuln/Weak/Frail)
+            if state.hp < hp_before:
+                fire_powers(state, "on_lose_hp", rng)
+    # 3. End-of-turn decay (for both player and enemies' Vuln/Weak/Frail)
     state.end_turn()
-    # 3. Start next turn: discard remaining hand, draw 5
+    # 4. Start next turn: discard remaining hand, draw 5
     state.discard_pile.extend(state.hand)
     state.hand = []
     state.start_turn()
     state.draw(5, rng)
-    # 4. Advance enemy intents — Phase 2 default = cycle through declared moves
+    # 5. Fire start-of-turn powers BEFORE the player acts
+    fire_powers(state, "on_turn_start", rng)
+    # 6. Advance enemy intents — default = cycle through declared moves
     _advance_enemy_intents(state)
 
 
