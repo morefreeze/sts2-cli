@@ -853,10 +853,16 @@ def _mc_rollout_bonuses(cards: list[dict], deck: list[dict]) -> list[float]:
     try:
         from agent.sim.rollout_recursive import score_candidates_via_rollout
         deck_ids = [_card_id_norm(c) for c in deck]
+        # Phase 4 attempted depth=3 multi-floor rollout but it underperformed
+        # depth=1 (eval 11.7 vs 12.5) because simulator-fidelity gaps
+        # (un-fired trigger bodies, no relic scaling, no Energy growth) get
+        # amplified over chained combats. Stick with depth=1 for the live
+        # path; multi-depth is available via max_depth param when the sim
+        # is hardened.
         return score_candidates_via_rollout(
             cards, deck_ids,
             hp=_MC_CONTEXT["hp"], max_hp=_MC_CONTEXT["max_hp"],
-            floor=_MC_CONTEXT["floor"], n_sims=15,
+            floor=_MC_CONTEXT["floor"], n_sims=15, max_depth=1,
         )
     except Exception:
         return [0.0] * len(cards)
