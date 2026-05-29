@@ -823,8 +823,16 @@ def deck_quality_score(deck: list[dict]) -> float:
 # 4s/decision overhead is fine for eval but kills training throughput.
 import os as _os_mc
 _MC_ENV = _os_mc.environ.get("STS2_MC_ROLLOUT", "").lower()
-_MC_ROLLOUT_ENABLED = _MC_ENV in ("1", "true", "on", "ensemble", "replace")
-_MC_MODE = "replace" if _MC_ENV == "replace" else "ensemble"
+_MC_ROLLOUT_ENABLED = _MC_ENV in ("1", "true", "on", "ensemble", "replace", "smart")
+_MC_MODE = (
+    "replace" if _MC_ENV == "replace"
+    else "smart" if _MC_ENV == "smart"
+    else "ensemble"
+)
+# In "smart" mode, only invoke MC when the v2 bonuses are close (top two
+# differ by less than this threshold) — saves compute on decisive picks
+# AND keeps MC's noise away from already-confident decisions.
+_MC_SMART_THRESHOLD = float(_os_mc.environ.get("STS2_MC_SMART_THRESH", "0.15"))
 
 
 def set_mc_rollout_enabled(flag: bool) -> None:
@@ -890,15 +898,27 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
     scorer = (lambda c: score_card_in_deck(c, deck)) if deck else score_card
     base = [scorer(c) for c in valid_cards]
     # Set-aware bonus combination:
-    #   STS2_MC_ROLLOUT=replace → MC bonus replaces v2 (Phase 3 step 2)
-    #   STS2_MC_ROLLOUT=ensemble (or =1 default in ensemble mode) → 0.5 MC + 0.5 v2
-    #   off → v2 only (existing path)
+    #   STS2_MC_ROLLOUT=replace  → MC bonus replaces v2 (Phase 3 step 2)
+    #   STS2_MC_ROLLOUT=ensemble → 0.5 MC + 0.5 v2 (Phase 3 ensemble)
+    #   STS2_MC_ROLLOUT=smart    → MC only when v2 top-two are close;
+    #                              otherwise pure v2 (saves compute + noise)
+    #   off → v2 only
     if _MC_ROLLOUT_ENABLED and deck:
         v2 = predictor_v2_set_bonuses(valid_cards, deck)
-        mc = _mc_rollout_bonuses(valid_cards, deck)
-        if _MC_MODE == "replace":
+        if _MC_MODE == "smart":
+            # Decide whether v2 is decisive enough to skip MC
+            sorted_v2 = sorted(v2, reverse=True)
+            top_gap = (sorted_v2[0] - sorted_v2[1]) if len(sorted_v2) >= 2 else 0.0
+            if top_gap >= _MC_SMART_THRESHOLD:
+                set_bonus = v2
+            else:
+                mc = _mc_rollout_bonuses(valid_cards, deck)
+                set_bonus = [0.5 * a + 0.5 * b for a, b in zip(v2, mc)]
+        elif _MC_MODE == "replace":
+            mc = _mc_rollout_bonuses(valid_cards, deck)
             set_bonus = mc
-        else:  # "ensemble" default
+        else:  # "ensemble"
+            mc = _mc_rollout_bonuses(valid_cards, deck)
             set_bonus = [0.5 * a + 0.5 * b for a, b in zip(v2, mc)]
     else:
         set_bonus = (predictor_v2_set_bonuses(valid_cards, deck)
