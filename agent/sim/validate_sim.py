@@ -112,11 +112,8 @@ def simulator_smoke_matrix() -> None:
         # Pick the first declared move; default damage=8 if not specified
         first_move = e["moves"][0]
         first_dmg = first_move.get("damage", 8)
-        hp_raw = (e.get("hp_normal", "30") or "30").split("-")[0].strip()
-        try:
-            hp = int(hp_raw)
-        except ValueError:
-            hp = 30
+        from agent.sim.combat_step import parse_enemy_hp
+        hp = parse_enemy_hp(e, default=30)
         wins = 0
         turns_total = 0
         hp_lost_total = 0

@@ -68,6 +68,43 @@ def _load_enemy_db() -> dict[str, dict]:
     return _ENEMY_DB
 
 
+def parse_enemy_hp(rec: dict, ascended: bool = False, default: int = 30) -> int:
+    """Resolve enemy HP from a data/enemies.json record.
+
+    Wiki HP strings come in a few shapes:
+      "173"        — single value
+      "23 - 28"    — range; we use midpoint so sim damage modelling sits
+                     between the easy and hard rolls
+      "173 (183)"  — base (ascended); `ascended=True` returns the bracketed
+                     value
+      "9999"       — scrape artefact (e.g. byrdpip); clamped to `default`
+
+    Range bounds are taken from `hp_normal` only — wiki rarely lists an
+    ascended range. `default` is the fallback for missing / unparseable HP.
+    """
+    key = "hp_ascended" if ascended and rec.get("hp_ascended") else "hp_normal"
+    raw = (rec.get(key) or "").strip()
+    if not raw:
+        return default
+    # Strip a possible "(NN)" trailing ascended hint when reading hp_normal.
+    if "(" in raw:
+        raw = raw.split("(", 1)[0].strip()
+    if "-" in raw:
+        try:
+            lo, hi = (int(p.strip()) for p in raw.split("-", 1))
+            hp = (lo + hi) // 2
+        except ValueError:
+            return default
+    else:
+        try:
+            hp = int(raw)
+        except ValueError:
+            return default
+    if hp <= 0 or hp > 500:
+        return default
+    return hp
+
+
 def get_card_data(card_id: str) -> dict | None:
     """Look up parsed card metadata. Tries multiple naming forms:
       - exact (wiki slug "strike", game id "STRIKE_IRONCLAD", upgrade "STRIKE+")

@@ -34,7 +34,7 @@ from typing import Any
 
 from agent.sim.combat_state import CombatState, Enemy
 from agent.sim.combat_simulator import simulate_combat, heuristic_policy
-from agent.sim.combat_step import _load_enemy_db, get_card_data
+from agent.sim.combat_step import _load_enemy_db, get_card_data, parse_enemy_hp
 
 
 # Enemy pools by act (rough mapping from data/enemies.json fields).
@@ -66,14 +66,10 @@ def _sample_enemy(floor: int, rng: random.Random) -> Enemy | None:
         return None
     raw = rng.choice(candidates)
     first_move = raw["moves"][0]
-    hp_raw = (raw.get("hp_normal", "30") or "30").split("-")[0].strip()
-    try:
-        hp = int(hp_raw)
-    except ValueError:
-        hp = 30
-    # Sanity guard against the 9999-HP scrape glitch (伯德幼雏)
-    if hp > 500:
-        hp = 100
+    # Ascended HP once we're past Act 1 — wiki carries the (hp_ascended)
+    # variant which roughly matches "Ascension 1+" difficulty.
+    ascended = floor >= _ACT2_FLOOR_START
+    hp = parse_enemy_hp(raw, ascended=ascended, default=30)
     return Enemy(
         id=raw["id"], name=raw["zh_name"], hp=hp, max_hp=hp,
         intent={
