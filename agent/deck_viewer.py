@@ -443,6 +443,79 @@ _RARITY_COLOR = {
 }
 
 
+# Per-axis "strong deck" cap — at this value the polygon hits 100% of
+# its radius. Numbers are calibrated 2× the DIM_BASELINES "good rounded"
+# targets so a balanced deck around the cap fills naturally, and a
+# Heavy-Attack/Light-Defense build still differentiates visually.
+# Aligned with the article's 输出/防御/运转 split.
+_DIM_CAP = {"attack": 6.0, "defense": 3.0, "energy": 0.40, "draw": 0.50}
+_DIM_LABEL = {"attack": "输出", "defense": "防御",
+              "energy": "运转·能量", "draw": "运转·抽牌"}
+
+
+def _radar_svg(dims: dict, size: int = 140) -> str:
+    """Quadrilateral radar of 4 dims, normalised by _DIM_CAP."""
+    import math
+    cx, cy = size / 2, size / 2 + 6
+    r_max = size / 2 - 18  # leave room for axis labels
+    keys = ["attack", "defense", "energy", "draw"]
+    # angle 0 = top, clockwise: attack (top), defense (right), energy (bot), draw (left)
+    angles = [-math.pi / 2 + i * math.pi / 2 for i in range(4)]
+
+    # Grid rings (25/50/75/100 %)
+    rings = []
+    for frac in (0.25, 0.5, 0.75, 1.0):
+        pts = [(cx + r_max * frac * math.cos(a), cy + r_max * frac * math.sin(a))
+               for a in angles]
+        ring = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        rings.append(f'<polygon points="{ring}" fill="none" stroke="#2a2d36" stroke-width="0.6"/>')
+
+    # Axis lines
+    axes = []
+    for a in angles:
+        x = cx + r_max * math.cos(a)
+        y = cy + r_max * math.sin(a)
+        axes.append(f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" y2="{y:.1f}" '
+                    f'stroke="#2a2d36" stroke-width="0.5"/>')
+
+    # Data polygon
+    pts = []
+    for k, a in zip(keys, angles):
+        v = dims.get(k, 0) or 0
+        norm = min(1.0, max(0.0, v / _DIM_CAP[k]))
+        x = cx + r_max * norm * math.cos(a)
+        y = cy + r_max * norm * math.sin(a)
+        pts.append((x, y))
+    poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    data_poly = (f'<polygon points="{poly}" fill="#fcd34d33" '
+                 f'stroke="#fcd34d" stroke-width="1.4"/>')
+
+    # Vertices
+    dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2" fill="#fcd34d"/>'
+                   for x, y in pts)
+
+    # Axis labels around the outside
+    labels = []
+    for k, a in zip(keys, angles):
+        lx = cx + (r_max + 4) * math.cos(a)
+        ly = cy + (r_max + 4) * math.sin(a)
+        v = dims.get(k, 0) or 0
+        anchor = ("middle" if abs(math.cos(a)) < 0.3
+                  else ("start" if math.cos(a) > 0 else "end"))
+        baseline = "central" if abs(math.sin(a)) < 0.3 else \
+                   ("hanging" if math.sin(a) > 0 else "baseline")
+        labels.append(
+            f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" '
+            f'dominant-baseline="{baseline}" font-size="10" fill="#9ca3af">'
+            f'{_DIM_LABEL[k]}<tspan fill="#fcd34d" dx="3">{v:.2f}</tspan></text>'
+        )
+
+    return (f'<svg viewBox="0 0 {size} {size+12}" width="{size}" height="{size+12}" '
+            f'style="flex:0 0 {size}px;">'
+            + "".join(rings) + "".join(axes) + data_poly + dots + "".join(labels)
+            + '</svg>')
+
+
 _ROUND_COLORS = {
     "baseline": "#9ca3af", "boss": "#f97316", "boss2": "#eab308",
     "boss3": "#a855f7", "hpw": "#22d3ee", "fix": "#34d399", "?": "#555",
@@ -502,17 +575,11 @@ def _render(rows: list[dict], card_db: dict, curves: dict) -> str:
                 f'</span>'
             )
 
-        # Dim bars
-        dim_html = []
-        for k in ("attack", "defense", "energy", "draw"):
-            v = r["dims"].get(k, 0)
-            pct = min(100, max(0, v * 100))
-            dim_html.append(
-                f'<div class="dim-row"><span class="dim-name">{k}</span>'
-                f'<div class="dim-bar"><div class="dim-fill" '
-                f'style="width:{pct:.0f}%;"></div></div>'
-                f'<span class="dim-val">{v:.2f}</span></div>'
-            )
+        # Dim radar (polygon) — 4 axes mapped to the article's 3-port framework
+        # 输出/防御/运转(拆抽牌+能量), each normalised by a "strong-deck" cap
+        # so a deck around the cap fills the polygon completely, beyond just
+        # extends to a soft outer ring.
+        dim_html = _radar_svg(r["dims"])
 
         rd = r.get("round", "?")
         rd_col = _ROUND_COLORS.get(rd, "#555")
@@ -533,7 +600,7 @@ def _render(rows: list[dict], card_db: dict, curves: dict) -> str:
           </div>
           <div class="panel-body">
             <div class="cards">{"".join(chips)}</div>
-            <div class="dims">{"".join(dim_html)}</div>
+            <div class="dims">{dim_html}</div>
           </div>
         </div>
         """)
@@ -651,13 +718,9 @@ def _render(rows: list[dict], card_db: dict, curves: dict) -> str:
     font-size:10px; flex:0 0 auto;
   }}
   .dims {{
-    flex:0 0 140px; font-size:10px; color:#9ca3af;
+    flex:0 0 auto; font-size:10px; color:#9ca3af;
+    display:flex; align-items:center;
   }}
-  .dim-row {{ display:flex; align-items:center; gap:5px; margin-bottom:3px; }}
-  .dim-name {{ width:50px; }}
-  .dim-bar {{ flex:1; height:7px; background:#22262f; border-radius:2px; overflow:hidden;}}
-  .dim-fill {{ height:100%; background:linear-gradient(90deg,#6fa3d6,#d2a23a); }}
-  .dim-val {{ width:30px; text-align:right; font-family:ui-monospace,monospace;}}
 
   /* Round badge + filter pill */
   .round-badge {{
