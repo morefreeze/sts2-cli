@@ -419,7 +419,13 @@ BOSS_CLEAR_BONUS = 10.0
 # every extra HP delivered above the dead zone so the policy explicitly
 # learns "save HP for the boss room".
 BOSS_ENTRY_HP_FLOOR = 50.0    # below this, no bonus (already in the 0% dead zone)
-BOSS_ENTRY_HP_WEIGHT = 0.2    # bonus = (hp - floor) × weight. hp=100 → +10, hp=80 → +6
+# Bumped 0.2 → 0.8 after three 300k boss-mix rounds (v1/v2/v3) all stalled at
+# 0% boss-win. HP-sweep diagnostic (May 25) showed boss is winnable at hp≥80
+# (27%/53%/77% at 80/100/120), so the bottleneck is HP delivery, not the boss
+# fight itself. Boss-focused training kept teaching combat skill at the cost of
+# eval regressing to baseline. Shifting the signal: reward HP arrived at the
+# boss room, not boss kills. hp=100 → +40 (was +10), hp=80 → +24 (was +6).
+BOSS_ENTRY_HP_WEIGHT = 0.8
 
 
 class CombatEnv(gym.Env):
