@@ -159,6 +159,11 @@ def simulate_combat(state: CombatState, policy: Policy = heuristic_policy,
         else:
             # Unknown action — terminate
             break
+    # Combat ended — fire any combat_end relic effects on victory only
+    # (loss handles HP at the room/run level, not here).
+    if state.player_won():
+        from agent.sim.relics import fire_relics
+        fire_relics(state, "combat_end")
     return {
         "won":         state.player_won(),
         "alive":       state.alive(),

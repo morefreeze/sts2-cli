@@ -83,12 +83,18 @@ def _sample_enemy(floor: int, rng: random.Random) -> Enemy | None:
 def _make_combat_state(deck_ids: list[str], hp: int, max_hp: int,
                        floor: int, energy: int = 3,
                        enemy: Enemy | None = None,
-                       seed: int = 0) -> CombatState:
-    """Build a CombatState seeded for combat from current run state."""
+                       seed: int = 0,
+                       relics: list[str] | None = None) -> CombatState:
+    """Build a CombatState seeded for combat from current run state.
+
+    `relics` defaults to ["BURNING_BLOOD"] — every Ironclad run carries it
+    and it heals 6 HP per won combat, which compounds dramatically over an
+    act and was unmodelled prior to Jun 1 sim-fidelity work."""
     s = CombatState(
         hp=hp, max_hp=max_hp, energy=energy, max_energy=energy,
         floor=floor, rng_seed=seed,
     )
+    s.relics = list(relics) if relics is not None else ["BURNING_BLOOD"]
     # Copy deck → draw pile (shuffled)
     s.draw_pile = list(deck_ids)
     random.Random(seed).shuffle(s.draw_pile)
