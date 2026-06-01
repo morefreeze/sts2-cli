@@ -21,10 +21,54 @@ The v1 predictor (data/deck_predictor.pkl) keeps working from the same
 deck_history.jsonl; v2 writes to data/deck_predictor_v2.pkl. card_scoring
 loads whichever the calling code asks for.
 """
-import argparse, json, os, pickle, sys
+import argparse, json, os, pickle, re, sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# Wiki text parser — used to enrich card_metadata stubs with stats so
+# score_deck_dimensions and compute_deck_archetype see real damage/block/
+# energy/draw values instead of zero (card_metadata only carries
+# cost/rarity/type/occurrences).
+_DAMAGE_RE = re.compile(r"deal\s+(\d+)\s+damage", re.I)
+_BLOCK_RE = re.compile(r"gain\s+(\d+)\s+block", re.I)
+_ENERGY_RE = re.compile(r"gain\s+(\d+)\s+energy", re.I)
+_DRAW_N_RE = re.compile(r"draw\s+(\d+)\s+cards?", re.I)
+_DRAW_A_RE = re.compile(r"draw\s+a\s+card", re.I)
+
+
+def _enrich_card_db(card_metadata: dict, wiki_path: str = "data/ironclad_cards.json"):
+    """Parse wiki normal_text to fill stats={damage,block,energy,cards} on
+    each metadata record. Mutates and returns card_metadata."""
+    if not os.path.exists(wiki_path):
+        print(f"  (no wiki at {wiki_path} — stubs stay stats-less)")
+        return card_metadata
+    with open(wiki_path) as f:
+        wiki = json.load(f).get("cards", [])
+    n_enriched = 0
+    for w in wiki:
+        # Match wiki slug to runtime ids (e.g. "pommel-strike" → "POMMEL_STRIKE")
+        slug = w.get("id", "")
+        runtime_id = slug.upper().replace("-", "_")
+        candidates = [runtime_id, runtime_id.replace("_IRONCLAD", ""),
+                      slug.upper(), slug.upper().replace("-", "_")]
+        text = w.get("normal_text") or ""
+        stats = {}
+        if (m := _DAMAGE_RE.search(text)) is not None: stats["damage"] = int(m.group(1))
+        if (m := _BLOCK_RE.search(text)) is not None: stats["block"] = int(m.group(1))
+        if (m := _ENERGY_RE.search(text)) is not None: stats["energy"] = int(m.group(1))
+        if (m := _DRAW_N_RE.search(text)) is not None: stats["cards"] = int(m.group(1))
+        elif _DRAW_A_RE.search(text): stats["cards"] = 1
+        for cid in candidates:
+            if cid in card_metadata:
+                rec = card_metadata[cid]
+                rec.setdefault("stats", stats)
+                rec.setdefault("description", text)
+                n_enriched += 1
+                break
+    print(f"  enriched {n_enriched}/{len(card_metadata)} card records with parsed stats")
+    return card_metadata
 
 
 # Histogram bins / one-hot vocab — must stay in sync between training and
@@ -114,14 +158,18 @@ def load_training_rows(history_path, card_db, picked_only=False):
                 continue
             n_used += 1
             deck_ids = pick.get("deck_before_ids") or []
-            # Stub cards with metadata for the existing dim/archetype scorers
+            # Stub cards with metadata for the existing dim/archetype scorers.
+            # Stats are required so card_dimensions reads non-zero damage/block/
+            # energy/draw — _enrich_card_db has populated them above.
             deck_stubs = []
             for cid in deck_ids:
                 m = card_db.get(cid, {})
                 deck_stubs.append({"id": cid, "name": cid,
                                    "cost": m.get("cost"),
                                    "rarity": m.get("rarity"),
-                                   "type": m.get("type")})
+                                   "type": m.get("type"),
+                                   "stats": m.get("stats") or {},
+                                   "description": m.get("description") or ""})
             dims = score_deck_dimensions(deck_stubs)
             arch = compute_deck_archetype(deck_stubs)
             agg = _deck_aggregate_features(deck_ids, card_db)
@@ -191,6 +239,7 @@ def main():
     with open(args.card_db) as f:
         card_db = json.load(f)
     print(f"Loaded card_db: {len(card_db)} cards")
+    _enrich_card_db(card_db)
 
     X, y, n_used, n_skip = load_training_rows(args.history, card_db,
                                               picked_only=args.picked_only)
