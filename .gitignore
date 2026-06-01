@@ -26,7 +26,12 @@ training_boss*.log
 crash_stderr.log
 data/
 checkpoints_boss/
+checkpoints_boss2/
+checkpoints_boss3/
+checkpoints_hpw/
+checkpoints_fix/
 checkpoints_256x256/
+decks.html
 
 # local Claude / MCP state (not tracked)
 .claude/scheduled_tasks.json
