@@ -826,6 +826,26 @@ def deck_quality_score(deck: list[dict]) -> float:
 # Monte-Carlo rollout signal (Phase 3 simulator). Off by default because
 # 4s/decision overhead is fine for eval but kills training throughput.
 import os as _os_mc
+# Diagnostic counters — published via atexit when STS2_MC_DIAG is set.
+_smart_mc_counts = {"invoked": 0, "skipped": 0}
+
+
+def _print_mc_diag():
+    inv, skp = _smart_mc_counts["invoked"], _smart_mc_counts["skipped"]
+    total = inv + skp
+    if total == 0:
+        return
+    rate = 100.0 * inv / total
+    import sys as _s
+    print(f"[MC diag] picks={total} MC-invoked={inv} v2-only={skp} ({rate:.1f}% triggered)",
+          file=_s.stderr)
+
+
+if _os_mc.environ.get("STS2_MC_DIAG", "") in ("1", "true"):
+    import atexit
+    atexit.register(_print_mc_diag)
+
+
 _MC_ENV = _os_mc.environ.get("STS2_MC_ROLLOUT", "").lower()
 _MC_ROLLOUT_ENABLED = _MC_ENV in ("1", "true", "on", "ensemble", "replace", "smart")
 _MC_MODE = (
@@ -915,15 +935,19 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
             top_gap = (sorted_v2[0] - sorted_v2[1]) if len(sorted_v2) >= 2 else 0.0
             if top_gap >= _MC_SMART_THRESHOLD:
                 set_bonus = v2
+                _smart_mc_counts["skipped"] += 1
             else:
                 mc = _mc_rollout_bonuses(valid_cards, deck)
                 set_bonus = [0.5 * a + 0.5 * b for a, b in zip(v2, mc)]
+                _smart_mc_counts["invoked"] += 1
         elif _MC_MODE == "replace":
             mc = _mc_rollout_bonuses(valid_cards, deck)
             set_bonus = mc
+            _smart_mc_counts["invoked"] += 1
         else:  # "ensemble"
             mc = _mc_rollout_bonuses(valid_cards, deck)
             set_bonus = [0.5 * a + 0.5 * b for a, b in zip(v2, mc)]
+            _smart_mc_counts["invoked"] += 1
     else:
         set_bonus = (predictor_v2_set_bonuses(valid_cards, deck)
                      if deck else [0.0] * len(valid_cards))
