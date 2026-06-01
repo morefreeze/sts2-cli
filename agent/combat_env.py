@@ -977,6 +977,27 @@ class CombatEnv(gym.Env):
             reward += BOSS_CLEAR_BONUS
         return reward
 
+    @staticmethod
+    def _state_relic_ids(state: dict) -> list[str]:
+        """Pull the canonical runtime ID (uppercase snake-case) for each
+        relic the player currently owns. Robust to a few legacy shapes:
+        relics may live at the top level, on the player block, or carry
+        either an "id" or "name" field."""
+        relics_raw = state.get("relics")
+        if not relics_raw:
+            player = state.get("player") or {}
+            relics_raw = player.get("relics", [])
+        out = []
+        for r in relics_raw or []:
+            if isinstance(r, dict):
+                rid = r.get("id") or r.get("name") or ""
+            else:
+                rid = str(r)
+            rid = rid.upper().replace("-", "_").replace(" ", "_")
+            if rid:
+                out.append(rid)
+        return out
+
     def _milestone_reward(self, state: dict) -> float:
         """One-shot reward when the run first crosses a milestone floor with a
         decent deck. Bounded ≤0.6 per milestone to avoid policy distortion.
@@ -992,10 +1013,12 @@ class CombatEnv(gym.Env):
                 bonus += m_bonus
                 # Buffer milestone record — final outcome appended in
                 # _emit_run_outcome when the run ends.
-                self._buffer_milestone_record(milestone, deck, q)
+                relic_ids = self._state_relic_ids(state)
+                self._buffer_milestone_record(milestone, deck, q, relic_ids)
         return bonus
 
-    def _buffer_milestone_record(self, milestone: int, deck: list, quality: float):
+    def _buffer_milestone_record(self, milestone: int, deck: list, quality: float,
+                                 relics: list[str] | None = None):
         """Save a deck snapshot for later outcome correlation."""
         if not self._deck_history_path:
             return
@@ -1019,6 +1042,7 @@ class CombatEnv(gym.Env):
             "dims": {k: round(v, 3) for k, v in dims.items()},
             "archetype": arch,
             "cards": cards,
+            "relics": list(relics) if relics else [],
             "ts": time.time(),
         })
 
@@ -1068,6 +1092,7 @@ class CombatEnv(gym.Env):
             "max_hp": state.get("player", {}).get("max_hp"),
             "deck_before_ids": [_card_id_norm(c) for c in deck],
             "deck_size": len(deck),
+            "relics": self._state_relic_ids(state),
             "options": opts,
             "picked": picked,
             "ts": time.time(),
