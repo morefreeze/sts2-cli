@@ -335,15 +335,24 @@ def _read_eval_curves() -> dict[str, list[tuple[float, float]]]:
             if "eval/avg_floor" not in tags:
                 continue
             evs = acc.Scalars("eval/avg_floor")
-            # For baseline, all events are useful. For others, filter to recent
-            # session (skip stale ones from older tb logs that share the dir).
-            if label != "baseline":
-                # Pick events whose step is small (i.e. relative-to-session
-                # rather than absolute step counters of resumed runs).
-                evs = [e for e in evs if e.step < 500_000]
+            # Normalise per-round: pick the most recent training session in
+            # this TB dir (events within 1 day of the latest wall_time), then
+            # rebase x to start at 0 so curves are directly comparable
+            # regardless of resume-step offset.
             if not evs:
                 continue
-            out[label] = [(e.step / 1000.0, float(e.value)) for e in evs]
+            recent = max(e.wall_time for e in evs)
+            evs = [e for e in evs if e.wall_time >= recent - 86400]
+            if not evs:
+                continue
+            # Filter the ARM64-dotnet eval-race crash sentinel (avg_floor=1.0
+            # over all 5 eval games == "every game crashed on floor 1"). These
+            # points carry no training-progress signal — drop them.
+            evs = [e for e in evs if e.value > 5.0]
+            if not evs:
+                continue
+            x0 = min(e.step for e in evs)
+            out[label] = [((e.step - x0) / 1000.0, float(e.value)) for e in evs]
         except Exception:
             continue
     return out
