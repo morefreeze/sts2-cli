@@ -513,11 +513,16 @@ def calibrate_dim_caps(jsonl_path: str = "data/deck_history.jsonl",
           f"caps={_DIM_CAP}, targets={_DIM_TARGET}", file=sys.stderr)
 
 
-def _radar_svg(dims: dict, size: int = 140) -> str:
-    """Quadrilateral radar of 4 dims, normalised by _DIM_CAP."""
+def _radar_svg(dims: dict, w: int = 200, h: int = 160) -> str:
+    """Quadrilateral radar of 4 dims, normalised by _DIM_CAP.
+
+    Wider than tall — 防御 / 抽牌 axis labels sit east/west of the chart and
+    each needs ~50 px for "防御 X.XX". cx pushed slightly right of centre so
+    the longest right-side label fits inside the viewBox without clipping.
+    """
     import math
-    cx, cy = size / 2, size / 2 + 6
-    r_max = size / 2 - 18  # leave room for axis labels
+    cx, cy = w * 0.46, h * 0.5 - 4   # nudge plot left to balance right-side labels
+    r_max = min(w, h) * 0.30  # ≈ 48 px radius — room for 4-direction labels
     keys = ["attack", "defense", "energy", "draw"]
     # angle 0 = top, clockwise: attack (top), defense (right), energy (bot), draw (left)
     angles = [-math.pi / 2 + i * math.pi / 2 for i in range(4)]
@@ -582,10 +587,20 @@ def _radar_svg(dims: dict, size: int = 140) -> str:
             f'{_DIM_LABEL[k]}<tspan fill="#fcd34d" dx="3">{v:.2f}</tspan></text>'
         )
 
-    return (f'<svg viewBox="0 0 {size} {size+12}" width="{size}" height="{size+12}" '
-            f'style="flex:0 0 {size}px;">'
+    # Inline legend strip — clarifies the dashed polygon without forcing
+    # the reader back up to the page header.
+    legend = (
+        f'<g transform="translate({w*0.04:.0f},{h-8})">'
+        f'  <polygon points="0,0 4,4 0,8 -4,4" fill="#fcd34d33" stroke="#fcd34d" stroke-width="1"/>'
+        f'  <text x="8" y="6" font-size="9" fill="#7b8290">本 deck</text>'
+        f'  <polygon points="50,0 54,4 50,8 46,4" fill="none" stroke="#7b8290" stroke-width="0.8" stroke-dasharray="2 1.5"/>'
+        f'  <text x="58" y="6" font-size="9" fill="#7b8290">过 boss 典型</text>'
+        f'</g>'
+    )
+    return (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+            f'style="flex:0 0 {w}px;">'
             + "".join(rings) + "".join(axes) + ref_poly + data_poly + dots
-            + "".join(labels) + '</svg>')
+            + "".join(labels) + legend + '</svg>')
 
 
 _ROUND_COLORS = {
