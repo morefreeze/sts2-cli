@@ -28,6 +28,7 @@ between combats — TODO for v2 of this module.
 """
 from __future__ import annotations
 
+import os
 import random
 from collections import defaultdict
 from typing import Any
@@ -94,7 +95,12 @@ def _make_combat_state(deck_ids: list[str], hp: int, max_hp: int,
         hp=hp, max_hp=max_hp, energy=energy, max_energy=energy,
         floor=floor, rng_seed=seed,
     )
-    s.relics = list(relics) if relics is not None else ["BURNING_BLOOD"]
+    if relics is not None:
+        s.relics = list(relics)
+    elif os.environ.get("STS2_SIM_NO_RELICS", "") in ("1", "true"):
+        s.relics = []  # A/B comparison knob — disable default relics for measurement
+    else:
+        s.relics = ["BURNING_BLOOD"]
     # Copy deck → draw pile (shuffled)
     s.draw_pile = list(deck_ids)
     random.Random(seed).shuffle(s.draw_pile)
