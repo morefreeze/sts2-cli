@@ -284,8 +284,10 @@ def score_card(card: dict) -> float:
             score += DEXTERITY_VALUE
 
     # === Generic bonuses ===
-    # Draw value
-    draw = stats.get("draw", 0)
+    # Draw value — the C# runtime sends draw count under the `cards` stat key
+    # (e.g. Pommel Strike: stats={damage:9, cards:1}); accept `draw` too in
+    # case the wiki/sim path ever populates it directly.
+    draw = stats.get("cards", stats.get("draw", 0)) or 0
     if draw > 0:
         score += draw * DRAW_VALUE
 
@@ -418,7 +420,9 @@ def card_dimensions(card: dict) -> dict[str, float]:
     e = stats.get("energy", 0) or 0
     if e > 0:
         res["energy"] = float(e)
-    d = stats.get("draw", 0) or 0
+    # Runtime sends draw count under the `cards` key; keep `draw` fallback for
+    # any path that pre-normalises (parsers, sim, viewer).
+    d = (stats.get("cards") or stats.get("draw") or 0)
     if d > 0:
         res["draw"] = float(d)
     # Powers: strength-gain count as attack potential (4 dmg-equiv per 1 str
