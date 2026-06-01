@@ -443,14 +443,74 @@ _RARITY_COLOR = {
 }
 
 
-# Per-axis "strong deck" cap — at this value the polygon hits 100% of
-# its radius. Numbers are calibrated 2× the DIM_BASELINES "good rounded"
-# targets so a balanced deck around the cap fills naturally, and a
-# Heavy-Attack/Light-Defense build still differentiates visually.
-# Aligned with the article's 输出/防御/运转 split.
-_DIM_CAP = {"attack": 6.0, "defense": 3.0, "energy": 0.40, "draw": 0.50}
+# Per-axis 1.0 anchor + dashed reference polygon target. Calibrated from
+# actual deck history: cap = p95 of decks that reached floor >= 15 (the
+# "boss-room dataset", n≈18k). target = p75 of the same bucket. So 1.0
+# means "this axis matches the top-5% of decks that actually reached the
+# boss room"; the dashed silhouette shows the typical boss-reach profile
+# so a user can see at a glance which axis they're under on.
+# Defaults are reasonable values if calibration fails / data is missing.
+_DIM_CAP = {"attack": 5.94, "defense": 3.07, "energy": 0.23, "draw": 0.25}
+_DIM_TARGET = {"attack": 4.67, "defense": 2.33, "energy": 0.13, "draw": 0.13}
 _DIM_LABEL = {"attack": "输出", "defense": "防御",
               "energy": "运转·能量", "draw": "运转·抽牌"}
+
+
+_CALIB_STATS = {"n_high": 0, "n_total": 0}
+
+
+def calibrate_dim_caps(jsonl_path: str = "data/deck_history.jsonl",
+                       floor_threshold: int = 15) -> None:
+    """Walk deck_history once and rewrite _DIM_CAP / _DIM_TARGET to p95 / p75
+    of the high-floor bucket. Called from main() so re-renders pick up
+    whatever the dataset currently looks like."""
+    try:
+        import numpy as np
+    except ImportError:
+        return
+    if not os.path.exists(jsonl_path):
+        return
+    outcomes: dict[str, dict] = {}
+    last_milestones: dict[str, dict] = {}
+    with open(jsonl_path) as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rid = o.get("run_id"); ev = o.get("event")
+            if not rid: continue
+            if ev == "milestone":
+                cur = last_milestones.get(rid)
+                if cur is None or o.get("floor_crossed", 0) > cur.get("floor_crossed", 0):
+                    last_milestones[rid] = o
+            elif ev == "outcome":
+                outcomes[rid] = o
+    card_db = load_card_db()
+    vals: dict[str, list[float]] = {k: [] for k in _DIM_CAP}
+    for rid, ms in last_milestones.items():
+        out = outcomes.get(rid)
+        if not out or out.get("max_floor", 0) < floor_threshold:
+            continue
+        deck = [lookup_card(c, card_db) for c in ms.get("cards", [])]
+        if len(deck) < 2:
+            continue
+        d = score_deck_dimensions(deck)
+        for k in vals:
+            vals[k].append(d[k])
+    n = len(vals["attack"])
+    _CALIB_STATS["n_high"] = n
+    _CALIB_STATS["n_total"] = len(outcomes)
+    if n < 200:  # not enough data for stable percentiles
+        print(f"  dim calibration: only {n} high-floor decks, keeping defaults",
+              file=sys.stderr)
+        return
+    for k in _DIM_CAP:
+        a = np.array(vals[k])
+        _DIM_CAP[k] = float(round(np.percentile(a, 95), 2))
+        _DIM_TARGET[k] = float(round(np.percentile(a, 75), 2))
+    print(f"  dim calibration over n={n} f≥{floor_threshold} decks: "
+          f"caps={_DIM_CAP}, targets={_DIM_TARGET}", file=sys.stderr)
 
 
 def _radar_svg(dims: dict, size: int = 140) -> str:
@@ -477,6 +537,18 @@ def _radar_svg(dims: dict, size: int = 140) -> str:
         y = cy + r_max * math.sin(a)
         axes.append(f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{x:.1f}" y2="{y:.1f}" '
                     f'stroke="#2a2d36" stroke-width="0.5"/>')
+
+    # Reference polygon — typical boss-reach deck (p75 of high-floor bucket).
+    # Drawn first so the data polygon overlays it cleanly.
+    ref_pts = []
+    for k, a in zip(keys, angles):
+        norm = min(1.0, _DIM_TARGET[k] / _DIM_CAP[k])
+        x = cx + r_max * norm * math.cos(a)
+        y = cy + r_max * norm * math.sin(a)
+        ref_pts.append((x, y))
+    ref_poly_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in ref_pts)
+    ref_poly = (f'<polygon points="{ref_poly_str}" fill="none" '
+                f'stroke="#7b8290" stroke-width="0.8" stroke-dasharray="3 2"/>')
 
     # Data polygon
     pts = []
@@ -512,8 +584,8 @@ def _radar_svg(dims: dict, size: int = 140) -> str:
 
     return (f'<svg viewBox="0 0 {size} {size+12}" width="{size}" height="{size+12}" '
             f'style="flex:0 0 {size}px;">'
-            + "".join(rings) + "".join(axes) + data_poly + dots + "".join(labels)
-            + '</svg>')
+            + "".join(rings) + "".join(axes) + ref_poly + data_poly + dots
+            + "".join(labels) + '</svg>')
 
 
 _ROUND_COLORS = {
@@ -787,7 +859,23 @@ def _render(rows: list[dict], card_db: dict, curves: dict) -> str:
         <span><i style="background:#d97057"></i>Attack</span>
         <span><i style="background:#5b9aa6"></i>Skill</span>
         <span><i style="background:#b48b5d"></i>Power</span>
+        <span style="margin-left:18px;">
+          <svg width="14" height="14" style="vertical-align:middle"><polygon points="7,2 12,7 7,12 2,7" fill="#fcd34d33" stroke="#fcd34d" stroke-width="1.2"/></svg>
+          deck
+        </span>
+        <span>
+          <svg width="14" height="14" style="vertical-align:middle"><polygon points="7,3 11,7 7,11 3,7" fill="none" stroke="#7b8290" stroke-width="0.8" stroke-dasharray="2 1.5"/></svg>
+          target (p75 of f≥15 decks)
+        </span>
       </span>
+    </div>
+    <div style="font-size:11px; color:#7b8290; margin-top:6px;">
+      Radar 1.0 anchor = p95 of decks that reached f≥15
+      ({_CALIB_STATS['n_high']:,} of {_CALIB_STATS['n_total']:,} runs).
+      Closer to 1 on an axis ≈ "you match the top-5% of boss-reach decks on that axis";
+      dashed silhouette is the typical (p75) boss-reach profile.
+      Caps: 输出={_DIM_CAP['attack']}, 防御={_DIM_CAP['defense']},
+      运转·能量={_DIM_CAP['energy']}, 运转·抽牌={_DIM_CAP['draw']}.
     </div>
   </header>
 
@@ -851,6 +939,7 @@ def main():
 
     card_db = load_card_db()
     print(f"Card DB: {len({c['id'] for c in [v for v in card_db.values()]})} unique cards", file=sys.stderr)
+    calibrate_dim_caps(args.input)
     decks = sample_milestones(args.input, n=args.n, seed=args.seed)
     print(f"Sampled {len(decks)} decks from {args.input}", file=sys.stderr)
     html = build_html(decks, card_db)
