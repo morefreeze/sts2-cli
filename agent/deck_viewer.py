@@ -27,6 +27,7 @@ from agent.card_scoring import (
     _deck_features_v2,
     score_deck_dimensions,
     compute_deck_archetype,
+    score_card,
 )
 # Trigger predictor load so the module-level _PREDICTOR_VERSION is populated.
 _load_predictor()
@@ -58,6 +59,34 @@ def load_card_db() -> dict[str, dict]:
                 db[canon.upper()] = rec
                 db[f"{canon.upper()}_IRONCLAD"] = rec
     return db
+
+
+# --------------------------------------------------------------------
+# Training-round attribution.
+# deck_history.jsonl rows carry only `run_id` (random) + `ts` (unix), not
+# a checkpoint label. Bin runs by timestamp into the training round that
+# was producing data at that moment, using ckpt-file mtimes as boundaries.
+# (Round = a contiguous training process whose CHECKPOINT_DIR setting
+# matches.)
+TRAINING_ROUNDS = [
+    # (label,    start_unix,         end_unix or None=ongoing)
+    ("baseline", 0,                   1779028800),  # → 05-29 13:00 (boss start)
+    ("boss",     1779028800,          1779043200),  # 05-29 13:00 → 17:00 (boss2 start)
+    ("boss2",    1779043200,          1779064800),  # 05-29 17:00 → 23:00
+    ("boss3",    1779064800,          1779097200),  # 05-29 23:00 → 05-30 08:00
+    ("hpw",      1779166800,          1779182400),  # 06-01 10:00 → 14:15 (fix start)
+    ("fix",      1779182400,          None),        # 06-01 14:15 → ongoing
+]
+
+
+def round_from_ts(ts: float | None) -> str:
+    """Map a unix timestamp to its training-round label."""
+    if not ts:
+        return "?"
+    for label, s, e in TRAINING_ROUNDS:
+        if ts >= s and (e is None or ts < e):
+            return label
+    return "?"
 
 
 _DAMAGE_RE = re.compile(r"deal\s+(\d+)\s+damage", re.I)
@@ -224,13 +253,172 @@ def build_html(decks: list[dict], card_db: dict) -> str:
             "dims": dims,
             "archetype_label": archetype_label(arch),
             "cards": deck_full,
+            "round": round_from_ts(d.get("ts")),
+            "ts": d.get("ts"),
         }
         rows.append(row)
     # Sort by max_floor desc, then deck_size
     rows.sort(key=lambda r: (-(r["max_floor"] if isinstance(r["max_floor"], int) else 0),
                               -r["deck_size"]))
 
-    return _render(rows)
+    return _render(rows, card_db, _read_eval_curves())
+
+
+def _all_cards_table(card_db: dict) -> list[dict]:
+    """All 86 wiki cards with score_card + empirical occurrences. Sorted by
+    score desc — leaderboard view."""
+    # Empirical occurrences from card_metadata
+    occurrences = {}
+    try:
+        with open("data/card_metadata.json") as f:
+            md = json.load(f)
+        for cid, rec in md.items():
+            occurrences[cid] = rec.get("occurrences", 0)
+    except FileNotFoundError:
+        pass
+
+    seen_ids = set()
+    rows = []
+    for cid_key, rec in card_db.items():
+        # Dedupe by wiki slug; lookup_card aliases multiple keys to the same rec
+        slug = rec.get("id")
+        if slug in seen_ids:
+            continue
+        seen_ids.add(slug)
+        runtime_id = slug.upper().replace("-", "_")
+        c = lookup_card(runtime_id, card_db)
+        # Fall back to runtime-ID flavoured (some have _IRONCLAD suffix)
+        for variant in (runtime_id, runtime_id + "_IRONCLAD"):
+            if variant in occurrences:
+                occ = occurrences[variant]
+                break
+        else:
+            occ = occurrences.get(runtime_id.replace("_IRONCLAD", ""), 0)
+        sc = score_card(c)
+        rows.append({
+            "id": runtime_id,
+            "zh": c["zh_name"],
+            "en": c["en_name"],
+            "type": c["type"],
+            "rarity": c["rarity"],
+            "cost": c["cost"],
+            "stats": c["stats"],
+            "score": sc,
+            "occ": occ,
+        })
+    rows.sort(key=lambda r: -r["score"])
+    return rows
+
+
+def _read_eval_curves() -> dict[str, list[tuple[float, float]]]:
+    """Per training round, return [(rel_step_k, eval_avg_floor)] tuples."""
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    except Exception:
+        return {}
+    out = {}
+    sources = [
+        ("baseline", "checkpoints/tb_logs/MaskablePPO_10"),
+        ("boss",     "checkpoints_boss/tb_logs/MaskablePPO_0"),
+        ("boss2",    "checkpoints_boss2/tb_logs/MaskablePPO_0"),
+        ("boss3",    "checkpoints_boss3/tb_logs/MaskablePPO_0"),
+        ("hpw",      "checkpoints_hpw/tb_logs/MaskablePPO_0"),
+        ("fix",      "checkpoints_fix/tb_logs/MaskablePPO_0"),
+    ]
+    for label, path in sources:
+        if not os.path.isdir(path):
+            continue
+        try:
+            acc = EventAccumulator(path, size_guidance={"scalars": 30000})
+            acc.Reload()
+            tags = acc.Tags().get("scalars", [])
+            if "eval/avg_floor" not in tags:
+                continue
+            evs = acc.Scalars("eval/avg_floor")
+            # For baseline, all events are useful. For others, filter to recent
+            # session (skip stale ones from older tb logs that share the dir).
+            if label != "baseline":
+                # Pick events whose step is small (i.e. relative-to-session
+                # rather than absolute step counters of resumed runs).
+                evs = [e for e in evs if e.step < 500_000]
+            if not evs:
+                continue
+            out[label] = [(e.step / 1000.0, float(e.value)) for e in evs]
+        except Exception:
+            continue
+    return out
+
+
+def _build_training_curves_svg(curves: dict, width: int = 720, height: int = 200) -> str:
+    """Inline SVG line chart, no JS. X = relative training step (kilo-steps),
+    Y = eval/avg_floor. One line per training round, baseline as reference."""
+    if not curves:
+        return '<div style="color:#7b8290; font-size:12px;">No TB data available</div>'
+
+    pad = {"l": 36, "r": 12, "t": 12, "b": 24}
+    all_x = [x for pts in curves.values() for x, _ in pts]
+    all_y = [y for pts in curves.values() for _, y in pts]
+    if not all_x:
+        return '<div style="color:#7b8290; font-size:12px;">empty curves</div>'
+    x_min, x_max = min(all_x + [0]), max(all_x + [300])
+    y_min, y_max = min(all_y + [10]) - 0.5, max(all_y + [15]) + 0.5
+
+    def sx(v):
+        return pad["l"] + (v - x_min) / max(x_max - x_min, 1) * (width - pad["l"] - pad["r"])
+    def sy(v):
+        return height - pad["b"] - (v - y_min) / max(y_max - y_min, 1) * (height - pad["t"] - pad["b"])
+
+    colors = {
+        "baseline": "#9ca3af", "boss": "#f97316", "boss2": "#eab308",
+        "boss3": "#a855f7", "hpw": "#22d3ee", "fix": "#34d399",
+    }
+    paths = []
+    legend = []
+    for label, pts in curves.items():
+        if not pts:
+            continue
+        col = colors.get(label, "#fff")
+        d = " ".join((f"M{sx(x):.1f},{sy(y):.1f}" if i == 0 else f"L{sx(x):.1f},{sy(y):.1f}")
+                     for i, (x, y) in enumerate(pts))
+        paths.append(f'<path d="{d}" stroke="{col}" stroke-width="1.5" fill="none"/>')
+        # endpoint dot
+        x_end, y_end = pts[-1]
+        paths.append(f'<circle cx="{sx(x_end):.1f}" cy="{sy(y_end):.1f}" r="3" fill="{col}"/>')
+        last_str = f"{y_end:.1f}"
+        legend.append((label, col, last_str, len(pts)))
+
+    # Y-axis ticks at integers
+    y_ticks = []
+    yi = int(y_min)
+    while yi <= y_max:
+        y_ticks.append(f'<text x="{pad["l"]-6}" y="{sy(yi)+3:.1f}" font-size="10" '
+                       f'fill="#666" text-anchor="end">{yi}</text>'
+                       f'<line x1="{pad["l"]}" y1="{sy(yi):.1f}" '
+                       f'x2="{width-pad["r"]}" y2="{sy(yi):.1f}" '
+                       f'stroke="#222" stroke-dasharray="2 4"/>')
+        yi += 2
+    # X-axis ticks every 50k
+    x_ticks = []
+    xi = 0
+    while xi <= x_max + 0.1:
+        x_ticks.append(f'<text x="{sx(xi):.1f}" y="{height-pad["b"]+14}" '
+                       f'font-size="10" fill="#666" text-anchor="middle">{xi:.0f}k</text>')
+        xi += 50
+
+    legend_html = " ".join(
+        f'<span style="color:{c};margin-right:14px;">●&nbsp;<b>{l}</b> '
+        f'<span style="color:#7b8290">→ {v} (n={n})</span></span>'
+        for l, c, v, n in legend
+    )
+
+    svg = f"""<svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px; background:#0e1118; border:1px solid #1a1d24; border-radius:6px;">
+      {''.join(y_ticks)}
+      {''.join(x_ticks)}
+      {''.join(paths)}
+      <text x="{width/2}" y="{height-4}" font-size="11" fill="#7b8290" text-anchor="middle">training step (relative, kilo)</text>
+    </svg>
+    <div style="font-size:12px; margin-top:6px;">{legend_html}</div>"""
+    return svg
 
 
 _CARD_TYPE_COLOR = {
@@ -246,7 +434,28 @@ _RARITY_COLOR = {
 }
 
 
-def _render(rows: list[dict]) -> str:
+_ROUND_COLORS = {
+    "baseline": "#9ca3af", "boss": "#f97316", "boss2": "#eab308",
+    "boss3": "#a855f7", "hpw": "#22d3ee", "fix": "#34d399", "?": "#555",
+}
+
+
+def _chip_tooltip(c: dict) -> str:
+    """Build the per-card hover text shown via title=. score_card breakdown."""
+    sc = score_card(c)
+    stats = c.get("stats") or {}
+    parts = [f"{c['en_name']} / {c['zh_name']}"]
+    parts.append(f"{c['type']} · {c['rarity']} · cost {c['cost']}")
+    if stats:
+        parts.append("stats: " + ", ".join(f"{k}={v}" for k, v in stats.items()))
+    desc = c.get("description") or ""
+    if desc:
+        parts.append(desc[:120])
+    parts.append(f"score_card = {sc:.2f}")
+    return " · ".join(parts)
+
+
+def _render(rows: list[dict], card_db: dict, curves: dict) -> str:
     n = len(rows)
     won_count = sum(1 for r in rows if r["won"])
     avg_size = sum(r["deck_size"] for r in rows) / max(n, 1)
@@ -268,15 +477,16 @@ def _render(rows: list[dict]) -> str:
             err_str = "—"
         v1_str = f"{r['v1']:.2f}"
 
-        # Card chips
+        # Card chips with hover tooltips (score_card breakdown)
         chips = []
         for c in r["cards"]:
             tcol = _CARD_TYPE_COLOR.get(c["type"], "#888")
             rcol = _RARITY_COLOR.get(c["rarity"], "#888")
             upg = "+" if c["upgraded"] else ""
             cost = c["cost"] if c["cost"] not in ("?", "X") else "·"
+            tip = _chip_tooltip(c).replace('"', "&quot;")
             chips.append(
-                f'<span class="chip" style="border-left:3px solid {tcol};'
+                f'<span class="chip" title="{tip}" style="border-left:3px solid {tcol};'
                 f' background:linear-gradient(90deg,{rcol}22,#1a1a1a 60%);">'
                 f'<span class="cost">{cost}</span>'
                 f'<span class="cname">{c["zh_name"]}{upg}</span>'
@@ -295,12 +505,14 @@ def _render(rows: list[dict]) -> str:
                 f'<span class="dim-val">{v:.2f}</span></div>'
             )
 
+        rd = r.get("round", "?")
+        rd_col = _ROUND_COLORS.get(rd, "#555")
         panels.append(f"""
-        <div class="deck-panel">
+        <div class="deck-panel" data-round="{rd}" data-outcome="{'won' if r['won'] else 'died'}">
           <div class="panel-head">
             <div class="floor-tag">F{r['max_floor']}</div>
             <div class="meta">
-              <div class="title">{r['archetype_label']}</div>
+              <div class="title">{r['archetype_label']} <span class="round-badge" style="background:{rd_col}22;color:{rd_col};">{rd}</span></div>
               <div class="sub">@F{r['floor_at']} · size {r['deck_size']} · {r['run_id'][:14]}</div>
             </div>
             <div class="scores">
@@ -316,6 +528,44 @@ def _render(rows: list[dict]) -> str:
           </div>
         </div>
         """)
+
+    # Round breakdown for summary
+    by_round = defaultdict(list)
+    for r in rows:
+        by_round[r["round"]].append(r)
+    round_summary = []
+    for rd_name, rs in sorted(by_round.items()):
+        m = sum(r["max_floor"] for r in rs if isinstance(r["max_floor"], int)) / max(len(rs), 1)
+        w = sum(1 for r in rs if r["won"])
+        col = _ROUND_COLORS.get(rd_name, "#555")
+        round_summary.append(
+            f'<span class="round-pill" style="border-color:{col};color:{col};">'
+            f'<b>{rd_name}</b> n={len(rs)} · floor={m:.1f} · won={w}</span>'
+        )
+    round_summary_html = " ".join(round_summary)
+
+    # Card scoring table (top-30 to keep size tame; rest accessible via expansion)
+    card_rows = _all_cards_table(card_db)
+    table_rows = []
+    for c in card_rows:
+        tcol = _CARD_TYPE_COLOR.get(c["type"], "#888")
+        rcol = _RARITY_COLOR.get(c["rarity"], "#888")
+        stats_str = ", ".join(f"{k}={v}" for k, v in c["stats"].items()) if c["stats"] else "—"
+        table_rows.append(
+            f'<tr>'
+            f'<td style="color:{rcol};">{c["zh"]}</td>'
+            f'<td style="color:#9ca3af;">{c["en"]}</td>'
+            f'<td><span style="color:{tcol};">{c["type"]}</span></td>'
+            f'<td>{c["rarity"]}</td>'
+            f'<td style="text-align:center;">{c["cost"]}</td>'
+            f'<td style="color:#7b8290; font-size:11px;">{stats_str}</td>'
+            f'<td style="text-align:right; color:#fcd34d; font-family:ui-monospace,monospace;">{c["score"]:.2f}</td>'
+            f'<td style="text-align:right; color:#9ca3af;">{c["occ"]:,}</td>'
+            f'</tr>'
+        )
+
+    # Training curves SVG
+    curves_svg = _build_training_curves_svg(curves)
 
     return f"""<!doctype html>
 <html lang="zh">
@@ -399,6 +649,41 @@ def _render(rows: list[dict]) -> str:
   .dim-bar {{ flex:1; height:7px; background:#22262f; border-radius:2px; overflow:hidden;}}
   .dim-fill {{ height:100%; background:linear-gradient(90deg,#6fa3d6,#d2a23a); }}
   .dim-val {{ width:30px; text-align:right; font-family:ui-monospace,monospace;}}
+
+  /* Round badge + filter pill */
+  .round-badge {{
+    display:inline-block; padding:1px 6px; border-radius:8px;
+    font-size:9px; font-weight:600; letter-spacing:.05em;
+    margin-left:6px; vertical-align:middle;
+  }}
+  .round-pill {{
+    display:inline-block; border:1px solid; padding:2px 10px; border-radius:12px;
+    font-size:11px; margin-right:8px; background:#0f1218;
+  }}
+  /* Section heads */
+  section {{ padding: 18px 22px; border-bottom:1px solid #1a1d24; }}
+  section h2 {{ margin:0 0 12px; font-size:13px; color:#9ca3af; font-weight:600; letter-spacing:.05em; text-transform:uppercase;}}
+
+  /* Filter controls */
+  .controls {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px;}}
+  .controls select {{
+    background:#1a1d24; color:#e5e7eb; border:1px solid #333; border-radius:4px;
+    padding:4px 8px; font-size:12px;
+  }}
+
+  /* Card scoring table */
+  table.cards-table {{
+    width:100%; border-collapse:collapse; font-size:12px;
+    background:#13161e;
+  }}
+  table.cards-table th {{
+    text-align:left; padding:6px 8px; border-bottom:2px solid #25282f;
+    color:#7b8290; font-weight:500; font-size:11px; text-transform:uppercase;
+    position:sticky; top:0; background:#13161e;
+  }}
+  table.cards-table td {{ padding:5px 8px; border-bottom:1px solid #1a1d24;}}
+  table.cards-table tr:hover td {{ background:#1a1d24;}}
+  .table-wrap {{ max-height:520px; overflow-y:auto; border:1px solid #1a1d24; border-radius:6px;}}
 </style>
 </head>
 <body>
@@ -409,19 +694,75 @@ def _render(rows: list[dict]) -> str:
       <span>Won: {won_count} ({100*won_count/max(n,1):.0f}%)</span>
       <span>avg deck size: {avg_size:.1f}</span>
       <span>avg final floor: {avg_floor:.1f}</span>
-      <span class="legend">
+    </div>
+    <div class="controls">
+      <span style="font-size:11px;color:#7b8290;">Filter:</span>
+      <select id="round-filter" onchange="filterPanels()">
+        <option value="">All rounds</option>
+        <option value="baseline">baseline</option>
+        <option value="boss">boss</option>
+        <option value="boss2">boss2</option>
+        <option value="boss3">boss3</option>
+        <option value="hpw">hpw</option>
+        <option value="fix">fix</option>
+      </select>
+      <select id="outcome-filter" onchange="filterPanels()">
+        <option value="">All outcomes</option>
+        <option value="won">Won only</option>
+        <option value="died">Died only</option>
+      </select>
+      <span class="legend" style="margin-left:14px;font-size:11px;">
         <span><i style="background:#d97057"></i>Attack</span>
         <span><i style="background:#5b9aa6"></i>Skill</span>
         <span><i style="background:#b48b5d"></i>Power</span>
-        <span><i style="background:#d2a23a"></i>Rare</span>
-        <span><i style="background:#6fa3d6"></i>Uncommon</span>
-        <span><i style="background:#bdbdbd"></i>Common</span>
       </span>
     </div>
   </header>
-  <div class="grid">
-    {''.join(panels)}
-  </div>
+
+  <section>
+    <h2>Training rounds — eval/avg_floor over training step</h2>
+    {curves_svg}
+    <div style="margin-top:12px;">{round_summary_html}</div>
+  </section>
+
+  <section>
+    <h2>Sampled decks ({n})</h2>
+    <div class="grid" id="deck-grid">
+      {''.join(panels)}
+    </div>
+  </section>
+
+  <section>
+    <h2>All 86 cards — score_card + empirical occurrences</h2>
+    <p style="font-size:11px;color:#7b8290;margin:0 0 8px;">
+      Sorted by score_card desc. Hover any card chip in a panel above to see this same breakdown inline.
+    </p>
+    <div class="table-wrap">
+    <table class="cards-table">
+      <thead>
+        <tr>
+          <th>中文</th><th>EN</th><th>type</th><th>rarity</th>
+          <th style="text-align:center;">cost</th><th>stats</th>
+          <th style="text-align:right;">score</th>
+          <th style="text-align:right;">picks (real)</th>
+        </tr>
+      </thead>
+      <tbody>{''.join(table_rows)}</tbody>
+    </table>
+    </div>
+  </section>
+
+<script>
+function filterPanels() {{
+  var r = document.getElementById('round-filter').value;
+  var o = document.getElementById('outcome-filter').value;
+  var panels = document.querySelectorAll('#deck-grid .deck-panel');
+  panels.forEach(function(p) {{
+    var ok = (!r || p.dataset.round === r) && (!o || p.dataset.outcome === o);
+    p.style.display = ok ? '' : 'none';
+  }});
+}}
+</script>
 </body>
 </html>"""
 
