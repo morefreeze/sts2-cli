@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 from collections import defaultdict
 
@@ -59,6 +60,36 @@ def load_card_db() -> dict[str, dict]:
     return db
 
 
+_DAMAGE_RE = re.compile(r"deal\s+(\d+)\s+damage", re.I)
+_BLOCK_RE = re.compile(r"gain\s+(\d+)\s+block", re.I)
+_ENERGY_RE = re.compile(r"gain\s+(\d+)\s+energy", re.I)
+_DRAW_N_RE = re.compile(r"draw\s+(\d+)\s+cards?", re.I)
+_DRAW_A_RE = re.compile(r"draw\s+a\s+card", re.I)
+
+
+def parse_card_stats(text: str) -> dict:
+    """Extract damage/block/energy/draw counts from wiki card text.
+
+    The wiki JSON has `stats=None` for every card; the runtime fills stats
+    from the live game state. For an offline viewer we recover the same
+    fields by regex over `normal_text` so card_dimensions() works.
+    """
+    if not text:
+        return {}
+    s = {}
+    if (m := _DAMAGE_RE.search(text)) is not None:
+        s["damage"] = int(m.group(1))
+    if (m := _BLOCK_RE.search(text)) is not None:
+        s["block"] = int(m.group(1))
+    if (m := _ENERGY_RE.search(text)) is not None:
+        s["energy"] = int(m.group(1))
+    if (m := _DRAW_N_RE.search(text)) is not None:
+        s["draw"] = int(m.group(1))
+    elif _DRAW_A_RE.search(text):
+        s["draw"] = 1
+    return s
+
+
 def lookup_card(card_id: str, card_db: dict) -> dict:
     """Build a card dict the scoring pipeline expects."""
     upgraded = card_id.endswith("+")
@@ -78,7 +109,11 @@ def lookup_card(card_id: str, card_db: dict) -> dict:
             "zh_name": base_id,
             "type": "?", "rarity": "?", "cost": "?",
             "upgraded": upgraded,
+            "stats": {},
+            "description": "",
         }
+    text = rec.get("upgraded_text" if upgraded else "normal_text") \
+           or rec.get("normal_text", "")
     return {
         "card_id": card_id,
         "en_name": rec.get("en_name", base_id),
@@ -87,6 +122,8 @@ def lookup_card(card_id: str, card_db: dict) -> dict:
         "rarity": rec.get("rarity", "?"),
         "cost": rec.get("cost", "?"),
         "upgraded": upgraded,
+        "stats": parse_card_stats(text),
+        "description": text,
     }
 
 
@@ -168,7 +205,10 @@ def build_html(decks: list[dict], card_db: dict) -> str:
         v1_q = d.get("deck_quality", 0.0)
         v2_mean = deck_v2_predicted_floor(deck_full,
                                           floor_at=d.get("floor_crossed", 10))
-        dims = d.get("dims", {})
+        # Recompute dims off the parsed-stats cards — the milestone's stored
+        # `dims` field was computed at runtime against game-state cards
+        # whose draw/energy stats were not always populated.
+        dims = score_deck_dimensions(deck_full)
         arch = d.get("archetype", {})
         outcome = d.get("_outcome", {})
         won = outcome.get("won", False)
