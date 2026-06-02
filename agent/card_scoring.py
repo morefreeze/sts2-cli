@@ -871,10 +871,22 @@ def set_mc_rollout_enabled(flag: bool) -> None:
 _MC_CONTEXT: dict = {"hp": 80, "max_hp": 80, "floor": 5}
 
 
-def set_mc_context(hp: int, max_hp: int, floor: int) -> None:
+def set_mc_context(hp: int, max_hp: int, floor: int,
+                   relics: list[str] | None = None) -> None:
+    """Set the run-state context the MC rollout uses to build a CombatState.
+
+    relics — list of relic runtime IDs (uppercase snake-case) the player
+    currently owns. If None, the rollout falls back to its starter default
+    (currently ["BURNING_BLOOD"]). Callers that know the actual owned set
+    (combat_env's card_reward path) should pass it through so things like
+    Lantern / Philosophers Stone show up in the sim."""
     _MC_CONTEXT["hp"] = int(hp)
     _MC_CONTEXT["max_hp"] = int(max_hp)
     _MC_CONTEXT["floor"] = int(floor)
+    if relics is not None:
+        _MC_CONTEXT["relics"] = list(relics)
+    elif "relics" in _MC_CONTEXT:
+        del _MC_CONTEXT["relics"]
 
 
 def _mc_rollout_bonuses(cards: list[dict], deck: list[dict]) -> list[float]:
@@ -895,6 +907,7 @@ def _mc_rollout_bonuses(cards: list[dict], deck: list[dict]) -> list[float]:
             cards, deck_ids,
             hp=_MC_CONTEXT["hp"], max_hp=_MC_CONTEXT["max_hp"],
             floor=_MC_CONTEXT["floor"], n_sims=15, max_depth=1,
+            relics=_MC_CONTEXT.get("relics"),
         )
     except Exception:
         return [0.0] * len(cards)

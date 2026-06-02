@@ -72,6 +72,43 @@ def _burning_blood_combat_end(state: CombatState) -> None:
     state.hp = new_hp
 
 
+# ─── Energy-scaling family — Phase-4 verdict's "energy growth" lever ──
+# Two trigger archetypes covering ~10 relics:
+#   combat_start +N energy: Lantern, Very Hot Cocoa, Venerable Tea Set (post-rest)
+#   turn_start   +1 energy: Philosophers Stone, Pumpkin Candle, Sozu, Spiked
+#                            Gauntlets, Velvet Choker, Whispering Earring,
+#                            Blessed Antler, Blood-Soaked Rose
+# Downsides on Ancient relics are not modelled — Damaru's lever is the
+# energy multiplier, which is what Phase-4 expected to move the needle.
+# Conservative: only the energy effect is applied.
+
+
+@register("LANTERN", "combat_start")
+def _lantern_combat_start(state: CombatState) -> None:
+    """Common relic: start each combat with +1 energy."""
+    state.energy += 1
+
+
+@register("VERY_HOT_COCOA", "combat_start")
+def _very_hot_cocoa_combat_start(state: CombatState) -> None:
+    """Ancient: start each combat with +4 energy."""
+    state.energy += 4
+
+
+def _per_turn_energy(state: CombatState) -> None:
+    """Shared handler used by every per-turn +1-energy relic."""
+    state.energy += 1
+
+
+# Bulk-register all per-turn +1-energy relics against the same handler.
+for _rid in (
+    "PHILOSOPHERS_STONE", "PUMPKIN_CANDLE", "SOZU", "SPIKED_GAUNTLETS",
+    "VELVET_CHOKER", "WHISPERING_EARRING", "BLESSED_ANTLER",
+    "BLOOD_SOAKED_ROSE", "BREAD",  # Bread: +1 from turn 2 onward; simplify to all turns
+):
+    register(_rid, "turn_start")(_per_turn_energy)
+
+
 # ─── Sanity test ──────────────────────────────────────────────────────
 
 
@@ -94,7 +131,35 @@ def _sanity():
     s.relics = ["NONSENSE"]
     fire_relics(s, "combat_end")
 
-    print("✓ relics sanity tests pass")
+    # Lantern: +1 energy at combat start
+    s = CombatState(hp=70, max_hp=80, energy=3)
+    s.relics = ["LANTERN"]
+    fire_relics(s, "combat_start")
+    assert s.energy == 4, f"Lantern didn't add energy: {s.energy}"
+
+    # Very Hot Cocoa: +4 energy at combat start
+    s = CombatState(hp=70, max_hp=80, energy=3)
+    s.relics = ["VERY_HOT_COCOA"]
+    fire_relics(s, "combat_start")
+    assert s.energy == 7, f"Cocoa +4 wrong: {s.energy}"
+
+    # Philosophers Stone: +1 energy per turn
+    s = CombatState(hp=70, max_hp=80, energy=3)
+    s.relics = ["PHILOSOPHERS_STONE"]
+    fire_relics(s, "turn_start")
+    assert s.energy == 4, f"Phil Stone turn_start: {s.energy}"
+    fire_relics(s, "turn_start")
+    assert s.energy == 5, f"Phil Stone repeat: {s.energy}"
+
+    # Two relics stack
+    s = CombatState(hp=70, max_hp=80, energy=3)
+    s.relics = ["LANTERN", "PHILOSOPHERS_STONE"]
+    fire_relics(s, "combat_start")
+    assert s.energy == 4, f"Lantern alone: {s.energy}"
+    fire_relics(s, "turn_start")
+    assert s.energy == 5, f"Phil Stone after Lantern: {s.energy}"
+
+    print("✓ relics sanity tests pass (BB + Lantern + Cocoa + Phil Stone)")
 
 
 if __name__ == "__main__":

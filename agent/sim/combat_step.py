@@ -475,6 +475,10 @@ def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
     state.draw(5, rng)
     # 5. Fire start-of-turn powers BEFORE the player acts
     fire_powers(state, "on_turn_start", rng)
+    # 5b. Fire start-of-turn relic effects (Damaru-family energy gain etc).
+    # Late import — agent.sim.relics already imports CombatState here.
+    from agent.sim.relics import fire_relics
+    fire_relics(state, "turn_start")
     # 6. Advance enemy intents — default = cycle through declared moves
     _advance_enemy_intents(state)
 

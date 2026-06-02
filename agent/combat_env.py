@@ -244,6 +244,7 @@ def greedy_action(state: dict) -> dict:
                 hp=int(player.get("hp", 80) or 80),
                 max_hp=int(player.get("max_hp", 80) or 80),
                 floor=int(floor) if isinstance(floor, (int, float)) and floor > 0 else 5,
+                relics=self._state_relic_ids(state),
             )
             # Pass deck for synergy-aware picks (boosts cards that fit the archetype).
             best = pick_best_card(cards, threshold=threshold, deck=deck)

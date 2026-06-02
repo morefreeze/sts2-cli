@@ -141,6 +141,11 @@ def simulate_combat(state: CombatState, policy: Policy = heuristic_policy,
     Mutates state.
     """
     rng = rng or random.Random(state.rng_seed)
+    # Fire start-of-combat relic effects (Lantern +1 energy etc) BEFORE
+    # the first hand is drawn — Anchor and similar block-gain relics also
+    # want to set initial block while it's still safe.
+    from agent.sim.relics import fire_relics
+    fire_relics(state, "combat_start")
     # Start of combat: ensure hand drawn
     if not state.hand and state.draw_pile:
         state.draw(5, rng)

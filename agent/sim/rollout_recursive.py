@@ -111,7 +111,8 @@ def _make_combat_state(deck_ids: list[str], hp: int, max_hp: int,
 
 def rollout_outcome(deck_ids: list[str], hp: int, max_hp: int, floor: int,
                     n_sims: int, seed: int = 0,
-                    max_depth: int = 1) -> dict[str, float]:
+                    max_depth: int = 1,
+                    relics: list[str] | None = None) -> dict[str, float]:
     """Run n_sims rollouts of `max_depth` combats forward. Returns aggregate stats:
         {"win_rate", "avg_final_hp", "avg_turns", "avg_max_floor"}.
 
@@ -144,7 +145,8 @@ def rollout_outcome(deck_ids: list[str], hp: int, max_hp: int, floor: int,
             if enemy is None:
                 break
             s = _make_combat_state(cur_deck, cur_hp, max_hp, cur_floor,
-                                    enemy=enemy, seed=sim_seed + d)
+                                    enemy=enemy, seed=sim_seed + d,
+                                    relics=relics)
             out = simulate_combat(s, heuristic_policy, max_turns=25,
                                    rng=random.Random(sim_seed + d * 7))
             last_turns = out["turns"]
@@ -236,23 +238,31 @@ def score_candidates_via_rollout(
     n_sims: int = 20,
     seed: int = 0,
     max_depth: int = 3,
+    relics: list[str] | None = None,
 ) -> list[float]:
     """Per-candidate bonus, normalised so the set sums to 0.
 
     max_depth=3 (Phase 4 default) — chain 3 combats forward so each card's
     long-term contribution actually matters.
     max_depth=1 (Phase 3 fallback for cheap inference) — single-combat sim.
+
+    `relics` is the player's currently-owned relic ID list. Forwarded to
+    rollout_outcome so the sim's combat states use it (Burning Blood,
+    Lantern, Philosophers Stone etc all alter combat HP/turn count and
+    therefore differentiate candidate cards meaningfully).
     """
     if not cards:
         return []
-    base = rollout_outcome(deck_ids, hp, max_hp, floor, n_sims, seed, max_depth)
+    base = rollout_outcome(deck_ids, hp, max_hp, floor, n_sims, seed,
+                            max_depth, relics=relics)
     base_s = _card_score(base) + base.get("avg_max_floor", floor)
 
     deltas: list[float] = []
     for i, c in enumerate(cards):
         new_deck = deck_ids + [_norm_id(c)]
         out = rollout_outcome(new_deck, hp, max_hp, floor, n_sims,
-                              seed=seed + i + 1, max_depth=max_depth)
+                              seed=seed + i + 1, max_depth=max_depth,
+                              relics=relics)
         candidate_s = _card_score(out) + out.get("avg_max_floor", floor)
         deltas.append(candidate_s - base_s)
     mean = sum(deltas) / len(deltas)
