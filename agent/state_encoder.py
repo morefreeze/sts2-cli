@@ -11,7 +11,62 @@ Observation layout (161 floats):
   [131:161] player buffs: top 30 buff magnitudes (alphabetical), normalized
 """
 import json
+import os
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# Relic vocabulary
+# ---------------------------------------------------------------------------
+
+_RELIC_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "data", "relics.json")
+
+
+def _norm_relic_id(rid: str) -> str:
+    return str(rid).upper().replace("-", "_").replace(" ", "_")
+
+
+def build_relic_vocab(path: str = _RELIC_DB_PATH, cap: int | None = None) -> dict:
+    """relic runtime_id (normalized, uppercase snake) -> contiguous index.
+    Sorted for determinism. `cap` keeps the first N (alphabetical) ids."""
+    with open(path) as f:
+        relics = json.load(f)["relics"]
+    ids = sorted({_norm_relic_id(r.get("runtime_id") or r.get("id") or "")
+                  for r in relics} - {""})
+    if cap is not None:
+        ids = ids[:cap]
+    return {rid: i for i, rid in enumerate(ids)}
+
+
+_cap = os.environ.get("STS2_RELIC_VOCAB_CAP")
+RELIC_VOCAB: dict = build_relic_vocab(cap=int(_cap) if _cap else None)
+RELIC_VOCAB_SIZE: int = len(RELIC_VOCAB)
+
+
+def encode_relics(relic_ids) -> np.ndarray:
+    """Multi-hot over RELIC_VOCAB. Unknown ids are ignored. Caller passes the
+    output of CombatEnv._state_relic_ids (already uppercase snake-case)."""
+    vec = np.zeros(RELIC_VOCAB_SIZE, dtype=np.float32)
+    for rid in relic_ids or []:
+        i = RELIC_VOCAB.get(rid)
+        if i is not None:
+            vec[i] = 1.0
+    return vec
+
+
+def obs_flags_for_size(model_obs_size: int, base_obs_size: int) -> tuple:
+    """Map a model's observation width to (extra_obs, relic_obs) flags.
+    base_obs_size is StateEncoder.obs_size (161). Raises on an unknown width."""
+    if model_obs_size == base_obs_size:
+        return (False, False)
+    if model_obs_size == base_obs_size + 8:
+        return (True, False)
+    if model_obs_size == base_obs_size + 8 + RELIC_VOCAB_SIZE:
+        return (True, True)
+    raise ValueError(
+        f"obs width {model_obs_size} not in ladder "
+        f"{{{base_obs_size}, {base_obs_size+8}, {base_obs_size+8+RELIC_VOCAB_SIZE}}}"
+    )
 
 MAX_HAND = 10
 MAX_ENEMIES = 3
