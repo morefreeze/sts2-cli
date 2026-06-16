@@ -61,13 +61,69 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(PROJECT_ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 
 
+# Hand-curated relic tier for boss-clear focus (Act 1 boss). Values are added
+# on top of the keyword-derived score below. Picked to address the bottleneck
+# "reach boss at HP≥75 + survive boss combat":
+#   S (+6.0): directly raises boss-entry HP buffer or boss-fight throughput
+#   A (+4.0): strong general value across Act 1 progression
+#   F (-6.0): traps that look ok but hurt boss-clear (e.g. cost an action slot
+#            with negligible boss-fight upside)
+_RELIC_TIER_OVERRIDE = {
+    # S-tier — clutch contributors to boss-clear
+    "VAJRA": 6.0,                   # +1 Strength permanent
+    "RED_SKULL": 6.0,               # +3 Strength when HP < 50% (boss usually triggers this)
+    "ANCHOR": 6.0,                  # start each combat with +10 Block (HP buffer)
+    "HORN_CLEAT": 6.0,              # turn 2 +14 Block (boss prep)
+    "MEAT_ON_THE_BONE": 6.0,        # heal to 12 HP when low — saves boss-runs
+    "CHAMPION_BELT": 6.0,           # vulnerable cards apply weak too — Bash combo
+    "ORANGE_PELLETS": 6.0,          # cleanse all debuffs once per turn after 3 card types
+    "ICE_CREAM": 6.0,               # energy carries over — massive boss-burst potential
+
+    # A-tier — strong general progression
+    "PHILOSOPHERS_STONE": 4.0,      # +1 energy/turn (energy relic family)
+    "LANTERN": 4.0,                 # +1 starting energy per combat
+    "DAMARU": 4.0,                  # similar energy buff
+    "BAG_OF_PREPARATION": 4.0,      # 2 extra cards turn 1 (helps boss opener)
+    "POCKETWATCH": 4.0,             # bonus draws on light-card turns
+    "TUNGSTEN_ROD": 4.0,            # all damage taken reduced by 1
+    "TORII": 4.0,                   # tiny attacks → 1 damage
+    "BIRD_FACED_URN": 4.0,          # heal 2 HP when playing a Power
+    "ART_OF_WAR": 4.0,              # +1 energy if no Attack played last turn
+    "PAPER_PHROG": 4.0,             # Vulnerable becomes +75% instead of +50%
+    "MERCURY_HOURGLASS": 4.0,       # 3 damage to all enemies start of turn
+    "MAGIC_FLOWER": 4.0,            # healing +50%
+    "CALIPERS": 4.0,                # block decay -15
+    "VELVET_CHOKER": 4.0,           # +1 energy but cap at 6 cards played
+    "BLOOD_VIAL": 4.0,              # heal 2 HP at start of combat
+    "WHISPERING_EARRING": 4.0,      # double gold from kills
+
+    # F-tier — looks ok but bad ROI for boss-focused builds
+    "MARK_OF_PAIN": -6.0,           # adds Wounds, hard cost on small decks
+    "RUNIC_PYRAMID": -6.0,          # discard skipped — Ironclad doesn't benefit
+    "FUSION_HAMMER": -6.0,          # +1 energy but can't rest
+    "DARKSTONE_PERIAPT": -6.0,      # Curse-trigger relic, edge case
+    "ECTOPLASM": -6.0,              # +1 energy, no gold from combats
+    "DEAD_BRANCH": -3.0,            # adds random cards — synergy-specific
+    "TINY_HOUSE": -3.0,             # one-time event, low boss impact
+}
+
+
 def _score_shop_relic(relic: dict) -> float:
-    """Score a shop relic for purchase desirability. Returns 0 if not worth buying."""
+    """Score a shop relic for purchase desirability. Returns 0 if not worth buying.
+
+    Combines keyword heuristic with hand-curated `_RELIC_TIER_OVERRIDE` for
+    cases where Ironclad meta knowledge supersedes regex. The override is
+    additive so the keyword backbone still picks up unseen relics correctly.
+    """
     name_raw = relic.get("name") or {}
     name = (name_raw.get("en", "") if isinstance(name_raw, dict) else str(name_raw)).lower()
     desc_raw = relic.get("description") or {}
     desc = (desc_raw.get("en", "") if isinstance(desc_raw, dict) else str(desc_raw)).lower()
     text = name + " " + desc
+
+    # Tier override applied first — uses runtime ID match
+    rid = str(relic.get("id") or "").upper().replace("-", "_").replace(" ", "_")
+    tier_bonus = _RELIC_TIER_OVERRIDE.get(rid, 0.0)
 
     # Hard pass on these
     if "curse" in text: return -5.0
@@ -105,7 +161,7 @@ def _score_shop_relic(relic: dict) -> float:
     if "enem" in text and "strength" in text: score -= 3.0
     # Bad: HP costs (e.g. Runic Dome, Sozu)
     if "hp" in text and "lose" in text and "start" in text: score -= 2.0
-    return score
+    return score + tier_bonus
 
 
 def _score_shop_potion(potion: dict) -> float:
@@ -240,11 +296,15 @@ def greedy_action(state: dict) -> dict:
             # is off — the v2 predictor path doesn't read it).
             from agent.card_scoring import set_mc_context as _set_mc_ctx
             player = state.get("player", {}) or {}
+            # boss_id intentionally NOT passed (Jun 10): two n=30 evals with
+            # boss-aware MC scored 3/30 reach each vs 16.7% baseline — the boss
+            # eval distorts deck building (glass-cannon drift). Machinery stays
+            # in rollout_recursive for gap-zone fine-tune evaluation use.
             _set_mc_ctx(
                 hp=int(player.get("hp", 80) or 80),
                 max_hp=int(player.get("max_hp", 80) or 80),
                 floor=int(floor) if isinstance(floor, (int, float)) and floor > 0 else 5,
-                relics=self._state_relic_ids(state),
+                relics=CombatEnv._state_relic_ids(state),
             )
             # Pass deck for synergy-aware picks (boosts cards that fit the archetype).
             best = pick_best_card(cards, threshold=threshold, deck=deck)
@@ -317,8 +377,7 @@ def greedy_action(state: dict) -> dict:
         pre_boss = isinstance(floor, int) and floor >= 11
 
         # Emergency: buy health potion first when HP is critically low (< 50%)
-        # Without this, the agent spends all gold on cards/relics and enters next fight
-        # with low HP and no heal potion.
+        # Jun 10 attempted "buy proactive at floor≥6 HP<85%" regressed → reverted.
         if hp_ratio < 0.50 and held_potions < 3:
             shop_potions = [p for p in state.get("potions", [])
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
@@ -334,15 +393,32 @@ def greedy_action(state: dict) -> dict:
         in_act2 = isinstance(floor, int) and floor >= 16
         deck = state.get("player", {}).get("deck", []) or []
 
-        # === REMOVAL FIRST when deck has Strike/Defend basics ===
-        # Aggressive change (2026-05-07): in Act 1, deck thinning is the highest-leverage
-        # gold spend — a removed Strike compounds across every shuffle, vs a single card
-        # buy. Always remove when affordable and there's any Strike/Defend in the deck.
-        n_strikes = sum(1 for c in deck if "STRIKE" in _card_id_norm(c) and "STRIKE_DUMMY" not in _card_id_norm(c))
-        n_defends = sum(1 for c in deck if "DEFEND" in _card_id_norm(c))
-        has_basic = (n_strikes + n_defends) >= 2
-        has_junk = any(score_card(c) < 3.5 for c in deck)
-        if removal_cost and gold >= removal_cost and (has_basic or has_junk):
+        # === Basic-card dead-weight purge (Jun 13) ===
+        # Three boss-entry decks all carried 3-5 un-removed Strike/Defend that
+        # diluted core-card draw rate. Removal had been gated against buyable
+        # card value, so a good shop card blocked removal. Strike/Defend are
+        # dead weight at ANY deck size — purge them first, unconditionally,
+        # until ≤2 remain.
+        n_basic = sum(1 for c in deck
+                      if _card_id_norm(c) in ("STRIKE_IRONCLAD", "DEFEND_IRONCLAD"))
+        if removal_cost and gold >= removal_cost and n_basic >= 3:
+            return {"cmd": "action", "action": "remove_card"}
+
+        # === Card removal — gated by quantified marginal value ===
+        # User observation (Jun 10): removal payoff strong at deck ≤15, weak >20.
+        # We now compare removal_value(deck) vs best buyable card score and
+        # pick whichever marginal upgrade is larger. Earlier "always remove if
+        # any basic/junk" was over-eager for bloated decks.
+        from agent.card_scoring import removal_value as _rv
+        rv = _rv(deck)
+        # Compute peek of best buyable card for comparison BEFORE deciding remove
+        _cards_peek = [c for c in state.get("cards", [])
+                        if c.get("is_stocked") and c.get("cost", 999) <= gold]
+        if _cards_peek:
+            _best_score = max(score_card_in_deck(c, deck) for c in _cards_peek)
+        else:
+            _best_score = 0.0
+        if removal_cost and gold >= removal_cost and rv > max(_best_score, 3.0):
             return {"cmd": "action", "action": "remove_card"}
 
         # Find best affordable card — deck-aware so synergy cards rank higher.
@@ -443,6 +519,7 @@ class CombatEnv(gym.Env):
     def __init__(self, cards_json: str = None, character: str = "Ironclad",
                  ascension: int = 0, seed: str = None, dry_run: bool = False,
                  seed_prefix: str = "t", max_floor: int = 0, extra_obs: bool = True,
+                 relic_obs: bool = None,
                  replay_actions: list = None, native_save_path: str = None,
                  set_hp_after_load: int = None):
         super().__init__()
@@ -459,9 +536,14 @@ class CombatEnv(gym.Env):
         # Extra features appended after enc.obs_size:
         #   [floor/17, entry_hp_ratio, e0_vuln, e0_weak, e1_vuln, e1_weak, e2_vuln, e2_weak]
         # extra_obs=False: legacy mode for checkpoints trained with 161-dim obs
+        import os as _os_env
+        relic_obs = _os_env.environ.get("STS2_RELIC_OBS") == "1" if relic_obs is None else relic_obs
         self._EXTRA_OBS = 8 if extra_obs else 0
-        self.observation_space = Box(low=0.0, high=1.0,
-                                     shape=(self.enc.obs_size + self._EXTRA_OBS,), dtype=np.float32)
+        from agent.state_encoder import RELIC_VOCAB_SIZE
+        self._RELIC_OBS = RELIC_VOCAB_SIZE if relic_obs else 0
+        self.observation_space = Box(
+            low=0.0, high=1.0,
+            shape=(self.enc.obs_size + self._EXTRA_OBS + self._RELIC_OBS,), dtype=np.float32)
         self.action_space = Discrete(41)
 
         self._proc = None
@@ -564,6 +646,7 @@ class CombatEnv(gym.Env):
         self._run_id = f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
         self._run_milestone_records = []
         self._run_card_pick_records = []
+        self._run_boss_id = None  # act boss from state.context.boss (set on first sight)
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
@@ -808,18 +891,24 @@ class CombatEnv(gym.Env):
         self._set_hp_after_load = (None if (hp is None or hp <= 0) else int(hp))
 
     def _encode(self, state: dict) -> np.ndarray:
-        """Encode state + optional extra features: floor, entry_hp, enemy vuln/weak × 3."""
+        """Encode state + optional extra (8) + optional relic multi-hot."""
         base = self.enc.encode(state)
-        if self._EXTRA_OBS == 0:
+        if self._EXTRA_OBS == 0 and self._RELIC_OBS == 0:
             return base
-        floor_norm = min(self._current_floor / 17.0, 1.0)
-        enemies = state.get("enemies", [])
-        extra = [floor_norm, self._combat_entry_hp_ratio]
-        for slot in range(3):
-            e = enemies[slot] if slot < len(enemies) else {}
-            extra.append(min(_enemy_power_amount(e, "Vulnerable") / 10.0, 1.0))
-            extra.append(min(_enemy_power_amount(e, "Weak") / 10.0, 1.0))
-        return np.concatenate([base, np.array(extra, dtype=np.float32)])
+        parts = [base]
+        if self._EXTRA_OBS:
+            floor_norm = min(self._current_floor / 17.0, 1.0)
+            enemies = state.get("enemies", [])
+            extra = [floor_norm, self._combat_entry_hp_ratio]
+            for slot in range(3):
+                e = enemies[slot] if slot < len(enemies) else {}
+                extra.append(min(_enemy_power_amount(e, "Vulnerable") / 10.0, 1.0))
+                extra.append(min(_enemy_power_amount(e, "Weak") / 10.0, 1.0))
+            parts.append(np.array(extra, dtype=np.float32))
+        if self._RELIC_OBS:
+            from agent.state_encoder import encode_relics
+            parts.append(encode_relics(CombatEnv._state_relic_ids(state)))
+        return np.concatenate(parts)
 
     def _init_combat_tracking(self, state: dict):
         self._prev_enemy_hp = _total_enemy_hp(state)
@@ -850,11 +939,21 @@ class CombatEnv(gym.Env):
         # (floor 17+) we add an extra 0.10 so each fraction of boss HP burned
         # gives stronger signal — boss combats are long, every chunk matters,
         # and 0% win rate means policy needs more "got close" signal.
-        dmg_reward = 0.15 * enemy_hp_lost / self._combat_start_enemy_hp
+        # Option d (Jun 14) — HP-preservation reward reshape. The floor-bonus
+        # lineage learned to RACE (spend HP for fast kills). To teach HP
+        # preservation: lower dmg_reward (less race incentive) + heavier
+        # hp_penalty (each HP lost hurts ~2.4×). Gated behind STS2_HP_REWARD=1
+        # so existing checkpoints/evals are unaffected; only the d-retrain run
+        # sets it. NEVER add explicit block_reward (block-forever collapse).
+        import os as _os_r
+        _hp_mode = _os_r.environ.get("STS2_HP_REWARD") == "1"
+        _dmg_w = 0.10 if _hp_mode else 0.15
+        _hp_w = -1.2 if _hp_mode else -0.50
+        dmg_reward = _dmg_w * enemy_hp_lost / self._combat_start_enemy_hp
         if self._current_floor >= 17:
             dmg_reward += 0.10 * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
-        hp_penalty = -0.50 * player_hp_lost / self._combat_start_player_max_hp
+        hp_penalty = _hp_w * player_hp_lost / self._combat_start_player_max_hp
 
         self._prev_enemy_hp = cur_enemy_hp
         self._prev_player_hp = cur_player_hp
@@ -962,7 +1061,12 @@ class CombatEnv(gym.Env):
         # the +2.0/+0.75/+0.50/+0.25 tiers made "block-then-kill" locally optimal —
         # agent drifted to stalling, hit cwr 82%→13%/to=84% collapse twice. Original
         # 8827k baseline (avg_floor=13.1) used only the quadratic curve below.
-        reward = 3.0 * hp_ratio * hp_ratio
+        # Option d: HP-preservation mode bumps the combat-win HP coefficient
+        # 3.0→5.0 so finishing a fight at low HP is much less rewarding than
+        # finishing healthy — discourages the race-to-low-HP habit.
+        import os as _os_w
+        _win_hp_coef = 5.0 if _os_w.environ.get("STS2_HP_REWARD") == "1" else 3.0
+        reward = _win_hp_coef * hp_ratio * hp_ratio
         # Floor bonus: Act 1 (floor≤15) = 0.10/floor; Act 2+ gets +0.15/floor above 15.
         if self._current_floor <= 15:
             floor_bonus = (self._current_floor - 1) * 0.10
@@ -1054,6 +1158,12 @@ class CombatEnv(gym.Env):
         decision counterfactuals (you saw these 3 options with this deck and
         picked X / SKIP — what was the future floor?), much denser signal than
         the 3 milestone snapshots per run."""
+        # Capture act boss for per-boss outcome stats (context.boss exposed
+        # at every decision point from floor 1).
+        _b = (state.get("context") or {}).get("boss") or {}
+        _bid = str(_b.get("id") or "").replace("_BOSS", "")
+        if _bid and getattr(self, "_run_boss_id", None) is None:
+            self._run_boss_id = _bid
         if not self._deck_history_path:
             return
         try:
@@ -1111,6 +1221,7 @@ class CombatEnv(gym.Env):
             "run_id": self._run_id,
             "max_floor": int(self._run_max_floor),
             "won": bool(victory),
+            "boss": getattr(self, "_run_boss_id", None),
             "ts": time.time(),
         }
         try:
@@ -1123,6 +1234,20 @@ class CombatEnv(gym.Env):
                 f.write(json.dumps(outcome, ensure_ascii=False) + "\n")
         except Exception:
             pass  # never let logging break training
+        # Bandit Q update: for every card_pick this run, update Q value with
+        # the run's max_floor outcome. Background-update; save periodically.
+        try:
+            from agent.card_scoring import update_card_q, save_card_q
+            for rec in self._run_card_pick_records:
+                picked = rec.get("picked")
+                if picked and picked != "SKIP":
+                    update_card_q(picked, self._run_max_floor)
+            # Periodic save (every 100 runs to limit disk churn)
+            self._q_save_counter = getattr(self, "_q_save_counter", 0) + 1
+            if self._q_save_counter % 100 == 0:
+                save_card_q()
+        except Exception:
+            pass
         self._run_milestone_records = []
 
     def _terminal_reward(self, state: dict) -> float:
@@ -1224,9 +1349,7 @@ class CombatEnv(gym.Env):
 
             if ("heal" in text or "restore" in text) and "curse" not in text:
                 # Heal thresholds 2026-05-19: raised Act 1 monster from 0.30→0.50.
-                # Verbose eval showed runs entering Act 1 elite at HP=40-45 with unused
-                # heal potions then dying in one combat. Better to burn the potion at
-                # 50% HP than die at 17% holding it.
+                # Jun 10 attempted 0.75/0.60 boost regressed -0.7 floor → reverted.
                 if is_boss:
                     use = hp_ratio < 0.60
                 elif is_act2:
@@ -1234,7 +1357,7 @@ class CombatEnv(gym.Env):
                 elif is_elite or is_late_game:
                     use = hp_ratio < 0.50
                 else:
-                    use = hp_ratio < 0.50  # Act 1 monster: heal aggressively
+                    use = hp_ratio < 0.50
             elif "block" in text:
                 # Block potion: always use at boss (30 block is always worth it vs boss attacks);
                 # at elite/threatening: use when damaged or incoming is severe
@@ -1322,7 +1445,19 @@ class CombatEnv(gym.Env):
                 return state
             if state.get("decision") == "combat_play":
                 return self._greedy_use_potions(state)
-            cmd = greedy_action(state)
+            cmd = None
+            # STS2_MAP_PLANNER=1 (Jun 11): full-map path planning — maximize
+            # expected HP at boss entry over the whole act DAG instead of the
+            # one-step heuristic. Falls back to greedy_action on any failure.
+            if (state.get("decision") == "map_select"
+                    and os.environ.get("STS2_MAP_PLANNER") == "1"):
+                try:
+                    from agent.map_planner import choose_map_node
+                    cmd = choose_map_node(self, state)
+                except Exception:
+                    cmd = None
+            if cmd is None:
+                cmd = greedy_action(state)
             # Log every card_reward decision (deck_before + offered options + picked)
             # for the deck predictor's training set. Old milestone/outcome events
             # remain unchanged — this is a strictly-additive event stream.
