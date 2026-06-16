@@ -37,3 +37,18 @@ def test_encode_relics_unknown_ignored():
 
 def test_encode_relics_empty():
     assert encode_relics([]).sum() == 0.0
+
+
+from agent.state_encoder import obs_flags_for_size
+
+
+def test_obs_flags_ladder():
+    assert obs_flags_for_size(161, 161) == (False, False)
+    assert obs_flags_for_size(169, 161) == (True, False)
+    assert obs_flags_for_size(161 + 8 + RELIC_VOCAB_SIZE, 161) == (True, True)
+
+
+def test_obs_flags_unknown_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        obs_flags_for_size(200, 161)
