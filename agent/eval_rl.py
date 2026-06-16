@@ -20,6 +20,19 @@ from agent.card_scoring import score_card_in_deck, deck_quality_score
 
 _GAME_TIMEOUT_SEC = 300  # 5 min per game — kills deadlocked C# processes
 
+# STS2_PLANNER=1 → combat decisions use turn_planner search instead of the
+# PPO policy (Jun 11). Falls back to model.predict per-decision on any failure.
+# STS2_PLANNER=lethal → hybrid: planner only intervenes when it finds a
+# provable all-enemies-dead sequence this turn; policy plays everything else.
+_PLANNER_ENV = os.environ.get("STS2_PLANNER", "").lower()
+_PLANNER_ON = _PLANNER_ENV in ("1", "true", "on", "lethal")
+_PLANNER_LETHAL_ONLY = _PLANNER_ENV == "lethal"
+
+# STS2_DEFENSE=1 → intent-aware defense override (Jun 13). Narrow hybrid:
+# when an enemy telegraphs a dangerous attack and the policy isn't blocking,
+# insert the best block card. Leaves attack decisions to the policy.
+_DEFENSE_ON = os.environ.get("STS2_DEFENSE", "") in ("1", "true", "on")
+
 
 class _GameTimeout(Exception):
     pass
@@ -71,6 +84,8 @@ def _write_boss_deck_record(state: dict, *, checkpoint: str, character: str,
             "name": _card_name(c),
             "score": round(sc, 3) if sc is not None else None,
         })
+    _boss = (state.get("context") or {}).get("boss") or {}
+    _player = state.get("player") or {}
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "checkpoint": os.path.basename(str(checkpoint)) if checkpoint else None,
@@ -80,8 +95,73 @@ def _write_boss_deck_record(state: dict, *, checkpoint: str, character: str,
         "floor": state.get("floor"),
         "act": state.get("act"),
         "room_type": (state.get("context") or {}).get("room_type", ""),
+        "boss": str(_boss.get("id") or "").replace("_BOSS", "") or None,
+        "hp_at_entry": _player.get("hp"),
+        "max_hp": _player.get("max_hp"),
+        "relics": [
+            (r.get("name", {}) or {}).get("en") if isinstance(r.get("name"), dict)
+            else r.get("name")
+            for r in (_player.get("relics") or [])
+        ],
         "deck_size": len(deck),
         "deck_quality": round(deck_quality_score(deck), 3),
+        "cards": cards,
+    }
+    os.makedirs(os.path.dirname(jsonl_path) or ".", exist_ok=True)
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _is_combat_round1(state: dict) -> bool:
+    """Round-1 of any combat (boss-agnostic). Caller does the floor gate using
+    env._current_floor, because state['floor'] is None during combat."""
+    return (isinstance(state, dict) and state.get("decision") == "combat_play"
+            and state.get("round", 0) == 1)
+
+
+def _write_combat_record(state: dict, *, floor: int, checkpoint: str, character: str,
+                         game_seed: str, game_index: int, jsonl_path: str) -> None:
+    """Like _write_boss_deck_record but boss-agnostic AND captures the enemies
+    (name/hp/intents) — the killer info for diagnosing where runs die."""
+    deck = state.get("player", {}).get("deck") or []
+    cards = []
+    for c in deck:
+        try:
+            sc = score_card_in_deck(c, deck)
+        except Exception:
+            sc = None
+        cards.append({"id": _card_id(c), "name": _card_name(c),
+                      "score": round(sc, 3) if sc is not None else None})
+    enemies = []
+    for e in state.get("enemies", []) or []:
+        nm = e.get("name")
+        if isinstance(nm, dict):
+            nm = nm.get("en", str(nm))
+        intents = [{"type": it.get("type"), "damage": it.get("damage", 0),
+                    "hits": it.get("hits") or 1}
+                   for it in (e.get("intents") or [])]
+        enemies.append({"name": nm, "hp": e.get("hp"),
+                        "max_hp": e.get("max_hp"), "intents": intents})
+    _player = state.get("player") or {}
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "checkpoint": os.path.basename(str(checkpoint)) if checkpoint else None,
+        "character": character,
+        "seed": game_seed,
+        "game_index": game_index,
+        "floor": floor,
+        "act": state.get("act"),
+        "room_type": (state.get("context") or {}).get("room_type", ""),
+        "hp_at_entry": _player.get("hp"),
+        "max_hp": _player.get("max_hp"),
+        "relics": [
+            (r.get("name", {}) or {}).get("en") if isinstance(r.get("name"), dict)
+            else r.get("name")
+            for r in (_player.get("relics") or [])
+        ],
+        "deck_size": len(deck),
+        "deck_quality": round(deck_quality_score(deck), 3) if deck else None,
+        "enemies": enemies,
         "cards": cards,
     }
     os.makedirs(os.path.dirname(jsonl_path) or ".", exist_ok=True)
@@ -237,6 +317,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                      boss_deck_log_path: str = None,
                      boss_snapshot_dir: str = None,
                      boss_snapshot_min_hp: int = 50,
+                     combat_snapshot_dir: str = None,
+                     combat_snapshot_floors: set = None,
                      checkpoint_name: str = None) -> dict:
     """Full-run eval with per-game floor breakdown.
 
@@ -246,11 +328,13 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
     boss_deck_log_path: when set, append a JSONL record of the deck + per-card
         scores at the start of each boss combat (one record per boss-floor).
     """
-    # Auto-detect obs_size: legacy=161, run11=169 (extra_obs adds 8 features)
+    # Auto-detect obs_size from model width (161=legacy, 169=extra, 441=extra+relic)
+    from agent.state_encoder import obs_flags_for_size
     model_obs_size = model.observation_space.shape[0]
-    extra_obs = (model_obs_size > 161)
+    extra_obs, relic_obs = obs_flags_for_size(model_obs_size, 161)
 
     floors, wins, combat_wins_list = [], [], []
+    boss_records = []  # per-game: {"boss": id, "reached": bool, "won": bool}
     for i in range(n_games):
         if load_seed:
             game_seed = load_seed
@@ -260,7 +344,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             game_seed = f"eval_r{random.randint(0, 0xFFFFFF):06x}_{i}"
 
         env_kwargs = dict(character=character, seed=game_seed,
-                          seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs)
+                          seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs,
+                          relic_obs=relic_obs)
         if replay_actions:
             env_kwargs["replay_actions"] = replay_actions
         if native_save_path:
@@ -282,6 +367,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         # combat (Act 1 / Act 2 / Act 3) records exactly once at round 1.
         logged_boss_floors: set = set()
         snapshotted_boss_floors: set = set()  # boss snapshot save dedup, per game
+        snapshotted_combat_floors: set = set()  # combat-floor snapshot dedup, per game
+        game_boss_id = None  # act boss from state.context.boss (known from floor 1)
 
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(_GAME_TIMEOUT_SEC)
@@ -296,6 +383,11 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
                 while not done:
                     state_snap = env._current_state
+                    if game_boss_id is None and state_snap:
+                        _b = (state_snap.get("context") or {}).get("boss") or {}
+                        _bid = _b.get("id")
+                        if _bid:
+                            game_boss_id = str(_bid).replace("_BOSS", "")
                     if boss_deck_log_path and _is_boss_combat_round1(state_snap):
                         fl = state_snap.get("floor", 0)
                         if fl not in logged_boss_floors:
@@ -333,8 +425,50 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                                     }, mf, indent=2)
                                 print(f"  [snapshot] {snap_name} (hp={int(hp)})")
                             snapshotted_boss_floors.add(fl)
+                    if (combat_snapshot_floors and _is_combat_round1(state_snap)
+                            and env._current_floor in combat_snapshot_floors):
+                        fl = env._current_floor
+                        if fl not in snapshotted_combat_floors:
+                            snapshotted_combat_floors.add(fl)
+                            os.makedirs(combat_snapshot_dir, exist_ok=True)
+                            _write_combat_record(
+                                state_snap, floor=fl, checkpoint=checkpoint_name,
+                                character=character, game_seed=game_seed,
+                                game_index=i,
+                                jsonl_path=os.path.join(combat_snapshot_dir, "records.jsonl"))
+                            hp = state_snap.get("player", {}).get("hp", 0)
+                            hp_i = int(hp) if isinstance(hp, (int, float)) else 0
+                            safe_seed = "".join(c if c.isalnum() else "_" for c in str(game_seed))
+                            snap_path = os.path.join(
+                                combat_snapshot_dir, f"{safe_seed}_fl{fl}_hp{hp_i}.save")
+                            sr = env._send({"cmd": "write_continue_save", "path": snap_path})
+                            if sr and sr.get("success"):
+                                print(f"  [combat-snap] fl{fl} hp{hp_i} {os.path.basename(snap_path)}")
                     masks = env_wrapped.action_masks()
-                    action, _ = model.predict(obs, deterministic=True, action_masks=masks)
+                    action = None
+                    if _PLANNER_ON and state_snap and state_snap.get("decision") == "combat_play":
+                        try:
+                            from agent.turn_planner import plan_action
+                            action = plan_action(state_snap, masks,
+                                                 lethal_only=_PLANNER_LETHAL_ONLY)
+                        except Exception:
+                            action = None
+                    if action is None:
+                        action, _ = model.predict(obs, deterministic=True, action_masks=masks)
+
+                    # Intent-aware defense override: only when policy isn't
+                    # already blocking and a dangerous attack is incoming.
+                    if (_DEFENSE_ON and state_snap
+                            and state_snap.get("decision") == "combat_play"):
+                        try:
+                            from agent.turn_planner import (intent_defense_override,
+                                                            _action_is_defense)
+                            if not _action_is_defense(state_snap, int(action)):
+                                ov = intent_defense_override(state_snap, masks)
+                                if ov is not None:
+                                    action = ov
+                        except Exception:
+                            pass
 
                     if verbose and state_snap:
                         action_name = _decode_action_name(env, int(action), state_snap)
@@ -390,7 +524,25 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         else:
             end_reason = "dead"
 
-        print(f"  game {i+1:2d}: floor={max_floor:2d} combats={ep_combat_wins} [{end_reason}]")
+        boss_records.append({"boss": game_boss_id or "?",
+                              "reached": max_floor >= 17, "won": run_won})
+        # Result row for the boss-deck log: joined by seed in the viewer.
+        # Only written when this game logged a boss-entry deck (reached boss).
+        if boss_deck_log_path and logged_boss_floors:
+            try:
+                with open(boss_deck_log_path, "a") as _bf:
+                    _bf.write(json.dumps({
+                        "event": "result", "seed": game_seed,
+                        "game_index": i, "boss": game_boss_id,
+                        "max_floor": max_floor, "run_won": run_won,
+                        "boss_beaten": run_won or max_floor > 17,
+                        "end_reason": end_reason,
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        print(f"  game {i+1:2d}: floor={max_floor:2d} combats={ep_combat_wins} "
+              f"boss={game_boss_id or '?':<20s} [{end_reason}]")
 
         if verbose:
             # Print per-room log
@@ -424,6 +576,14 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                         print(step)
             print()
 
+    # Per-boss aggregation: games / boss-reach / wins per act boss.
+    per_boss: dict = {}
+    for rec in boss_records:
+        b = per_boss.setdefault(rec["boss"], {"games": 0, "reached": 0, "won": 0})
+        b["games"] += 1
+        b["reached"] += int(rec["reached"])
+        b["won"] += int(rec["won"])
+
     return {
         "avg_floor": float(np.mean(floors)),
         "max_floor": int(max(floors)),
@@ -431,6 +591,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         "avg_combat_wins": float(np.mean(combat_wins_list)),
         "floors": floors,
         "n": n_games,
+        "per_boss": per_boss,
     }
 
 
@@ -470,9 +631,18 @@ def main():
                         "floor per game. Pair with agent/boss_retry.py to diagnose boss loss.")
     p.add_argument("--boss-snapshot-min-hp", type=int, default=50,
                    help="Only snapshot when player HP at boss-entry is >= this (default 50).")
+    p.add_argument("--combat-snapshot-dir", default=None,
+                   help="Directory to write a save + records.jsonl (deck/enemies/hp) at "
+                        "round 1 of combats on --combat-snapshot-floors (boss-agnostic). "
+                        "Diagnose mid-Act death walls (e.g. floor 15). Replay saves with boss_retry.py.")
+    p.add_argument("--combat-snapshot-floors", default=None,
+                   help="Comma-separated floors to capture for --combat-snapshot-dir, e.g. '7,8,9,15'.")
     args = p.parse_args()
     boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
                           else args.deck_log)
+    combat_snapshot_floors = None
+    if args.combat_snapshot_dir and args.combat_snapshot_floors:
+        combat_snapshot_floors = {int(x) for x in str(args.combat_snapshot_floors).split(",") if x.strip()}
 
     replay_actions = None
     load_seed = None
@@ -523,6 +693,8 @@ def main():
                              boss_deck_log_path=boss_deck_log_path,
                              boss_snapshot_dir=args.boss_snapshot_dir,
                              boss_snapshot_min_hp=args.boss_snapshot_min_hp,
+                             combat_snapshot_dir=args.combat_snapshot_dir,
+                             combat_snapshot_floors=combat_snapshot_floors,
                              checkpoint_name=checkpoint)
     print(f"---")
     print(f"avg_floor      : {stats['avg_floor']:.1f}")
@@ -530,6 +702,14 @@ def main():
     print(f"win_rate       : {stats['win_rate']:.0%}")
     print(f"avg_combat_wins: {stats['avg_combat_wins']:.1f}")
     print(f"floor dist     : {sorted(stats['floors'])}")
+    per_boss = stats.get("per_boss") or {}
+    if per_boss:
+        print(f"--- per-boss ---")
+        for bid in sorted(per_boss):
+            b = per_boss[bid]
+            print(f"  {bid:<22s} games={b['games']:>2} "
+                  f"reach={b['reached']:>2} ({b['reached']/max(b['games'],1):.0%}) "
+                  f"win={b['won']:>2}")
 
 
 if __name__ == "__main__":

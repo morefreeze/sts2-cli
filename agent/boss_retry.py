@@ -40,6 +40,7 @@ def _player_hp(env: CombatEnv) -> int:
 
 
 def _play_one(model, save_path: str, deterministic: bool, extra_obs: bool,
+              relic_obs: bool = False,
               max_steps: int = 2000, set_hp: int = None) -> dict:
     """Load snapshot, play until the (boss) episode ends, return outcome dict.
 
@@ -49,6 +50,7 @@ def _play_one(model, save_path: str, deterministic: bool, extra_obs: bool,
                     seed=f"boss_retry_{int(time.time()*1e6) % 10**9}",
                     native_save_path=save_path,
                     extra_obs=extra_obs,
+                    relic_obs=relic_obs,
                     set_hp_after_load=set_hp)
     env_w = ActionMasker(env, mask_fn)
     won = False
@@ -122,7 +124,8 @@ def main():
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = MaskablePPO.load(args.checkpoint, device=device)
-    extra_obs = model.observation_space.shape[0] > 161
+    from agent.state_encoder import obs_flags_for_size
+    extra_obs, relic_obs = obs_flags_for_size(model.observation_space.shape[0], 161)
 
     if os.path.isfile(args.snapshot_dir) and args.snapshot_dir.endswith(".save"):
         snapshots = [args.snapshot_dir]
@@ -163,20 +166,27 @@ def main():
         snap_report = {"snapshot": os.path.basename(snap), "meta": meta, "modes": {}}
         if hp_sweep:
             for hp in hp_sweep:
-                t0 = time.time()
-                results = [
-                    _play_one(model, snap, deterministic=False, extra_obs=extra_obs, set_hp=hp)
-                    for _ in range(args.n_stochastic)
-                ]
-                summ = _summarize(results)
-                elapsed = time.time() - t0
-                print(f"  hp={hp:>3}: win {summ['wins']:>2}/{summ['n']} "
-                      f"({100*summ['win_rate']:>3.0f}%) | "
-                      f"avg_final_hp={summ['avg_final_hp']:>5.1f} "
-                      f"(med={summ['median_final_hp']:>4.0f}) | "
-                      f"avg_steps={summ['avg_steps']:>5.0f} | "
-                      f"{elapsed:.1f}s")
-                snap_report["modes"][f"hp_{hp}"] = {"summary": summ, "results": results}
+                for mode, n_runs, det in [
+                    ("det", args.n_deterministic, True),
+                    ("stoch", args.n_stochastic, False),
+                ]:
+                    if n_runs <= 0:
+                        continue
+                    t0 = time.time()
+                    results = [
+                        _play_one(model, snap, deterministic=det, extra_obs=extra_obs,
+                                  relic_obs=relic_obs, set_hp=hp)
+                        for _ in range(n_runs)
+                    ]
+                    summ = _summarize(results)
+                    elapsed = time.time() - t0
+                    print(f"  hp={hp:>3} {mode:5s}: win {summ['wins']:>2}/{summ['n']} "
+                          f"({100*summ['win_rate']:>3.0f}%) | "
+                          f"avg_final_hp={summ['avg_final_hp']:>5.1f} "
+                          f"(med={summ['median_final_hp']:>4.0f}) | "
+                          f"avg_steps={summ['avg_steps']:>5.0f} | "
+                          f"{elapsed:.1f}s")
+                    snap_report["modes"][f"hp_{hp}_{mode}"] = {"summary": summ, "results": results}
         else:
             for mode, n_runs, det in [
                 ("deterministic", args.n_deterministic, True),
@@ -187,7 +197,7 @@ def main():
                 t0 = time.time()
                 results = []
                 for i in range(n_runs):
-                    r = _play_one(model, snap, det, extra_obs)
+                    r = _play_one(model, snap, det, extra_obs, relic_obs=relic_obs)
                     results.append(r)
                     if r.get("error"):
                         print(f"  {mode} {i+1:>2}: ERROR {r['error']}")

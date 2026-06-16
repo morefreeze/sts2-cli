@@ -9,9 +9,10 @@ class RLAgent:
     def __init__(self, checkpoint_path: str, cards_json: str):
         self.enc = StateEncoder(cards_json)
         self.model = MaskablePPO.load(checkpoint_path)
-        # Auto-detect whether model expects extra obs (169-dim vs 161-dim)
+        # Auto-detect obs mode from model width (161=base, 169=extra, 441=extra+relic)
+        from agent.state_encoder import obs_flags_for_size
         model_obs_size = self.model.observation_space.shape[0]
-        self._extra_obs = model_obs_size > self.enc.obs_size
+        self._extra_obs, self._relic_obs = obs_flags_for_size(model_obs_size, self.enc.obs_size)
         self._extra_dim = model_obs_size - self.enc.obs_size
 
         # Runtime state for extra obs features
@@ -37,6 +38,10 @@ class RLAgent:
             obs = np.concatenate([base_obs, np.array(extra, dtype=np.float32)])
         else:
             obs = base_obs
+        if self._relic_obs:
+            from agent.state_encoder import encode_relics
+            from agent.combat_env import CombatEnv
+            obs = np.concatenate([obs, encode_relics(CombatEnv._state_relic_ids(state))])
         obs = obs.reshape(1, -1)
         mask = self.enc.action_mask(state).reshape(1, -1)
         action, _ = self.model.predict(obs, action_masks=mask, deterministic=True)
