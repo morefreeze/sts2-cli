@@ -112,14 +112,24 @@ existing heuristic — no gap to handle specially.
 
 ### 4. Evaluation
 
+> **Correction (found during implementation):** `play_full_run.py` uses a RANDOM agent and
+> does NOT exercise `card_scoring`. It is therefore only the crash gate, not a deck-quality
+> measure. The scorer is exercised by `eval_rl.py` (via `greedy_action`). Updated below.
+
 - **Hard gate (crash regression):** CLAUDE.md regression — 5 games × 5 characters via
-  `play_full_run.py`, all `Completed: 5/5`, 0 crashes/stuck.
-- **Ironclad non-regression:** `eval_rl` boss-reach / avg_floor, **fixed seeds**, before vs
-  after (per the fixed-seed A/B lesson — random seeds are seed-confounded).
-- **Non-Ironclad upside:** extend `play_full_run.py` SUMMARY to report **avg_floor per
-  character** (the per-run `floor` is already in each result dict; seeds are already
-  deterministic `run_{i+1}`). Run a larger fixed-seed batch (e.g. 20–30/char) before vs
-  after for Silent/Defect/Regent/Necrobinder.
+  `play_full_run.py`, all `Completed: 5/5`, 0 crashes/stuck. (Validates the build/integration
+  runs; does not exercise the scorer.)
+- **Ironclad deck-quality A/B (the real signal):** `eval_rl` boss-reach / avg_floor with a
+  FIXED model checkpoint, **fixed seeds**, before (checkpoint commit, no advisor) vs after
+  (HEAD), toggled via git (per the fixed-seed A/B lesson — random seeds are seed-confounded).
+- **Non-Ironclad — measurement gap:** there is **no clean gameplay measure** with current
+  infra. `play_full_run` (random agent) ignores the scorer; `eval_rl --character X` plays
+  combat with the Ironclad-trained policy, so its avg_floor reflects policy mismatch, not
+  deck quality. Use a **deck-quality proxy** instead (mean advisor-tier of the decks the
+  scorer builds, before vs after), accepting it is partly circular. A true non-Ironclad
+  gameplay signal requires per-character trained policies (out of scope).
+- The per-character `avg_floor` added to `play_full_run.py` (Task 6) remains a useful
+  reporting improvement, but is NOT the deck-quality signal.
 
 ## Risks & mitigations
 
@@ -134,8 +144,9 @@ existing heuristic — no gap to handle specially.
 ## Success criteria
 
 1. 5×5 crash regression stays green (hard gate).
-2. Ironclad fixed-seed avg_floor / boss-reach **not worse** than baseline (within noise).
-3. At least one non-Ironclad character shows a fixed-seed avg_floor improvement; none
+2. Ironclad fixed-seed avg_floor / boss-reach (via `eval_rl`, git-toggled A/B) **not worse**
+   than baseline (within noise).
+3. Non-Ironclad deck-quality proxy shows a higher mean advisor-tier of built decks; none
    regress materially.
 4. `data/advisor_card_ratings.json` + `data/advisor_card_tags.json` committed and
    reproducible from `build_advisor_ratings.py`.

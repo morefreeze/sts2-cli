@@ -647,6 +647,11 @@ Expected: all PASS.
 
 - [ ] **Step 2: Crash regression — 5 games × 5 characters (HARD GATE)**
 
+> **What this validates:** `play_full_run.py` uses a RANDOM agent and does NOT import
+> `card_scoring`, so this is purely the CLAUDE.md build/crash gate (the game runs end-to-end
+> for all 5 characters). It does **not** measure deck quality. The `avg_floor=` field added
+> in Task 6 is a reporting nicety here, NOT the deck-building signal.
+
 Run:
 ```bash
 for char in Ironclad Silent Defect Regent Necrobinder; do
@@ -654,32 +659,58 @@ for char in Ironclad Silent Defect Regent Necrobinder; do
     .venv/bin/python python/play_full_run.py 5 "$char" 2>&1 | grep -E "Wins|Completed|avg_floor"
 done
 ```
-Expected: every character prints `Completed: 5/5` (0 crashes/stuck). The new `avg_floor=` field appears in each summary.
+Expected: every character prints `Completed: 5/5` (0 crashes/stuck).
 
-- [ ] **Step 3: Capture the BASELINE before/after numbers**
+- [ ] **Step 3: Deck-quality A/B — `eval_rl`, fixed seeds, git-toggled (the real signal)**
 
-The A/B must compare the same fixed seeds with and without the change. Use git to toggle:
+> **Tooling correction (discovered during execution):** the deck-building scorer is only
+> exercised by `eval_rl.py` (via `greedy_action` → `score_card_in_deck`/`score_card` for
+> card-reward/shop/smith picks), NOT by `play_full_run`. The A/B therefore runs through
+> `eval_rl` with a FIXED model checkpoint, toggling only the `card_scoring` code via git:
+> `before` = the checkpoint commit `2323eef` (no advisor); `after` = HEAD (advisor baseline).
+>
+> **Non-Ironclad measurement gap:** `eval_rl`'s combat policy is Ironclad-trained. Running
+> `eval_rl --character Silent` exercises Silent's advisor card-picks but plays its combat
+> with the Ironclad policy, so its avg_floor is dominated by the policy mismatch, not deck
+> quality. With current infra, **only Ironclad has a valid gameplay A/B.** For the 4 weak
+> characters, use the deck-quality proxy in Step 3b (no clean gameplay measure exists until
+> they have their own trained policies).
+
+3a — Ironclad gameplay A/B (run when machine load is low; ~40 games):
 ```bash
-# AFTER (current branch state) — record per-character avg_floor at N=20:
-for char in Ironclad Silent Defect Regent Necrobinder; do
-  echo "== $char (after) =="
-  STS2_GAME_DIR="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64" \
-    .venv/bin/python python/play_full_run.py 20 "$char" 2>&1 | grep -E "avg_floor"
-done
+MODEL=checkpoints_best/ppo_ironclad_13308k_RETRAIN_23pct.zip
+GD="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64"
+
+# AFTER (current HEAD, advisor active):
+STS2_GAME_DIR="$GD" .venv/bin/python agent/eval_rl.py "$MODEL" \
+  --character Ironclad --n-games 20 --fixed-seeds 2>&1 | grep -iE "avg_floor|boss|reach|win"
+
+# BEFORE (toggle card_scoring + advisor data back to the checkpoint commit, same seeds):
+git stash   # park any working-tree edits
+git checkout 2323eef -- agent/card_scoring.py
+rm -f data/advisor_card_ratings.json data/advisor_card_tags.json   # loaders degrade to {} → heuristic
+STS2_GAME_DIR="$GD" .venv/bin/python agent/eval_rl.py "$MODEL" \
+  --character Ironclad --n-games 20 --fixed-seeds 2>&1 | grep -iE "avg_floor|boss|reach|win"
+# restore:
+git checkout HEAD -- agent/card_scoring.py data/advisor_card_ratings.json data/advisor_card_tags.json
+git stash pop || true
 ```
-Then stash the scoring change and re-run for the baseline:
-```bash
-git stash   # or check out the pre-change commit of card_scoring.py / data files
-# re-run the same loop, label "(before)"
-git stash pop
-```
-Record both columns. **Per the fixed-seed lesson, do NOT compare across different seed sets.**
+**Per the fixed-seed lesson, always `--fixed-seeds` on BOTH runs; never compare across seed sets.**
+
+3b — Non-Ironclad deck-quality proxy (cheap, no games): score the decks the scorer builds
+before vs after against the advisor tiers (mean tier value + S/A-tier share), per character,
+from `data/eval_decks.jsonl` if present, or from a synthetic card-reward harness. Report the
+delta as the non-Ironclad signal, with the caveat that it is partly circular (measured
+against the injected source).
 
 - [ ] **Step 4: Decision gate**
 
-- Ironclad `avg_floor` AFTER must be **≥ BEFORE − noise** (no material regression). If Ironclad regresses, tune `_TIER_BASE` or widen `_OVERRIDE_DELTA_CAP` and repeat Step 3.
-- At least one non-Ironclad character should improve; none should materially regress.
-- If the gate passes, the feature is ready to merge. If not, iterate on `_TIER_BASE` / override-cap (the only knobs) and re-run.
+- Ironclad `avg_floor` / boss-reach AFTER must be **≥ BEFORE − noise** (no material
+  regression). If Ironclad regresses, the first lever is the `_card_tags` union (switch to
+  gap-fill-only so advisor axes don't perturb Ironclad's tuned tags), then `_TIER_BASE` /
+  `_OVERRIDE_DELTA_CAP`. Re-run Step 3a.
+- Non-Ironclad proxy (3b) should show a higher mean deck tier; none should regress.
+- If the gate passes, the feature is ready to merge. If not, iterate on the knobs and re-run.
 
 - [ ] **Step 5: Finalize**
 
