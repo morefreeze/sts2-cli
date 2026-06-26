@@ -1394,15 +1394,24 @@ def _mc_rollout_bonuses(cards: list[dict], deck: list[dict]) -> list[float]:
 # ─── Phase 2: stream-aware (tag-synergy) scoring ─────────────────────────
 def _card_tags(card: dict) -> list[str]:
     cid = _card_id_norm(card)
-    tags = _CARD_TAGS.get(cid)
-    if tags is not None:
+    adv = _load_advisor_tags()
+
+    def _resolve(key: str) -> list[str]:
+        hand = _CARD_TAGS.get(key)
+        axes = adv.get(key, [])
+        if hand is None:
+            return list(axes)  # non-Ironclad / untuned → advisor axes only
+        # both present → hand-tuned union advisor (hand-tuned first, no dupes)
+        return hand + [a for a in axes if a not in hand]
+
+    tags = _resolve(cid)
+    if tags:
         return tags
-    # Starter cards: runtime IDs carry "_IRONCLAD" / "_SILENT" etc. suffix but
-    # the wiki-sourced tag map uses bare "STRIKE" / "DEFEND". Strip the suffix
-    # and retry once before giving up.
+    # Starter cards: runtime IDs carry "_IRONCLAD" / "_SILENT" etc. suffix but the
+    # tag maps use bare "STRIKE" / "DEFEND". Strip the suffix and retry once.
     for suffix in ("_IRONCLAD", "_SILENT", "_DEFECT", "_REGENT", "_NECROBINDER"):
         if cid.endswith(suffix):
-            return _CARD_TAGS.get(cid[:-len(suffix)], [])
+            return _resolve(cid[:-len(suffix)])
     return []
 
 

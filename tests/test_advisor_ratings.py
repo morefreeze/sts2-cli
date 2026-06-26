@@ -80,3 +80,20 @@ def test_unrated_card_unchanged(monkeypatch):
             "stats": {"damage": 6}, "description": ""}
     # heuristic path: Strike-like 6 dmg/1 cost → positive score, unchanged
     assert card_scoring.score_card(card) > 0
+
+
+def test_card_tags_fall_back_to_advisor(monkeypatch):
+    # Ironclad hand-tuned map has NO entry for this Silent card...
+    monkeypatch.setattr(card_scoring, "_CARD_TAGS", {})
+    monkeypatch.setattr(card_scoring, "_ADVISOR_TAGS",
+                        {"PHANTOM_BLADES": ["SCALING", "SHIV"]})
+    tags = card_scoring._card_tags({"id": "CARD.PHANTOM_BLADES"})
+    assert "SHIV" in tags and "SCALING" in tags
+
+
+def test_card_tags_prefers_handtuned(monkeypatch):
+    # When both exist, hand-tuned Ironclad tags win (union with advisor).
+    monkeypatch.setattr(card_scoring, "_CARD_TAGS", {"AGGRESSION": ["SCALING_PILLAR"]})
+    monkeypatch.setattr(card_scoring, "_ADVISOR_TAGS", {"AGGRESSION": ["RANDOM"]})
+    tags = card_scoring._card_tags({"id": "CARD.AGGRESSION"})
+    assert "SCALING_PILLAR" in tags  # hand-tuned preserved
