@@ -29,3 +29,26 @@ def test_parse_cards_extracts_and_dedupes():
 def test_parse_cards_skips_blank_tier():
     html = '<script>x = {"id": "CARD.FOO", "tier": "", "axes": []};</script>'
     assert parse_cards(html) == {}
+
+
+from agent import card_scoring
+
+
+def test_advisor_ratings_loader_returns_dict():
+    ratings = card_scoring._load_advisor_ratings()
+    assert isinstance(ratings, dict)
+    # generated in Task 2; a known Ironclad card should be present
+    assert "AGGRESSION" in ratings
+    assert ratings["AGGRESSION"]["tier"] in {"S", "A", "B", "C", "D"}
+
+
+def test_tier_base_monotonic():
+    tb = card_scoring._TIER_BASE
+    assert tb["S"] > tb["A"] > tb["B"] > tb["C"] > tb["D"]
+
+
+def test_context_bonus_rewards_draw_and_energy():
+    # a skill that draws 2 and gives 1 energy → positive context bonus
+    card = {"id": "CARD.TEST", "type": "skill", "cost": 1,
+            "stats": {"cards": 2, "energy": 1}, "description": ""}
+    assert card_scoring._context_bonus(card) > 0
