@@ -115,3 +115,26 @@ def test_summarize_reports_avg_floor():
     assert "Completed: 3/3" in out
     # avg over numeric floors (12, 17) → 14.5
     assert "avg_floor=14.5" in out
+
+
+def test_broken_card_beats_advisor_rating():
+    # WHIRLWIND is in BOTH BROKEN_CARDS and the advisor ratings. The BROKEN check
+    # runs before the advisor branch, so it must still score 0.0 (locks invariant:
+    # broken-before-advisor ordering). Uses the real committed data (no monkeypatch).
+    assert "WHIRLWIND" in card_scoring.BROKEN_CARDS
+    assert "WHIRLWIND" in card_scoring._load_advisor_ratings()
+    card = {"id": "CARD.WHIRLWIND", "type": "attack", "cost": 1,
+            "stats": {"damage": 5}, "description": ""}
+    assert card_scoring.score_card(card) == 0.0
+
+
+def test_override_negative_delta_uncapped(monkeypatch):
+    # A rated S-tier card whose OVERRIDE is BELOW the tier base → negative delta,
+    # within the ±cap so it is NOT clamped. Confirms the lower/uncapped delta path.
+    monkeypatch.setattr(card_scoring, "_ADVISOR_RATINGS",
+                        {"ZED": {"tier": "S", "axes": [], "character": "IRONCLAD"}})
+    monkeypatch.setitem(card_scoring.OVERRIDES, "ZED", 8.0)  # below S base 9.5
+    card = {"id": "CARD.ZED", "type": "skill", "cost": 1, "stats": {}, "description": ""}
+    score = card_scoring.score_card(card)
+    # base S=9.5; delta = 8.0 - 9.5 = -1.5 (within ±2.0) → 8.0, no context bonus
+    assert abs(score - 8.0) < 0.01

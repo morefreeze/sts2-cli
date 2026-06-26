@@ -344,6 +344,10 @@ def score_card(card: dict) -> float:
             _delta = OVERRIDES[card_id] - _TIER_BASE[_adv["tier"]]
             _delta = max(-_OVERRIDE_DELTA_CAP, min(_OVERRIDE_DELTA_CAP, _delta))
             score += _delta
+        # Empirical bonus applied ungated, mirroring the MAIN heuristic path below
+        # (NOT the OVERRIDES early-return, which gates on EMPIRICAL_MIN_MAGNITUDE).
+        # This branch replaces the main path for rated cards, so it matches it.
+        # Inert today: EMPIRICAL_WEIGHT == 0.0.
         if EMPIRICAL_BONUS and card_id in EMPIRICAL_BONUS:
             score += EMPIRICAL_BONUS[card_id] * EMPIRICAL_WEIGHT
         return max(0.0, min(score, 10.0))

@@ -33,6 +33,10 @@ def parse_cards(html: str) -> dict:
     out: dict = {}
     for m in re.finditer(r'\{"id":\s*"CARD\.', html):
         i = m.start()
+        # NOTE: brace counting is string-NAIVE — it does not skip "{"/"}" that appear
+        # inside string values. Safe for this dataset (advisor fields have no literal
+        # braces in strings); if one ever did, json.loads below would raise and that
+        # single card would be skipped (fail-safe, not a crash). Re-runnable offline.
         depth = 0
         j = i
         while j < len(html):
