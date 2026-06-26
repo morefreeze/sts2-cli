@@ -52,3 +52,31 @@ def test_context_bonus_rewards_draw_and_energy():
     card = {"id": "CARD.TEST", "type": "skill", "cost": 1,
             "stats": {"cards": 2, "energy": 1}, "description": ""}
     assert card_scoring._context_bonus(card) > 0
+
+
+def test_rated_card_uses_tier_base(monkeypatch):
+    monkeypatch.setattr(card_scoring, "_ADVISOR_RATINGS",
+                        {"ZED": {"tier": "D", "axes": [], "character": "SILENT"}})
+    # A D-tier card with big raw damage must NOT score high — tier dominates the base.
+    card = {"id": "CARD.ZED", "type": "attack", "cost": 1,
+            "stats": {"damage": 40}, "description": ""}
+    score = card_scoring.score_card(card)
+    assert score <= card_scoring._TIER_BASE["D"] + 0.01  # base 2.0, no context bonus
+
+
+def test_override_becomes_bounded_delta(monkeypatch):
+    monkeypatch.setattr(card_scoring, "_ADVISOR_RATINGS",
+                        {"ZED": {"tier": "C", "axes": [], "character": "IRONCLAD"}})
+    monkeypatch.setitem(card_scoring.OVERRIDES, "ZED", 10.0)  # huge absolute override
+    card = {"id": "CARD.ZED", "type": "skill", "cost": 1, "stats": {}, "description": ""}
+    score = card_scoring.score_card(card)
+    # base C=4.0; delta capped at +2.0 → 6.0, NOT the raw 10.0
+    assert abs(score - (card_scoring._TIER_BASE["C"] + card_scoring._OVERRIDE_DELTA_CAP)) < 0.01
+
+
+def test_unrated_card_unchanged(monkeypatch):
+    monkeypatch.setattr(card_scoring, "_ADVISOR_RATINGS", {})  # nothing rated
+    card = {"id": "CARD.UNRATED", "type": "attack", "cost": 1,
+            "stats": {"damage": 6}, "description": ""}
+    # heuristic path: Strike-like 6 dmg/1 cost → positive score, unchanged
+    assert card_scoring.score_card(card) > 0

@@ -332,6 +332,22 @@ def score_card(card: dict) -> float:
     if card_id.startswith("CARD."):
         card_id = card_id[5:]
 
+    # === Advisor tier baseline (all 5 characters) ===
+    # For any card the advisor rates, the tier IS the base value — it subsumes the
+    # raw cost/type/damage/block heuristic and rarity. Context bonuses still layer on
+    # top, OVERRIDES apply as a bounded delta, empirical bonus as elsewhere.
+    _adv = _load_advisor_ratings().get(card_id)
+    if _adv and _adv.get("tier") in _TIER_BASE:
+        score = _TIER_BASE[_adv["tier"]]
+        score += _context_bonus(card)
+        if card_id in OVERRIDES:
+            _delta = OVERRIDES[card_id] - _TIER_BASE[_adv["tier"]]
+            _delta = max(-_OVERRIDE_DELTA_CAP, min(_OVERRIDE_DELTA_CAP, _delta))
+            score += _delta
+        if EMPIRICAL_BONUS and card_id in EMPIRICAL_BONUS:
+            score += EMPIRICAL_BONUS[card_id] * EMPIRICAL_WEIGHT
+        return max(0.0, min(score, 10.0))
+
     # Check manual override first — but DO still apply empirical bonus below
     # so the data-driven signal can nudge override values up/down.
     if card_id in OVERRIDES:
