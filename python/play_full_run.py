@@ -291,6 +291,26 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
             proc.kill()
 
 
+def summarize(results, num_runs, character="Ironclad"):
+    """Build the SUMMARY text block, including avg_floor over numeric floors."""
+    lines = ["\n" + "=" * 60, f"SUMMARY ({character})", "=" * 60]
+    wins = sum(1 for r in results if r and r.get("victory"))
+    completed = sum(1 for r in results if r and not r.get("timeout"))
+    floors = []
+    for i, r in enumerate(results):
+        if r:
+            status = "WIN" if r.get("victory") else ("TIMEOUT" if r.get("timeout") else "LOSS")
+            lines.append(f"  Run {i+1}: {status} | seed={r.get('seed')} steps={r.get('steps')} "
+                         f"act={r.get('act')} floor={r.get('floor')}")
+            f = r.get("floor")
+            if isinstance(f, (int, float)):
+                floors.append(f)
+    avg_floor = round(sum(floors) / len(floors), 1) if floors else 0.0
+    lines.append(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}, "
+                 f"avg_floor={avg_floor}")
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Play full STS2 runs using the headless simulator with a random agent.",
@@ -320,17 +340,7 @@ def main():
         results.append(result)
         print()
 
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    wins = sum(1 for r in results if r and r.get("victory"))
-    completed = sum(1 for r in results if r and not r.get("timeout"))
-    for i, r in enumerate(results):
-        if r:
-            status = "WIN" if r.get("victory") else ("TIMEOUT" if r.get("timeout") else "LOSS")
-            print(f"  Run {i+1}: {status} | seed={r.get('seed')} steps={r.get('steps')} "
-                  f"act={r.get('act')} floor={r.get('floor')}")
-    print(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}")
+    print(summarize(results, num_runs, character))
 
 
 if __name__ == "__main__":

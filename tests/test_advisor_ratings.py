@@ -97,3 +97,21 @@ def test_card_tags_prefers_handtuned(monkeypatch):
     monkeypatch.setattr(card_scoring, "_ADVISOR_TAGS", {"AGGRESSION": ["RANDOM"]})
     tags = card_scoring._card_tags({"id": "CARD.AGGRESSION"})
     assert "SCALING_PILLAR" in tags  # hand-tuned preserved
+
+
+import sys as _sys, os as _os_t
+_sys.path.insert(0, _os_t.path.join(_os_t.path.dirname(__file__), "..", "python"))
+import play_full_run
+
+
+def test_summarize_reports_avg_floor():
+    results = [
+        {"victory": False, "seed": "run_1", "floor": 12, "act": 1, "steps": 50},
+        {"victory": True,  "seed": "run_2", "floor": 17, "act": 3, "steps": 90},
+        {"victory": False, "seed": "run_3", "floor": "?", "act": 1, "steps": 40},
+    ]
+    out = play_full_run.summarize(results, num_runs=3, character="Silent")
+    assert "Wins: 1/3" in out
+    assert "Completed: 3/3" in out
+    # avg over numeric floors (12, 17) → 14.5
+    assert "avg_floor=14.5" in out
