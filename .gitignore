@@ -25,6 +25,11 @@ training_run*.log
 training_boss*.log
 crash_stderr.log
 data/
+# Exceptions: advisor card ratings are derived from an EXTERNAL site
+# (ing-gom/sts2-card-advisor) that can change/disappear, so we commit a
+# snapshot. Regenerate with: agent/build_advisor_ratings.py
+!data/advisor_card_ratings.json
+!data/advisor_card_tags.json
 checkpoints_boss/
 checkpoints_boss2/
 checkpoints_boss3/

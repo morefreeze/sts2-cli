@@ -56,3 +56,47 @@ def parse_cards(html: str) -> dict:
             continue
         out[cid] = {k: obj.get(k) for k in _KEEP}
     return out
+
+
+def build_tags(ratings: dict) -> dict:
+    """Return { NORM_ID: [axes...] } for cards that have any axes."""
+    return {cid: r["axes"] for cid, r in ratings.items() if r.get("axes")}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Extract advisor card ratings to data/.")
+    ap.add_argument("--html", help="Path to a saved advisor HTML snapshot. "
+                                    "If omitted, fetch the live URL.")
+    ap.add_argument("--url", default=ADVISOR_URL, help="Advisor URL (used when --html absent).")
+    args = ap.parse_args()
+
+    if args.html:
+        with open(args.html, encoding="utf-8") as f:
+            html = f.read()
+    else:
+        with urllib.request.urlopen(args.url) as resp:
+            html = resp.read().decode("utf-8")
+
+    ratings = parse_cards(html)
+    tags = build_tags(ratings)
+
+    ratings_path = os.path.join(_DATA_DIR, "advisor_card_ratings.json")
+    tags_path = os.path.join(_DATA_DIR, "advisor_card_tags.json")
+    with open(ratings_path, "w", encoding="utf-8") as f:
+        json.dump(ratings, f, ensure_ascii=False, indent=0, sort_keys=True)
+    with open(tags_path, "w", encoding="utf-8") as f:
+        json.dump(tags, f, ensure_ascii=False, indent=0, sort_keys=True)
+
+    by_char: dict = {}
+    by_tier: dict = {}
+    for r in ratings.values():
+        by_char[r["character"]] = by_char.get(r["character"], 0) + 1
+        by_tier[r["tier"]] = by_tier.get(r["tier"], 0) + 1
+    print(f"wrote {len(ratings)} cards -> {ratings_path}")
+    print(f"wrote {len(tags)} tag entries -> {tags_path}")
+    print("by character:", dict(sorted(by_char.items())))
+    print("by tier:", dict(sorted(by_tier.items())))
+
+
+if __name__ == "__main__":
+    main()

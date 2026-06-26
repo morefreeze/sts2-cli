@@ -1,0 +1,1420 @@
+{
+"ABRASIVE": {
+"anchor_score": 8.15,
+"axes": [
+"CUNNING_PRODUCER",
+"THORNS",
+"SCALING",
+"DEXTERITY",
+"CUNNING"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"ACCELERANT": {
+"anchor_score": 8.05,
+"axes": [
+"POISON",
+"POISON_AMPLIFIER"
+],
+"character": "SILENT",
+"tier": "B"
+},
+"ACCURACY": {
+"anchor_score": 6.15,
+"axes": [
+"SHIV_AMPLIFIER"
+],
+"character": "SILENT",
+"tier": "B"
+},
+"ACROBATICS": {
+"anchor_score": 3.55,
+"axes": [
+"DRAW",
+"CUNNING_CONSUMER"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"AFTERIMAGE": {
+"anchor_score": 8.15,
+"axes": [
+"BLOCK",
+"PLAY_TRIGGER",
+"SCALING"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"AGGRESSION": {
+"anchor_score": 10.05,
+"axes": [
+"SCALING",
+"RANDOM",
+"CARD_RETURN",
+"DAMAGE_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "B"
+},
+"BANSHEES_CRY": {
+"anchor_score": 3.9,
+"axes": [
+"AOE_DAMAGE",
+"VOLATILE_CONSUMER",
+"DAMAGE",
+"AOE"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"BARRICADE": {
+"anchor_score": 7.7,
+"axes": [
+"BLOCK",
+"BLOCK_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "D"
+},
+"BEAT_INTO_SHAPE": {
+"anchor_score": 5.3,
+"axes": [
+"DAMAGE",
+"FORGE_PRODUCER",
+"FORGE_AMPLIFIER",
+"LORDS_BLADE_PRODUCER"
+],
+"character": "REGENT",
+"tier": "C"
+},
+"BIG_BANG": {
+"anchor_score": 3.9,
+"axes": [
+"EXHAUST_TAG",
+"ENERGY",
+"STAR_PRODUCER",
+"DRAW",
+"STAR",
+"FORGE",
+"EXHAUST_SELF",
+"FORGE_PRODUCER",
+"UNLIMITED",
+"ENERGY_PRODUCER",
+"LORDS_BLADE_PRODUCER"
+],
+"character": "REGENT",
+"tier": "S"
+},
+"BLACK_HOLE": {
+"anchor_score": 4.1,
+"axes": [
+"EXHAUST_TAG",
+"STAR_PRODUCER",
+"AOE_DAMAGE",
+"STAR",
+"AOE",
+"STAR_CONSUMER"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"BLADE_DANCE": {
+"anchor_score": 3.15,
+"axes": [
+"EXHAUST_TAG",
+"EXHAUST_SELF",
+"SHIV",
+"SHIV_PRODUCER",
+"CARD_GEN"
+],
+"character": "SILENT",
+"tier": "A"
+},
+"BLADE_OF_INK": {
+"anchor_score": 3.9,
+"axes": [
+"SHIV",
+"SHIV_PRODUCER",
+"CARD_GEN"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"BRAND": {
+"anchor_score": 5.65,
+"axes": [
+"EXHAUST_TAG",
+"EXHAUST_PRODUCER",
+"HP_LOSS",
+"SCALING",
+"STRENGTH_PRODUCER"
+],
+"character": "IRONCLAD",
+"tier": "A"
+},
+"BUBBLE_BUBBLE": {
+"anchor_score": 2.9,
+"axes": [
+"POISON",
+"POISON_CONSUMER",
+"POISON_PRODUCER"
+],
+"character": "SILENT",
+"tier": "C"
+},
+"BULLY": {
+"anchor_score": 5.45,
+"axes": [
+"DEBUFF",
+"VULN",
+"DAMAGE",
+"VULN_AMPLIFIER",
+"FREE_ATTACK"
+],
+"character": "IRONCLAD",
+"tier": "B"
+},
+"BULWARK": {
+"anchor_score": 3.55,
+"axes": [
+"BLOCK",
+"FORGE",
+"FORGE_PRODUCER",
+"LORDS_BLADE_PRODUCER"
+],
+"character": "REGENT",
+"tier": "S"
+},
+"CALCIFY": {
+"anchor_score": 11.15,
+"axes": [
+"SCALING",
+"BLOCK",
+"SKELETON_AMPLIFIER",
+"SKELETON_ATTACK_AMPLIFIER"
+],
+"character": "NECROBINDER",
+"tier": "C"
+},
+"CALCULATED_GAMBLE": {
+"anchor_score": 3.55,
+"axes": [
+"EXHAUST_TAG",
+"DRAW",
+"EXHAUST_SELF",
+"CUNNING_CONSUMER",
+"UNLIMITED"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"CALL_OF_THE_VOID": {
+"anchor_score": 8.15,
+"axes": [
+"RANDOM",
+"CARD_GEN",
+"SCALING"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"CAPTURE_SPIRIT": {
+"anchor_score": 3.55,
+"axes": [
+"SOUL_PRODUCER",
+"DAMAGE"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"CHILD_OF_THE_STARS": {
+"anchor_score": 7.0,
+"axes": [
+"BLOCK",
+"STAR",
+"STAR_PAYOFF",
+"STAR_CONSUMER"
+],
+"character": "REGENT",
+"tier": "S"
+},
+"CLOAK_AND_DAGGER": {
+"anchor_score": 3.15,
+"axes": [
+"BLOCK",
+"SHIV_PRODUCER"
+],
+"character": "SILENT",
+"tier": "A"
+},
+"COLOSSUS": {
+"anchor_score": 5.95,
+"axes": [
+"BLOCK",
+"DEBUFF",
+"VULN",
+"VULN_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "S"
+},
+"COMPILE_DRIVER": {
+"anchor_score": 5.8,
+"axes": [
+"DRAW_CONDITIONAL",
+"DAMAGE",
+"ORB_VARIETY_AMPLIFIER"
+],
+"character": "DEFECT",
+"tier": "S"
+},
+"CONFLAGRATION": {
+"anchor_score": 5.65,
+"axes": [
+"AOE_DAMAGE",
+"DAMAGE",
+"AOE",
+"DAMAGE_AMPLIFIER",
+"ATTACK_COUNT"
+],
+"character": "IRONCLAD",
+"tier": "C"
+},
+"CONQUEROR": {
+"anchor_score": 5.1,
+"axes": [
+"DURATION",
+"FORGE",
+"FORGE_PRODUCER",
+"LORDS_BLADE_AMPLIFIER",
+"LORDS_BLADE_PRODUCER"
+],
+"character": "REGENT",
+"tier": "D"
+},
+"CONSUMING_SHADOW": {
+"anchor_score": 4.1,
+"axes": [
+"EXHAUST_TAG",
+"ORB_PRODUCER",
+"DARK_ORB",
+"ORB_EVOKE",
+"DARK_ORB_PRODUCER"
+],
+"character": "DEFECT",
+"tier": "D"
+},
+"CONVERGENCE": {
+"anchor_score": 3.55,
+"axes": [
+"ENERGY",
+"STAR_PRODUCER",
+"STAR"
+],
+"character": "REGENT",
+"tier": "S"
+},
+"COOLANT": {
+"anchor_score": 7.1,
+"axes": [
+"BLOCK",
+"FROST_ORB",
+"ORB_VARIETY_AMPLIFIER"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"CORROSIVE_WAVE": {
+"anchor_score": 3.25,
+"axes": [
+"POISON",
+"AOE_POISON",
+"POISON_PRODUCER",
+"AOE",
+"DRAW_ON_DRAW"
+],
+"character": "SILENT",
+"tier": "C"
+},
+"COUNTDOWN": {
+"anchor_score": 4.0,
+"axes": [
+"DOOM_PRODUCER",
+"RANDOM"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"CREATIVE_AI": {
+"anchor_score": 7.65,
+"axes": [
+"RANDOM",
+"CARD_GEN",
+"SCALING"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"CRIMSON_MANTLE": {
+"anchor_score": 7.9,
+"axes": [
+"BLOCK",
+"SCALING",
+"HP_LOSS"
+],
+"character": "IRONCLAD",
+"tier": "A"
+},
+"CRUELTY": {
+"anchor_score": 8.55,
+"axes": [
+"DEBUFF",
+"VULN",
+"VULN_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "S"
+},
+"DANSE_MACABRE": {
+"anchor_score": 7.95,
+"axes": [
+"BLOCK",
+"BLOCK_AMPLIFIER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"DARKNESS": {
+"anchor_score": 5.7,
+"axes": [
+"ORB_PRODUCER",
+"DURATION",
+"DARK_ORB_AMPLIFIER",
+"DARK_ORB"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"DEATHBRINGER": {
+"anchor_score": 3.55,
+"axes": [
+"DOOM_PRODUCER",
+"AOE_DEBUFF",
+"DEBUFF",
+"WEAK",
+"DOOM",
+"AOE",
+"AOE_DOOM",
+"WEAK_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"DEATHS_DOOR": {
+"anchor_score": 3.3,
+"axes": [
+"BLOCK",
+"DOOM_CONSUMER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"DEBILITATE": {
+"anchor_score": 8.35,
+"axes": [
+"DEBUFF",
+"VULN",
+"WEAK",
+"DURATION",
+"DAMAGE",
+"VULN_AMPLIFIER",
+"WEAK_AMPLIFIER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"DEFY": {
+"anchor_score": 3.4,
+"axes": [
+"BLOCK",
+"ETHEREAL_SELF",
+"DEBUFF",
+"WEAK",
+"WEAK_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"DEMESNE": {
+"anchor_score": 4.95,
+"axes": [
+"ENERGY",
+"ETHEREAL_SELF",
+"DRAW",
+"ENERGY_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"DEVOUR_LIFE": {
+"anchor_score": 4.7,
+"axes": [
+"SOUL_CONSUMER",
+"HEAL",
+"MINION",
+"SKELETON_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"DIRGE": {
+"anchor_score": 4.3,
+"axes": [
+"EXHAUST_TAG",
+"SOUL_PRODUCER",
+"MINION",
+"EXHAUST_SELF",
+"X_COST",
+"SKELETON_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"DISMANTLE": {
+"anchor_score": 5.7,
+"axes": [
+"DEBUFF",
+"VULN",
+"DAMAGE",
+"VULN_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "A"
+},
+"DOMINATE": {
+"anchor_score": 7.95,
+"axes": [
+"EXHAUST_TAG",
+"DEBUFF",
+"VULN",
+"SCALING",
+"EXHAUST_SELF",
+"VULN_AMPLIFIER",
+"STRENGTH_PRODUCER",
+"UNLIMITED"
+],
+"character": "IRONCLAD",
+"tier": "S"
+},
+"DRUM_OF_BATTLE": {
+"anchor_score": 7.15,
+"axes": [
+"EXHAUST_TAG",
+"DRAW",
+"SCALING",
+"EXHAUST_DRAIN_PASSIVE",
+"EXHAUST_TARGET_FORCED"
+],
+"character": "IRONCLAD",
+"tier": "C"
+},
+"DUAL_WIELD": {
+"anchor_score": 4.888,
+"axes": [
+"REPLAY",
+"POWER_AMPLIFIER",
+"CARD_GEN"
+],
+"character": "SHARED",
+"tier": "B"
+},
+"DYING_STAR": {
+"anchor_score": 3.4,
+"axes": [
+"ETHEREAL_SELF",
+"AOE_DAMAGE",
+"DURATION",
+"DAMAGE",
+"DEBUFF",
+"STRENGTH_DOWN",
+"AOE",
+"AOE_DEBUFF"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"END_OF_DAYS": {
+"anchor_score": 3.9,
+"axes": [
+"DOOM_PRODUCER",
+"AOE_DOOM",
+"DOOM",
+"AOE",
+"DOOM_CONSUMER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"ENVENOM": {
+"anchor_score": 4.3,
+"axes": [
+"POISON",
+"POISON_PRODUCER"
+],
+"character": "SILENT",
+"tier": "C"
+},
+"ERADICATE": {
+"anchor_score": 6.4,
+"axes": [
+"RETAIN_SELF",
+"DAMAGE",
+"RETAIN",
+"X_COST",
+"MULTI_HIT_SCALING"
+],
+"character": "NECROBINDER",
+"tier": "B"
+},
+"FAN_OF_KNIVES": {
+"anchor_score": 6.7,
+"axes": [
+"AOE_OTHER",
+"SHIV",
+"SHIV_AMPLIFIER",
+"AOE",
+"SHIV_PRODUCER"
+],
+"character": "SILENT",
+"tier": "C"
+},
+"FURNACE": {
+"anchor_score": 3.95,
+"axes": [
+"FORGE",
+"FORGE_PRODUCER",
+"LORDS_BLADE_PRODUCER"
+],
+"character": "REGENT",
+"tier": "C"
+},
+"GENESIS": {
+"anchor_score": 4.45,
+"axes": [
+"STAR_PRODUCER",
+"STAR",
+"STAR_BURST"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"GENETIC_ALGORITHM": {
+"anchor_score": 5.65,
+"axes": [
+"EXHAUST_TAG",
+"BLOCK",
+"EXHAUST_SELF",
+"BLOCK_SCALING"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"GLIMPSE_BEYOND": {
+"anchor_score": 2.98,
+"axes": [
+"EXHAUST_TAG",
+"SOUL_PRODUCER",
+"EXHAUST_SELF"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"GRAVE_WARDEN": {
+"anchor_score": 3.15,
+"axes": [
+"BLOCK",
+"SOUL_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"HAILSTORM": {
+"anchor_score": 6.35,
+"axes": [
+"DAMAGE",
+"FROST_PAYOFF",
+"AOE",
+"AOE_DAMAGE",
+"AOE_OTHER"
+],
+"character": "DEFECT",
+"tier": "C"
+},
+"HAMMER_TIME": {
+"anchor_score": 7.95,
+"axes": [
+"FORGE_AMPLIFIER"
+],
+"character": "REGENT",
+"tier": "A"
+},
+"HAUNT": {
+"anchor_score": 4.35,
+"axes": [
+"RANDOM",
+"SOUL_CONSUMER",
+"HP_LOSS"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"HAZE": {
+"anchor_score": 3.05,
+"axes": [
+"POISON",
+"AOE_POISON",
+"POISON_PRODUCER",
+"CUNNING_PRODUCER",
+"CUNNING",
+"AOE"
+],
+"character": "SILENT",
+"tier": "B"
+},
+"HELLO_WORLD": {
+"anchor_score": 7.15,
+"axes": [
+"CARD_GEN",
+"SCALING"
+],
+"character": "SHARED",
+"tier": "B"
+},
+"HIDDEN_DAGGERS": {
+"anchor_score": 3.3,
+"axes": [
+"SHIV",
+"CUNNING_CONSUMER",
+"SHIV_PRODUCER"
+],
+"character": "SILENT",
+"tier": "A"
+},
+"ICE_LANCE": {
+"anchor_score": 3.65,
+"axes": [
+"ORB_PRODUCER",
+"DAMAGE",
+"FROST_ORB"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"IGNITION": {
+"anchor_score": 3.65,
+"axes": [
+"EXHAUST_TAG",
+"ORB_PRODUCER",
+"EXHAUST_SELF",
+"PLASMA_ORB"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"INFERNO": {
+"anchor_score": 7.55,
+"axes": [
+"AOE_DAMAGE",
+"SCALING",
+"HP_LOSS",
+"HP_LOSS_CONSUMER",
+"AOE"
+],
+"character": "IRONCLAD",
+"tier": "A"
+},
+"INFINITE_BLADES": {
+"anchor_score": 4.35,
+"axes": [
+"SHIV",
+"SHIV_PRODUCER",
+"CARD_GEN"
+],
+"character": "SILENT",
+"tier": "A"
+},
+"KINGLY_PUNCH": {
+"anchor_score": 5.05,
+"axes": [
+"SCALING",
+"DRAW_ON_DRAW",
+"DAMAGE"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"LARGESSE": {
+"anchor_score": 6.0,
+"axes": [
+"SCALING",
+"RANDOM",
+"CARD_GEN"
+],
+"character": "REGENT",
+"tier": "A"
+},
+"LETHALITY": {
+"anchor_score": 10.2,
+"axes": [
+"SCALING",
+"ETHEREAL_SELF",
+"DAMAGE_AMPLIFIER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"LOOP": {
+"anchor_score": 7.35,
+"axes": [
+"REPLAY",
+"ORB_AMPLIFIER"
+],
+"character": "DEFECT",
+"tier": "D"
+},
+"MACHINE_LEARNING": {
+"anchor_score": 8.3,
+"axes": [
+"DRAW",
+"DRAW_AMPLIFIER"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"MAD_SCIENCE": {
+"anchor_score": 5.15,
+"axes": [
+"BLOCK",
+"SCALING",
+"ENERGY",
+"DRAW_CONDITIONAL",
+"DEBUFF",
+"VULN",
+"WEAK",
+"RANDOM",
+"DURATION",
+"DAMAGE",
+"VULN_PRODUCER",
+"WEAK_PRODUCER"
+],
+"character": "SHARED",
+"tier": "A"
+},
+"MASTER_PLANNER": {
+"anchor_score": 3.63,
+"axes": [
+"CUNNING_PRODUCER",
+"SKILL_CONDITIONAL"
+],
+"character": "SILENT",
+"tier": "C"
+},
+"MODDED": {
+"anchor_score": 5.9,
+"axes": [
+"SCALING",
+"DRAW",
+"SLOT_EXPAND"
+],
+"character": "DEFECT",
+"tier": "S"
+},
+"MOLTEN_FIST": {
+"anchor_score": 5.15,
+"axes": [
+"EXHAUST_TAG",
+"DEBUFF",
+"VULN",
+"DAMAGE",
+"EXHAUST_SELF",
+"VULN_AMPLIFIER",
+"UNLIMITED"
+],
+"character": "IRONCLAD",
+"tier": "C"
+},
+"MULTI_CAST": {
+"anchor_score": 6.8,
+"axes": [
+"X_COST",
+"ORB_AMPLIFIER",
+"ORB_EVOKE",
+"ORB_CONSUMER"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"NECRO_MASTERY": {
+"anchor_score": 4.3,
+"axes": [
+"AOE_OTHER",
+"SKELETON_PRODUCER",
+"MINION",
+"AOE_DAMAGE",
+"AOE",
+"SKELETON_CONSUMER"
+],
+"character": "NECROBINDER",
+"tier": "C"
+},
+"NOXIOUS_FUMES": {
+"anchor_score": 4.6,
+"axes": [
+"POISON",
+"AOE_POISON",
+"POISON_PRODUCER",
+"AOE"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"NO_ESCAPE": {
+"anchor_score": 5.7,
+"axes": [
+"DOOM_PRODUCER",
+"DOOM",
+"DOOM_AMPLIFIER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"OBLIVION": {
+"anchor_score": 3.4,
+"axes": [
+"DOOM_PRODUCER",
+"DOOM"
+],
+"character": "NECROBINDER",
+"tier": "B"
+},
+"OFFERING": {
+"anchor_score": 3.9,
+"axes": [
+"EXHAUST_TAG",
+"ENERGY",
+"DRAW",
+"HP_LOSS",
+"EXHAUST_SELF",
+"STACKABLE",
+"ENERGY_PRODUCER"
+],
+"character": "IRONCLAD",
+"tier": "S"
+},
+"OUTBREAK": {
+"anchor_score": 3.75,
+"axes": [
+"POISON",
+"AOE_DAMAGE",
+"POISON_CONSUMER",
+"AOE"
+],
+"character": "SILENT",
+"tier": "D"
+},
+"PAGESTORM": {
+"anchor_score": 4.6,
+"axes": [
+"DRAW",
+"VOLATILE_CONSUMER",
+"DRAW_ON_DRAW"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"PALE_BLUE_DOT": {
+"anchor_score": 6.966,
+"axes": [
+"DRAW_AMPLIFIER"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"PHANTOM_BLADES": {
+"anchor_score": 9.7,
+"axes": [
+"SCALING",
+"SHIV",
+"SHIV_AMPLIFIER"
+],
+"character": "SILENT",
+"tier": "B"
+},
+"PILLAR_OF_CREATION": {
+"anchor_score": 9.95,
+"axes": [
+"BLOCK",
+"BLOCK_AMPLIFIER",
+"CARD_GEN_PAYOFF"
+],
+"character": "REGENT",
+"tier": "C"
+},
+"PREDATOR": {
+"anchor_score": 5.45,
+"axes": [
+"DRAW",
+"DAMAGE",
+"DRAW_AMPLIFIER"
+],
+"character": "SILENT",
+"tier": "B"
+},
+"PROLONG": {
+"anchor_score": 5.7,
+"axes": [
+"EXHAUST_TAG",
+"BLOCK",
+"EXHAUST_SELF",
+"BLOCK_AMPLIFIER"
+],
+"character": "SHARED",
+"tier": "A"
+},
+"PROTECTOR": {
+"anchor_score": 5.15,
+"axes": [
+"SCALING",
+"SKELETON_CONSUMER",
+"DAMAGE",
+"OSTY"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"QUADCAST": {
+"anchor_score": 5.8,
+"axes": [
+"REPEAT",
+"ORB_AMPLIFIER",
+"ORB_EVOKE",
+"ORB_CONSUMER"
+],
+"character": "DEFECT",
+"tier": "S"
+},
+"RADIATE": {
+"anchor_score": 5.45,
+"axes": [
+"AOE_DAMAGE",
+"DAMAGE",
+"STAR",
+"AOE",
+"FREE_ATTACK",
+"STAR_AMPLIFIER"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"REANIMATE": {
+"anchor_score": 3.9,
+"axes": [
+"EXHAUST_TAG",
+"MINION",
+"EXHAUST_SELF",
+"SKELETON_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"REAPER_FORM": {
+"anchor_score": 4.6,
+"axes": [
+"DOOM_PRODUCER"
+],
+"character": "NECROBINDER",
+"tier": "S"
+},
+"ROLLING_BOULDER": {
+"anchor_score": 7.5,
+"axes": [
+"SCALING",
+"AOE",
+"AOE_DAMAGE"
+],
+"character": "SHARED",
+"tier": "C"
+},
+"RUPTURE": {
+"anchor_score": 7.3,
+"axes": [
+"SCALING",
+"STRENGTH_PRODUCER",
+"HP_LOSS_CONSUMER"
+],
+"character": "IRONCLAD",
+"tier": "B"
+},
+"SEEKING_EDGE": {
+"anchor_score": 6.7,
+"axes": [
+"AOE_OTHER",
+"FORGE",
+"FORGE_PRODUCER",
+"LORDS_BLADE_PRODUCER",
+"LORDS_BLADE_AMPLIFIER"
+],
+"character": "REGENT",
+"tier": "C"
+},
+"SENTRY_MODE": {
+"anchor_score": 7.65,
+"axes": [
+"BLOCK",
+"CARD_GEN",
+"SCALING"
+],
+"character": "NECROBINDER",
+"tier": "B"
+},
+"SEVERANCE": {
+"anchor_score": 3.3,
+"axes": [
+"SOUL_PRODUCER",
+"DAMAGE"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"SHADOW_STEP": {
+"anchor_score": 5.1,
+"axes": [
+"CUNNING_CONSUMER",
+"DAMAGE_AMPLIFIER"
+],
+"character": "SILENT",
+"tier": "D"
+},
+"SHROUD": {
+"anchor_score": 4.35,
+"axes": [
+"BLOCK",
+"DOOM_CONSUMER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"SIGNAL_BOOST": {
+"anchor_score": 4.768,
+"axes": [
+"EXHAUST_TAG",
+"POWER_AMPLIFIER",
+"EXHAUST_SELF"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"SNEAKY": {
+"anchor_score": 8.15,
+"axes": [
+"BLOCK",
+"CUNNING_PRODUCER",
+"SCALING",
+"CUNNING"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"SOUL_STORM": {
+"anchor_score": 5.25,
+"axes": [
+"EXHAUST_TAG",
+"SCALING",
+"SOUL_CONSUMER",
+"EXHAUST_CONSUMER",
+"DAMAGE"
+],
+"character": "NECROBINDER",
+"tier": "C"
+},
+"SPECTRUM_SHIFT": {
+"anchor_score": 7.15,
+"axes": [
+"RANDOM",
+"CARD_GEN",
+"SCALING"
+],
+"character": "REGENT",
+"tier": "C"
+},
+"SPINNER": {
+"anchor_score": 4.7,
+"axes": [
+"ORB_PRODUCER",
+"ORB",
+"GLASS_ORB"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"SPIRIT_OF_ASH": {
+"anchor_score": 4.7,
+"axes": [
+"BLOCK",
+"VOLATILE_CONSUMER"
+],
+"character": "NECROBINDER",
+"tier": "A"
+},
+"SPLASH": {
+"anchor_score": 6.0,
+"axes": [
+"SCALING",
+"RANDOM",
+"DURATION",
+"CARD_GEN"
+],
+"character": "SHARED",
+"tier": "A"
+},
+"SQUEEZE": {
+"anchor_score": 8.05,
+"axes": [
+"DAMAGE",
+"OSTY",
+"SKELETON_ATTACK_AMPLIFIER",
+"SKELETON_AMPLIFIER",
+"SKELETON_CONSUMER"
+],
+"character": "NECROBINDER",
+"tier": "C"
+},
+"STARDUST": {
+"anchor_score": 5.95,
+"axes": [
+"RANDOM",
+"DAMAGE",
+"FREE_ATTACK",
+"STAR_X_COST",
+"STAR_CONSUMER",
+"MULTI_HIT_SCALING",
+"X_COST"
+],
+"character": "REGENT",
+"tier": "A"
+},
+"STOKE": {
+"anchor_score": 5.4,
+"axes": [
+"EXHAUST_TAG",
+"SCALING",
+"RANDOM",
+"EXHAUST_PRODUCER",
+"EXHAUST_BURST",
+"EXHAUST_TARGET_FORCED",
+"CARD_GEN"
+],
+"character": "IRONCLAD",
+"tier": "B"
+},
+"STORM": {
+"anchor_score": 7.7,
+"axes": [
+"ORB_PRODUCER",
+"LIGHTNING_ORB",
+"POWER_AMPLIFIER"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"SUBROUTINE": {
+"anchor_score": 6.636,
+"axes": [
+"ENERGY",
+"POWER_AMPLIFIER"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"SWORD_SAGE": {
+"anchor_score": 11.5,
+"axes": [
+"SCALING",
+"LORDS_BLADE_PAYOFF",
+"DAMAGE_AMPLIFIER",
+"LORDS_BLADE_AMPLIFIER"
+],
+"character": "REGENT",
+"tier": "C"
+},
+"SYNCHRONIZE": {
+"anchor_score": 5.45,
+"axes": [
+"EXHAUST_TAG",
+"EXHAUST_SELF",
+"FOCUS",
+"ORB_VARIETY_AMPLIFIER",
+"STACKABLE"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"TACTICIAN": {
+"anchor_score": 3.55,
+"axes": [
+"ENERGY",
+"CUNNING_PRODUCER",
+"CUNNING"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"TEAR_ASUNDER": {
+"anchor_score": 6.0,
+"axes": [
+"DAMAGE",
+"REPEAT",
+"MULTI_HIT_SCALING",
+"HP_LOSS_CONSUMER"
+],
+"character": "IRONCLAD",
+"tier": "A"
+},
+"TEMPEST": {
+"anchor_score": 4.05,
+"axes": [
+"ORB_PRODUCER",
+"X_COST",
+"LIGHTNING_ORB"
+],
+"character": "DEFECT",
+"tier": "B"
+},
+"THE_SCYTHE": {
+"anchor_score": 5.25,
+"axes": [
+"EXHAUST_TAG",
+"SCALING",
+"DAMAGE",
+"EXHAUST_SELF"
+],
+"character": "NECROBINDER",
+"tier": "C"
+},
+"THE_SEALED_THRONE": {
+"anchor_score": 4.1,
+"axes": [
+"STAR_PRODUCER",
+"PLAY_TRIGGER",
+"STAR_BURST"
+],
+"character": "REGENT",
+"tier": "S"
+},
+"THE_SMITH": {
+"anchor_score": 3.65,
+"axes": [
+"FORGE",
+"FORGE_PRODUCER",
+"LORDS_BLADE_PRODUCER"
+],
+"character": "REGENT",
+"tier": "A"
+},
+"THRASH": {
+"anchor_score": 5.7,
+"axes": [
+"EXHAUST_TAG",
+"DAMAGE",
+"EXHAUST_PRODUCER",
+"HIT_2",
+"EXHAUST_TARGET_RANDOM",
+"DAMAGE_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "A"
+},
+"THUNDER": {
+"anchor_score": 4.0,
+"axes": [
+"DAMAGE",
+"LIGHTNING_EVOKE",
+"ORB_EVOKE"
+],
+"character": "DEFECT",
+"tier": "A"
+},
+"TOOLS_OF_THE_TRADE": {
+"anchor_score": 4.6,
+"axes": [
+"CUNNING_CONSUMER"
+],
+"character": "SILENT",
+"tier": "S"
+},
+"TYRANNY": {
+"anchor_score": 4.45,
+"axes": [
+"POISON",
+"EXHAUST_TAG",
+"EXHAUST_TARGET_RANDOM"
+],
+"character": "REGENT",
+"tier": "B"
+},
+"UNLEASH": {
+"anchor_score": 4.9,
+"axes": [
+"SCALING",
+"SKELETON_CONSUMER",
+"DAMAGE",
+"OSTY"
+],
+"character": "NECROBINDER",
+"tier": "B"
+},
+"UNMOVABLE": {
+"anchor_score": 8.55,
+"axes": [
+"BLOCK",
+"DURATION",
+"BLOCK_AMPLIFIER"
+],
+"character": "IRONCLAD",
+"tier": "S"
+},
+"VOID_FORM": {
+"anchor_score": 8.15,
+"axes": [
+"ETHEREAL_SELF",
+"SCALING"
+],
+"character": "REGENT",
+"tier": "S"
+},
+"VOLTAIC": {
+"anchor_score": 3.9,
+"axes": [
+"EXHAUST_TAG",
+"ORB_PRODUCER",
+"EXHAUST_SELF",
+"LIGHTNING_ORB"
+],
+"character": "DEFECT",
+"tier": "S"
+},
+"WHIRLWIND": {
+"anchor_score": 6.3,
+"axes": [
+"AOE_DAMAGE",
+"DAMAGE",
+"X_COST",
+"AOE",
+"MULTI_HIT_SCALING"
+],
+"character": "IRONCLAD",
+"tier": "A"
+}
+}
