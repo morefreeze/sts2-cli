@@ -84,6 +84,8 @@ class DecisionAdvisor:
         deck = (state.get("player") or {}).get("deck") or []
         if not cards:
             return {"cmd": "action", "action": "skip_card_reward"}
+        if not any(c.get("id") or c.get("type") or c.get("stats") or c.get("description") for c in cards):
+            return None
         base = evaluate_deck(deck)
         weakest = min(("attack", "defense", "cycle", "energy"), key=lambda k: base.get(k, 0.0))
         scored: list[CandidateScore] = []

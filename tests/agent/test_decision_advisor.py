@@ -74,6 +74,14 @@ def test_card_reward_skips_when_candidate_worsens_large_deck():
     assert cmd == {"cmd": "action", "action": "skip_card_reward"}
 
 
+def test_card_reward_falls_back_for_unscorable_fixture_cards():
+    state = base_state("card_reward", cards=[{"index": 0}])
+
+    cmd = DecisionAdvisor().choose(state)
+
+    assert cmd is None
+
+
 def test_map_select_avoids_elite_at_low_hp():
     state = base_state(
         "map_select",
