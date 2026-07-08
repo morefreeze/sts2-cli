@@ -120,3 +120,19 @@ def test_combat_uses_lethal_planner_when_available(monkeypatch):
     cmd = DecisionAdvisor().choose(state)
 
     assert cmd == {"cmd": "action", "action": "play_card", "args": {"card_index": 0, "target_index": 0}}
+
+
+def test_greedy_action_uses_decision_advisor_for_card_rewards():
+    from agent.combat_env import greedy_action
+
+    deck = [card("CARD.STRIKE_IRONCLAD", damage=6) for _ in range(5)]
+    state = base_state(
+        "card_reward",
+        cards=[
+            card("CARD.DEFEND_IRONCLAD", ctype="Skill", block=5, index=0),
+            card("CARD.STRIKE_IRONCLAD", damage=6, index=1),
+        ],
+    )
+    state["player"]["deck"] = deck
+
+    assert greedy_action(state)["args"]["card_index"] == 0

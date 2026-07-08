@@ -19,9 +19,11 @@ from agent.state_encoder import StateEncoder
 from agent.strategy import Act1SafeStrategy, HpAwareMapStrategy, MapStrategy, rest_site_action
 from agent.card_scoring import (score_card, score_card_in_deck, pick_best_card,
                                   pick_worst_card, deck_quality_score, _card_id_norm)
+from agent.decision_advisor import DecisionAdvisor
 
 # Swappable map strategy — change globally via set_map_strategy()
 _map_strategy: MapStrategy = HpAwareMapStrategy()
+_decision_advisor = DecisionAdvisor()
 
 
 def set_map_strategy(strategy: MapStrategy):
@@ -273,6 +275,9 @@ def _score_event_option(opt: dict) -> float:
 def greedy_action(state: dict) -> dict:
     """Greedy heuristic for non-combat decisions. Used during training and by coordinator."""
     decision = state.get("decision", "")
+    advised = _decision_advisor.choose(state)
+    if advised is not None:
+        return advised
 
     if decision == "map_select":
         choices = state.get("choices", [])
