@@ -1,10 +1,13 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
 from agent.eval_rl import (
     _VerboseCombatEnv,
     _build_parser,
+    _resolve_combat_snapshot_config,
+    _write_combat_record,
     classify_eval_result,
     format_floor_label,
     format_floor_labels,
@@ -196,3 +199,50 @@ def test_run_eval_retries_invalid_attempt_with_the_same_fixed_seed(monkeypatch):
     assert stats["status_counts"] == {"crash": 1, "dead": 1}
     assert stats["results"][0]["status"] == "dead"
     assert stats["results"][0]["attempts"] == 2
+
+
+def test_midact_elite_snapshot_preset_targets_floor_6_and_7():
+    snapshot_dir, floors = _resolve_combat_snapshot_config(
+        preset="midact-elite",
+        snapshot_dir=None,
+        floors_spec=None,
+    )
+
+    assert snapshot_dir == "data/snapshots/midact_elite"
+    assert floors == {6, 7}
+
+
+def test_snapshot_config_requires_directory_and_floors_together():
+    with pytest.raises(ValueError, match="both"):
+        _resolve_combat_snapshot_config(
+            preset=None,
+            snapshot_dir="data/snapshots/custom",
+            floors_spec=None,
+        )
+
+
+def test_combat_snapshot_record_retains_explicit_checkpoint_path(tmp_path):
+    checkpoint = tmp_path / "nested" / "ppo_ironclad_13418k.zip"
+    record_path = tmp_path / "records.jsonl"
+    state = {
+        "player": {"hp": 34, "max_hp": 80, "deck": [], "relics": []},
+        "context": {"room_type": "Elite"},
+        "enemies": [{"name": "Byrdonis", "hp": 86, "max_hp": 86, "intents": []}],
+    }
+
+    _write_combat_record(
+        state,
+        floor=7,
+        checkpoint=str(checkpoint),
+        character="Ironclad",
+        game_seed="eval_fixed_0",
+        game_index=0,
+        jsonl_path=str(record_path),
+    )
+
+    record = json.loads(record_path.read_text().strip())
+    assert record["checkpoint"] == checkpoint.name
+    assert record["checkpoint_path"] == str(checkpoint.resolve())
+    assert record["seed"] == "eval_fixed_0"
+    assert record["floor"] == 7
+    assert record["room_type"] == "Elite"

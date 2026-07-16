@@ -58,6 +58,12 @@ HP_CURRICULUM_SCHEDULE = [
     (0.85,   0),  # 0 = no override, use natural HP from snapshot
 ]
 HP_CURRICULUM_PHASE_FRACTIONS = (0.00, 0.30, 0.60, 0.85)
+SNAPSHOT_CURRICULUM_SCHEDULE = (
+    (0.00, 0.75),
+    (0.35, 0.50),
+    (0.70, 0.25),
+    (0.90, 0.00),
+)
 
 
 def _hp_curriculum_fractions(count: int) -> list[float]:
@@ -95,6 +101,16 @@ def _parse_hp_curriculum_values(spec: str) -> list[tuple[float, int]]:
         values.append(hp)
 
     return list(zip(_hp_curriculum_fractions(len(values)), values))
+
+
+def _snapshot_curriculum_phase(progress: float, n_envs: int) -> tuple[int, int]:
+    """Return (snapshot_env_count, phase_index) for decaying snapshot exposure."""
+    ratio, phase = SNAPSHOT_CURRICULUM_SCHEDULE[0][1], 0
+    for i, (fraction, candidate_ratio) in enumerate(SNAPSHOT_CURRICULUM_SCHEDULE):
+        if progress >= fraction:
+            ratio, phase = candidate_ratio, i
+    count = int(round(max(n_envs, 0) * ratio))
+    return max(0, min(n_envs, count)), phase
 
 
 def mask_fn(env):
@@ -535,6 +551,10 @@ def main():
                         help="Number of envs that load from saves (rest run fresh games). "
                              "Default -1 = all envs use saves (legacy). Set to e.g. 2 for "
                              "mixed training: 2 envs from saves + 2 random.")
+    parser.add_argument("--snapshot-curriculum", action="store_true",
+                        help="Decay save-pool env exposure 75%%→50%%→25%%→0%% over training. "
+                             "Requires --load-save or --load-save-dir; cannot be combined "
+                             "with an explicit --mix-save-envs value.")
     parser.add_argument("--ent-coef", type=float, default=None,
                         help="Override entropy coefficient (default: 0.08 hardcoded). "
                              "Use higher (e.g. 0.15) for boss-only training to escape policy collapse.")
@@ -584,11 +604,27 @@ def main():
         if not load_saves:
             print(f"  ⚠ No .save files in {args.load_save_dir}"); sys.exit(1)
     if load_saves:
-        if args.mix_save_envs >= 0:
+        if args.snapshot_curriculum and args.mix_save_envs != -1:
+            parser.error("--snapshot-curriculum cannot be combined with --mix-save-envs")
+        if args.snapshot_curriculum:
+            current_mix_save_envs, snapshot_curriculum_phase = _snapshot_curriculum_phase(
+                0.0, args.n_envs)
+            suffix += (f" + snapshot-curriculum({current_mix_save_envs}/{args.n_envs} "
+                       f"envs from saves×{len(load_saves)})")
+        elif args.mix_save_envs >= 0:
+            current_mix_save_envs = max(0, min(args.mix_save_envs, args.n_envs))
+            snapshot_curriculum_phase = -1
             n_save = max(0, min(args.mix_save_envs, args.n_envs))
             suffix += f" + mix({n_save}/{args.n_envs} envs from saves×{len(load_saves)})"
         else:
+            current_mix_save_envs = -1
+            snapshot_curriculum_phase = -1
             suffix += f" + load_saves×{len(load_saves)}"
+    else:
+        if args.snapshot_curriculum:
+            parser.error("--snapshot-curriculum requires --load-save or --load-save-dir")
+        current_mix_save_envs = args.mix_save_envs
+        snapshot_curriculum_phase = -1
 
     print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs"
           f" | device={device}{suffix}")
@@ -599,7 +635,8 @@ def main():
             print(f"  load_save: {s}")
 
     vec_env = _make_vec_env(args.character, args.ascension, args.n_envs, initial_floor,
-                            load_saves=load_saves, mix_save_envs=args.mix_save_envs)
+                            load_saves=load_saves,
+                            mix_save_envs=current_mix_save_envs)
 
     policy_kwargs = dict(net_arch=dict(pi=[512, 512], vf=[512, 512]))
 
@@ -695,7 +732,9 @@ def main():
             progress = steps_done / max(args.steps, 1)
             floor, _ = _curriculum_phase(progress) if args.curriculum else (initial_floor, 0)
             vec_env = _make_vec_env(args.character, args.ascension, args.n_envs,
-                                    floor, seed_offset=steps_done // 1000)
+                                    floor, seed_offset=steps_done // 1000,
+                                    load_saves=load_saves,
+                                    mix_save_envs=current_mix_save_envs)
             model.set_env(vec_env)
             old_vf_pretrain = getattr(callback, "_vf_pretrain_remaining", 0)
             callback = TrainCallback(args.steps, args.n_envs, N_STEPS,
@@ -735,6 +774,32 @@ def main():
                     model.logger.dump(steps_done)
             except Exception as e:
                 print(f"  [eval] Error: {e}", flush=True)
+
+        if args.snapshot_curriculum and steps_done < args.steps:
+            progress = steps_done / max(args.steps, 1)
+            next_mix, next_phase = _snapshot_curriculum_phase(progress, args.n_envs)
+            if next_phase != snapshot_curriculum_phase:
+                print(f"  [snapshot-curriculum] Phase → {next_mix}/{args.n_envs} "
+                      "envs from saves", flush=True)
+                vec_env.close()
+                floor, _ = (_curriculum_phase(progress) if args.curriculum
+                            else (initial_floor, 0))
+                vec_env = _make_vec_env(
+                    args.character,
+                    args.ascension,
+                    args.n_envs,
+                    floor,
+                    seed_offset=steps_done // 1000,
+                    load_saves=load_saves,
+                    mix_save_envs=next_mix,
+                )
+                model.set_env(vec_env)
+                current_mix_save_envs = next_mix
+                snapshot_curriculum_phase = next_phase
+                if args.hp_curriculum:
+                    hp_override, hp_phase = _hp_curriculum_phase(progress)
+                    vec_env.env_method("set_hp_after_load", hp_override)
+                    callback._last_hp_curriculum_phase = hp_phase
 
     vec_env.close()
     total_time = time.time() - callback._train_start

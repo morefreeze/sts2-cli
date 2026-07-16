@@ -34,6 +34,7 @@ _PLANNER_LETHAL_ONLY = _PLANNER_ENV == "lethal"
 # when an enemy telegraphs a dangerous attack and the policy isn't blocking,
 # insert the best block card. Leaves attack decisions to the policy.
 _DEFENSE_ON = os.environ.get("STS2_DEFENSE", "") in ("1", "true", "on")
+_MIDACT_SNAPSHOT_DIR = "data/snapshots/midact_elite"
 
 
 def format_floor_label(floor: int | float | str | None) -> str:
@@ -51,6 +52,26 @@ def format_floor_label(floor: int | float | str | None) -> str:
 
 def format_floor_labels(floors: list[int] | tuple[int, ...]) -> str:
     return "[" + ", ".join(format_floor_label(f) for f in sorted(floors)) + "]"
+
+
+def _resolve_combat_snapshot_config(*, preset: str | None,
+                                    snapshot_dir: str | None,
+                                    floors_spec: str | None) -> tuple[str | None, set[int] | None]:
+    if preset == "midact-elite":
+        snapshot_dir = snapshot_dir or _MIDACT_SNAPSHOT_DIR
+        floors_spec = floors_spec or "6,7"
+    floors = None
+    if floors_spec:
+        try:
+            floors = {int(token.strip()) for token in floors_spec.split(",")
+                      if token.strip()}
+        except ValueError:
+            raise ValueError("combat snapshot floors must be comma-separated integers") from None
+        if not floors or any(floor <= 0 for floor in floors):
+            raise ValueError("combat snapshot floors must be positive integers")
+    if bool(snapshot_dir) != bool(floors):
+        raise ValueError("combat snapshot directory and floors must both be provided")
+    return snapshot_dir, floors
 
 
 def classify_eval_result(*, timed_out: bool, run_won: bool, info: dict) -> str:
@@ -158,6 +179,7 @@ def _write_boss_deck_record(state: dict, *, checkpoint: str, character: str,
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "checkpoint": os.path.basename(str(checkpoint)) if checkpoint else None,
+        "checkpoint_path": os.path.abspath(str(checkpoint)) if checkpoint else None,
         "character": character,
         "seed": game_seed,
         "game_index": game_index,
@@ -215,6 +237,7 @@ def _write_combat_record(state: dict, *, floor: int, checkpoint: str, character:
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "checkpoint": os.path.basename(str(checkpoint)) if checkpoint else None,
+        "checkpoint_path": os.path.abspath(str(checkpoint)) if checkpoint else None,
         "character": character,
         "seed": game_seed,
         "game_index": game_index,
@@ -738,6 +761,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         "Diagnose mid-Act death walls (e.g. floor 15). Replay saves with boss_retry.py.")
     p.add_argument("--combat-snapshot-floors", default=None,
                    help="Comma-separated floors to capture for --combat-snapshot-dir, e.g. '7,8,9,15'.")
+    p.add_argument("--snapshot-preset", choices=("midact-elite",), default=None,
+                   help="Named snapshot preset; midact-elite captures floors 6 and 7")
     return p
 
 
@@ -748,9 +773,14 @@ def main():
     args = p.parse_args()
     boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
                           else args.deck_log)
-    combat_snapshot_floors = None
-    if args.combat_snapshot_dir and args.combat_snapshot_floors:
-        combat_snapshot_floors = {int(x) for x in str(args.combat_snapshot_floors).split(",") if x.strip()}
+    try:
+        combat_snapshot_dir, combat_snapshot_floors = _resolve_combat_snapshot_config(
+            preset=args.snapshot_preset,
+            snapshot_dir=args.combat_snapshot_dir,
+            floors_spec=args.combat_snapshot_floors,
+        )
+    except ValueError as exc:
+        p.error(str(exc))
 
     replay_actions = None
     load_seed = None
@@ -802,7 +832,7 @@ def main():
                              boss_deck_log_path=boss_deck_log_path,
                              boss_snapshot_dir=args.boss_snapshot_dir,
                              boss_snapshot_min_hp=args.boss_snapshot_min_hp,
-                             combat_snapshot_dir=args.combat_snapshot_dir,
+                             combat_snapshot_dir=combat_snapshot_dir,
                              combat_snapshot_floors=combat_snapshot_floors,
                              checkpoint_name=checkpoint)
     print(f"---")
