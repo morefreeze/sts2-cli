@@ -361,12 +361,12 @@ def test_greedy_action_card_reward():
         "player": {"deck": []},
         "cards": [{
             "index": 0,
-            "id": "CARD.STRIKE_IRONCLAD",
-            "cost": 1,
+            "id": "CARD.BLUDGEON",
+            "cost": 3,
             "type": "Attack",
-            "rarity": "Common",
-            "stats": {"damage": 6},
-            "description": "Deal 6 damage.",
+            "rarity": "Rare",
+            "stats": {"damage": 32},
+            "description": "Deal 32 damage.",
         }],
     }
     action = greedy_action(state)

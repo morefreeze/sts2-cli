@@ -27,8 +27,8 @@ _decision_advisor = DecisionAdvisor()
 
 
 def _decision_advisor_enabled() -> bool:
-    flag = os.environ.get("STS2_DECISION_ADVISOR", "1").strip().lower()
-    return flag not in {"0", "false", "off", "no"}
+    flag = os.environ.get("STS2_DECISION_ADVISOR", "").strip().lower()
+    return flag in {"1", "true", "on", "yes"}
 
 
 def set_map_strategy(strategy: MapStrategy):

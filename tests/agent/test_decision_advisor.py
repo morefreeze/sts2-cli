@@ -130,9 +130,10 @@ def test_combat_uses_lethal_planner_when_available(monkeypatch):
     assert cmd == {"cmd": "action", "action": "play_card", "args": {"card_index": 0, "target_index": 0}}
 
 
-def test_greedy_action_uses_decision_advisor_for_card_rewards():
+def test_greedy_action_uses_decision_advisor_for_card_rewards(monkeypatch):
     from agent.combat_env import greedy_action
 
+    monkeypatch.setenv("STS2_DECISION_ADVISOR", "1")
     deck = [card("CARD.STRIKE_IRONCLAD", damage=6) for _ in range(5)]
     state = base_state(
         "card_reward",
@@ -165,3 +166,39 @@ def test_greedy_action_can_disable_decision_advisor(monkeypatch):
     }
 
     assert combat_env.greedy_action(state)["action"] == "select_map_node"
+
+
+def test_greedy_action_defaults_decision_advisor_off(monkeypatch):
+    from agent import combat_env
+
+    class FailingAdvisor:
+        def choose(self, state):
+            raise AssertionError("advisor should require explicit opt-in")
+
+    monkeypatch.delenv("STS2_DECISION_ADVISOR", raising=False)
+    monkeypatch.setattr(combat_env, "_decision_advisor", FailingAdvisor())
+
+    state = {
+        "decision": "map_select",
+        "choices": [
+            {"col": 1, "row": 3, "type": "enemy"},
+            {"col": 2, "row": 3, "type": "rest"},
+        ],
+    }
+
+    assert combat_env.greedy_action(state)["action"] == "select_map_node"
+
+
+def test_greedy_action_enables_decision_advisor_explicitly(monkeypatch):
+    from agent import combat_env
+
+    advised = {"cmd": "action", "action": "leave_room"}
+
+    class RecordingAdvisor:
+        def choose(self, state):
+            return advised
+
+    monkeypatch.setenv("STS2_DECISION_ADVISOR", "1")
+    monkeypatch.setattr(combat_env, "_decision_advisor", RecordingAdvisor())
+
+    assert combat_env.greedy_action({"decision": "event_choice"}) == advised
