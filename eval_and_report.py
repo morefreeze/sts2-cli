@@ -8,6 +8,7 @@ This script:
 4. Output is auto-delivered to Telegram by the cron system
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -49,6 +50,7 @@ def run_eval(checkpoint: str, n_games: int = 10,
         verbose=False
     )
     return stats
+
 
 def format_report(stats: dict, checkpoint: str) -> str:
     """Format evaluation results into a readable report."""
@@ -94,6 +96,17 @@ def format_report(stats: dict, checkpoint: str) -> str:
 
     return "\n".join(report)
 
+
+def _evaluation_key(checkpoint: str, *, n_games: int, fixed_seeds: bool,
+                    invalid_retries: int) -> str:
+    return json.dumps({
+        "checkpoint": os.path.abspath(checkpoint),
+        "n_games": n_games,
+        "fixed_seeds": fixed_seeds,
+        "invalid_retries": invalid_retries,
+    }, sort_keys=True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint", help="Explicit path to checkpoint zip")
@@ -108,6 +121,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def main():
     args = _build_parser().parse_args()
     checkpoint = args.checkpoint
+    evaluation_key = _evaluation_key(
+        checkpoint,
+        n_games=args.n_games,
+        fixed_seeds=args.fixed_seeds,
+        invalid_retries=args.invalid_retries,
+    )
 
     # Check if we should skip (same checkpoint as last run)
     last_eval_file = "/tmp/sts2-cli/last_eval_checkpoint.txt"
@@ -115,8 +134,8 @@ def main():
 
     try:
         with open(last_eval_file) as f:
-            last_checkpoint = f.read().strip()
-        if os.path.basename(checkpoint) == last_checkpoint:
+            last_evaluation_key = f.read().strip()
+        if evaluation_key == last_evaluation_key:
             print(f"[SILENT]")
             return
     except FileNotFoundError:
@@ -136,7 +155,8 @@ def main():
 
     # Save checkpoint as last evaluated
     with open(last_eval_file, "w") as f:
-        f.write(os.path.basename(checkpoint))
+        f.write(evaluation_key)
+
 
 if __name__ == "__main__":
     main()
