@@ -64,6 +64,31 @@ SNAPSHOT_CURRICULUM_SCHEDULE = (
     (0.70, 0.25),
     (0.90, 0.00),
 )
+TRAINING_PROFILES = {
+    "midact-elite": {
+        "snapshot_curriculum": True,
+        "ent_coef": 0.10,
+        "eval_freq": 25_000,
+        "save_dir": "checkpoints_midact_elite",
+    },
+    "act1-boss": {
+        "mix_save_envs": "half",
+        "hp_curriculum": True,
+        "hp_curriculum_values": "100,90,80,natural",
+        "ent_coef": 0.15,
+        "eval_freq": 25_000,
+        "save_dir": "checkpoints_act1_boss",
+    },
+}
+_PROFILE_OPTION_FLAGS = {
+    "snapshot_curriculum": {"--snapshot-curriculum", "--no-snapshot-curriculum"},
+    "mix_save_envs": {"--mix-save-envs"},
+    "hp_curriculum": {"--hp-curriculum", "--no-hp-curriculum"},
+    "hp_curriculum_values": {"--hp-curriculum-values"},
+    "ent_coef": {"--ent-coef"},
+    "eval_freq": {"--eval-freq"},
+    "save_dir": {"--save-dir"},
+}
 
 
 def _hp_curriculum_fractions(count: int) -> list[float]:
@@ -111,6 +136,40 @@ def _snapshot_curriculum_phase(progress: float, n_envs: int) -> tuple[int, int]:
             ratio, phase = candidate_ratio, i
     count = int(round(max(n_envs, 0) * ratio))
     return max(0, min(n_envs, count)), phase
+
+
+def _apply_training_profile(args, *, explicit_options: set[str]) -> None:
+    """Apply named profile defaults without overwriting explicit CLI options."""
+    if not args.profile:
+        return
+    try:
+        defaults = TRAINING_PROFILES[args.profile]
+    except KeyError:
+        raise ValueError(f"unknown training profile: {args.profile}") from None
+
+    snapshot_explicit = bool(
+        explicit_options & _PROFILE_OPTION_FLAGS["snapshot_curriculum"])
+    mix_explicit = "--mix-save-envs" in explicit_options
+    hp_explicit = bool(explicit_options & _PROFILE_OPTION_FLAGS["hp_curriculum"])
+
+    for dest, value in defaults.items():
+        if explicit_options & _PROFILE_OPTION_FLAGS[dest]:
+            continue
+        if dest == "snapshot_curriculum" and mix_explicit and not snapshot_explicit:
+            continue
+        if dest == "mix_save_envs" and snapshot_explicit and args.snapshot_curriculum:
+            continue
+        if (dest == "hp_curriculum_values" and hp_explicit
+                and not args.hp_curriculum):
+            continue
+        if value == "half":
+            value = max(1, args.n_envs // 2)
+        setattr(args, dest, value)
+
+
+def _validate_training_profile(args, *, load_saves: list[str]) -> None:
+    if args.profile and not load_saves:
+        raise ValueError(f"training profile {args.profile!r} requires a save pool")
 
 
 def mask_fn(env):
@@ -521,6 +580,9 @@ def _make_vec_env(character: str, ascension: int, n_envs: int,
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=tuple(TRAINING_PROFILES), default=None,
+                        help="Named fine-tuning defaults: midact-elite or act1-boss. "
+                             "Explicit CLI options override profile values.")
     parser.add_argument("--character",   default="Ironclad")
     parser.add_argument("--steps",       type=int, default=500_000)
     parser.add_argument("--n-envs",      type=int, default=4)
@@ -533,7 +595,8 @@ def main():
     parser.add_argument("--vf-pretrain-chunks", type=int, default=0,
                         help="Freeze policy for N 25k-step chunks at start so value network can calibrate (e.g. 2 = 50k steps VF-only)")
     parser.add_argument("--curriculum",  action="store_true")
-    parser.add_argument("--hp-curriculum", action="store_true",
+    parser.add_argument("--hp-curriculum", action=argparse.BooleanOptionalAction,
+                        default=False,
                         help="Enable HP curriculum (B2: phases 120→100→80→natural) when "
                              "training with --load-save or --load-save-dir. Only useful "
                              "with snapshot pool — overrides player HP after each load.")
@@ -551,7 +614,8 @@ def main():
                         help="Number of envs that load from saves (rest run fresh games). "
                              "Default -1 = all envs use saves (legacy). Set to e.g. 2 for "
                              "mixed training: 2 envs from saves + 2 random.")
-    parser.add_argument("--snapshot-curriculum", action="store_true",
+    parser.add_argument("--snapshot-curriculum", action=argparse.BooleanOptionalAction,
+                        default=False,
                         help="Decay save-pool env exposure 75%%→50%%→25%%→0%% over training. "
                              "Requires --load-save or --load-save-dir; cannot be combined "
                              "with an explicit --mix-save-envs value.")
@@ -562,6 +626,15 @@ def main():
                         help="Override checkpoint output dir (default: checkpoints/). "
                              "Use 'checkpoints_boss/' for boss-focused training.")
     args = parser.parse_args()
+    explicit_options = {
+        token.split("=", 1)[0]
+        for token in sys.argv[1:]
+        if token.startswith("--")
+    }
+    try:
+        _apply_training_profile(args, explicit_options=explicit_options)
+    except ValueError as exc:
+        parser.error(str(exc))
     global CHECKPOINT_DIR, HP_CURRICULUM_SCHEDULE
     if args.save_dir:
         CHECKPOINT_DIR = os.path.abspath(args.save_dir)
@@ -603,6 +676,10 @@ def main():
         load_saves = sorted(glob.glob(os.path.join(args.load_save_dir, "*.save")))
         if not load_saves:
             print(f"  ⚠ No .save files in {args.load_save_dir}"); sys.exit(1)
+    try:
+        _validate_training_profile(args, load_saves=load_saves)
+    except ValueError as exc:
+        parser.error(str(exc))
     if load_saves:
         if args.snapshot_curriculum and args.mix_save_envs != -1:
             parser.error("--snapshot-curriculum cannot be combined with --mix-save-envs")
@@ -628,6 +705,10 @@ def main():
 
     print(f"Training: {args.character} | {args.steps} steps | {args.n_envs} envs"
           f" | device={device}{suffix}")
+    if args.profile:
+        print(f"  profile={args.profile} snapshot_curriculum={args.snapshot_curriculum} "
+              f"mix_save_envs={current_mix_save_envs} hp_curriculum={args.hp_curriculum} "
+              f"ent_coef={ENT_COEF} eval_freq={args.eval_freq} save_dir={CHECKPOINT_DIR}")
     print(f"  n_steps={N_STEPS} batch={BATCH_SIZE} lr={LR} ent={ENT_COEF} "
           f"hp_penalty=-0.50 floor_bonus=0.10×floor(cap1.5) hp_curve=quadratic")
     if load_saves:
