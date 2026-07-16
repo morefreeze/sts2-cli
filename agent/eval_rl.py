@@ -7,6 +7,8 @@ Usage:
     python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --verbose
 """
 import argparse, json, os, random, signal, sys, time
+from collections import Counter
+
 import numpy as np
 import torch
 
@@ -49,6 +51,56 @@ def format_floor_label(floor: int | float | str | None) -> str:
 
 def format_floor_labels(floors: list[int] | tuple[int, ...]) -> str:
     return "[" + ", ".join(format_floor_label(f) for f in sorted(floors)) + "]"
+
+
+def classify_eval_result(*, timed_out: bool, run_won: bool, info: dict) -> str:
+    """Classify one completed evaluation attempt."""
+    if timed_out or info.get("timeout"):
+        return "timeout"
+    if run_won:
+        return "win"
+    if info.get("stuck"):
+        return "stuck"
+    if info.get("crashed"):
+        return "crash"
+    return "dead"
+
+
+def should_retry_invalid_result(status: str, *, retries_used: int,
+                                retry_limit: int) -> bool:
+    return status in {"crash", "timeout", "stuck"} and retries_used < retry_limit
+
+
+def summarize_eval_results(results: list[dict], *, requested_n: int,
+                           total_attempts: int,
+                           attempt_statuses: list[str] | None = None) -> dict:
+    """Aggregate only legitimate wins/deaths into policy performance metrics."""
+    valid = [r for r in results if r.get("status") in {"win", "dead"}]
+    floors = [int(r.get("floor", 0) or 0) for r in valid]
+    combat_wins = [int(r.get("combat_wins", 0) or 0) for r in valid]
+    wins = [1 if r.get("status") == "win" else 0 for r in valid]
+    statuses = (attempt_statuses if attempt_statuses is not None
+                else [str(r.get("status", "unknown")) for r in results])
+    counts = Counter(statuses)
+    invalid_attempts = sum(
+        count for status, count in counts.items()
+        if status in {"crash", "timeout", "stuck"}
+    )
+    return {
+        "avg_floor": float(np.mean(floors)) if floors else 0.0,
+        "max_floor": int(max(floors)) if floors else 0,
+        "win_rate": float(np.mean(wins)) if wins else 0.0,
+        "avg_combat_wins": float(np.mean(combat_wins)) if combat_wins else 0.0,
+        "floors": floors,
+        "n": len(valid),
+        "valid_n": len(valid),
+        "invalid_n": len(results) - len(valid),
+        "invalid_attempts": invalid_attempts,
+        "requested_n": requested_n,
+        "attempts": total_attempts,
+        "status_counts": dict(sorted(counts.items())),
+        "results": results,
+    }
 
 
 class _GameTimeout(Exception):
@@ -332,7 +384,8 @@ class _VerboseCombatEnv(CombatEnv):
 
 
 def run_eval_verbose(model, character: str, n_games: int = 10,
-                     fixed_seeds: bool = False, seed_offset: int = 0,
+                     fixed_seeds: bool = True, seed_offset: int = 0,
+                     invalid_retries: int = 1,
                      verbose: bool = False,
                      replay_actions: list = None,
                      load_seed: str = None,
@@ -356,15 +409,27 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
     model_obs_size = model.observation_space.shape[0]
     extra_obs, relic_obs = obs_flags_for_size(model_obs_size, 161)
 
-    floors, wins, combat_wins_list = [], [], []
+    if n_games < 1:
+        raise ValueError("n_games must be at least 1")
+    if invalid_retries < 0:
+        raise ValueError("invalid_retries cannot be negative")
+
+    results: list[dict] = []
+    attempt_statuses: list[str] = []
     boss_records = []  # per-game: {"boss": id, "reached": bool, "won": bool}
-    for i in range(n_games):
-        if load_seed:
-            game_seed = load_seed
-        elif fixed_seeds:
-            game_seed = f"eval_fixed_{i + seed_offset}"
-        else:
-            game_seed = f"eval_r{random.randint(0, 0xFFFFFF):06x}_{i}"
+    i = 0
+    retries_used = 0
+    total_attempts = 0
+    game_seed = None
+    while i < n_games:
+        total_attempts += 1
+        if retries_used == 0:
+            if load_seed:
+                game_seed = load_seed
+            elif fixed_seeds:
+                game_seed = f"eval_fixed_{i + seed_offset}"
+            else:
+                game_seed = f"eval_r{random.randint(0, 0xFFFFFF):06x}_{i}"
 
         env_kwargs = dict(character=character, seed=game_seed,
                           seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs,
@@ -534,38 +599,22 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             signal.alarm(0)
 
         env_wrapped.close()
-        floors.append(max_floor)
-        combat_wins_list.append(ep_combat_wins)
-        wins.append(1 if run_won else 0)
-
-        if timed_out:
-            end_reason = "TIMEOUT"
-        elif run_won:
-            end_reason = "WIN"
-        elif last_info.get("crashed"):
-            end_reason = "crash/stuck"
-        else:
-            end_reason = "dead"
-
-        boss_records.append({"boss": game_boss_id or "?",
-                              "reached": max_floor >= 17, "won": run_won})
-        # Result row for the boss-deck log: joined by seed in the viewer.
-        # Only written when this game logged a boss-entry deck (reached boss).
-        if boss_deck_log_path and logged_boss_floors:
-            try:
-                with open(boss_deck_log_path, "a") as _bf:
-                    _bf.write(json.dumps({
-                        "event": "result", "seed": game_seed,
-                        "game_index": i, "boss": game_boss_id,
-                        "max_floor": max_floor, "run_won": run_won,
-                        "boss_beaten": run_won or max_floor > 17,
-                        "end_reason": end_reason,
-                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
+        status = classify_eval_result(
+            timed_out=timed_out,
+            run_won=run_won,
+            info=last_info,
+        )
+        attempt_statuses.append(status)
+        retrying = should_retry_invalid_result(
+            status,
+            retries_used=retries_used,
+            retry_limit=invalid_retries,
+        )
+        end_reason = status.upper() if status in {"win", "timeout"} else status
+        retry_note = (f"; retry {retries_used + 1}/{invalid_retries}"
+                      if retrying else "")
         print(f"  game {i+1:2d}: floor={format_floor_label(max_floor):>5s} combats={ep_combat_wins} "
-              f"boss={game_boss_id or '?':<20s} [{end_reason}]")
+              f"boss={game_boss_id or '?':<20s} [{end_reason}{retry_note}]")
 
         if verbose:
             # Print per-room log
@@ -599,6 +648,44 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                         print(step)
             print()
 
+        if retrying:
+            retries_used += 1
+            continue
+
+        results.append({
+            "seed": game_seed,
+            "game_index": i,
+            "status": status,
+            "floor": max_floor,
+            "combat_wins": ep_combat_wins,
+            "boss": game_boss_id or "?",
+            "run_won": run_won,
+            "attempts": retries_used + 1,
+        })
+        if status in {"win", "dead"}:
+            boss_records.append({"boss": game_boss_id or "?",
+                                 "reached": max_floor >= 17, "won": run_won})
+
+        # Result row for the boss-deck log: joined by seed in the viewer.
+        # Only written when this game logged a boss-entry deck (reached boss).
+        if boss_deck_log_path and logged_boss_floors:
+            try:
+                with open(boss_deck_log_path, "a") as _bf:
+                    _bf.write(json.dumps({
+                        "event": "result", "seed": game_seed,
+                        "game_index": i, "boss": game_boss_id,
+                        "max_floor": max_floor, "run_won": run_won,
+                        "boss_beaten": run_won or max_floor > 17,
+                        "end_reason": status,
+                        "attempts": retries_used + 1,
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+
+        i += 1
+        retries_used = 0
+
     # Per-boss aggregation: games / boss-reach / wins per act boss.
     per_boss: dict = {}
     for rec in boss_records:
@@ -607,40 +694,31 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         b["reached"] += int(rec["reached"])
         b["won"] += int(rec["won"])
 
-    return {
-        "avg_floor": float(np.mean(floors)),
-        "max_floor": int(max(floors)),
-        "win_rate": float(np.mean(wins)),
-        "avg_combat_wins": float(np.mean(combat_wins_list)),
-        "floors": floors,
-        "n": n_games,
-        "per_boss": per_boss,
-    }
+    stats = summarize_eval_results(
+        results,
+        requested_n=n_games,
+        total_attempts=total_attempts,
+        attempt_statuses=attempt_statuses,
+    )
+    stats["per_boss"] = per_boss
+    return stats
 
 
-def _latest_checkpoint(checkpoints_dir: str = "checkpoints") -> str:
-    import glob, re
-    zips = glob.glob(os.path.join(checkpoints_dir, "ppo_ironclad_*.zip"))
-    if not zips:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}/")
-    def _steps(p):
-        m = re.search(r"_(\d+)k\.zip$", p)
-        return int(m.group(1)) if m else 0
-    return max(zips, key=_steps)
-
-
-def main():
-    import json as _json
-
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("checkpoint", nargs="?", default=None,
-                   help="Path to checkpoint zip (default: latest in checkpoints/)")
+    p.add_argument("checkpoint", help="Explicit path to checkpoint zip")
     p.add_argument("--character", default="Ironclad")
     p.add_argument("--n-games", type=int, default=20)
-    p.add_argument("--fixed-seeds", action="store_true",
-                   help="Use fixed eval_fixed_0..N seeds (reproducible but risks overfitting)")
+    seed_group = p.add_mutually_exclusive_group()
+    seed_group.add_argument("--fixed-seeds", dest="fixed_seeds", action="store_true",
+                            help="Use fixed eval_fixed_0..N seeds (default)")
+    seed_group.add_argument("--random-seeds", dest="fixed_seeds", action="store_false",
+                            help="Use a new random seed for each requested game")
+    p.set_defaults(fixed_seeds=True)
     p.add_argument("--seed-offset", type=int, default=0,
-                   help="Offset for fixed seed index (use with --fixed-seeds)")
+                   help="Offset for fixed seed index")
+    p.add_argument("--invalid-retries", type=int, default=1,
+                   help="Retry crash/timeout/stuck attempts on the same seed (default: 1)")
     p.add_argument("--verbose", action="store_true", default=False,
                    help="Per-room summaries + detailed last-combat trace on wins")
     p.add_argument("--load", default=None,
@@ -660,6 +738,13 @@ def main():
                         "Diagnose mid-Act death walls (e.g. floor 15). Replay saves with boss_retry.py.")
     p.add_argument("--combat-snapshot-floors", default=None,
                    help="Comma-separated floors to capture for --combat-snapshot-dir, e.g. '7,8,9,15'.")
+    return p
+
+
+def main():
+    import json as _json
+
+    p = _build_parser()
     args = p.parse_args()
     boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
                           else args.deck_log)
@@ -689,7 +774,7 @@ def main():
         if "--n-games" not in sys.argv and "-n" not in sys.argv:
             n_games = 1
 
-    checkpoint = args.checkpoint or _latest_checkpoint()
+    checkpoint = args.checkpoint
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = MaskablePPO.load(checkpoint, device=device)
 
@@ -710,6 +795,7 @@ def main():
 
     stats = run_eval_verbose(model, character, n_games=n_games,
                              fixed_seeds=args.fixed_seeds, seed_offset=args.seed_offset,
+                             invalid_retries=args.invalid_retries,
                              verbose=args.verbose,
                              replay_actions=replay_actions, load_seed=load_seed,
                              native_save_path=native_save_path,
@@ -720,6 +806,10 @@ def main():
                              combat_snapshot_floors=combat_snapshot_floors,
                              checkpoint_name=checkpoint)
     print(f"---")
+    print(f"valid games    : {stats['valid_n']}/{stats['requested_n']} "
+          f"(attempts={stats['attempts']}, invalid_seeds={stats['invalid_n']}, "
+          f"invalid_attempts={stats['invalid_attempts']})")
+    print(f"status counts  : {stats['status_counts']}")
     print(f"avg_floor      : {stats['avg_floor']:.1f}")
     print(f"max_floor      : {format_floor_label(stats['max_floor'])}")
     print(f"win_rate       : {stats['win_rate']:.0%}")

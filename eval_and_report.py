@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
-"""eval_and_report.py - Evaluate latest RL checkpoint and generate report.
+"""Evaluate an explicit RL checkpoint and generate a reproducible report.
 
 This script:
-1. Finds the latest checkpoint in checkpoints/
-2. Evaluates it with 10 games
+1. Requires the checkpoint path from the caller
+2. Evaluates it with a fixed seed set by default
 3. Generates a formatted report
 4. Output is auto-delivered to Telegram by the cron system
 """
-import glob, os, re, subprocess, sys
+import argparse
+import os
+import re
+import sys
 from datetime import datetime
 
-def latest_checkpoint(checkpoints_dir: str = "checkpoints") -> str:
-    """Find the latest checkpoint by step count."""
-    zips = glob.glob(os.path.join(checkpoints_dir, "ppo_ironclad_*.zip"))
-    if not zips:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}/")
-    def _steps(p):
-        m = re.search(r"_(\d+)k\.zip$", p)
-        return int(m.group(1)) if m else 0
-    return max(zips, key=_steps)
 
 def extract_steps(checkpoint_path: str) -> int:
     """Extract step count from checkpoint filename."""
     m = re.search(r"_(\d+)k\.zip$", checkpoint_path)
     return int(m.group(1)) if m else 0
 
-def run_eval(checkpoint: str, n_games: int = 10) -> dict:
+
+def run_eval(checkpoint: str, n_games: int = 10,
+             fixed_seeds: bool = True, invalid_retries: int = 1) -> dict:
     """Run evaluation using eval_rl.py and parse output."""
     # Import eval_rl module directly instead of subprocess
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from agent.eval_rl import run_eval_verbose, _latest_checkpoint
+    from agent.eval_rl import run_eval_verbose
     from sb3_contrib import MaskablePPO
     import torch
 
@@ -48,7 +44,8 @@ def run_eval(checkpoint: str, n_games: int = 10) -> dict:
         model,
         character="Ironclad",
         n_games=n_games,
-        fixed_seeds=False,
+        fixed_seeds=fixed_seeds,
+        invalid_retries=invalid_retries,
         verbose=False
     )
     return stats
@@ -64,11 +61,16 @@ def format_report(stats: dict, checkpoint: str) -> str:
     report.append(f"📈 **Training Steps**: {steps}k ({steps*1000:,})")
     report.append(f"🕐 **Eval Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report.append(f"")
-    report.append(f"📊 **Performance ({stats['n']} games)**:")
+    report.append(
+        f"📊 **Performance ({stats['valid_n']}/{stats['requested_n']} valid games)**:"
+    )
     report.append(f"  • **Win Rate**: {stats['win_rate']:.1%}")
     report.append(f"  • **Avg Floor**: {stats['avg_floor']:.1f}")
     report.append(f"  • **Max Floor**: {stats['max_floor']}")
     report.append(f"  • **Avg Combat Wins**: {stats['avg_combat_wins']:.1f}")
+    report.append(f"  • **Invalid Seeds**: {stats['invalid_n']}")
+    report.append(f"  • **Invalid Attempts**: {stats['invalid_attempts']}")
+    report.append(f"  • **Attempts**: {stats['attempts']}")
     report.append(f"")
     report.append(f"📊 **Floor Distribution**: {sorted(stats['floors'])}")
 
@@ -92,8 +94,20 @@ def format_report(stats: dict, checkpoint: str) -> str:
 
     return "\n".join(report)
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("checkpoint", help="Explicit path to checkpoint zip")
+    parser.add_argument("--n-games", type=int, default=10)
+    parser.add_argument("--invalid-retries", type=int, default=1)
+    parser.add_argument("--random-seeds", dest="fixed_seeds", action="store_false",
+                        help="Use random seeds instead of the fixed comparison set")
+    parser.set_defaults(fixed_seeds=True)
+    return parser
+
+
 def main():
-    checkpoint = latest_checkpoint()
+    args = _build_parser().parse_args()
+    checkpoint = args.checkpoint
 
     # Check if we should skip (same checkpoint as last run)
     last_eval_file = "/tmp/sts2-cli/last_eval_checkpoint.txt"
@@ -109,7 +123,12 @@ def main():
         pass
 
     # Run evaluation
-    stats = run_eval(checkpoint, n_games=10)
+    stats = run_eval(
+        checkpoint,
+        n_games=args.n_games,
+        fixed_seeds=args.fixed_seeds,
+        invalid_retries=args.invalid_retries,
+    )
 
     # Format and print report
     report = format_report(stats, checkpoint)
