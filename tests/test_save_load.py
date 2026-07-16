@@ -1,6 +1,6 @@
 """Regression tests for native save/load behavior."""
 
-from conftest import Game
+from .conftest import Game
 
 
 def test_load_map_save_does_not_retrigger_neow(tmp_path):

@@ -144,3 +144,24 @@ def test_greedy_action_uses_decision_advisor_for_card_rewards():
     state["player"]["deck"] = deck
 
     assert greedy_action(state)["args"]["card_index"] == 0
+
+
+def test_greedy_action_can_disable_decision_advisor(monkeypatch):
+    from agent import combat_env
+
+    class FailingAdvisor:
+        def choose(self, state):
+            raise AssertionError("advisor should be bypassed")
+
+    monkeypatch.setenv("STS2_DECISION_ADVISOR", "0")
+    monkeypatch.setattr(combat_env, "_decision_advisor", FailingAdvisor())
+
+    state = {
+        "decision": "map_select",
+        "choices": [
+            {"col": 1, "row": 3, "type": "enemy"},
+            {"col": 2, "row": 3, "type": "rest"},
+        ],
+    }
+
+    assert combat_env.greedy_action(state)["action"] == "select_map_node"

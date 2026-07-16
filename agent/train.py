@@ -57,6 +57,44 @@ HP_CURRICULUM_SCHEDULE = [
     (0.60,  80),  # 20% win
     (0.85,   0),  # 0 = no override, use natural HP from snapshot
 ]
+HP_CURRICULUM_PHASE_FRACTIONS = (0.00, 0.30, 0.60, 0.85)
+
+
+def _hp_curriculum_fractions(count: int) -> list[float]:
+    if count <= 0:
+        raise ValueError("hp curriculum values cannot be empty")
+    if count == len(HP_CURRICULUM_PHASE_FRACTIONS):
+        return list(HP_CURRICULUM_PHASE_FRACTIONS)
+    if count == 1:
+        return [0.00]
+    return [0.85 * i / (count - 1) for i in range(count)]
+
+
+def _parse_hp_curriculum_values(spec: str) -> list[tuple[float, int]]:
+    """Parse comma-separated HP phases.
+
+    The token "natural" maps to 0, matching CombatEnv's "no HP override" value.
+    """
+    if not spec or not spec.strip():
+        raise ValueError("hp curriculum values cannot be empty")
+
+    values = []
+    for raw in spec.split(","):
+        token = raw.strip().lower()
+        if not token:
+            raise ValueError("hp curriculum values contain an empty phase")
+        if token in {"natural", "none"}:
+            hp = 0
+        else:
+            try:
+                hp = int(token)
+            except ValueError:
+                raise ValueError(f"invalid hp curriculum value: {raw!r}") from None
+            if hp < 0:
+                raise ValueError("hp curriculum values must be non-negative")
+        values.append(hp)
+
+    return list(zip(_hp_curriculum_fractions(len(values)), values))
 
 
 def mask_fn(env):
@@ -483,6 +521,9 @@ def main():
                         help="Enable HP curriculum (B2: phases 120→100→80→natural) when "
                              "training with --load-save or --load-save-dir. Only useful "
                              "with snapshot pool — overrides player HP after each load.")
+    parser.add_argument("--hp-curriculum-values", default=None,
+                        help="Comma-separated HP phases for --hp-curriculum; 'natural' means "
+                             "no override. Example: 100,90,80,72. Implies --hp-curriculum.")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")
     parser.add_argument("--load-save",   default=None,
@@ -501,9 +542,15 @@ def main():
                         help="Override checkpoint output dir (default: checkpoints/). "
                              "Use 'checkpoints_boss/' for boss-focused training.")
     args = parser.parse_args()
-    global CHECKPOINT_DIR
+    global CHECKPOINT_DIR, HP_CURRICULUM_SCHEDULE
     if args.save_dir:
         CHECKPOINT_DIR = os.path.abspath(args.save_dir)
+    if args.hp_curriculum_values:
+        try:
+            HP_CURRICULUM_SCHEDULE = _parse_hp_curriculum_values(args.hp_curriculum_values)
+        except ValueError as e:
+            parser.error(str(e))
+        args.hp_curriculum = True
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     device = "mps" if torch.backends.mps.is_available() else "cpu"

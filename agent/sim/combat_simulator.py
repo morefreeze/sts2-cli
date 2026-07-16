@@ -56,7 +56,10 @@ def heuristic_policy(state: CombatState, rng: random.Random) -> dict:
     """Heuristic player: attack if lethal damage available; else block when
     incoming is high; else play any playable card.
 
-    Crude but covers ~70% of basic-deck combats reasonably."""
+    Crude but covers ~70% of basic-deck combats reasonably.
+    (Jun 10 v2 rewrite tried Power-first + Vuln-prio + greedy-block; n=30 eval
+    regressed 12.45→11.8, 4/30→1/30 boss-reach because Power-first wasted T1
+    survival energy. Reverted to original logic.)"""
     # Build a quick cost+effect summary per hand slot
     candidates = []
     for i, cid in enumerate(state.hand):
@@ -122,6 +125,110 @@ def heuristic_policy(state: CombatState, rng: random.Random) -> dict:
     # Else any playable card
     return {"kind": "play", "hand_idx": candidates[0]["hand_idx"],
             "target_idx": target_idx}
+
+
+# ─── MCTS policy (Jun 10) ─────────────────────────────────────────────────
+import copy as _copy
+import os as _os_mcts
+
+
+def _enumerate_actions(state: CombatState) -> list[dict]:
+    """Return list of legal actions for current turn (each: {kind, hand_idx, target_idx})
+    plus the end_turn action. Used by MCTS to enumerate candidates."""
+    actions = []
+    alive_targets = [i for i, e in enumerate(state.enemies) if e.hp > 0]
+    if not alive_targets:
+        return [{"kind": "end_turn"}]
+    for i, cid in enumerate(state.hand):
+        data = get_card_data(cid)
+        if data is None:
+            continue
+        cost_raw = data.get("cost", "1")
+        try:
+            cost = int(cost_raw)
+        except (ValueError, TypeError):
+            cost = 1 if cost_raw != "X" else state.energy
+        if cost > state.energy:
+            continue
+        # Only target one enemy for attacks to keep branch factor manageable
+        is_attack = data.get("type") == "Attack"
+        if is_attack and len(alive_targets) > 1:
+            # Pick lowest-HP target + first Vuln-tagged target (max 2 options)
+            tgts = [alive_targets[0]]
+            vuln_t = next((t for t in alive_targets
+                           if state.enemies[t].statuses.get("Vulnerable", 0) > 0), None)
+            if vuln_t is not None and vuln_t not in tgts:
+                tgts.append(vuln_t)
+        else:
+            tgts = [alive_targets[0]]
+        for t in tgts:
+            actions.append({"kind": "play", "hand_idx": i, "target_idx": t})
+    actions.append({"kind": "end_turn"})
+    return actions
+
+
+def _evaluate_state(state: CombatState) -> float:
+    """Value function: higher = better player position.
+    Combines player HP (kept), enemy HP (drained), player block (free HP)."""
+    if not state.alive():
+        return -200.0
+    enemy_hp_total = sum(max(0, e.hp) for e in state.enemies)
+    enemy_max_total = sum(max(1, e.max_hp) for e in state.enemies)
+    enemy_frac_alive = enemy_hp_total / max(enemy_max_total, 1)
+    # Reward: keep HP up, drain enemy, modest block credit
+    return (state.hp + 0.3 * state.block) - 60 * enemy_frac_alive
+
+
+def mcts_policy(state: CombatState, rng: random.Random,
+                 n_sims_per_action: int = 2, rollout_depth: int = 3) -> dict:
+    """1-ply lookahead search: for each playable action, simulate N rollouts
+    using heuristic_policy for the next `rollout_depth` turns, then evaluate.
+    Pick action with highest expected value.
+
+    Trade-off: ~5-15× slower than heuristic_policy per turn. Use only when
+    MC predictions matter (during card_reward MC rollout, not real combat).
+
+    Env knob: STS2_MCTS_DEPTH overrides rollout_depth, STS2_MCTS_SIMS overrides
+    n_sims_per_action. STS2_USE_MCTS=1 enables policy throughout sim.
+    """
+    actions = _enumerate_actions(state)
+    if len(actions) <= 1:
+        return actions[0] if actions else {"kind": "end_turn"}
+
+    depth = int(_os_mcts.environ.get("STS2_MCTS_DEPTH", rollout_depth))
+    n_sims = int(_os_mcts.environ.get("STS2_MCTS_SIMS", n_sims_per_action))
+
+    best_action = actions[0]
+    best_value = -float("inf")
+    for action in actions:
+        values = []
+        for _ in range(n_sims):
+            s = _copy.deepcopy(state)
+            try:
+                if action["kind"] == "play":
+                    from agent.sim.combat_step import play_card as _play, end_turn as _end
+                    _play(s, action["hand_idx"], action.get("target_idx", 0), rng)
+                else:
+                    from agent.sim.combat_step import end_turn as _end
+                    _end(s, rng)
+                # Roll out remaining turns with heuristic for depth turns
+                for _ in range(depth):
+                    if s.combat_over():
+                        break
+                    sub = heuristic_policy(s, rng)
+                    if sub["kind"] == "end_turn":
+                        _end(s, rng)
+                    else:
+                        from agent.sim.combat_step import play_card as _play2
+                        _play2(s, sub["hand_idx"], sub.get("target_idx", 0), rng)
+            except Exception:
+                pass
+            values.append(_evaluate_state(s))
+        avg_val = sum(values) / max(len(values), 1)
+        if avg_val > best_value:
+            best_value = avg_val
+            best_action = action
+    return best_action
 
 
 # ─── main simulation loop ─────────────────────────────────────────────────

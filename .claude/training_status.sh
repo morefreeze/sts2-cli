@@ -46,8 +46,9 @@ fmt_train() {
 # ───── train ──────────────────────────────────────────────────────────────
 train_pids=$(pgrep -f 'agent\.train' 2>/dev/null)
 if [[ -n "$train_pids" ]]; then
-    log=$(ls -t training_run*.log training_boss*.log 2>/dev/null | head -1)
-    if [[ -n "$log" ]]; then
+    train_logs=(training_run*.log(N) training_boss*.log(N))
+    if (( ${#train_logs[@]} )); then
+        log=$(ls -t -- $train_logs | head -1)
         echo "🎓 $(fmt_train "$log")"
     else
         echo "🎓 train PID=$(echo $train_pids | tr '\n' ' ') (no log)"
@@ -57,8 +58,9 @@ fi
 # ───── eval ───────────────────────────────────────────────────────────────
 eval_pids=$(pgrep -f 'agent\.eval_rl' 2>/dev/null)
 if [[ -n "$eval_pids" ]]; then
-    eval_log=$(ls -t /tmp/sts2-cli/eval_*.log 2>/dev/null | head -1)
-    if [[ -n "$eval_log" ]]; then
+    eval_logs=(/tmp/sts2-cli/eval_*.log(N))
+    if (( ${#eval_logs[@]} )); then
+        eval_log=$(ls -t -- $eval_logs | head -1)
         n_done=$(grep -cE "^  game " "$eval_log" 2>/dev/null)
         ckpt=$(basename "$eval_log" .log | sed 's/^eval_//')
         echo "🔬 eval ${ckpt}: ${n_done} games done"
@@ -70,8 +72,9 @@ fi
 # ───── boss_retry ─────────────────────────────────────────────────────────
 retry_pids=$(pgrep -f 'boss_retry' 2>/dev/null)
 if [[ -n "$retry_pids" ]]; then
-    retry_log=$(ls -t /tmp/sts2-cli/boss_retry_*.log /tmp/sts2-cli/hp_sweep_*.log 2>/dev/null | head -1)
-    if [[ -n "$retry_log" ]]; then
+    retry_logs=(/tmp/sts2-cli/boss_retry_*.log(N) /tmp/sts2-cli/hp_sweep_*.log(N))
+    if (( ${#retry_logs[@]} )); then
+        retry_log=$(ls -t -- $retry_logs | head -1)
         # boss_retry prints "  mode: win X/Y …" lines once each mode completes
         n_done=$(grep -cE "^  (deterministic|stochastic|hp=)" "$retry_log" 2>/dev/null)
         ckpt=$(basename "$retry_log" .log | sed 's/^boss_retry_//;s/^hp_sweep_//')
@@ -83,8 +86,11 @@ fi
 
 # ───── most recent finished eval/retry summary ────────────────────────────
 # Only show if NO train/eval/retry currently running OR as a tail tip.
-latest_log=$(ls -t /tmp/sts2-cli/eval_*.log /tmp/sts2-cli/boss_retry_*.log /tmp/sts2-cli/hp_sweep_*.log 2>/dev/null \
-             | head -1)
+latest_logs=(/tmp/sts2-cli/eval_*.log(N) /tmp/sts2-cli/boss_retry_*.log(N) /tmp/sts2-cli/hp_sweep_*.log(N))
+latest_log=""
+if (( ${#latest_logs[@]} )); then
+    latest_log=$(ls -t -- $latest_logs | head -1)
+fi
 if [[ -n "$latest_log" && -z "$eval_pids" && -z "$retry_pids" ]]; then
     # Only when the corresponding task is no longer running — show summary
     avg=$(grep -E "^avg_floor" "$latest_log" 2>/dev/null | tail -1 | awk '{print $3}')

@@ -156,8 +156,13 @@ def lookup_card(card_id: str, card_db: dict) -> dict:
     }
 
 
-def sample_milestones(jsonl_path: str, n: int = 100, seed: int = 42) -> list[dict]:
-    """One milestone per run, n distinct runs, ranked by floor then random."""
+def sample_milestones(jsonl_path: str, n: int = 100, seed: int = 42,
+                       min_floor: int = 0) -> list[dict]:
+    """One milestone per run, n distinct runs, ranked by floor then random.
+
+    min_floor: if >0, only include runs whose outcome reached max_floor ≥ min_floor.
+    Use --min-floor 17 to view only boss-reach decks.
+    """
     by_run: dict[str, list[dict]] = defaultdict(list)
     outcomes: dict[str, dict] = {}
     with open(jsonl_path) as f:
@@ -176,6 +181,11 @@ def sample_milestones(jsonl_path: str, n: int = 100, seed: int = 42) -> list[dic
                 outcomes[rid] = o
     rng = random.Random(seed)
     runs = [rid for rid in by_run if rid in outcomes]
+    if min_floor > 0:
+        runs = [rid for rid in runs
+                if (outcomes[rid].get("max_floor") or 0) >= min_floor]
+        print(f"  filtered to {len(runs)} runs with max_floor >= {min_floor}",
+              file=sys.stderr)
     rng.shuffle(runs)
     chosen = []
     for rid in runs[: n * 3]:  # over-sample then prune duplicates
@@ -619,7 +629,7 @@ def _chip_tooltip(c: dict) -> str:
         parts.append("stats: " + ", ".join(f"{k}={v}" for k, v in stats.items()))
     desc = c.get("description") or ""
     if desc:
-        parts.append(desc[:120])
+        parts.append(desc[:300])
     parts.append(f"score_card = {sc:.2f}")
     return " · ".join(parts)
 
@@ -950,12 +960,15 @@ def main():
                    help="how many distinct runs to sample")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--input", default="data/deck_history.jsonl")
+    p.add_argument("--min-floor", type=int, default=0,
+                   help="only include runs reaching this floor (17 = boss-reach)")
     args = p.parse_args()
 
     card_db = load_card_db()
     print(f"Card DB: {len({c['id'] for c in [v for v in card_db.values()]})} unique cards", file=sys.stderr)
     calibrate_dim_caps(args.input)
-    decks = sample_milestones(args.input, n=args.n, seed=args.seed)
+    decks = sample_milestones(args.input, n=args.n, seed=args.seed,
+                               min_floor=args.min_floor)
     print(f"Sampled {len(decks)} decks from {args.input}", file=sys.stderr)
     html = build_html(decks, card_db)
     with open(args.out, "w") as f:

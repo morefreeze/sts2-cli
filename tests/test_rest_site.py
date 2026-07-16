@@ -44,7 +44,8 @@ class TestRestSiteActions:
         if not heal:
             pytest.skip("HEAL not available at near-full HP")
         state = game.act("choose_option", option_index=heal["index"])
-        assert state.get("player", {}).get("hp", 0) <= 80
+        player = state.get("player", {})
+        assert player.get("hp", 0) <= player.get("max_hp", 0)
 
     def test_smith_triggers_card_select(self, game):
         state = game.start(seed="rsa3")

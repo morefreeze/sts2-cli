@@ -113,6 +113,9 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                     # HP_STRONG raised to 0.85: runs at 75-85% HP shouldn't seek elites.
                 elif isinstance(floor, int) and floor >= 13:
                     p += 3  # pre-boss zone: save HP for boss fight, avoid elites
+                              # Jun 10 attempted +10 boost (strong avoid) regressed boss-reach
+                              # 13%→0% even though avg_floor rose — paths around elite force
+                              # tougher unavoidable fights. Reverted to +3.
                 if isinstance(floor, int) and floor >= self.ACT2_BOSS_ZONE:
                     p += 4  # pre-Act-2-boss: strongly avoid elites regardless of HP
             scored.append((p, i, c))
@@ -142,6 +145,9 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     hp_ratio = hp / max_hp
     floor = state.get("floor") or state.get("context", {}).get("floor", 0)
     deck = player.get("deck") or []
+    boss = (state.get("context") or {}).get("boss") or {}
+    boss_id = boss.get("id") if isinstance(boss, dict) else boss
+    is_vantom = "VANTOM" in str(boss_id or "").upper()
 
     # Heal threshold by floor — used when no must-upgrade card present.
     if isinstance(floor, int) and floor >= 16:
@@ -163,7 +169,7 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     elif isinstance(floor, int) and floor <= 15:
         CRITICAL_HEAL = 0.40  # Act 2 body: balance
     else:
-        CRITICAL_HEAL = 0.30  # Pre-boss zone: upgrades matter more (boss is one fight)
+        CRITICAL_HEAL = 0.30  # Pre-boss zone
 
     enabled = [o for o in options if o.get("is_enabled", True)]
     heal  = next((o for o in enabled if "heal"  in (o.get("option_id") or "").lower()), None)
@@ -175,7 +181,19 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     # Floor 14+ = pre-boss zone (boss at 17, max 2 fights remain), so HEAL wins.
     # Earlier scope (10+) regressed -1.0 floor by removing too many good SMITHs.
     pre_boss_zone = isinstance(floor, int) and floor >= 14
+    import os
+    vantom_rest_heal_enabled = os.environ.get(
+        "STS2_VANTOM_REST_HEAL", "") in ("1", "true", "on")
+    vantom_mid_boss_low = (
+        vantom_rest_heal_enabled
+        and is_vantom
+        and isinstance(floor, int)
+        and 11 <= floor <= 13
+        and hp_ratio < 0.70
+    )
     if hp_ratio < CRITICAL_HEAL and heal is not None:
+        choice = heal
+    elif vantom_mid_boss_low and heal is not None:
         choice = heal
     elif pre_boss_zone and hp_ratio < heal_threshold and heal is not None:
         choice = heal  # boss prep: HEAL over SMITH at floor 14+

@@ -101,6 +101,101 @@ def _deck_aggregate_features(deck_ids, card_db):
             "rarity_hist": n_rarity, "n_known": n_known}
 
 
+# Energy-scaling relics — they raise base/per-turn energy by 1-4, which inflates
+# the value of high-cost cards and changes the deck's effective archetype.
+# Captured as a single binary feature: presence alters card-pick fitness.
+_ENERGY_RELICS = {
+    "LANTERN", "VERY_HOT_COCOA", "VENERABLE_TEA_SET",
+    "PHILOSOPHERS_STONE", "PUMPKIN_CANDLE", "SOZU", "SPIKED_GAUNTLETS",
+    "VELVET_CHOKER", "WHISPERING_EARRING", "BLESSED_ANTLER",
+    "BLOOD_SOAKED_ROSE", "BREAD",
+}
+
+
+def _relic_features(relics):
+    """Compute (relic_count, has_energy_relic, has_burning_blood). `relics` may
+    be None for legacy rows (logged before relic tracking); treat as 0 in that
+    case."""
+    if not relics:
+        return 0.0, 0.0, 0.0
+    ids = {str(r).upper().replace("-", "_") for r in relics}
+    has_energy = 1.0 if (ids & _ENERGY_RELICS) else 0.0
+    has_bb = 1.0 if "BURNING_BLOOD" in ids else 0.0
+    return float(len(relics)), has_energy, has_bb
+
+
+def _interaction_features(deck_part_dict, cand_dict, has_energy, has_bb, relic_count):
+    """12 explicit deck × relic and candidate × relic cross features."""
+    return [
+        has_energy * deck_part_dict["cost2_count"],
+        has_energy * deck_part_dict["cost3plus_count"],
+        has_energy * deck_part_dict["deck_size"],
+        has_energy * deck_part_dict["n_power"],
+        has_energy * deck_part_dict["dim_attack"],
+        has_bb * deck_part_dict["hp_ratio"],
+        has_bb * deck_part_dict["n_attack"],
+        relic_count * deck_part_dict["cost3plus_count"],
+        cand_dict["cost"] * has_energy,
+        cand_dict["is_power"] * has_energy,
+        cand_dict["cost"] * relic_count,
+        cand_dict["is_attack"] * has_bb,
+    ]
+
+
+def _norm_id(s):
+    return str(s).upper().replace("-", "_").replace(" ", "_")
+
+
+# 14-bucket floor one-hot: floor == 3, 4, ..., 16 (one bucket each)
+FLOOR_BUCKETS = list(range(3, 17))
+
+
+def _floor_onehot(floor):
+    return [1.0 if floor == f else 0.0 for f in FLOOR_BUCKETS]
+
+
+def _scan_top_relics(history_path, n=50):
+    """One-pass scan to find top-N most common relic IDs in card_pick rows."""
+    counts = defaultdict(int)
+    with open(history_path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("event") == "card_pick":
+                for r in rec.get("relics") or []:
+                    counts[_norm_id(r)] += 1
+    return [r for r, _ in sorted(counts.items(), key=lambda x: -x[1])[:n]]
+
+
+def _deck_card_counts(deck_ids, card_idx):
+    """One feature per known card: count in deck."""
+    out = [0.0] * len(card_idx)
+    for cid in deck_ids:
+        i = card_idx.get(_norm_id(cid))
+        if i is not None:
+            out[i] += 1.0
+    return out
+
+
+def _cand_card_onehot(opt, card_idx):
+    out = [0.0] * len(card_idx)
+    i = card_idx.get(_norm_id(opt.get("id", "")))
+    if i is not None:
+        out[i] = 1.0
+    return out
+
+
+def _relic_onehot(relics, relic_idx):
+    out = [0.0] * len(relic_idx)
+    for r in relics or []:
+        i = relic_idx.get(_norm_id(r))
+        if i is not None:
+            out[i] = 1.0
+    return out
+
+
 def _candidate_features(opt):
     cost = opt.get("cost")
     cost_v = float(cost) if cost is not None else -1.0
@@ -112,7 +207,7 @@ def _candidate_features(opt):
     return [cost_v] + type_oh + rar_oh + [upg]
 
 
-FEATURE_NAMES = [
+BASE_FEATURE_NAMES = [
     "deck_dim_attack", "deck_dim_defense", "deck_dim_energy", "deck_dim_draw",
     "arch_str_gain", "arch_str_user",
     "arch_exhaust_payload", "arch_exhaust_fuel", "arch_block_payload",
@@ -120,15 +215,26 @@ FEATURE_NAMES = [
     "deck_n_attack", "deck_n_skill", "deck_n_power",
     "deck_n_common", "deck_n_uncommon", "deck_n_rare",
     "deck_size", "floor", "hp_ratio",
+    "relic_count", "has_energy_relic", "has_burning_blood",
     "cand_cost",
     "cand_is_attack", "cand_is_skill", "cand_is_power",
     "cand_is_common", "cand_is_uncommon", "cand_is_rare",
     "cand_upgraded",
 ]
-# 4 dims + 5 arch + 10 deck_aggregates + 3 scalars + 8 candidate = 30
+INTERACTION_FEATURE_NAMES = [
+    "ix_energy_x_cost2", "ix_energy_x_cost3plus", "ix_energy_x_decksize",
+    "ix_energy_x_npower", "ix_energy_x_dimattack",
+    "ix_bb_x_hpratio", "ix_bb_x_nattack",
+    "ix_reliccount_x_cost3plus",
+    "ix_candcost_x_energy", "ix_candpower_x_energy",
+    "ix_candcost_x_reliccount", "ix_candattack_x_bb",
+]
+# 4 dims + 5 arch + 10 deck_aggregates + 3 scalars + 3 relic + 8 candidate = 33 base
+# + 12 interaction + 80 deck_card_count + 80 cand_card_oh + 50 relic_oh + 14 floor_oh = 269 total
 
 
-def load_training_rows(history_path, card_db, picked_only=False):
+def load_training_rows(history_path, card_db, picked_only=False, relics_only=False,
+                       card_ids=None, top_relics=None):
     from agent.card_scoring import score_deck_dimensions, compute_deck_archetype
     picks_by_run = defaultdict(list)
     outcomes = {}
@@ -146,6 +252,8 @@ def load_training_rows(history_path, card_db, picked_only=False):
             elif ev == "outcome":
                 outcomes[rid] = rec.get("max_floor", 0)
 
+    card_idx = {cid: i for i, cid in enumerate(card_ids or [])}
+    relic_idx = {r: i for i, r in enumerate(top_relics or [])}
     X, y = [], []
     n_used = n_skip = 0
     for rid, picks in picks_by_run.items():
@@ -155,6 +263,8 @@ def load_training_rows(history_path, card_db, picked_only=False):
         for pick in picks:
             if pick.get("picked") == "SKIP":
                 n_skip += 1
+                continue
+            if relics_only and not pick.get("relics"):
                 continue
             n_used += 1
             deck_ids = pick.get("deck_before_ids") or []
@@ -177,6 +287,10 @@ def load_training_rows(history_path, card_db, picked_only=False):
             floor = pick.get("floor", 0)
             mhp = max(pick.get("max_hp", 1) or 1, 1)
             hp_ratio = (pick.get("hp", 0) or 0) / mhp
+            relic_count, has_energy_relic, has_bb = _relic_features(pick.get("relics"))
+            deck_card_counts = _deck_card_counts(deck_ids, card_idx)
+            relic_oh = _relic_onehot(pick.get("relics"), relic_idx)
+            floor_oh = _floor_onehot(floor)
             deck_part = [
                 float(dims.get("attack", 0)),
                 float(dims.get("defense", 0)),
@@ -200,7 +314,20 @@ def load_training_rows(history_path, card_db, picked_only=False):
                 float(deck_size),
                 float(floor),
                 float(hp_ratio),
+                relic_count,
+                has_energy_relic,
+                has_bb,
             ]
+            # Snapshot key deck stats for interaction computation
+            deck_stats = {
+                "cost2_count": float(agg["cost_hist"][2]),
+                "cost3plus_count": float(agg["cost_hist"][3]),
+                "deck_size": float(deck_size),
+                "n_power": float(agg["type_hist"][2]),
+                "n_attack": float(agg["type_hist"][0]),
+                "dim_attack": float(dims.get("attack", 0)),
+                "hp_ratio": float(hp_ratio),
+            }
             options = pick.get("options") or []
             if picked_only:
                 # Causally clean: only the picked option's features are paired
@@ -216,7 +343,16 @@ def load_training_rows(history_path, card_db, picked_only=False):
                 opts_to_use = options
             for opt in opts_to_use:
                 cand = _candidate_features(opt)
-                X.append(deck_part + cand)
+                cand_oh = _cand_card_onehot(opt, card_idx)
+                cand_stats = {
+                    "cost": cand[0],          # cand_cost
+                    "is_attack": cand[1],     # cand_is_attack
+                    "is_power": cand[3],      # cand_is_power
+                }
+                ix = _interaction_features(deck_stats, cand_stats,
+                                            has_energy_relic, has_bb, relic_count)
+                X.append(deck_part + cand + ix + deck_card_counts + cand_oh
+                          + relic_oh + floor_oh)
                 y.append(outcome)
     return X, y, n_used, n_skip
 
@@ -229,6 +365,9 @@ def main():
     p.add_argument("--min-rows", type=int, default=500)
     p.add_argument("--picked-only", action="store_true",
                    help="Train only on the picked option per event (1 row vs 3); causally cleaner")
+    p.add_argument("--relics-only", action="store_true",
+                   help="Train only on picks with a non-empty relics field (newer rows); "
+                        "causally clean for relic-aware feature signal")
     args = p.parse_args()
 
     if not os.path.exists(args.history):
@@ -241,9 +380,29 @@ def main():
     print(f"Loaded card_db: {len(card_db)} cards")
     _enrich_card_db(card_db)
 
+    card_ids = sorted(card_db.keys())  # stable index for one-hot
+    print(f"Scanning top-50 relics in history ...")
+    top_relics = _scan_top_relics(args.history, n=50)
+    print(f"  top relics: {top_relics[:5]}... (+{max(len(top_relics)-5,0)} more)")
+
+    # Padded vocab for stable feature count: enforce exactly 80 cards + 50 relics
+    card_ids = (card_ids + [f"__PAD_CARD_{i}" for i in range(80)])[:80]
+    top_relics = (top_relics + [f"__PAD_RELIC_{i}" for i in range(50)])[:50]
+
+    feature_names = (list(BASE_FEATURE_NAMES)
+                     + list(INTERACTION_FEATURE_NAMES)
+                     + [f"deck_count_{cid}" for cid in card_ids]
+                     + [f"cand_oh_{cid}" for cid in card_ids]
+                     + [f"relic_{rid}" for rid in top_relics]
+                     + [f"floor_eq_{f}" for f in FLOOR_BUCKETS])
+
     X, y, n_used, n_skip = load_training_rows(args.history, card_db,
-                                              picked_only=args.picked_only)
-    mode = "picked-only" if args.picked_only else "all-options"
+                                              picked_only=args.picked_only,
+                                              relics_only=args.relics_only,
+                                              card_ids=card_ids,
+                                              top_relics=top_relics)
+    mode = ("picked-only" if args.picked_only else "all-options") + (
+        " | relics-only" if args.relics_only else "")
     print(f"Loaded {len(X)} rows from {n_used} picks ({n_skip} SKIP excluded) [{mode}]")
     if y:
         print(f"y stats: mean={sum(y)/len(y):.2f}, min={min(y)}, max={max(y)}")
@@ -254,8 +413,8 @@ def main():
 
     import numpy as np
     X = np.array(X); y = np.array(y)
-    print(f"X shape: {X.shape}, expected (N, {len(FEATURE_NAMES)})")
-    assert X.shape[1] == len(FEATURE_NAMES), "feature-count mismatch"
+    print(f"X shape: {X.shape}, expected (N, {len(feature_names)})")
+    assert X.shape[1] == len(feature_names), f"feature-count mismatch: {X.shape[1]} vs {len(feature_names)}"
 
     from sklearn.ensemble import HistGradientBoostingRegressor
     from sklearn.pipeline import Pipeline
@@ -275,17 +434,19 @@ def main():
         idx = np.random.RandomState(0).choice(len(X), min(5000, len(X)), replace=False)
         perm = permutation_importance(pipe, X[idx], y[idx], n_repeats=3,
                                       random_state=0, n_jobs=-1)
-        ranked = sorted(zip(FEATURE_NAMES, perm.importances_mean), key=lambda x: -x[1])
+        ranked = sorted(zip(feature_names, perm.importances_mean), key=lambda x: -x[1])
         for name, imp in ranked[:15]:
-            print(f"  {name:<22s} {imp:+.4f}")
+            print(f"  {name:<30s} {imp:+.4f}")
     except Exception as e:
         print(f"(perm importance skipped: {e})")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "wb") as f:
-        pickle.dump({"pipeline": pipe, "feature_names": FEATURE_NAMES,
+        pickle.dump({"pipeline": pipe, "feature_names": feature_names,
+                     "card_ids": card_ids, "top_relics": top_relics,
+                     "floor_buckets": FLOOR_BUCKETS,
                      "n_train": len(X), "cv_r2_mean": float(cv_r2.mean()),
-                     "card_db_size": len(card_db), "version": "v2"}, f)
+                     "card_db_size": len(card_db), "version": "v2-269"}, f)
     print(f"\nSaved → {args.out}")
     return 0
 

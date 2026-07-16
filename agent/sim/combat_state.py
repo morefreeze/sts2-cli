@@ -31,6 +31,12 @@ class Enemy:
     block: int = 0
     intent: dict[str, Any] = field(default_factory=dict)  # {"type":"attack","damage":6,"hits":1} etc.
     statuses: dict[str, int] = field(default_factory=dict)
+    # Intent-loop state: when sim consults spire-codex attack_pattern,
+    # `intent_state_id` tracks the current state in the per-monster cycle.
+    # `intent_used_once` records states with must_perform_once=true so they
+    # don't re-fire mid-combat.
+    intent_state_id: str = ""
+    intent_used_once: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -61,6 +67,11 @@ class CombatState:
     turn: int = 1
     attacks_played_this_turn: int = 0
     cards_exhausted_this_turn: int = 0
+    # Combat archetype — drives type-specific max_turns and MC scoring:
+    #   "MOB"   → ≤5 turns expected (waste HP if longer)
+    #   "ELITE" → 3-7 turns
+    #   "BOSS"  → 10+ turns (attrition / scaling test)
+    combat_type: str = "MOB"
     lost_hp_this_turn: bool = False
     hp_lost_this_combat: int = 0
 
@@ -154,6 +165,13 @@ class CombatState:
         e.block -= absorbed
         through = amount - absorbed
         if through > 0:
+            slippery = int(e.statuses.get("Slippery", 0) or 0)
+            if slippery > 0:
+                through = min(through, 1)
+                if slippery == 1:
+                    e.statuses.pop("Slippery", None)
+                else:
+                    e.statuses["Slippery"] = slippery - 1
             actual = min(through, e.hp)
             e.hp -= actual
             return actual
@@ -166,6 +184,8 @@ class CombatState:
         self.attacks_played_this_turn = 0
         self.cards_exhausted_this_turn = 0
         self.lost_hp_this_turn = False
+        # Reset relic per-turn counters (Beating Remnant cap accumulator etc.)
+        self.statuses.pop("_dmg_taken_this_turn", None)
         # Block decay (unless special status like Barricade)
         if "Barricade" not in self.statuses:
             self.block = 0
@@ -180,6 +200,16 @@ class CombatState:
                 self.statuses[st] -= 1
                 if self.statuses[st] <= 0:
                     del self.statuses[st]
+        # Clear all __this_turn modifiers — they're per-turn buffs and must
+        # not accumulate (Akabeko Vigor, Red Skull conditional STR, SETUP_STRIKE,
+        # etc.). Previous bug: these persisted across turns, inflating player
+        # damage massively in long sim combats.
+        for k in [k for k in self.statuses if k.endswith("__this_turn")]:
+            del self.statuses[k]
+        # Same for enemy this_turn statuses
+        for e in self.enemies:
+            for k in [k for k in e.statuses if k.endswith("__this_turn")]:
+                del e.statuses[k]
         # End-of-turn enemy status decay
         for e in self.enemies:
             for st in ("Vulnerable", "Weak", "Frail"):

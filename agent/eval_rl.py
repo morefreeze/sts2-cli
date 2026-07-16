@@ -34,6 +34,23 @@ _PLANNER_LETHAL_ONLY = _PLANNER_ENV == "lethal"
 _DEFENSE_ON = os.environ.get("STS2_DEFENSE", "") in ("1", "true", "on")
 
 
+def format_floor_label(floor: int | float | str | None) -> str:
+    """Format absolute run floor as act-relative label, e.g. 22 -> A2F5."""
+    try:
+        floor_i = int(floor)
+    except (TypeError, ValueError):
+        return "?"
+    if floor_i <= 0:
+        return "?"
+    act = ((floor_i - 1) // 17) + 1
+    act_floor = ((floor_i - 1) % 17) + 1
+    return f"A{act}F{act_floor}"
+
+
+def format_floor_labels(floors: list[int] | tuple[int, ...]) -> str:
+    return "[" + ", ".join(format_floor_label(f) for f in sorted(floors)) + "]"
+
+
 class _GameTimeout(Exception):
     pass
 
@@ -541,7 +558,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                     }, ensure_ascii=False) + "\n")
             except Exception:
                 pass
-        print(f"  game {i+1:2d}: floor={max_floor:2d} combats={ep_combat_wins} "
+        print(f"  game {i+1:2d}: floor={format_floor_label(max_floor):>5s} combats={ep_combat_wins} "
               f"boss={game_boss_id or '?':<20s} [{end_reason}]")
 
         if verbose:
@@ -563,15 +580,15 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                     result = "WIN" if run_won else "dead"
                 else:
                     result = "won"
-                print(f"  [combat fl={fl}] HP {hp_b}→{hp_a} [{result}]")
+                print(f"  [combat {format_floor_label(fl)}] HP {hp_b}→{hp_a} [{result}]")
 
             # Print last combat step-by-step for wins OR for boss-reach (fl≥17) defeats —
             # the latter is what we need to debug "got close to boss kill" scenarios.
             if all_combat_logs:
                 last_fl, _, _, last_steps = all_combat_logs[-1]
                 if run_won or (isinstance(last_fl, int) and last_fl >= 14):
-                    label = "WIN" if run_won else f"DEFEAT (deep, fl={last_fl})"
-                    print(f"\n  === Last combat (fl={last_fl}) [{label}] step-by-step ===")
+                    label = "WIN" if run_won else f"DEFEAT (deep, {format_floor_label(last_fl)})"
+                    print(f"\n  === Last combat ({format_floor_label(last_fl)}) [{label}] step-by-step ===")
                     for step in last_steps:
                         print(step)
             print()
@@ -698,10 +715,10 @@ def main():
                              checkpoint_name=checkpoint)
     print(f"---")
     print(f"avg_floor      : {stats['avg_floor']:.1f}")
-    print(f"max_floor      : {stats['max_floor']}")
+    print(f"max_floor      : {format_floor_label(stats['max_floor'])}")
     print(f"win_rate       : {stats['win_rate']:.0%}")
     print(f"avg_combat_wins: {stats['avg_combat_wins']:.1f}")
-    print(f"floor dist     : {sorted(stats['floors'])}")
+    print(f"floor dist     : {format_floor_labels(stats['floors'])}")
     per_boss = stats.get("per_boss") or {}
     if per_boss:
         print(f"--- per-boss ---")

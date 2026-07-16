@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import json
 import pytest
 from agent.combat_env import CombatEnv, greedy_action
+from agent.strategy import rest_site_action
 
 CARDS_JSON = os.path.join(os.path.dirname(__file__), '..', '..', 'localization_eng', 'cards.json')
 
@@ -15,21 +16,20 @@ def test_env_action_space_size():
 
 def test_env_observation_space_shape():
     env = CombatEnv(cards_json=CARDS_JSON, character="Ironclad", dry_run=True)
-    assert env.observation_space.shape == (130,)
+    expected = env.enc.obs_size + env._EXTRA_OBS + env._RELIC_OBS
+    assert env.observation_space.shape == (expected,)
 
 
 def test_reward_combat_win():
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
     env._combat_start_player_max_hp = 80
-    # Combat win with full HP: 1.0 * (80/80) = 1.0
-    assert abs(env._combat_win_reward({"player": {"hp": 80, "max_hp": 80}}) - 1.0) < 1e-5
-    # Combat win with half HP: 1.0 * (40/80) = 0.5
-    assert abs(env._combat_win_reward({"player": {"hp": 40, "max_hp": 80}}) - 0.5) < 1e-5
+    assert env._combat_win_reward({"player": {"hp": 80, "max_hp": 80}}) == pytest.approx(3.0)
+    assert env._combat_win_reward({"player": {"hp": 40, "max_hp": 80}}) == pytest.approx(0.75)
 
 
 def test_reward_terminal():
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
-    assert env._terminal_reward({"victory": False}) == -0.5
+    assert env._terminal_reward({"victory": False}) == -2.0
     assert env._terminal_reward({"victory": True}) == 2.0
 
 
@@ -39,16 +39,50 @@ def test_shaping_reward_damage():
     env._prev_player_hp = 80
     env._combat_start_enemy_hp = 30
     env._combat_start_player_max_hp = 80
-    # Deal 10 damage to enemy, take 0: +0.02 * 10/30 = +0.00667
     r = env._shaping_reward({"enemies": [{"hp": 20}], "player": {"hp": 80}})
     assert r > 0
-    assert abs(r - 0.02 * 10 / 30) < 1e-5
+    assert r == pytest.approx(0.15 * 10 / 30 - 0.003)
+
+
+def _boss_reward_env(room_type="Boss"):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._prev_enemy_hp = 250
+    env._prev_player_hp = 80
+    env._combat_start_enemy_hp = 250
+    env._combat_start_player_max_hp = 80
+    env._current_floor = 17
+    env._current_combat_room_type = room_type
+    return env
+
+
+def test_boss_dense_reward_adds_progress_signal(monkeypatch):
+    next_state = {"enemies": [{"hp": 200}], "player": {"hp": 80}}
+
+    monkeypatch.delenv("STS2_BOSS_DENSE", raising=False)
+    baseline = _boss_reward_env()._shaping_reward(next_state)
+
+    monkeypatch.setenv("STS2_BOSS_DENSE", "1")
+    dense = _boss_reward_env()._shaping_reward(next_state)
+
+    assert dense >= baseline + 0.09
+
+
+def test_boss_dense_reward_does_not_affect_non_boss_combats(monkeypatch):
+    next_state = {"enemies": [{"hp": 200}], "player": {"hp": 80}}
+
+    monkeypatch.delenv("STS2_BOSS_DENSE", raising=False)
+    baseline = _boss_reward_env(room_type="Monster")._shaping_reward(next_state)
+
+    monkeypatch.setenv("STS2_BOSS_DENSE", "1")
+    dense = _boss_reward_env(room_type="Monster")._shaping_reward(next_state)
+
+    assert dense == baseline
 
 
 def test_reset_returns_correct_obs_shape():
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
     obs, info = env.reset()
-    assert obs.shape == (130,)
+    assert obs.shape == env.observation_space.shape
 
 
 def test_step_dry_run_terminates():
@@ -56,6 +90,252 @@ def test_step_dry_run_terminates():
     env.reset()
     obs, reward, terminated, truncated, info = env.step(40)  # end_turn
     assert terminated  # dry_run always terminates
+
+
+def test_reset_uses_updated_state_after_hp_override(monkeypatch):
+    load_state = {
+        "decision": "combat_play",
+        "context": {"floor": 17, "room_type": "Boss"},
+        "player": {"hp": 80, "max_hp": 80},
+        "enemies": [{"hp": 100, "max_hp": 100}],
+    }
+    hp_state = {
+        **load_state,
+        "player": {"hp": 72, "max_hp": 80},
+    }
+    calls = []
+
+    env = CombatEnv(cards_json=CARDS_JSON, native_save_path="boss.save", set_hp_after_load=72)
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+    monkeypatch.setattr(env, "_start_proc", lambda: None)
+
+    def fake_send(cmd):
+        calls.append(cmd)
+        if cmd["cmd"] == "load_save":
+            return load_state
+        if cmd["cmd"] == "set_player":
+            return hp_state
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(env, "_send", fake_send)
+    monkeypatch.setattr(env, "_advance_to_combat", lambda state: state)
+
+    env.reset()
+
+    assert calls == [
+        {"cmd": "load_save", "path": "boss.save", "lang": "en"},
+        {"cmd": "set_player", "hp": 72},
+    ]
+    assert env._current_state["player"]["hp"] == 72
+    assert env._combat_entry_hp_ratio == pytest.approx(0.9)
+
+
+def test_greedy_use_potions_refreshes_indices_after_use(monkeypatch):
+    vulnerable_0 = {
+        "index": 0,
+        "name": {"en": "Vulnerable Potion"},
+        "description": {"en": "Apply Vulnerable."},
+        "target_type": "AnyEnemy",
+    }
+    blood_1 = {
+        "index": 1,
+        "name": {"en": "Blood Potion"},
+        "description": {"en": "Heal."},
+        "target_type": "AnyPlayer",
+    }
+    vulnerable_2 = {
+        "index": 2,
+        "name": {"en": "Vulnerable Potion"},
+        "description": {"en": "Apply Vulnerable."},
+        "target_type": "AnyEnemy",
+    }
+
+    def state_with(potions):
+        return {
+            "decision": "combat_play",
+            "context": {"floor": 8, "room_type": "Elite"},
+            "player": {"hp": 87, "max_hp": 87, "block": 0, "potions": potions},
+            "enemies": [
+                {
+                    "name": "Bygone Effigy",
+                    "hp": 127,
+                    "max_hp": 127,
+                    "intents": [{"type": "Sleep"}],
+                }
+            ],
+        }
+
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_floor = 8
+    used_indices = []
+
+    def fake_send(cmd):
+        idx = cmd["args"]["potion_index"]
+        used_indices.append(idx)
+        if idx == 0:
+            return state_with([
+                {**blood_1, "index": 0},
+                {**vulnerable_2, "index": 1},
+            ])
+        if idx == 1:
+            return state_with([{**blood_1, "index": 0}])
+        return {"type": "error", "message": f"Invalid potion index {idx}"}
+
+    monkeypatch.setattr(env, "_send", fake_send)
+
+    result = env._greedy_use_potions(state_with([vulnerable_0, blood_1, vulnerable_2]))
+
+    assert used_indices == [0, 1]
+    assert result["decision"] == "combat_play"
+    assert result.get("type") != "error"
+
+
+def _vantom_slippery_mask_state():
+    return {
+        "decision": "combat_play",
+        "energy": 3,
+        "player": {"hp": 80, "max_hp": 80, "block": 0},
+        "hand": [
+            {
+                "index": 0,
+                "id": "CARD.CINDER",
+                "cost": 2,
+                "type": "Attack",
+                "can_play": True,
+                "target_type": "AnyEnemy",
+                "stats": {"damage": 17},
+                "description": "Deal 17 damage.",
+            },
+            {
+                "index": 1,
+                "id": "CARD.STRIKE_IRONCLAD",
+                "cost": 1,
+                "type": "Attack",
+                "can_play": True,
+                "target_type": "AnyEnemy",
+                "stats": {"damage": 6},
+                "description": "Deal 6 damage.",
+            },
+            {
+                "index": 2,
+                "id": "CARD.DEFEND_IRONCLAD",
+                "cost": 1,
+                "type": "Skill",
+                "can_play": True,
+                "target_type": "Self",
+                "stats": {"block": 5},
+                "description": "Gain 5 Block.",
+            },
+        ],
+        "enemies": [
+            {
+                "name": "Vantom",
+                "hp": 173,
+                "max_hp": 173,
+                "intents": [{"type": "Attack", "damage": 7}],
+                "powers": [{"name": "Slippery", "amount": 9}],
+            }
+        ],
+    }
+
+
+def test_action_masks_leave_vantom_slippery_filter_off_by_default(monkeypatch):
+    monkeypatch.delenv("STS2_VANTOM_SLIPPERY_MASK", raising=False)
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_state = _vantom_slippery_mask_state()
+
+    masks = env.action_masks()
+
+    assert masks[0]
+    assert masks[4]
+    assert masks[11]
+    assert masks[40]
+
+
+def test_action_masks_apply_vantom_slippery_strip_filter(monkeypatch):
+    monkeypatch.setenv("STS2_VANTOM_SLIPPERY_MASK", "1")
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_state = _vantom_slippery_mask_state()
+
+    masks = env.action_masks()
+
+    assert not masks[0]
+    assert masks[4]
+    assert masks[11]
+    assert masks[40]
+
+
+def _boss_planner_mask_state():
+    strike = {
+        "index": 0,
+        "id": "CARD.STRIKE_IRONCLAD",
+        "cost": 1,
+        "type": "Attack",
+        "can_play": True,
+        "target_type": "AnyEnemy",
+        "stats": {"damage": 6},
+        "description": "Deal 6 damage.",
+    }
+    defend = {
+        "index": 1,
+        "id": "CARD.DEFEND_IRONCLAD",
+        "cost": 1,
+        "type": "Skill",
+        "can_play": True,
+        "target_type": "Self",
+        "stats": {"block": 5},
+        "description": "Gain 5 Block.",
+    }
+    return {
+        "decision": "combat_play",
+        "energy": 3,
+        "max_energy": 3,
+        "round": 1,
+        "context": {"floor": 17, "room_type": "Boss"},
+        "player": {
+            "hp": 30,
+            "max_hp": 80,
+            "block": 0,
+            "deck": [strike, defend],
+            "relics": [],
+        },
+        "player_powers": None,
+        "hand": [strike, defend],
+        "enemies": [
+            {
+                "name": "Boss",
+                "hp": 6,
+                "max_hp": 50,
+                "block": 0,
+                "intents": [{"type": "attack", "damage": 12, "hits": 1}],
+                "powers": None,
+            }
+        ],
+    }
+
+
+def test_action_masks_can_force_boss_planner_choice(monkeypatch):
+    monkeypatch.setenv("STS2_BOSS_PLANNER_MASK", "1")
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_state = _boss_planner_mask_state()
+
+    masks = env.action_masks()
+
+    assert masks.sum() == 1
+    assert masks[0]
+
+
+def test_action_masks_can_force_elite_planner_choice(monkeypatch):
+    monkeypatch.setenv("STS2_BOSS_PLANNER_MASK", "1")
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _boss_planner_mask_state()
+    state["context"]["room_type"] = "Elite"
+    env._current_state = state
+
+    masks = env.action_masks()
+
+    assert masks.sum() == 1
+    assert masks[0]
 
 
 def test_greedy_action_map_select():
@@ -78,7 +358,16 @@ def test_greedy_action_map_select():
 def test_greedy_action_card_reward():
     state = {
         "decision": "card_reward",
-        "cards": [{"index": 0}]
+        "player": {"deck": []},
+        "cards": [{
+            "index": 0,
+            "id": "CARD.STRIKE_IRONCLAD",
+            "cost": 1,
+            "type": "Attack",
+            "rarity": "Common",
+            "stats": {"damage": 6},
+            "description": "Deal 6 damage.",
+        }],
     }
     action = greedy_action(state)
     assert action["action"] == "select_card_reward"
@@ -95,3 +384,63 @@ def test_greedy_action_rest_heal():
     action = greedy_action(state)
     assert action["action"] == "choose_option"
     assert action["args"]["option_index"] == 1  # HEAL preferred
+
+
+def _rest_options():
+    return [
+        {"index": 0, "option_id": "SMITH", "is_enabled": True},
+        {"index": 1, "option_id": "HEAL", "is_enabled": True},
+    ]
+
+
+def _must_smith_deck():
+    return [
+        {
+            "id": "CARD.INFLAME",
+            "type": "Power",
+            "rarity": "Uncommon",
+            "cost": 1,
+            "description": "Gain 2 Strength.",
+        }
+    ]
+
+
+def test_vantom_mid_act_rest_keeps_must_smith_override_by_default(monkeypatch):
+    monkeypatch.delenv("STS2_VANTOM_REST_HEAL", raising=False)
+    state = {
+        "decision": "rest_site",
+        "floor": 12,
+        "context": {"boss": {"id": "VANTOM_BOSS"}},
+        "player": {"hp": 54, "max_hp": 80, "deck": _must_smith_deck()},
+    }
+
+    action = rest_site_action(state, _rest_options())
+
+    assert action["args"]["option_index"] == 0
+
+
+def test_vantom_mid_act_rest_heals_below_seventy_when_enabled(monkeypatch):
+    monkeypatch.setenv("STS2_VANTOM_REST_HEAL", "1")
+    state = {
+        "decision": "rest_site",
+        "floor": 12,
+        "context": {"boss": {"id": "VANTOM_BOSS"}},
+        "player": {"hp": 54, "max_hp": 80, "deck": _must_smith_deck()},
+    }
+
+    action = rest_site_action(state, _rest_options())
+
+    assert action["args"]["option_index"] == 1
+
+
+def test_non_vantom_mid_act_rest_keeps_must_smith_override():
+    state = {
+        "decision": "rest_site",
+        "floor": 12,
+        "context": {"boss": {"id": "CEREMONIAL_BEAST_BOSS"}},
+        "player": {"hp": 54, "max_hp": 80, "deck": _must_smith_deck()},
+    }
+
+    action = rest_site_action(state, _rest_options())
+
+    assert action["args"]["option_index"] == 0

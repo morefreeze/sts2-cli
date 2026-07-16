@@ -68,6 +68,41 @@ def _load_enemy_db() -> dict[str, dict]:
     return _ENEMY_DB
 
 
+# Spire-codex monsters.json — structured attack_pattern state machine.
+# Pulled from ptrlrd/spire-codex (data/eng/monsters.json), 115 monsters with
+# moves[].damage / .block / .powers and attack_pattern.states[].next chain.
+_SPIRE_DB: dict[str, dict] | None = None
+
+
+def _load_spire_db() -> dict[str, dict]:
+    global _SPIRE_DB
+    if _SPIRE_DB is not None:
+        return _SPIRE_DB
+    path = "data/spire_codex_monsters.json"
+    if not os.path.exists(path):
+        _SPIRE_DB = {}
+        return _SPIRE_DB
+    with open(path) as f:
+        data = json.load(f)
+    _SPIRE_DB = {m["id"]: m for m in data}
+    return _SPIRE_DB
+
+
+def _spire_lookup(enemy_id: str, enemy_name: str = "") -> dict | None:
+    """Try to find a monster record matching this Enemy by id (uppercased) or
+    by name fallback (case-folded). Returns None if unknown."""
+    db = _load_spire_db()
+    if enemy_id:
+        cand = enemy_id.upper().replace("-", "_")
+        if cand in db:
+            return db[cand]
+    if enemy_name:
+        target = enemy_name.upper().replace(" ", "_").replace("-", "_")
+        if target in db:
+            return db[target]
+    return None
+
+
 def parse_enemy_hp(rec: dict, ascended: bool = False, default: int = 30) -> int:
     """Resolve enemy HP from a data/enemies.json record.
 
@@ -183,7 +218,13 @@ def apply_effect(state: CombatState, effect: dict[str, Any],
         return
 
     if kind == "gain_block":
-        state.block += effect["amount"]
+        amount = effect["amount"]
+        # Vambrace: first block-gain doubled per combat
+        if state.statuses.pop("_vambrace_ready", 0):
+            amount *= 2
+        state.block += amount
+        from agent.sim.relics import fire_relics as _fr_bg
+        _fr_bg(state, "on_block_gain", amount=amount)
         return
 
     if kind == "apply_status":
@@ -350,6 +391,15 @@ def _player_incoming(state: CombatState, base: int) -> int:
     dmg = base
     if state.statuses.get("Vulnerable", 0) > 0:
         dmg = int(dmg * 1.5)
+    # Relic-set per-hit damage reduction (Tungsten Rod = -1, stacks)
+    dmg -= state.statuses.get("_dmg_reduction", 0)
+    # Cap per-turn damage (Beating Remnant = max 20/turn)
+    cap = state.statuses.get("_max_dmg_per_turn", 0)
+    if cap > 0:
+        already = state.statuses.get("_dmg_taken_this_turn", 0)
+        if already + dmg > cap:
+            dmg = max(0, cap - already)
+        state.statuses["_dmg_taken_this_turn"] = already + dmg
     return max(0, dmg)
 
 
@@ -408,6 +458,18 @@ def play_card(state: CombatState, hand_idx: int, target_idx: int = 0,
     # Fire on_exhaust powers if anything exhausted during this play
     if state.cards_exhausted_this_turn > exhausts_before:
         fire_powers(state, "on_exhaust", rng)
+    # Fire relic triggers — chain-counter relics consume these
+    from agent.sim.relics import fire_relics as _fr
+    card_type = data.get("type") or ""
+    _fr(state, "on_card_play", card_id=played, card_type=card_type, cost=cost)
+    if card_type == "Attack":
+        _fr(state, "on_attack_play")
+    elif card_type == "Skill":
+        _fr(state, "on_skill_play")
+    elif card_type == "Power":
+        _fr(state, "on_power_play")
+    if state.cards_exhausted_this_turn > exhausts_before:
+        _fr(state, "on_exhaust")
     # Add-copy hooks
     for where in ("discard", "hand", "draw"):
         n = state.statuses.pop(f"_pending_add_copy__{where}", 0)
@@ -448,6 +510,8 @@ def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
     rng = rng or random.Random(state.rng_seed)
     # 1. End-of-turn powers (e.g. status-decay-style effects)
     fire_powers(state, "on_turn_end", rng)
+    from agent.sim.relics import fire_relics as _fire_relics_te
+    _fire_relics_te(state, "turn_end")
     # 2. Enemies act
     for e in state.enemies:
         if e.hp <= 0:
@@ -466,6 +530,19 @@ def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
                     return
             if state.hp < hp_before:
                 fire_powers(state, "on_lose_hp", rng)
+                from agent.sim.relics import fire_relics
+                fire_relics(state, "damage_taken", amount=hp_before - state.hp)
+            # Hybrid move enemy-side block (e.g. GUARDED_STRIKE 12 dmg + 18 block)
+            e.block += intent.get("attack_block", 0)
+        elif intent.get("type") == "defend":
+            e.block = e.block + intent.get("block", 0)
+        # Apply intent powers (buff self or debuff player) regardless of intent
+        # type. BUG-FIX (Jun 9): permanent Strength stacking from buff moves
+        # like BOWLBUG_NECTAR (+15) or FUZZY_WURM_CRAWLER (+7) made MC predict
+        # offense-only decks (kill before stack accumulates). Reality those
+        # buffs read as "wind-up for next attack" not multi-turn permanent.
+        # Heuristic: amount > 2 treated as this_turn (one-shot), ≤2 permanent.
+        _apply_intent_powers(state, e, intent.get("powers", []))
     # 3. End-of-turn decay (for both player and enemies' Vuln/Weak/Frail)
     state.end_turn()
     # 4. Start next turn: discard remaining hand, draw 5
@@ -484,14 +561,18 @@ def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
 
 
 def _advance_enemy_intents(state: CombatState) -> None:
-    """Pick each enemy's next move from its declared sequence. With no real
-    intent loop we just pick a random move from `moves`. The Phase 3 hybrid
-    can call back to the real engine for canonical intents when this falls
-    short."""
+    """Advance each enemy along its declared attack_pattern (spire-codex
+    state machine). Falls back to old random-from-moves when the monster
+    isn't in spire-codex or has no pattern."""
     edb = _load_enemy_db()
     for e in state.enemies:
         if e.hp <= 0:
             continue
+        spire = _spire_lookup(e.id, e.name)
+        if spire is not None and spire.get("attack_pattern"):
+            _spire_advance(e, spire)
+            continue
+        # Legacy fallback: random pick from old enemies.json moves
         slug = _enemy_id_to_slug(e.id) or _enemy_name_to_slug(e.name)
         meta = edb.get(slug) if slug else None
         if not meta:
@@ -505,6 +586,132 @@ def _advance_enemy_intents(state: CombatState) -> None:
             e.intent = {"type": "attack", "damage": m["damage"], "hits": 1}
         else:
             e.intent = {"type": "debuff", "damage": 0, "hits": 0}
+
+
+def _spire_advance(e, spire: dict) -> None:
+    """Walk the spire-codex attack_pattern state machine one step:
+        1. If intent_state_id is empty, start at initial_move's state.
+        2. Else look up current state, advance to its `next`.
+        3. Skip states marked must_perform_once if already used.
+        4. Resolve the state's move_id → moves[] record → set e.intent.
+    """
+    pattern = spire["attack_pattern"]
+    states = pattern.get("states", [])
+    if not states:
+        return
+    state_by_id = {s["id"]: s for s in states}
+
+    # Initial seed
+    if not e.intent_state_id:
+        initial_move = pattern.get("initial_move")
+        # initial_move is a move_id; find the state whose move_id matches
+        cur_state = next(
+            (s for s in states if s.get("move_id") == initial_move),
+            states[0],
+        )
+    else:
+        cur_state = state_by_id.get(e.intent_state_id)
+        if cur_state is None:
+            cur_state = states[0]
+        else:
+            # Advance to next, skipping must_perform_once states already used
+            nxt_id = cur_state.get("next")
+            while nxt_id:
+                nxt = state_by_id.get(nxt_id)
+                if nxt is None:
+                    cur_state = states[0]; break
+                if (nxt.get("must_perform_once")
+                        and nxt["id"] in e.intent_used_once):
+                    nxt_id = nxt.get("next")
+                    continue
+                cur_state = nxt; break
+
+    e.intent_state_id = cur_state["id"]
+    if cur_state.get("must_perform_once"):
+        if cur_state["id"] not in e.intent_used_once:
+            e.intent_used_once.append(cur_state["id"])
+
+    move_id = cur_state.get("move_id")
+    move = next((m for m in spire.get("moves", []) if m.get("id") == move_id), None)
+    if not move:
+        return
+    _apply_spire_move_to_intent(e, move)
+
+
+def _apply_spire_move_to_intent(e, move: dict) -> None:
+    """Translate a spire-codex move record → CombatState's intent dict shape.
+    Also carries the move's `powers` (STRENGTH/WEAK/FRAIL/...) into the intent
+    so they fire when the enemy acts (in `end_turn`).
+
+    BUG-FIX (Jun 9): combined attack+defend moves (e.g. CRUSHER's GUARDED_STRIKE
+    = 12 dmg + 18 block) used to drop the block entirely. Now `attack_block`
+    is carried as a separate field and applied after the damage in end_turn.
+    """
+    intent_kind = move.get("intent", "Attack").lower()
+    dmg_block = move.get("damage")
+    if dmg_block:
+        e.intent = {
+            "type": "attack",
+            "damage": dmg_block.get("normal", 0),
+            "hits": dmg_block.get("hit_count", 1),
+            "attack_block": move.get("block", 0),  # enemy block on hybrid moves
+        }
+    elif "defend" in intent_kind or move.get("block"):
+        e.intent = {
+            "type": "defend",
+            "damage": 0, "hits": 0,
+            "block": move.get("block", 0),
+        }
+    else:
+        e.intent = {"type": "debuff", "damage": 0, "hits": 0}
+    powers = move.get("powers")
+    if powers:
+        e.intent["powers"] = powers
+
+
+# spire power_id → sim's TitleCase status names. Unmapped power_ids are passed
+# through verbatim (recorded but won't be re-read by combat math).
+_POWER_NAME_MAP = {
+    "STRENGTH": "Strength",
+    "DEXTERITY": "Dexterity",
+    "WEAK": "Weak",
+    "VULNERABLE": "Vulnerable",
+    "FRAIL": "Frail",
+    "ENERGIZED": "Energized",
+    "PLATED_ARMOR": "PlatedArmor",
+    "RITUAL": "Ritual",
+    "METALLICIZE": "Metallicize",
+    "POISON": "Poison",
+}
+
+
+def _apply_intent_powers(state, enemy, powers: list) -> None:
+    """Apply a list of spire-codex power dicts to either self (enemy) or player.
+    Each entry: {power_id, target, amount}.
+
+    Heuristic for enemy Strength gains: amount > 2 is treated as a wind-up
+    one-shot buff (applied as Strength_this_turn — decays after next attack).
+    Without this, Act-1 buff enemies (BOWLBUG_NECTAR +15, FUZZY_WURM_CRAWLER
+    +7) would stack absurd Strength over a 4-turn fight and warp MC predictions
+    toward offense-only decks.
+    """
+    for p in powers or []:
+        pid = p.get("power_id") or ""
+        name = _POWER_NAME_MAP.get(pid, pid)
+        target = (p.get("target") or "self").lower()
+        amount = int(p.get("amount", 0))
+        if not name or amount == 0:
+            continue
+        # Cap permanent enemy Strength gains at +2 per move. Spire data carries
+        # large numbers (BOWLBUG_NECTAR +15, FUZZY_WURM +7) that are actually
+        # wind-up semantics in real STS2; without the cap MC predictions warp
+        # toward offense-only decks because long fights become unwinnable.
+        if target == "self" and name == "Strength" and amount > 2:
+            amount = 2
+        if target == "self":
+            enemy.statuses[name] = enemy.statuses.get(name, 0) + amount
+        elif target == "player":
+            state.statuses[name] = state.statuses.get(name, 0) + amount
 
 
 def _enemy_id_to_slug(eid: str) -> str | None:

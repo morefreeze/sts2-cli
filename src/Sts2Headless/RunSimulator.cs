@@ -309,6 +309,41 @@ public class RunSimulator
         field?.SetValue(obj, value);
     }
 
+    private static void ClampPlayerHp(Player player)
+    {
+        var creature = player.Creature;
+        if (creature == null) return;
+        var maxHp = creature.MaxHp;
+        if (maxHp > 0 && creature.CurrentHp > maxHp)
+            SetField(creature, "_currentHp", maxHp);
+    }
+
+    private void RemoveDeckCardHeadless(Player player, CardModel? selected, int fallbackIndex)
+    {
+        var deck = player.Deck;
+        if (deck == null) return;
+
+        var deckCards = deck.Cards?.Where(c => c != null).ToList() ?? new List<CardModel>();
+        CardModel? target = selected != null && deckCards.Contains(selected) ? selected : null;
+        if (target == null && fallbackIndex >= 0 && fallbackIndex < deckCards.Count)
+            target = deckCards[fallbackIndex];
+        if (target == null) return;
+
+        try { _runState?.RemoveCard(target); } catch { }
+
+        if (deck.Cards != null && deck.Cards.Contains(target))
+        {
+            foreach (var field in deck.GetType().GetFields(NonPublic))
+            {
+                if (field.GetValue(deck) is System.Collections.IList list && list.Contains(target))
+                {
+                    list.Remove(target);
+                    break;
+                }
+            }
+        }
+    }
+
     public Dictionary<string, object?> SetPlayer(Dictionary<string, System.Text.Json.JsonElement> args)
     {
         try
@@ -320,6 +355,7 @@ public class RunSimulator
                 SetField(player.Creature, "_currentHp", hpEl.GetInt32());
             if (args.TryGetValue("max_hp", out var mhpEl) && player.Creature != null)
                 SetField(player.Creature, "_maxHp", mhpEl.GetInt32());
+            ClampPlayerHp(player);
             if (args.TryGetValue("gold", out var goldEl))
                 player.Gold = goldEl.GetInt32();
 
@@ -1469,6 +1505,10 @@ public class RunSimulator
             .ToArray();
 
         Log($"Card selection: indices [{string.Join(",", indices)}]");
+        var selectedBeforeResolve = _cardSelector.PendingOptions?
+            .Where((_, i) => indices.Contains(i))
+            .ToList() ?? new List<CardModel>();
+        var deckCountBeforeSelect = player.Deck?.Cards?.Count(c => c != null) ?? 0;
         _cardSelector.ResolvePendingByIndices(indices);
         _syncCtx.Pump();
         WaitForActionExecutor();
@@ -1492,6 +1532,15 @@ public class RunSimulator
             Thread.Sleep(200);
             _syncCtx.Pump();
             WaitForActionExecutor();
+            var deckCountAfterSelect = player.Deck?.Cards?.Count(c => c != null) ?? 0;
+            if (indices.Length > 0 && deckCountAfterSelect >= deckCountBeforeSelect)
+            {
+                RemoveDeckCardHeadless(
+                    player,
+                    selectedBeforeResolve.Count > 0 ? selectedBeforeResolve[0] : null,
+                    indices[0]);
+                _syncCtx.Pump();
+            }
             Log("Card selection in shop (card removal), refreshing shop state");
         }
 
@@ -1652,6 +1701,7 @@ public class RunSimulator
                 Thread.Sleep(200);
                 _syncCtx.Pump();
                 WaitForActionExecutor();
+                ClampPlayerHp(player);
                 ForceToMap();
                 return MapSelectState();
             }

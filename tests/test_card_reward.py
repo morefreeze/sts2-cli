@@ -44,6 +44,12 @@ class TestCardReward:
         if state["decision"] != "card_reward":
             pytest.skip("No card_reward")
         deck_before = state["player"]["deck_size"]
+        ids_before = [c["id"] for c in state["player"]["deck"]]
+        reward_ids = {c["id"] for c in state.get("cards", [])}
         state = game.act("skip_card_reward")
         deck_after = state.get("player", {}).get("deck_size", deck_before)
-        assert deck_after == deck_before
+        ids_after = [c["id"] for c in state.get("player", {}).get("deck", [])]
+        assert deck_after <= deck_before
+        assert not reward_ids.intersection(ids_after)
+        for cid in set(ids_after):
+            assert ids_after.count(cid) <= ids_before.count(cid)

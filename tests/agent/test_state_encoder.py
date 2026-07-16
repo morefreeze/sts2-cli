@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import numpy as np
 import pytest
-from agent.state_encoder import StateEncoder
+from agent.state_encoder import CARD_SLOT, MAX_HAND, StateEncoder
 
 CARDS_JSON = os.path.join(os.path.dirname(__file__), '..', '..', 'localization_eng', 'cards.json')
 
@@ -39,7 +39,7 @@ def test_encode_returns_correct_shape(enc):
     obs = enc.encode(make_state())
     assert obs.shape == (enc.obs_size,)
     assert obs.dtype == np.float32
-    assert enc.obs_size == 130
+    assert enc.obs_size == 161
 
 
 def test_encode_energy_normalized(enc):
@@ -49,7 +49,7 @@ def test_encode_energy_normalized(enc):
 
 def test_encode_hp_normalized(enc):
     obs = enc.encode(make_state(player_hp=40, player_max_hp=80))
-    player_start = 1 + 1 + 80  # after energy + turn + hand
+    player_start = 1 + 1 + MAX_HAND * CARD_SLOT
     assert abs(obs[player_start] - 0.5) < 1e-5
 
 

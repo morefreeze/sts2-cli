@@ -8,6 +8,15 @@ from unittest.mock import patch, MagicMock
 CARDS_JSON = os.path.join(os.path.dirname(__file__), '..', '..', 'localization_eng', 'cards.json')
 
 
+def mock_ppo_model(action_idx):
+    from agent.state_encoder import StateEncoder
+
+    mock_model = MagicMock()
+    mock_model.observation_space.shape = (StateEncoder(CARDS_JSON).obs_size,)
+    mock_model.predict.return_value = (np.array([action_idx]), None)
+    return mock_model
+
+
 def make_combat_state():
     return {
         "decision": "combat_play", "energy": 3, "round": 1,
@@ -21,8 +30,7 @@ def make_combat_state():
 
 def test_rl_agent_act_returns_cmd_dict():
     from agent.rl_agent import RLAgent
-    mock_model = MagicMock()
-    mock_model.predict.return_value = (np.array([0]), None)  # action 0: play card 0 at enemy 0
+    mock_model = mock_ppo_model(0)  # action 0: play card 0 at enemy 0
 
     with patch("agent.rl_agent.MaskablePPO.load", return_value=mock_model):
         agent = RLAgent("fake_path.zip", CARDS_JSON)
@@ -36,8 +44,7 @@ def test_rl_agent_act_returns_cmd_dict():
 
 def test_rl_agent_end_turn_action():
     from agent.rl_agent import RLAgent
-    mock_model = MagicMock()
-    mock_model.predict.return_value = (np.array([40]), None)  # end_turn
+    mock_model = mock_ppo_model(40)  # end_turn
 
     with patch("agent.rl_agent.MaskablePPO.load", return_value=mock_model):
         agent = RLAgent("fake_path.zip", CARDS_JSON)
@@ -48,8 +55,7 @@ def test_rl_agent_end_turn_action():
 
 def test_rl_agent_passes_action_mask_to_predict():
     from agent.rl_agent import RLAgent
-    mock_model = MagicMock()
-    mock_model.predict.return_value = (np.array([40]), None)
+    mock_model = mock_ppo_model(40)
 
     with patch("agent.rl_agent.MaskablePPO.load", return_value=mock_model):
         agent = RLAgent("fake_path.zip", CARDS_JSON)

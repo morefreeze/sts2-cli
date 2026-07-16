@@ -26,6 +26,11 @@ _map_strategy: MapStrategy = HpAwareMapStrategy()
 _decision_advisor = DecisionAdvisor()
 
 
+def _decision_advisor_enabled() -> bool:
+    flag = os.environ.get("STS2_DECISION_ADVISOR", "1").strip().lower()
+    return flag not in {"0", "false", "off", "no"}
+
+
 def set_map_strategy(strategy: MapStrategy):
     """Replace the global map strategy. Call before training or evaluation."""
     global _map_strategy
@@ -275,9 +280,10 @@ def _score_event_option(opt: dict) -> float:
 def greedy_action(state: dict) -> dict:
     """Greedy heuristic for non-combat decisions. Used during training and by coordinator."""
     decision = state.get("decision", "")
-    advised = _decision_advisor.choose(state)
-    if advised is not None:
-        return advised
+    if _decision_advisor_enabled():
+        advised = _decision_advisor.choose(state)
+        if advised is not None:
+            return advised
 
     if decision == "map_select":
         choices = state.get("choices", [])
@@ -509,6 +515,10 @@ BOSS_ENTRY_HP_FLOOR = 50.0    # below this, no bonus (already in the 0% dead zon
 # boss room, not boss kills. hp=100 → +40 (was +10), hp=80 → +24 (was +6).
 BOSS_ENTRY_HP_WEIGHT = 0.8
 
+# Optional dense boss-only shaping for boss snapshot fine-tuning.
+# Off by default so existing full-run checkpoints/evals keep their reward scale.
+BOSS_DENSE_DAMAGE_WEIGHT = 0.50
+
 
 class CombatEnv(gym.Env):
     """
@@ -656,7 +666,9 @@ class CombatEnv(gym.Env):
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
             if state is not None and state.get("type") != "error" and self._set_hp_after_load is not None:
-                self._send({"cmd": "set_player", "hp": self._set_hp_after_load})
+                updated_state = self._send({"cmd": "set_player", "hp": self._set_hp_after_load})
+                if updated_state is not None and updated_state.get("type") != "error":
+                    state = updated_state
         else:
             state = self._send({"cmd": "start_run", "character": self.character,
                                 "seed": run_seed, "ascension": self.ascension})
@@ -883,7 +895,28 @@ class CombatEnv(gym.Env):
     def action_masks(self) -> np.ndarray:
         if self._current_state is None:
             return np.ones(41, dtype=bool)
-        return self.enc.action_mask(self._current_state)
+        mask = self.enc.action_mask(self._current_state)
+        if os.environ.get("STS2_VANTOM_SLIPPERY_MASK", "") in ("1", "true", "on"):
+            try:
+                from agent.turn_planner import apply_vantom_slippery_mask
+                mask = apply_vantom_slippery_mask(self._current_state, mask)
+            except Exception:
+                pass
+        if os.environ.get("STS2_BOSS_PLANNER_MASK", "") in ("1", "true", "on"):
+            try:
+                context = self._current_state.get("context") or {}
+                room_type = str(context.get("room_type") or self._current_combat_room_type)
+                room_type_l = room_type.lower()
+                if "boss" in room_type_l or "elite" in room_type_l:
+                    from agent.turn_planner import plan_action
+                    planned = plan_action(self._current_state, mask)
+                    if planned is not None and 0 <= int(planned) < len(mask) and bool(mask[int(planned)]):
+                        forced = np.zeros_like(mask)
+                        forced[int(planned)] = True
+                        mask = forced
+            except Exception:
+                pass
+        return mask
 
     def close(self):
         self._kill_proc()
@@ -957,6 +990,9 @@ class CombatEnv(gym.Env):
         dmg_reward = _dmg_w * enemy_hp_lost / self._combat_start_enemy_hp
         if self._current_floor >= 17:
             dmg_reward += 0.10 * enemy_hp_lost / self._combat_start_enemy_hp
+        if (_os_r.environ.get("STS2_BOSS_DENSE") == "1"
+                and "boss" in str(self._current_combat_room_type).lower()):
+            dmg_reward += BOSS_DENSE_DAMAGE_WEIGHT * enemy_hp_lost / self._combat_start_enemy_hp
         player_hp_lost = max(self._prev_player_hp - cur_player_hp, 0)
         hp_penalty = _hp_w * player_hp_lost / self._combat_start_player_max_hp
 
@@ -1434,11 +1470,13 @@ class CombatEnv(gym.Env):
                     break
                 if new_state is None:
                     break
-            if new_state is None or new_state.get("decision") == "game_over":
+            if (new_state is None or new_state.get("decision") == "game_over"
+                    or new_state.get("type") == "error"):
                 return new_state or state
             state = new_state
-            # Refresh potion list from updated state
-            potions = (state.get("player") or {}).get("potions", []) or []
+            # Potion slots are re-indexed after each use; restart the scan on
+            # the updated state so we never send stale potion_index values.
+            return self._greedy_use_potions(state)
 
         return state
 

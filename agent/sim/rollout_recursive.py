@@ -34,7 +34,7 @@ from collections import defaultdict
 from typing import Any
 
 from agent.sim.combat_state import CombatState, Enemy
-from agent.sim.combat_simulator import simulate_combat, heuristic_policy
+from agent.sim.combat_simulator import simulate_combat, heuristic_policy, mcts_policy
 from agent.sim.combat_step import _load_enemy_db, get_card_data, parse_enemy_hp
 
 
@@ -81,6 +81,30 @@ def _sample_enemy(floor: int, rng: random.Random) -> Enemy | None:
     )
 
 
+def _classify_combat_type(floor: int, enemy: Enemy | None) -> str:
+    """MOB / ELITE / BOSS — drives type-specific MC max_turns and scoring.
+
+    Boss: floor 17 (Act 1 boss) or any enemy with max_hp ≥ 200.
+    Elite: Act 1 elite floors (~7) or enemy hp 70-200.
+    Mob: everything else."""
+    if floor == _BOSS_FLOOR:
+        return "BOSS"
+    if enemy is not None and enemy.max_hp >= 200:
+        return "BOSS"
+    if enemy is not None and enemy.max_hp >= 70:
+        return "ELITE"
+    return "MOB"
+
+
+# Type-specific MC simulator cap. Match expected real-game pacing so a stalled
+# combat costs MC's outcome score (HP spent / turn) appropriately.
+_TYPE_MAX_TURNS = {
+    "MOB": 5,      # mob > 5 turns → policy is bleeding HP, bad sign
+    "ELITE": 7,    # elites take a few turns; cap at 7
+    "BOSS": 25,    # bosses are long attrition tests
+}
+
+
 def _make_combat_state(deck_ids: list[str], hp: int, max_hp: int,
                        floor: int, energy: int = 3,
                        enemy: Enemy | None = None,
@@ -94,6 +118,7 @@ def _make_combat_state(deck_ids: list[str], hp: int, max_hp: int,
     s = CombatState(
         hp=hp, max_hp=max_hp, energy=energy, max_energy=energy,
         floor=floor, rng_seed=seed,
+        combat_type=_classify_combat_type(floor, enemy),
     )
     if relics is not None:
         s.relics = list(relics)
@@ -147,7 +172,11 @@ def rollout_outcome(deck_ids: list[str], hp: int, max_hp: int, floor: int,
             s = _make_combat_state(cur_deck, cur_hp, max_hp, cur_floor,
                                     enemy=enemy, seed=sim_seed + d,
                                     relics=relics)
-            out = simulate_combat(s, heuristic_policy, max_turns=25,
+            type_cap = _TYPE_MAX_TURNS.get(s.combat_type, 25)
+            # STS2_USE_MCTS=1 enables MCTS combat play in MC rollout (Jun 10).
+            # Costs ~5-15× compute per MC sim but predictions are more accurate.
+            policy_fn = mcts_policy if os.environ.get("STS2_USE_MCTS") == "1" else heuristic_policy
+            out = simulate_combat(s, policy_fn, max_turns=type_cap,
                                    rng=random.Random(sim_seed + d * 7))
             last_turns = out["turns"]
             last_won = out["won"]
@@ -222,6 +251,90 @@ def _card_score(outcome: dict[str, float]) -> float:
     return outcome["win_rate"] * 80 + outcome["avg_final_hp"] * 0.5
 
 
+# ─── Boss-aware evaluation (Jun 10) ────────────────────────────────────
+# state.context.boss exposes the act boss from floor 1. When set_mc_context
+# carries boss_id, each candidate deck is ALSO evaluated against the actual
+# boss fight (spire-codex attack pattern drives the sim via intent-loop).
+# Deck construction then organically counters the specific boss:
+#   VANTOM (Dismember 27 spike)        → block cards rank higher
+#   CEREMONIAL_BEAST (+2 STR/turn race) → burst damage ranks higher
+#   THE_KIN (priest + 2 followers)      → AoE ranks higher
+#   LAGAVULIN_MATRIARCH (sleeps)        → setup powers rank higher
+
+# Multi-enemy boss compositions (encounter id → monster ids)
+_BOSS_COMPOSITION = {
+    "THE_KIN": ["KIN_PRIEST", "KIN_FOLLOWER", "KIN_FOLLOWER"],
+    "KAISER_CRAB": ["CRUSHER", "ROCKET"],
+}
+
+
+def _make_boss_enemies(boss_id: str) -> list[Enemy]:
+    """Build the Enemy list for a boss encounter using spire-codex stats.
+    Enemy.id matches the spire DB so _spire_advance drives real intent loops."""
+    from agent.sim.combat_step import _load_spire_db
+    db = _load_spire_db()
+    out: list[Enemy] = []
+    for mid in _BOSS_COMPOSITION.get(boss_id, [boss_id]):
+        rec = db.get(mid)
+        if rec is None:
+            continue
+        hp = rec.get("min_hp") or rec.get("max_hp") or 200
+        first_move = (rec.get("moves") or [{}])[0]
+        dmg = (first_move.get("damage") or {})
+        out.append(Enemy(
+            id=mid, name=mid, hp=int(hp), max_hp=int(hp),
+            intent={"type": "attack",
+                    "damage": int(dmg.get("normal", 10) or 10),
+                    "hits": int(dmg.get("hit_count", 1) or 1)},
+        ))
+    return out
+
+
+def boss_rollout_outcome(deck_ids: list[str], hp: int, max_hp: int,
+                          boss_id: str, n_sims: int = 6, seed: int = 0,
+                          relics: list[str] | None = None) -> dict[str, float]:
+    """Simulate the ACTUAL upcoming boss fight n_sims times with this deck.
+    Entry HP uses current hp (optimistic but consistent across candidates —
+    only the differential matters for ranking)."""
+    wins = 0
+    hps: list[int] = []
+    for i in range(n_sims):
+        sim_seed = seed * 7919 + i
+        enemies = _make_boss_enemies(boss_id)
+        if not enemies:
+            return {"win_rate": 0.0, "avg_final_hp": 0.0, "n_sims": 0.0}
+        s = _make_combat_state(deck_ids, hp, max_hp, _BOSS_FLOOR,
+                                seed=sim_seed, relics=relics)
+        s.enemies = enemies
+        s.combat_type = "BOSS"
+        out = simulate_combat(s, heuristic_policy,
+                               max_turns=_TYPE_MAX_TURNS["BOSS"],
+                               rng=random.Random(sim_seed))
+        if out["won"]:
+            wins += 1
+        hps.append(out["final_hp"] if out["won"] else 0)
+    return {
+        "win_rate": wins / max(n_sims, 1),
+        "avg_final_hp": sum(hps) / max(len(hps), 1),
+        "n_sims": float(n_sims),
+    }
+
+
+def _boss_weight(floor: int) -> float:
+    """How much the boss-fight eval weighs vs next-room eval.
+
+    Tuned Jun 10 after first boss-aware eval: original ramp to 1.0 made the
+    boss eval (±80 scale) dominate next-room eval → VANTOM runs went glass
+    cannon (sim said "block can't save you from Dismember-27, race!") and
+    died at floors 6-14 (0/12 reach). Capped at 0.4 and start later (floor 8)
+    so boss eval nudges instead of dominating; combined with the 0.5 score
+    scale below, max boss influence is 0.2 × ±80 = ±16."""
+    return max(0.0, min(0.4, (floor - 8) * 0.05))
+
+
+_BOSS_SCORE_SCALE = 0.5  # boss outcome score multiplier (see _boss_weight)
+
+
 def _norm_id(card: dict[str, Any]) -> str:
     cid = card.get("id", "?")
     if isinstance(cid, dict):
@@ -239,6 +352,7 @@ def score_candidates_via_rollout(
     seed: int = 0,
     max_depth: int = 3,
     relics: list[str] | None = None,
+    boss_id: str | None = None,
 ) -> list[float]:
     """Per-candidate bonus, normalised so the set sums to 0.
 
@@ -250,12 +364,21 @@ def score_candidates_via_rollout(
     rollout_outcome so the sim's combat states use it (Burning Blood,
     Lantern, Philosophers Stone etc all alter combat HP/turn count and
     therefore differentiate candidate cards meaningfully).
+
+    `boss_id` — actual act boss (from state.context.boss). When set, every
+    candidate is also evaluated against the real boss fight, weighted by
+    proximity (_boss_weight). Deck construction becomes boss-aware.
     """
     if not cards:
         return []
+    bw = _boss_weight(floor) if boss_id else 0.0
     base = rollout_outcome(deck_ids, hp, max_hp, floor, n_sims, seed,
                             max_depth, relics=relics)
     base_s = _card_score(base) + base.get("avg_max_floor", floor)
+    if bw > 0:
+        bb = boss_rollout_outcome(deck_ids, hp, max_hp, boss_id,
+                                    n_sims=6, seed=seed, relics=relics)
+        base_s += bw * _BOSS_SCORE_SCALE * _card_score(bb)
 
     deltas: list[float] = []
     for i, c in enumerate(cards):
@@ -264,6 +387,11 @@ def score_candidates_via_rollout(
                               seed=seed + i + 1, max_depth=max_depth,
                               relics=relics)
         candidate_s = _card_score(out) + out.get("avg_max_floor", floor)
+        if bw > 0:
+            ob = boss_rollout_outcome(new_deck, hp, max_hp, boss_id,
+                                        n_sims=6, seed=seed + i + 1,
+                                        relics=relics)
+            candidate_s += bw * _BOSS_SCORE_SCALE * _card_score(ob)
         deltas.append(candidate_s - base_s)
     mean = sum(deltas) / len(deltas)
     return [d - mean for d in deltas]
