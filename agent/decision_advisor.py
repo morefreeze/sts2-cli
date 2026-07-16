@@ -1,29 +1,15 @@
 """Decision advisor for strategy-driving, directional action scoring."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from agent.card_scoring import (
-    BROKEN_CARDS,
-    _card_id_norm,
     best_smith_target,
     card_dimensions,
     deck_5turn_burst,
     deck_block_per_turn,
     deck_boss_versatility,
     deck_engine_efficiency,
-    score_card_in_deck,
 )
 from agent.turn_planner import END_TURN_ACTION, NO_TARGET_SLOT, plan_action
-
-
-@dataclass
-class CandidateScore:
-    command: dict
-    score: float
-    dimensions: dict[str, float] = field(default_factory=dict)
-    reason: str = ""
-    hard_safety: bool = False
 
 
 def _clamp01(x: float) -> float:
@@ -58,8 +44,6 @@ class DecisionAdvisor:
         decision = state.get("decision", "")
         if decision == "combat_play":
             return self._choose_combat(state)
-        if decision == "card_reward":
-            return self._choose_card_reward(state)
         if decision == "map_select":
             return self._choose_map(state)
         if decision == "rest_site":
@@ -78,49 +62,6 @@ class DecisionAdvisor:
         if target_slot != NO_TARGET_SLOT:
             args["target_index"] = target_slot
         return {"cmd": "action", "action": "play_card", "args": args}
-
-    def _choose_card_reward(self, state: dict) -> dict:
-        cards = state.get("cards") or []
-        deck = (state.get("player") or {}).get("deck") or []
-        if not cards:
-            return {"cmd": "action", "action": "skip_card_reward"}
-        if not any(c.get("id") or c.get("type") or c.get("stats") or c.get("description") for c in cards):
-            return None
-        base = evaluate_deck(deck)
-        weakest = min(("attack", "defense", "cycle", "energy"), key=lambda k: base.get(k, 0.0))
-        scored: list[CandidateScore] = []
-        for i, c in enumerate(cards):
-            cid = _card_id_norm(c)
-            if cid in BROKEN_CARDS:
-                continue
-            card_score = score_card_in_deck(c, deck)
-            if card_score <= 0.0:
-                continue
-            after = evaluate_deck(deck + [c])
-            delta = {k: after.get(k, 0.0) - base.get(k, 0.0) for k in after}
-            contrib = card_dimensions(c)
-            fill_bonus = 0.20 if contrib.get(weakest, 0.0) > 0 else 0.0
-            large_deck_penalty = max(0, len(deck) - 15) * 0.025
-            score = (
-                0.35 * delta.get("attack", 0.0)
-                + 0.35 * delta.get("defense", 0.0)
-                + 0.20 * delta.get("cycle", 0.0)
-                + 0.10 * delta.get("energy", 0.0)
-                + fill_bonus
-                + min(card_score / 10.0, 1.0) * 0.18
-                - large_deck_penalty
-            )
-            idx = c.get("index", i)
-            scored.append(CandidateScore(
-                {"cmd": "action", "action": "select_card_reward", "args": {"card_index": idx}},
-                score,
-                delta,
-                f"fills {weakest}" if fill_bonus else "card reward delta",
-            ))
-        skip_score = 0.10 + max(0, len(deck) - 15) * 0.03
-        if not scored or max(scored, key=lambda s: s.score).score <= skip_score:
-            return {"cmd": "action", "action": "skip_card_reward"}
-        return max(scored, key=lambda s: s.score).command
 
     def _choose_map(self, state: dict) -> dict | None:
         choices = state.get("choices") or []

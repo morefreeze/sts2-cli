@@ -45,41 +45,13 @@ def test_evaluate_deck_exposes_directional_axes():
     assert scores["cycle"] > 0
 
 
-def test_card_reward_prefers_card_that_fills_weak_defense_axis():
-    deck = [card("CARD.STRIKE_IRONCLAD", damage=6) for _ in range(5)]
-    cards = [
-        card("CARD.DEFEND_IRONCLAD", ctype="Skill", block=5, index=0),
-        card("CARD.STRIKE_IRONCLAD", damage=6, index=1),
-    ]
-    state = base_state("card_reward", cards=cards)
-    state["player"]["deck"] = deck
+def test_card_reward_is_owned_by_shared_fallback_policy():
+    state = base_state(
+        "card_reward",
+        cards=[card("CARD.DEFEND_IRONCLAD", ctype="Skill", block=5, index=0)],
+    )
 
-    cmd = DecisionAdvisor().choose(state)
-
-    assert cmd == {
-        "cmd": "action",
-        "action": "select_card_reward",
-        "args": {"card_index": 0},
-    }
-
-
-def test_card_reward_skips_when_candidate_worsens_large_deck():
-    deck = [card("CARD.STRIKE_IRONCLAD", damage=6) for _ in range(20)]
-    bad = card("CARD.WOUND", ctype="Status", index=0)
-    state = base_state("card_reward", cards=[bad])
-    state["player"]["deck"] = deck
-
-    cmd = DecisionAdvisor().choose(state)
-
-    assert cmd == {"cmd": "action", "action": "skip_card_reward"}
-
-
-def test_card_reward_falls_back_for_unscorable_fixture_cards():
-    state = base_state("card_reward", cards=[{"index": 0}])
-
-    cmd = DecisionAdvisor().choose(state)
-
-    assert cmd is None
+    assert DecisionAdvisor().choose(state) is None
 
 
 def test_map_select_avoids_elite_at_low_hp():
@@ -130,10 +102,11 @@ def test_combat_uses_lethal_planner_when_available(monkeypatch):
     assert cmd == {"cmd": "action", "action": "play_card", "args": {"card_index": 0, "target_index": 0}}
 
 
-def test_greedy_action_uses_decision_advisor_for_card_rewards(monkeypatch):
-    from agent.combat_env import greedy_action
+def test_greedy_action_uses_shared_card_reward_policy_when_advisor_enabled(monkeypatch):
+    from agent import combat_env
 
     monkeypatch.setenv("STS2_DECISION_ADVISOR", "1")
+    monkeypatch.setattr(combat_env, "pick_best_card", lambda *args, **kwargs: 1)
     deck = [card("CARD.STRIKE_IRONCLAD", damage=6) for _ in range(5)]
     state = base_state(
         "card_reward",
@@ -144,7 +117,7 @@ def test_greedy_action_uses_decision_advisor_for_card_rewards(monkeypatch):
     )
     state["player"]["deck"] = deck
 
-    assert greedy_action(state)["args"]["card_index"] == 0
+    assert combat_env.greedy_action(state)["args"]["card_index"] == 1
 
 
 def test_greedy_action_can_disable_decision_advisor(monkeypatch):

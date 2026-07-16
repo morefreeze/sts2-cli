@@ -305,13 +305,19 @@ class _VerboseCombatEnv(CombatEnv):
                 f"  [rest fl={fl}] {hp_str} options={opts} → {chosen_name}")
 
         elif dec == "card_reward":
-            from agent.card_scoring import score_card, pick_best_card
+            from agent.card_scoring import score_card
             cards = state.get("cards", [])
-            best_idx = pick_best_card(cards)
-            if best_idx is not None and best_idx < len(cards):
-                chosen = _card_id(cards[best_idx])
-            else:
-                chosen = "SKIP"
+            cmd = greedy_action(state)
+            chosen = "SKIP"
+            if cmd.get("action") == "select_card_reward":
+                selected_idx = (cmd.get("args") or {}).get("card_index")
+                selected = next(
+                    (card for pos, card in enumerate(cards)
+                     if card.get("index", pos) == selected_idx),
+                    None,
+                )
+                if selected is not None:
+                    chosen = _card_id(selected)
             top3 = [(score_card(c), _card_id(c)) for c in cards]
             top3.sort(reverse=True)
             self.room_log.append(
