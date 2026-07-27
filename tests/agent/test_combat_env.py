@@ -3,6 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import json
 import pytest
+import agent.combat_env as combat_env
 from agent.combat_env import CombatEnv, greedy_action
 from agent.strategy import rest_site_action
 
@@ -371,6 +372,92 @@ def test_greedy_action_card_reward():
     }
     action = greedy_action(state)
     assert action["action"] == "select_card_reward"
+
+
+def _late_card_reward_state():
+    return {
+        "decision": "card_reward",
+        "act": 1,
+        "floor": 12,
+        "player": {
+            "deck": [{"id": f"CARD.DECK_{i}"} for i in range(15)],
+            "deck_size": 15,
+        },
+        "cards": [
+            {"id": "CARD.OLD_TOP", "index": 0},
+            {"id": "CARD.ELIGIBLE", "index": 1},
+        ],
+    }
+
+
+def test_card_quality_gate_selects_eligible_card_at_original_index(monkeypatch):
+    state = _late_card_reward_state()
+    seen = {}
+    monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "1")
+    monkeypatch.setattr(
+        combat_env,
+        "is_act1_card_reward_eligible",
+        lambda card, deck, act: card["id"] == "CARD.ELIGIBLE",
+    )
+
+    def fake_pick(cards, *, threshold, deck):
+        seen["ids"] = [card["id"] for card in cards]
+        return 0
+
+    monkeypatch.setattr(combat_env, "pick_best_card", fake_pick)
+    action = greedy_action(state)
+    assert seen["ids"] == ["CARD.ELIGIBLE"]
+    assert action["args"]["card_index"] == 1
+
+
+def test_card_quality_gate_skips_when_every_offer_is_ineligible(monkeypatch):
+    monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "1")
+    monkeypatch.setattr(
+        combat_env,
+        "is_act1_card_reward_eligible",
+        lambda card, deck, act: False,
+    )
+    monkeypatch.setattr(
+        combat_env,
+        "pick_best_card",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("empty eligible set should skip before ranking")
+        ),
+    )
+    assert greedy_action(_late_card_reward_state()) == {
+        "cmd": "action",
+        "action": "skip_card_reward",
+    }
+
+
+def test_card_quality_gate_is_enabled_by_default(monkeypatch):
+    state = _late_card_reward_state()
+    monkeypatch.delenv("STS2_CARD_QUALITY_GATE", raising=False)
+    monkeypatch.setattr(
+        combat_env,
+        "is_act1_card_reward_eligible",
+        lambda card, deck, act: card["id"] == "CARD.ELIGIBLE",
+    )
+    monkeypatch.setattr(
+        combat_env, "pick_best_card", lambda cards, *, threshold, deck: 0
+    )
+    assert greedy_action(state)["args"]["card_index"] == 1
+
+
+def test_card_quality_gate_zero_restores_unfiltered_selection(monkeypatch):
+    state = _late_card_reward_state()
+    monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "0")
+    monkeypatch.setattr(
+        combat_env,
+        "is_act1_card_reward_eligible",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("disabled gate should not inspect offers")
+        ),
+    )
+    monkeypatch.setattr(
+        combat_env, "pick_best_card", lambda cards, *, threshold, deck: 0
+    )
+    assert greedy_action(state)["args"]["card_index"] == 0
 
 
 def test_greedy_action_rest_heal():

@@ -18,7 +18,8 @@ from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
 from agent.strategy import Act1SafeStrategy, HpAwareMapStrategy, MapStrategy, rest_site_action
 from agent.card_scoring import (score_card, score_card_in_deck, pick_best_card,
-                                  pick_worst_card, deck_quality_score, _card_id_norm)
+                                  pick_worst_card, deck_quality_score,
+                                  is_act1_card_reward_eligible, _card_id_norm)
 from agent.decision_advisor import DecisionAdvisor
 
 # Swappable map strategy — change globally via set_map_strategy()
@@ -29,6 +30,11 @@ _decision_advisor = DecisionAdvisor()
 def _decision_advisor_enabled() -> bool:
     flag = os.environ.get("STS2_DECISION_ADVISOR", "").strip().lower()
     return flag in {"1", "true", "on", "yes"}
+
+
+def _card_quality_gate_enabled() -> bool:
+    flag = os.environ.get("STS2_CARD_QUALITY_GATE", "1").strip().lower()
+    return flag not in {"0", "false", "off", "no"}
 
 
 def set_map_strategy(strategy: MapStrategy):
@@ -317,9 +323,25 @@ def greedy_action(state: dict) -> dict:
                 floor=int(floor) if isinstance(floor, (int, float)) and floor > 0 else 5,
                 relics=CombatEnv._state_relic_ids(state),
             )
-            # Pass deck for synergy-aware picks (boosts cards that fit the archetype).
-            best = pick_best_card(cards, threshold=threshold, deck=deck)
-            if best is not None:
+            # Preserve reward indices while filtering late Act 1 deck dilution.
+            # Ranking, score thresholds, and broken-card handling remain owned
+            # by pick_best_card.
+            indexed_cards = list(enumerate(cards))
+            if _card_quality_gate_enabled():
+                act = state.get("act")
+                indexed_cards = [
+                    (original_index, card)
+                    for original_index, card in indexed_cards
+                    if is_act1_card_reward_eligible(card, deck, act)
+                ]
+            eligible_cards = [card for _, card in indexed_cards]
+            if not eligible_cards:
+                return {"cmd": "action", "action": "skip_card_reward"}
+            best_eligible = pick_best_card(
+                eligible_cards, threshold=threshold, deck=deck
+            )
+            if best_eligible is not None:
+                best = indexed_cards[best_eligible][0]
                 return {"cmd": "action", "action": "select_card_reward",
                         "args": {"card_index": best}}
         return {"cmd": "action", "action": "skip_card_reward"}
