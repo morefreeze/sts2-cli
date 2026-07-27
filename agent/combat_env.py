@@ -34,7 +34,7 @@ def _decision_advisor_enabled() -> bool:
 
 def _card_quality_gate_enabled() -> bool:
     flag = os.environ.get("STS2_CARD_QUALITY_GATE", "0").strip().lower()
-    return flag not in {"0", "false", "off", "no"}
+    return flag in {"1", "true", "on", "yes"}
 
 
 def set_map_strategy(strategy: MapStrategy):
@@ -339,6 +339,8 @@ def greedy_action(state: dict) -> dict:
                     for original_index, card in indexed_cards
                     if is_act1_card_reward_eligible(card, deck, act)
                 ]
+                if not indexed_cards and state.get("can_skip") is False:
+                    indexed_cards = list(enumerate(cards))
             eligible_cards = [card for _, card in indexed_cards]
             if not eligible_cards:
                 return {"cmd": "action", "action": "skip_card_reward"}

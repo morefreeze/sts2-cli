@@ -105,7 +105,9 @@ eligible and existing behavior continues.
 
 Broken-card filtering remains owned by `pick_best_card` and is unchanged.
 The gate must not turn an engine-data problem into an automatic skip or a
-failed run.
+failed run. If a reward explicitly reports `can_skip=false` and filtering
+removes every option, `greedy_action` falls back to the original unfiltered
+offer set.
 
 ## Data flow
 
