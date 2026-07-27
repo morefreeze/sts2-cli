@@ -21,6 +21,14 @@ default-on environment switch for a one-variable A/B and immediate rollback.
 **Approved design:**
 `docs/superpowers/specs/2026-07-27-act1-card-quality-gate-design.md`
 
+**Execution outcome:** The original implementation exposed the runtime act at
+`state.context.act`, not `state.act`. Fixed-seed iterations then added a floor
+12 activation threshold, a 16-card hard cap, and a `-0.01` premium dilution
+floor. The static gate passed six of seven promotion checks but did not enter
+Act 2; the one approved 2,048-step fine-tune regressed progression. The
+updated design spec records the final evidence and overrides the initial
+default-on and 18-card snippets below. The delivered switch is default-off.
+
 ---
 
 ## Task 1: Add the pure Act 1 eligibility predicate

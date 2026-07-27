@@ -1,6 +1,7 @@
 # Act 1 Marginal Card-Quality Gate Design
 
-**Status:** Design approved on 2026-07-27; implementation has not started.
+**Status:** Implemented and evaluated on 2026-07-27; not promoted because
+neither the static gate nor the one approved fine-tune entered Act 2.
 
 ## Context
 
@@ -57,10 +58,10 @@ top-scoring card is ineligible but another offered card is eligible, the agent
 can still select the best eligible alternative. If no card is both eligible
 and above the existing score threshold, the agent skips the reward.
 
-The final behavior is enabled by default. Setting
-`STS2_CARD_QUALITY_GATE=0` disables only this new filter and restores the
-current behavior for paired evaluation or emergency rollback. If promotion
-criteria fail, the branch must leave the default disabled before merge.
+The behavior is available behind `STS2_CARD_QUALITY_GATE=1`. Promotion
+criteria failed, so the final branch leaves it disabled by default. Setting
+`STS2_CARD_QUALITY_GATE=0`, or leaving the variable unset, restores the
+pre-gate behavior.
 
 ## Eligibility rules
 
@@ -75,20 +76,23 @@ It computes:
   - the card has the `SCALING_PILLAR` tag while the deck has fewer than two
     scaling pillars.
 
-The rules are:
+The evaluated rules are:
 
-1. Outside Act 1, accept the card unchanged.
-2. With fewer than 15 cards, accept the card unchanged.
-3. With 15-17 cards, accept only when `delta > 0`, or when the card is a
-   `premium_core`.
-4. With 18 or more cards, accept only when:
-   - `delta >= 0.005`; or
-   - the card is a `premium_core` and `delta >= -0.01`.
+1. Before floor 12, do not invoke the gate. Early event rewards can inflate a
+   deck to 15 cards by floor 6; filtering those rewards caused two fixed seeds
+   to lose Act 1 boss reach.
+2. Outside Act 1, accept the card unchanged.
+3. With fewer than 15 cards, accept the card unchanged.
+4. With exactly 15 cards, accept when `delta > 0`, or when the card is a
+   `premium_core` and `delta >= -0.01`.
+5. With 16 or more cards, reject further normal card rewards.
 
-The stricter 18-card rule prevents a nominally premium card from causing
-severe dilution. The premium exception protects late high-impact scaling,
-draw, and defensive cards that the aggregate metric can undervalue because
-adding any card slightly worsens cycle efficiency.
+The 16-card cap was the only tested configuration that reduced median
+boss-entry deck size from 17 to 16 without reducing average floor or boss
+reach. Applying only the old strict delta rule at 16 cards regressed a
+sentinel seed to floor 14, while the hard cap preserved its boss reach. The
+premium lower bound prevents nominal scaling cards such as Pyre
+(`delta=-0.0355` in the failing seed) from bypassing the cap's quality intent.
 
 The deck list, rather than a separate reported deck-size field, is
 authoritative because the quality calculation requires the actual cards.
@@ -107,9 +111,10 @@ failed run.
 
 1. `greedy_action` receives a `card_reward` state.
 2. It establishes the existing MC context and existing score threshold.
-3. When the quality gate is enabled and the state is in Act 1, it filters
-   offered cards with the pure eligibility predicate while retaining their
-   original indices.
+3. When the quality gate is enabled, the run is at floor 12 or later, and the
+   state is in Act 1, it filters offered cards with the pure eligibility
+   predicate while retaining their original indices. The act is read from
+   either `state.act` or the runtime's actual `state.context.act` location.
 4. It calls `pick_best_card` on the eligible cards.
 5. It maps the selected eligible-card index back to the original reward index.
 6. If no eligible card clears the existing threshold, it returns
@@ -126,8 +131,8 @@ Unit tests in `tests/agent/test_card_scoring.py` will cover:
 - a non-positive marginal card is rejected at 15-17 cards;
 - a positive-marginal card is accepted at 15-17 cards;
 - a missing scaling pillar and a score-9.5 premium card receive the exception;
-- an 18-card deck rejects a severely negative premium card;
-- an 18-card deck accepts a card with at least `0.005` lift;
+- a severely negative premium card is rejected at 15 cards;
+- a 16-card deck rejects every further normal reward before scoring;
 - invalid or incomplete inputs fail open.
 
 Integration tests in `tests/agent/test_combat_env.py` will cover:
@@ -135,7 +140,7 @@ Integration tests in `tests/agent/test_combat_env.py` will cover:
 - the gate can reject the old top-scoring card and select an eligible
   lower-ranked card using its original reward index;
 - all ineligible offers produce `skip_card_reward`;
-- the final default enables the gate;
+- the final default disables the unpromoted gate;
 - `STS2_CARD_QUALITY_GATE=0` restores the current selection behavior.
 
 All existing card-scoring and combat-environment tests must remain green.
@@ -176,6 +181,34 @@ If any progression or deck-quality criterion regresses, keep the gate disabled,
 inspect rejected offers on the failing seeds, adjust only one threshold or
 exception rule, and repeat the paired evaluation.
 
+## Evaluation result
+
+The final static gate used checkpoint `ppo_ironclad_13955k.zip` and compared
+gate-off v3 against gate-on v4:
+
+- both lanes: `20/20` valid, zero invalid attempts, average floor `15.0`,
+  boss reach `11/20`, Act 2 `0/20`;
+- median boss-entry deck size: `17 -> 16`;
+- average operational quality: `0.511462 -> 0.515988`;
+- average starter-basic count: `7.4545 -> 7.4545`.
+
+This passed every criterion except Act 2 entry, so the conditional training
+branch ran once. It used 22 baseline/gated natural-HP boss snapshots, two of
+four save-backed environments, and 2,048 steps from `13955k`. The resulting
+`ppo_ironclad_13957k.zip` regressed to:
+
+- `20/20` valid, zero invalid attempts;
+- average floor `14.4`;
+- boss reach `9/20`;
+- Act 2 `0/20`;
+- median boss-entry deck size `16`;
+- average operational quality `0.513949`;
+- average starter-basic count `7.7778`.
+
+The trained checkpoint is rejected. Because no candidate entered Act 2 and
+the trained candidate also failed progression criteria, the runtime switch
+remains default-off.
+
 ## Deliverables
 
 - Pure eligibility predicate in `agent/card_scoring.py`.
@@ -184,4 +217,5 @@ exception rule, and repeat the paired evaluation.
 - Focused unit and integration tests.
 - Paired 20-seed baseline and candidate logs.
 - Boss-entry deck comparison and Act 2 evidence.
-- A promoted default-on gate only after all acceptance criteria pass.
+- A measured, default-off experimental gate because the acceptance criteria
+  did not all pass.
