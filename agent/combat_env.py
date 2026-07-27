@@ -327,7 +327,12 @@ def greedy_action(state: dict) -> dict:
             # Ranking, score thresholds, and broken-card handling remain owned
             # by pick_best_card.
             indexed_cards = list(enumerate(cards))
-            if _card_quality_gate_enabled():
+            late_act1 = (
+                not isinstance(floor, bool)
+                and isinstance(floor, (int, float))
+                and floor >= 12
+            )
+            if _card_quality_gate_enabled() and late_act1:
                 act = state.get("act") or (state.get("context") or {}).get("act")
                 indexed_cards = [
                     (original_index, card)
