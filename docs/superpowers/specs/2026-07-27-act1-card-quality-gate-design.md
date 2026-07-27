@@ -1,0 +1,187 @@
+# Act 1 Marginal Card-Quality Gate Design
+
+**Status:** Design approved on 2026-07-27; implementation has not started.
+
+## Context
+
+The current best full-run policy is the 2,048-step early-stop checkpoint
+`ppo_ironclad_13955k.zip`.
+
+On the same 20 fixed seeds:
+
+- the original `13933k` baseline averaged `14.4` floors, reached the Act 1
+  boss in `11/20` runs, and entered Act 2 in `0/20`;
+- `13955k` averaged `15.0` floors, also reached the boss in `11/20` runs,
+  and entered Act 2 in `0/20`.
+
+Boss retries show that `13955k` can deterministically beat two of the eleven
+saved baseline boss states. Full runs still lose because the states delivered
+to the boss differ in hidden RNG and, more importantly, regularly contain
+diluted decks.
+
+The recent deck-history sample contains 680 completed runs that reached the
+Act 1 boss. After those decks had already reached 15 cards, the agent still
+took 1,609 card rewards. Adding the selected card reduced or failed to improve
+the operational deck-quality score in 985 cases (61%). The most common
+negative-marginal additions were Sword Boomerang, Perfected Strike, Body Slam,
+Bully, Molten Fist, and Havoc.
+
+The remaining primary bottleneck is therefore late Act 1 deck dilution, not
+general floor progression or a lack of boss-combat training data.
+
+## Goals
+
+1. Keep the `13955k` 20-seed average floor at or above `15.0`.
+2. Keep Act 1 boss reach at or above `11/20`.
+3. Produce measurably leaner and no-worse-quality boss-entry decks.
+4. Beat at least one Act 1 boss and enter Act 2 on the same 20 fixed seeds.
+5. Preserve a one-variable A/B path and an immediate runtime rollback.
+
+## Non-goals
+
+- Changing PPO combat actions, observations, rewards, or network weights.
+- Changing map, rest-site, event, shop, or card-removal strategies.
+- Re-ranking cards or replacing the existing card-scoring model.
+- Applying the quality gate to Act 2 or later acts.
+- Refactoring unrelated card-scoring or environment code.
+
+## Chosen approach
+
+Add a pure Act 1 card-reward eligibility predicate in
+`agent/card_scoring.py`. `agent/combat_env.py::greedy_action` will filter the
+offered cards through the predicate before passing the eligible subset to the
+existing `pick_best_card` function.
+
+This preserves the current score ordering and score threshold. If the current
+top-scoring card is ineligible but another offered card is eligible, the agent
+can still select the best eligible alternative. If no card is both eligible
+and above the existing score threshold, the agent skips the reward.
+
+The final behavior is enabled by default. Setting
+`STS2_CARD_QUALITY_GATE=0` disables only this new filter and restores the
+current behavior for paired evaluation or emergency rollback. If promotion
+criteria fail, the branch must leave the default disabled before merge.
+
+## Eligibility rules
+
+The predicate receives the offered card, the current deck, and the current act.
+It computes:
+
+- `before`: `deck_quality_metrics(deck)["overall"]`;
+- `after`: `deck_quality_metrics(deck + [card])["overall"]`;
+- `delta = after - before`;
+- `premium_core`: either:
+  - `score_card_in_deck(card, deck) >= 9.5`, or
+  - the card has the `SCALING_PILLAR` tag while the deck has fewer than two
+    scaling pillars.
+
+The rules are:
+
+1. Outside Act 1, accept the card unchanged.
+2. With fewer than 15 cards, accept the card unchanged.
+3. With 15-17 cards, accept only when `delta > 0`, or when the card is a
+   `premium_core`.
+4. With 18 or more cards, accept only when:
+   - `delta >= 0.005`; or
+   - the card is a `premium_core` and `delta >= -0.01`.
+
+The stricter 18-card rule prevents a nominally premium card from causing
+severe dilution. The premium exception protects late high-impact scaling,
+draw, and defensive cards that the aggregate metric can undervalue because
+adding any card slightly worsens cycle efficiency.
+
+The deck list, rather than a separate reported deck-size field, is
+authoritative because the quality calculation requires the actual cards.
+
+## Failure behavior
+
+The gate fails open. If the act, deck, card data, or quality metrics are
+missing, invalid, non-finite, or raise an exception, the offered card remains
+eligible and existing behavior continues.
+
+Broken-card filtering remains owned by `pick_best_card` and is unchanged.
+The gate must not turn an engine-data problem into an automatic skip or a
+failed run.
+
+## Data flow
+
+1. `greedy_action` receives a `card_reward` state.
+2. It establishes the existing MC context and existing score threshold.
+3. When the quality gate is enabled and the state is in Act 1, it filters
+   offered cards with the pure eligibility predicate while retaining their
+   original indices.
+4. It calls `pick_best_card` on the eligible cards.
+5. It maps the selected eligible-card index back to the original reward index.
+6. If no eligible card clears the existing threshold, it returns
+   `skip_card_reward`.
+7. Existing `card_pick` logging records the actual selected card or `SKIP`;
+   no persisted schema changes are required.
+
+## Tests
+
+Unit tests in `tests/agent/test_card_scoring.py` will cover:
+
+- Act 2 and later acts are unchanged;
+- decks below 15 cards are unchanged;
+- a non-positive marginal card is rejected at 15-17 cards;
+- a positive-marginal card is accepted at 15-17 cards;
+- a missing scaling pillar and a score-9.5 premium card receive the exception;
+- an 18-card deck rejects a severely negative premium card;
+- an 18-card deck accepts a card with at least `0.005` lift;
+- invalid or incomplete inputs fail open.
+
+Integration tests in `tests/agent/test_combat_env.py` will cover:
+
+- the gate can reject the old top-scoring card and select an eligible
+  lower-ranked card using its original reward index;
+- all ineligible offers produce `skip_card_reward`;
+- the final default enables the gate;
+- `STS2_CARD_QUALITY_GATE=0` restores the current selection behavior.
+
+All existing card-scoring and combat-environment tests must remain green.
+
+## Fixed-seed validation
+
+Use the same explicit checkpoint,
+`checkpoints/act1_boss_13933_smoke_20260727/ppo_ironclad_13955k.zip`, for both
+lanes. Disable advisor, planner, boss planner mask, and boss-readiness lift.
+Set `DECK_HISTORY_PATH=` so neither lane updates the outcome-feedback bandit
+during evaluation.
+
+Run 20 fixed seeds in each lane:
+
+- baseline: `STS2_CARD_QUALITY_GATE=0`;
+- candidate: `STS2_CARD_QUALITY_GATE=1`.
+
+Both lanes use `--invalid-retries 2`, a unique boss-deck JSONL file, and a
+unique boss-snapshot directory.
+
+The gate is promoted only if all of these are true:
+
+1. valid games are `20/20` with zero invalid attempts;
+2. candidate average floor is at least `15.0`;
+3. candidate boss reach is at least `11/20`;
+4. candidate enters Act 2 in at least `1/20` runs;
+5. median boss-entry deck size is at least one card smaller than baseline;
+6. average boss-entry operational quality does not decrease;
+7. average starter-basic count does not increase.
+
+If the gate improves deck composition and preserves progression but still
+produces `0/20` Act 2 entries, capture its boss-entry snapshots and perform one
+2,048-step natural-HP diverse boss fine-tune from `13955k`. The combined
+checkpoint and gate must pass the same promotion criteria; training results
+alone are not sufficient.
+
+If any progression or deck-quality criterion regresses, keep the gate disabled,
+inspect rejected offers on the failing seeds, adjust only one threshold or
+exception rule, and repeat the paired evaluation.
+
+## Deliverables
+
+- Pure eligibility predicate in `agent/card_scoring.py`.
+- Act 1 reward filtering and original-index mapping in
+  `agent/combat_env.py`.
+- Focused unit and integration tests.
+- Paired 20-seed baseline and candidate logs.
+- Boss-entry deck comparison and Act 2 evidence.
+- A promoted default-on gate only after all acceptance criteria pass.
