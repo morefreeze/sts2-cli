@@ -328,7 +328,7 @@ def greedy_action(state: dict) -> dict:
             # by pick_best_card.
             indexed_cards = list(enumerate(cards))
             if _card_quality_gate_enabled():
-                act = state.get("act")
+                act = state.get("act") or (state.get("context") or {}).get("act")
                 indexed_cards = [
                     (original_index, card)
                     for original_index, card in indexed_cards

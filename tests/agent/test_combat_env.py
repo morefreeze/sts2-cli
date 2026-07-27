@@ -410,6 +410,30 @@ def test_card_quality_gate_selects_eligible_card_at_original_index(monkeypatch):
     assert action["args"]["card_index"] == 1
 
 
+def test_card_quality_gate_reads_act_from_runtime_context(monkeypatch):
+    state = _late_card_reward_state()
+    state.pop("act")
+    state["context"] = {"act": 1}
+    seen = {}
+    monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "1")
+
+    def fake_eligibility(card, deck, act):
+        seen["act"] = act
+        return card["id"] == "CARD.ELIGIBLE"
+
+    monkeypatch.setattr(
+        combat_env, "is_act1_card_reward_eligible", fake_eligibility
+    )
+    monkeypatch.setattr(
+        combat_env, "pick_best_card", lambda cards, *, threshold, deck: 0
+    )
+
+    action = greedy_action(state)
+
+    assert seen["act"] == 1
+    assert action["args"]["card_index"] == 1
+
+
 def test_card_quality_gate_skips_when_every_offer_is_ineligible(monkeypatch):
     monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "1")
     monkeypatch.setattr(
