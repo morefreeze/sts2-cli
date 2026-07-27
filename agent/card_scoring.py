@@ -6,6 +6,7 @@ and synergy potential. Used by greedy_action() for card_reward, shop, and
 card_select (removal) decisions.
 """
 import json as _json
+import math as _math
 import os as _os
 
 # === Empirical bonus from gameplay statistics ===
@@ -1567,6 +1568,58 @@ def _card_tags(card: dict) -> list[str]:
         if cid.endswith(suffix):
             return _resolve(cid[:-len(suffix)])
     return []
+
+
+def is_act1_card_reward_eligible(
+        card: dict, deck: list[dict], act: object) -> bool:
+    """Whether an offered card may enter a late Act 1 deck.
+
+    This is deliberately fail-open: state or scoring problems must preserve
+    the pre-gate card reward behavior.
+    """
+    try:
+        if isinstance(act, bool) or act is None:
+            return True
+        act_number = int(act)
+        if isinstance(act, float) and not act.is_integer():
+            return True
+        if act_number != 1:
+            return True
+        if not isinstance(card, dict) or not _card_id_norm(card):
+            return True
+        if not isinstance(deck, list):
+            return True
+        if any(not isinstance(c, dict) or not _card_id_norm(c) for c in deck):
+            return True
+        if len(deck) < 15:
+            return True
+
+        before = float(deck_quality_metrics(deck)["overall"])
+        after = float(deck_quality_metrics(deck + [card])["overall"])
+        delta = after - before
+        score = float(score_card_in_deck(card, deck))
+        if not _math.isfinite(delta) or not _math.isfinite(score):
+            return True
+
+        tags = _card_tags(card)
+        scaling_pillars = sum(
+            1 for deck_card in deck
+            if "SCALING_PILLAR" in _card_tags(deck_card)
+        )
+        premium_core = (
+            score >= 9.5
+            or ("SCALING_PILLAR" in tags and scaling_pillars < 2)
+        )
+
+        if len(deck) >= 18:
+            epsilon = 1e-12
+            return (
+                delta >= 0.005 - epsilon
+                or (premium_core and delta >= -0.01 - epsilon)
+            )
+        return delta > 0.0 or premium_core
+    except Exception:
+        return True
 
 
 def _deck_tag_counts(deck: list[dict]) -> dict[str, int]:

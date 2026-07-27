@@ -1,6 +1,9 @@
+import pytest
+
 from agent.card_scoring import (
     deck_5turn_burst,
     deck_quality_metrics,
+    is_act1_card_reward_eligible,
     pick_best_card,
     score_deck_dimensions,
     set_mc_context,
@@ -25,6 +28,141 @@ def card(cid, *, cost=1, ctype="Attack", damage=0, block=0, draw=0,
         "stats": stats,
         "description": description,
     }
+
+
+def _stub_gate_signals(monkeypatch, *, delta, score=5.0, card_tags=()):
+    import agent.card_scoring as scoring
+
+    monkeypatch.setattr(
+        scoring,
+        "deck_quality_metrics",
+        lambda cards: {"overall": 0.5 + (delta if len(cards) == 16 else 0.0)},
+    )
+    monkeypatch.setattr(scoring, "score_card_in_deck", lambda offered, deck: score)
+
+    def fake_tags(value):
+        if value.get("id") == "CARD.OFFER":
+            return set(card_tags)
+        return {"SCALING_PILLAR"} if value.get("pillar") else set()
+
+    monkeypatch.setattr(scoring, "_card_tags", fake_tags)
+
+
+def _gate_deck(size, *, pillars=0):
+    return [
+        {
+            "id": f"CARD.DECK_{i}",
+            "pillar": i < pillars,
+        }
+        for i in range(size)
+    ]
+
+
+def test_act1_card_quality_gate_is_inactive_outside_act1(monkeypatch):
+    import agent.card_scoring as scoring
+
+    monkeypatch.setattr(
+        scoring,
+        "deck_quality_metrics",
+        lambda deck: (_ for _ in ()).throw(AssertionError("gate should not score")),
+    )
+    assert is_act1_card_reward_eligible(
+        {"id": "CARD.OFFER"}, _gate_deck(18), act=2
+    )
+
+
+def test_act1_card_quality_gate_is_inactive_below_15_cards(monkeypatch):
+    import agent.card_scoring as scoring
+
+    monkeypatch.setattr(
+        scoring,
+        "deck_quality_metrics",
+        lambda deck: (_ for _ in ()).throw(AssertionError("gate should not score")),
+    )
+    assert is_act1_card_reward_eligible(
+        {"id": "CARD.OFFER"}, _gate_deck(14), act=1
+    )
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [(0.0, False), (-0.001, False), (0.001, True)],
+)
+def test_act1_card_quality_gate_midrange_delta_boundary(
+        monkeypatch, delta, expected):
+    _stub_gate_signals(monkeypatch, delta=delta)
+    assert (
+        is_act1_card_reward_eligible(
+            {"id": "CARD.OFFER"}, _gate_deck(15), act=1
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("score", "tags", "pillars"),
+    [(9.5, (), 2), (5.0, ("SCALING_PILLAR",), 1)],
+)
+def test_act1_card_quality_gate_midrange_premium_exception(
+        monkeypatch, score, tags, pillars):
+    _stub_gate_signals(
+        monkeypatch,
+        delta=-0.001,
+        score=score,
+        card_tags=tags,
+    )
+    assert is_act1_card_reward_eligible(
+        {"id": "CARD.OFFER"}, _gate_deck(15, pillars=pillars), act=1
+    )
+
+
+@pytest.mark.parametrize(
+    ("delta", "score", "expected"),
+    [(-0.011, 10.0, False), (-0.010, 10.0, True), (0.005, 5.0, True)],
+)
+def test_act1_card_quality_gate_large_deck_boundaries(
+        monkeypatch, delta, score, expected):
+    import agent.card_scoring as scoring
+
+    monkeypatch.setattr(
+        scoring,
+        "deck_quality_metrics",
+        lambda cards: {
+            "overall": 0.5 + (delta if len(cards) == 19 else 0.0)
+        },
+    )
+    monkeypatch.setattr(scoring, "score_card_in_deck", lambda offered, deck: score)
+    monkeypatch.setattr(scoring, "_card_tags", lambda value: set())
+    assert (
+        is_act1_card_reward_eligible(
+            {"id": "CARD.OFFER"}, _gate_deck(18), act=1
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("offered", "deck", "act"),
+    [
+        ({}, _gate_deck(15), 1),
+        ({"id": "CARD.OFFER"}, [{"name": "missing id"}] * 15, 1),
+        ({"id": "CARD.OFFER"}, _gate_deck(15), None),
+        ({"id": "CARD.OFFER"}, _gate_deck(15), "invalid"),
+    ],
+)
+def test_act1_card_quality_gate_invalid_inputs_fail_open(offered, deck, act):
+    assert is_act1_card_reward_eligible(offered, deck, act)
+
+
+def test_act1_card_quality_gate_nonfinite_metric_fails_open(monkeypatch):
+    import agent.card_scoring as scoring
+
+    monkeypatch.setattr(
+        scoring, "deck_quality_metrics", lambda cards: {"overall": float("nan")}
+    )
+    assert is_act1_card_reward_eligible(
+        {"id": "CARD.OFFER"}, _gate_deck(15), act=1
+    )
 
 
 def test_deck_quality_counts_strength_scaling_as_boss_burst():
