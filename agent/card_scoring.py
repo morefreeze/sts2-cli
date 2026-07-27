@@ -1593,6 +1593,8 @@ def is_act1_card_reward_eligible(
             return True
         if len(deck) < 15:
             return True
+        if len(deck) >= 16:
+            return False
 
         before = float(deck_quality_metrics(deck)["overall"])
         after = float(deck_quality_metrics(deck + [card])["overall"])
@@ -1611,13 +1613,11 @@ def is_act1_card_reward_eligible(
             or ("SCALING_PILLAR" in tags and scaling_pillars < 2)
         )
 
-        if len(deck) >= 18:
-            epsilon = 1e-12
-            return (
-                delta >= 0.005 - epsilon
-                or (premium_core and delta >= -0.01 - epsilon)
-            )
-        return delta > 0.0 or premium_core
+        epsilon = 1e-12
+        return (
+            delta > 0.0
+            or (premium_core and delta >= -0.01 - epsilon)
+        )
     except Exception:
         return True
 

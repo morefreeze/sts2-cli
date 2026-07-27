@@ -116,28 +116,26 @@ def test_act1_card_quality_gate_midrange_premium_exception(
     )
 
 
-@pytest.mark.parametrize(
-    ("delta", "score", "expected"),
-    [(-0.011, 10.0, False), (-0.010, 10.0, True), (0.005, 5.0, True)],
-)
-def test_act1_card_quality_gate_large_deck_boundaries(
-        monkeypatch, delta, score, expected):
+def test_act1_card_quality_gate_midrange_premium_rejects_severe_dilution(
+        monkeypatch):
+    _stub_gate_signals(monkeypatch, delta=-0.011, score=10.0)
+    assert not is_act1_card_reward_eligible(
+        {"id": "CARD.OFFER"}, _gate_deck(15), act=1
+    )
+
+
+def test_act1_card_quality_gate_rejects_every_card_at_16_card_cap(monkeypatch):
     import agent.card_scoring as scoring
 
     monkeypatch.setattr(
         scoring,
         "deck_quality_metrics",
-        lambda cards: {
-            "overall": 0.5 + (delta if len(cards) == 19 else 0.0)
-        },
+        lambda cards: (_ for _ in ()).throw(
+            AssertionError("hard cap should reject before scoring")
+        ),
     )
-    monkeypatch.setattr(scoring, "score_card_in_deck", lambda offered, deck: score)
-    monkeypatch.setattr(scoring, "_card_tags", lambda value: set())
-    assert (
-        is_act1_card_reward_eligible(
-            {"id": "CARD.OFFER"}, _gate_deck(18), act=1
-        )
-        is expected
+    assert not is_act1_card_reward_eligible(
+        {"id": "CARD.OFFER"}, _gate_deck(16), act=1
     )
 
 
