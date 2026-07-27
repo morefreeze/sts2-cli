@@ -85,7 +85,7 @@ The evaluated rules are:
 3. With fewer than 15 cards, accept the card unchanged.
 4. With exactly 15 cards, accept when `delta > 0`, or when the card is a
    `premium_core` and `delta >= -0.01`.
-5. With 16 or more cards, reject further normal card rewards.
+5. With 16 or more cards, reject further skippable card rewards.
 
 The 16-card cap was the only tested configuration that reduced median
 boss-entry deck size from 17 to 16 without reducing average floor or boss
@@ -99,9 +99,10 @@ authoritative because the quality calculation requires the actual cards.
 
 ## Failure behavior
 
-The gate fails open. If the act, deck, card data, or quality metrics are
-missing, invalid, non-finite, or raise an exception, the offered card remains
-eligible and existing behavior continues.
+The gate fails open when an input or quality metric required by the applicable
+branch is missing, invalid, non-finite, or raises an exception. A valid
+16-card deck follows the explicit hard-cap branch without evaluating quality
+metrics.
 
 Broken-card filtering remains owned by `pick_best_card` and is unchanged.
 The gate must not turn an engine-data problem into an automatic skip or a
