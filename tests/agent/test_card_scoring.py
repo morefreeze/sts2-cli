@@ -271,7 +271,10 @@ def test_lean_boss_deck_prefers_rampage_over_generic_damage():
 
 
 def test_boss_readiness_lift_can_prefer_large_readiness_lift_over_mob_attack(monkeypatch):
+    import agent.card_scoring as scoring
+
     monkeypatch.setenv("STS2_BOSS_READINESS_LIFT", "1")
+    monkeypatch.setattr(scoring, "q_adjustment", lambda card: 0.0)
     deck = (
         [{"id": "CARD.STRIKE_IRONCLAD"} for _ in range(5)]
         + [{"id": "CARD.DEFEND_IRONCLAD"} for _ in range(4)]
