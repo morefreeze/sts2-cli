@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -115,6 +116,50 @@ def test_catalog_indexes_mixed_sources_without_normalizing_replays(tmp_path: Pat
     assert all(not value.startswith(str(tmp_path)) for value in (
         entry["source_id"] for entry in entries
     ))
+
+
+def test_catalog_read_errors_keep_errno_but_never_expose_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "unreadable.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def fail_read(path: Path, *args, **kwargs):
+        if path == source:
+            raise OSError(errno.EACCES, "Permission denied", str(source))
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_read)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    entry = catalog.list_sources()[0]
+    payload = catalog.get_source(entry["source_id"])
+
+    rendered = json.dumps({"entry": entry, "payload": payload})
+    assert "unreadable.jsonl" in rendered
+    assert "Permission denied" in rendered
+    assert f"[Errno {errno.EACCES}]" in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_catalog_scrubs_absolute_paths_from_adapter_errors(
+    tmp_path: Path,
+):
+    _write_jsonl(tmp_path / "replay.jsonl", _replay("run-1"))
+
+    def leaking_parser(records: list[dict], source_name: str | None = None) -> dict:
+        raise RuntimeError(f"could not parse source root {tmp_path}")
+
+    catalog = RunCatalog([tmp_path], replay_parser=leaking_parser)
+    entry = catalog.list_sources()[0]
+
+    payload = catalog.get_source(entry["source_id"])
+
+    rendered = json.dumps(payload)
+    assert "could not parse" in rendered
+    assert str(tmp_path) not in rendered
+    assert entry["source_id"] in rendered
 
 
 def test_catalog_source_ids_are_stable_distinct_and_roots_are_safe(tmp_path: Path):

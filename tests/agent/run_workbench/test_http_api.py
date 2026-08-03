@@ -45,6 +45,19 @@ def _request(base: str, path: str, *, payload: object | None = None) -> tuple[in
         return error.code, json.loads(error.read())
 
 
+def _raw_request(base: str, path: str, body: bytes) -> tuple[int, dict]:
+    request = Request(
+        base + path,
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=3) as response:
+            return response.status, json.loads(response.read())
+    except HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
 def _catalog(tmp_path: Path) -> RunCatalog:
     (tmp_path / "native.run").write_text(json.dumps(_native()), encoding="utf-8")
     _write_jsonl(tmp_path / "summary.jsonl", [{"event": "summary", "avg_floor": 8}])
@@ -123,6 +136,15 @@ def test_parse_upload_http_validation(
     assert message in body["error"]
 
 
+def test_parse_upload_invalid_utf8_is_json_bad_request(tmp_path: Path):
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, body = _raw_request(base, "/api/parse", b'\xff\xfe{"text":"x"}')
+
+    assert status == 400
+    assert "error" in body
+    assert "UTF-8" in body["error"]
+
+
 def test_parse_upload_http_supports_native_replay_and_summary(tmp_path: Path):
     catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
     uploads = [
@@ -164,4 +186,3 @@ def test_legacy_http_endpoints_remain_available(tmp_path: Path, monkeypatch: pyt
     assert latest["name"] == "legacy.jsonl"
     assert log["name"] == "legacy.jsonl"
     assert translations["translations"] == {"lang": "zh"}
-

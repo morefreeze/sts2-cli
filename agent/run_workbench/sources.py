@@ -37,7 +37,12 @@ def read_json_records(path: Path) -> list[dict]:
             f"{path.name}: invalid UTF-8 at byte {error.start}"
         ) from error
     except OSError as error:
-        raise SourceFormatError(f"{path.name}: could not read source: {error}") from error
+        detail = error.strerror or type(error).__name__
+        detail = str(detail).replace(str(path), path.name)
+        errno_label = f"[Errno {error.errno}] " if error.errno is not None else ""
+        raise SourceFormatError(
+            f"{path.name}: could not read source: {errno_label}{detail}"
+        ) from error
 
     if suffix == ".jsonl":
         return _read_jsonl_records(path, contents)

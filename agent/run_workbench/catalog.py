@@ -97,7 +97,7 @@ class RunCatalog:
         for source_id in candidate_ids:
             source = self._sources[source_id]
             sources.append(deepcopy(source.entry))
-            path_ids[str(source.path)] = source_id
+            path_ids.update(_source_redactions(source))
             adapted = self._adapt(source)
             errors.extend(adapted.errors)
             for record in self._public_records(source, adapted):
@@ -115,7 +115,7 @@ class RunCatalog:
             "view": "run",
             "run": payload,
             "sources": sorted(sources, key=lambda item: item["source_id"]),
-            "errors": list(dict.fromkeys(errors)),
+            "errors": _scrub_paths(list(dict.fromkeys(errors)), path_ids),
         }
 
     def list_cohorts(self) -> list[dict[str, Any]]:
@@ -265,6 +265,9 @@ class RunCatalog:
         else:
             open_mode = "run"
         metadata = _metadata_completeness(records or [])
+        redactions = _path_redactions(path, root, source_id)
+        public_errors = _scrub_paths(errors, redactions)
+        public_message = _scrub_paths(descriptor.message, redactions)
         entry = {
             "source_id": source_id,
             "display_name": display_name,
@@ -274,8 +277,8 @@ class RunCatalog:
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "record_count": descriptor.record_count,
-            "message": descriptor.message,
-            "errors": errors,
+            "message": public_message,
+            "errors": public_errors,
             "metadata_completeness": metadata,
         }
         return _IndexedSource(
@@ -316,30 +319,30 @@ class RunCatalog:
     def _source_view(
         self, source: _IndexedSource, adapted: AdaptedSource
     ) -> dict[str, Any]:
+        redactions = _source_redactions(source)
         if adapted.summary is not None:
             return {
                 "view": "summary",
                 "source": deepcopy(source.entry),
-                "summary": _scrub_paths(
-                    deepcopy(adapted.summary), {str(source.path): source.source_id}
-                ),
-                "errors": list(adapted.errors),
+                "summary": _scrub_paths(deepcopy(adapted.summary), redactions),
+                "errors": _scrub_paths(list(adapted.errors), redactions),
             }
         records = self._public_records(source, adapted)
         if not records:
             return {
                 "view": "error",
                 "source": deepcopy(source.entry),
-                "errors": list(adapted.errors) or ["source contains no adaptable runs"],
+                "errors": _scrub_paths(list(adapted.errors), redactions)
+                or ["source contains no adaptable runs"],
             }
         return {
             "view": "run" if len(records) == 1 else "runs",
             "source": deepcopy(source.entry),
             "runs": [
-                _scrub_paths(record.to_dict(), {str(source.path): source.source_id})
+                _scrub_paths(record.to_dict(), redactions)
                 for record in records
             ],
-            "errors": list(adapted.errors),
+            "errors": _scrub_paths(list(adapted.errors), redactions),
         }
 
     def _build_cohorts(self) -> list[dict[str, Any]]:
@@ -428,6 +431,17 @@ class RunCatalog:
 def _source_id(root: Path, relative: str) -> str:
     digest = sha256(f"{root}\0{relative}".encode("utf-8")).hexdigest()[:20]
     return f"src_{digest}"
+
+
+def _path_redactions(path: Path, root: Path, source_id: str) -> dict[str, str]:
+    redactions = {str(path): source_id}
+    if root.parent != root:
+        redactions[str(root)] = "<source-root>"
+    return redactions
+
+
+def _source_redactions(source: _IndexedSource) -> dict[str, str]:
+    return _path_redactions(source.path, source.root, source.source_id)
 
 
 def _cohort_id(key: tuple[Any, ...]) -> str:
@@ -588,11 +602,10 @@ def _scrub_paths(value: Any, path_ids: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [_scrub_paths(item, path_ids) for item in value]
     if isinstance(value, str):
-        for path, source_id in path_ids.items():
-            if value == path:
-                return source_id
-            if value.startswith(path + ":"):
-                return source_id + value[len(path):]
+        for path, source_id in sorted(
+            path_ids.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            value = value.replace(path, source_id)
         return value
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("catalog response contains a non-finite number")

@@ -1935,15 +1935,17 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 raise CatalogError("invalid Content-Length") from exc
             if length < 0 or length > 10 * 1024 * 1024:
                 raise CatalogError("request body is too large")
-            raw = self.rfile.read(length).decode("utf-8")
             try:
+                raw = self.rfile.read(length).decode("utf-8")
                 payload = json.loads(
                     raw,
                     parse_constant=lambda value: (_ for _ in ()).throw(
                         ValueError(f"non-standard numeric constant {value}")
                     ),
                 )
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            except UnicodeDecodeError as exc:
+                raise CatalogError(f"invalid UTF-8 request body: {exc}") from exc
+            except (json.JSONDecodeError, ValueError) as exc:
                 raise CatalogError(f"invalid JSON request: {exc}") from exc
             if not isinstance(payload, dict):
                 raise CatalogError("request must be a JSON object")
