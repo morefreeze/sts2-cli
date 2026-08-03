@@ -134,6 +134,13 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
     max_floor = _first_int(record, "max_global_floor", "max_floor")
     if max_floor is None and floors:
         max_floor = max(floors)
+    raw_modifiers = record.get("modifiers")
+    modifiers = (
+        tuple(raw_modifiers)
+        if isinstance(raw_modifiers, list)
+        and all(isinstance(modifier, str) for modifier in raw_modifiers)
+        else ()
+    )
 
     return RunRecord(
         run_id=_first_text(record, "run_id") or "",
@@ -148,6 +155,7 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
             evaluation_mode=_first_text(record, "evaluation_mode"),
             scenario=_first_text(record, "scenario"),
             ascension=_first_int(record, "ascension"),
+            modifiers=modifiers,
             is_multiplayer=(
                 record.get("is_multiplayer")
                 if type(record.get("is_multiplayer")) is bool

@@ -55,6 +55,51 @@ def test_native_run_preserves_exact_multiplayer_flag(
     assert run.to_dict()["metadata"]["is_multiplayer"] is is_multiplayer
 
 
+def test_native_run_preserves_exact_string_modifiers(tmp_path: Path) -> None:
+    path = tmp_path / "modifiers.run"
+    path.write_text(
+        json.dumps(
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "modifiers": ["MODIFIER.BIG_GAME_HUNTER", "MODIFIER.DRAFT"],
+                "map_point_history": [{"map_point_type": "ancient"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(path).runs[0]
+
+    assert run.metadata.modifiers == (
+        "MODIFIER.BIG_GAME_HUNTER",
+        "MODIFIER.DRAFT",
+    )
+    assert run.to_dict()["metadata"]["modifiers"] == [
+        "MODIFIER.BIG_GAME_HUNTER",
+        "MODIFIER.DRAFT",
+    ]
+
+
+def test_native_run_rejects_a_mixed_modifier_list_conservatively(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid-modifiers.run"
+    path.write_text(
+        json.dumps(
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "modifiers": ["MODIFIER.BIG_GAME_HUNTER", 7],
+                "map_point_history": [{"map_point_type": "ancient"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(path).runs[0]
+
+    assert run.metadata.modifiers == ()
+
+
 def test_invalid_run_suffix_does_not_fabricate_a_complete_capable_run(
     tmp_path: Path,
 ) -> None:

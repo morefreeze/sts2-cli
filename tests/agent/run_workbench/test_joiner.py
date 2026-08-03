@@ -48,7 +48,10 @@ def test_join_preserves_exact_native_multiplayer_metadata() -> None:
         run_id="shared-multiplayer",
         source_id="native.run",
         source_kind=SourceKind.NATIVE_RUN,
-        metadata=RunMetadata(is_multiplayer=True),
+        metadata=RunMetadata(
+            is_multiplayer=True,
+            modifiers=("MODIFIER.BIG_GAME_HUNTER",),
+        ),
     )
     deck = RunRecord(
         run_id="shared-multiplayer",
@@ -59,6 +62,7 @@ def test_join_preserves_exact_native_multiplayer_metadata() -> None:
     joined = join_records([deck, native])[0]
 
     assert joined.metadata.is_multiplayer is True
+    assert joined.metadata.modifiers == ("MODIFIER.BIG_GAME_HUNTER",)
     assert joined.to_dict()["metadata"]["is_multiplayer"] is True
 
 

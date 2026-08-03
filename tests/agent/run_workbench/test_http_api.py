@@ -14,15 +14,25 @@ import agent.run_progress_viewer as viewer
 from agent.run_progress_viewer import make_viewer_handler
 from agent.run_workbench.assets import NodeArtResolver
 from agent.run_workbench.catalog import RunCatalog
+from agent.run_workbench.map_service import MapRequest, visited_route_map
 
 from .test_catalog import _native, _replay, _replay_parser, _write_jsonl
 
 
 @contextmanager
-def _server(catalog: RunCatalog, *, art_resolver: NodeArtResolver | None = None):
+def _server(
+    catalog: RunCatalog,
+    *,
+    art_resolver: NodeArtResolver | None = None,
+    map_service: object | None = None,
+):
     httpd = ThreadingHTTPServer(
         ("127.0.0.1", 0),
-        make_viewer_handler(catalog, art_resolver=art_resolver),
+        make_viewer_handler(
+            catalog,
+            art_resolver=art_resolver,
+            map_service=map_service,
+        ),
     )
     thread = Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -249,6 +259,37 @@ def test_native_map_never_claims_full_graph_without_exact_single_player_metadata
     assert status == 200
     assert payload["full_map"] is False
     assert reason_fragment in payload["fallback_reason"].lower()
+
+
+def test_joined_native_modifiers_reach_the_map_service_request(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    run["modifiers"] = ["MODIFIER.BIG_GAME_HUNTER"]
+    (tmp_path / "native.run").write_text(json.dumps(run), encoding="utf-8")
+    _write_jsonl(
+        tmp_path / "joined-deck.jsonl",
+        [{"event": "outcome", "run_id": run["run_id"], "status": "dead"}],
+    )
+
+    class CapturingMapService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="captured request")
+
+    service = CapturingMapService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        status, _ = _request(base, f"/api/run/map?id={run['run_id']}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert service.requests[0].modifiers == ("MODIFIER.BIG_GAME_HUNTER",)
 
 
 def test_only_the_globally_last_route_node_is_terminal_across_acts(
