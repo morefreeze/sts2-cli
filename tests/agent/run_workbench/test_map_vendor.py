@@ -5,6 +5,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import pytest
+
 
 VENDOR_DIR = (
     Path(__file__).resolve().parents[3]
@@ -26,16 +28,24 @@ REQUEST = {
 }
 
 
-def _invoke(payload: object) -> subprocess.CompletedProcess[str]:
+def _invoke_text(text: str) -> subprocess.CompletedProcess[str]:
     node = shutil.which("node")
     assert node is not None, "the active NVM-managed Node.js executable is required"
     return subprocess.run(
         [node, str(CLI)],
-        input=json.dumps(payload),
+        input=text,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _invoke(payload: object) -> subprocess.CompletedProcess[str]:
+    return _invoke_text(json.dumps(payload))
+
+
+def _without(field: str) -> dict[str, object]:
+    return {key: value for key, value in REQUEST.items() if key != field}
 
 
 def test_vendor_records_license_and_exact_upstream_provenance():
@@ -87,4 +97,69 @@ def test_map_cli_reports_invalid_input_as_json_without_stdout_diagnostics():
         "schema_version": 1,
         "ok": False,
         "error": "request must be a JSON object",
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        (_without("act_id"), "act_id must be a non-empty string"),
+        ({**REQUEST, "act_id": ""}, "act_id must be a non-empty string"),
+        ({**REQUEST, "act_id": "   "}, "act_id must be a non-empty string"),
+        (_without("act_index"), "act_index must be a nonnegative integer"),
+        ({**REQUEST, "act_index": -1}, "act_index must be a nonnegative integer"),
+        ({**REQUEST, "act_index": 0.5}, "act_index must be a nonnegative integer"),
+        (_without("seed"), "seed must be a string"),
+        ({**REQUEST, "seed": 123}, "seed must be a string"),
+        (_without("ascension"), "ascension must be a nonnegative integer"),
+        ({**REQUEST, "ascension": -1}, "ascension must be a nonnegative integer"),
+        ({**REQUEST, "ascension": 0.5}, "ascension must be a nonnegative integer"),
+        (_without("modifiers"), "modifiers must be an array of strings"),
+        ({**REQUEST, "modifiers": "none"}, "modifiers must be an array of strings"),
+        ({**REQUEST, "modifiers": ["ok", 3]}, "modifiers must be an array of strings"),
+        (_without("is_multiplayer"), "is_multiplayer must be a boolean"),
+        ({**REQUEST, "is_multiplayer": "false"}, "is_multiplayer must be a boolean"),
+        (_without("visited"), "visited must be null or an array of objects"),
+        ({**REQUEST, "visited": {}}, "visited must be null or an array of objects"),
+        ({**REQUEST, "visited": [None]}, "visited must be null or an array of objects"),
+        (_without("allow_partial_path"), "allow_partial_path must be a boolean"),
+        (
+            {**REQUEST, "allow_partial_path": "false"},
+            "allow_partial_path must be a boolean",
+        ),
+    ],
+)
+def test_map_cli_rejects_missing_or_wrongly_typed_fields(
+    payload: dict[str, object], error: str
+):
+    result = _invoke(payload)
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "schema_version": 1,
+        "ok": False,
+        "error": error,
+    }
+
+
+def test_map_cli_rejects_visited_history_over_the_safe_act_limit():
+    result = _invoke({**REQUEST, "visited": [{} for _ in range(257)]})
+
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["error"] == "visited exceeds 256 nodes"
+
+
+def test_map_cli_rejects_oversized_stdin_before_attempting_json_parse():
+    oversized_invalid_json = "{" + (" " * 1_048_576)
+    assert len(oversized_invalid_json.encode("utf-8")) > 1_048_576
+
+    result = _invoke_text(oversized_invalid_json)
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "schema_version": 1,
+        "ok": False,
+        "error": "input exceeds 1048576 bytes",
     }

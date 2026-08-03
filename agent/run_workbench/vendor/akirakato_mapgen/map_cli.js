@@ -4,6 +4,10 @@ const fs = require('fs');
 const { generateActMap } = require('./index.js');
 const { PointTypeName } = require('./map_point.js');
 
+const MAX_INPUT_BYTES = 1024 * 1024;
+const MAX_VISITED_NODES = 256;
+const READ_CHUNK_BYTES = 64 * 1024;
+
 function pointId(point) {
   return `${point.coord.col}:${point.coord.row}`;
 }
@@ -56,15 +60,53 @@ function serializeGraph(graph, alignment) {
   return { nodes, edges };
 }
 
-function requireRequestObject(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validateRequest(value) {
+  if (!isPlainObject(value)) {
     throw new Error('request must be a JSON object');
+  }
+  if (typeof value.act_id !== 'string' || value.act_id.trim() === '') {
+    throw new Error('act_id must be a non-empty string');
+  }
+  if (!Number.isInteger(value.act_index) || value.act_index < 0) {
+    throw new Error('act_index must be a nonnegative integer');
+  }
+  if (typeof value.seed !== 'string') {
+    throw new Error('seed must be a string');
+  }
+  if (!Number.isInteger(value.ascension) || value.ascension < 0) {
+    throw new Error('ascension must be a nonnegative integer');
+  }
+  if (!Array.isArray(value.modifiers) || !value.modifiers.every((item) => typeof item === 'string')) {
+    throw new Error('modifiers must be an array of strings');
+  }
+  if (typeof value.is_multiplayer !== 'boolean') {
+    throw new Error('is_multiplayer must be a boolean');
+  }
+  if (value.visited !== null && !Array.isArray(value.visited)) {
+    throw new Error('visited must be null or an array of objects');
+  }
+  if (Array.isArray(value.visited)) {
+    if (value.visited.length > MAX_VISITED_NODES) {
+      throw new Error(`visited exceeds ${MAX_VISITED_NODES} nodes`);
+    }
+    if (!value.visited.every(isPlainObject)) {
+      throw new Error('visited must be null or an array of objects');
+    }
+  }
+  if (typeof value.allow_partial_path !== 'boolean') {
+    throw new Error('allow_partial_path must be a boolean');
   }
   return value;
 }
 
 function generatePayload(value) {
-  const request = requireRequestObject(value);
+  const request = validateRequest(value);
   const { graph, alignment } = generateActMap({
     actId: request.act_id,
     actIndex: request.act_index,
@@ -99,9 +141,26 @@ function writeJson(value) {
   process.stdout.write(`${JSON.stringify(canonicalize(value))}\n`);
 }
 
+function readBoundedInput(fd = 0) {
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const remainingProbeBytes = (MAX_INPUT_BYTES + 1) - totalBytes;
+    const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, remainingProbeBytes));
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+    if (bytesRead === 0) break;
+    totalBytes += bytesRead;
+    if (totalBytes > MAX_INPUT_BYTES) {
+      throw new Error(`input exceeds ${MAX_INPUT_BYTES} bytes`);
+    }
+    chunks.push(buffer.subarray(0, bytesRead));
+  }
+  return Buffer.concat(chunks, totalBytes).toString('utf8');
+}
+
 function main() {
   try {
-    const request = JSON.parse(fs.readFileSync(0, 'utf8'));
+    const request = JSON.parse(readBoundedInput());
     writeJson(generatePayload(request));
   } catch (error) {
     writeJson({
@@ -115,4 +174,12 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { generatePayload, serializeAlignment, serializeGraph };
+module.exports = {
+  MAX_INPUT_BYTES,
+  MAX_VISITED_NODES,
+  generatePayload,
+  readBoundedInput,
+  serializeAlignment,
+  serializeGraph,
+  validateRequest,
+};
