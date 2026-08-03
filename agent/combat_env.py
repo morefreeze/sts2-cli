@@ -565,7 +565,8 @@ class CombatEnv(gym.Env):
                  seed_prefix: str = "t", max_floor: int = 0, extra_obs: bool = True,
                  relic_obs: bool = None,
                  replay_actions: list = None, native_save_path: str = None,
-                 set_hp_after_load: int = None):
+                 set_hp_after_load: int = None,
+                 run_context: dict | None = None):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
@@ -618,7 +619,13 @@ class CombatEnv(gym.Env):
             os.path.join(PROJECT_ROOT, "data", "deck_history.jsonl"))
         # Per-run state for the predictor: max floor seen, milestones captured
         self._run_max_floor = 1
-        self._run_id = None
+        self._run_context = dict(run_context or {})
+        self._run_seed = self._seed
+        self._run_id = str(
+            self._run_context.get("run_id")
+            or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
+        )
+        self._run_outcome_emitted = False
         self._run_milestone_records: list = []  # buffered rows until outcome known
         self._run_card_pick_records: list = []   # buffered card-reward decisions (per pick, see _buffer_card_pick)
 
@@ -658,6 +665,7 @@ class CombatEnv(gym.Env):
                          or self._current_state.get("context", {}).get("floor", 0))
             if self.max_floor > 0 and isinstance(cur_floor, int) and cur_floor >= self.max_floor:
                 # Curriculum: restart to keep fighting easy enemies
+                self._emit_run_outcome(self._current_state, False, status="invalid")
                 self._game_alive = False
                 self._kill_proc()
             else:
@@ -669,6 +677,16 @@ class CombatEnv(gym.Env):
                 # Advance failed — game ended (natural game_over or crash).
                 # Signal game_over via info instead of silently restarting:
                 # eval_rl.py checks info["game_over"] to end the eval game correctly.
+                terminal_status = (
+                    "crash" if state is None else
+                    "stuck" if state.get("decision") == "stuck" else
+                    None if state.get("decision") == "game_over" else "invalid"
+                )
+                self._emit_run_outcome(
+                    state or self._current_state,
+                    bool(state and state.get("victory", False)),
+                    status=terminal_status,
+                )
                 self._game_alive = False
                 self._kill_proc()
                 self._current_state = _dummy_combat_state()
@@ -677,20 +695,27 @@ class CombatEnv(gym.Env):
                 return self._encode(self._current_state), {
                     "game_over": True,
                     "crashed": crashed,
+                    "stuck": bool(state and state.get("decision") == "stuck"),
+                    "invalid": terminal_status == "invalid",
                     "victory": bool(state and state.get("victory", False)),
                 }
 
         # Start a fresh game process + run
-        self._kill_proc()
-        self._start_proc()
         run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}_{random.randint(0,99999)}"
         self._run_counter += 1
         self._milestones_paid.clear()  # new run — re-arm deck-quality milestones
         self._run_max_floor = 1
-        self._run_id = f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
+        self._run_id = str(
+            self._run_context.get("run_id")
+            or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
+        )
+        self._run_seed = run_seed
+        self._run_outcome_emitted = False
         self._run_milestone_records = []
         self._run_card_pick_records = []
         self._run_boss_id = None  # act boss from state.context.boss (set on first sight)
+        self._kill_proc()
+        self._start_proc()
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
@@ -702,11 +727,13 @@ class CombatEnv(gym.Env):
             state = self._send({"cmd": "start_run", "character": self.character,
                                 "seed": run_seed, "ascension": self.ascension})
         if state is None or state.get("type") == "error":
+            self._emit_run_outcome(state or {}, False, status="reset_failure")
             self._game_alive = False
             self._current_state = _dummy_combat_state()
             self._init_combat_tracking(self._current_state)  # prevent stale max_hp=1
             return self._encode(self._current_state), {
                 "load_failed": bool(self._native_save_path),
+                "reset_failure": True,
                 "message": (state or {}).get("message", "") if state else "",
             }
 
@@ -717,11 +744,14 @@ class CombatEnv(gym.Env):
             for cmd in self._replay_actions:
                 state = self._send(cmd)
                 if state is None:
+                    self._emit_run_outcome(self._current_state or {}, False, status="invalid")
                     self._game_alive = False
                     self._current_state = _dummy_combat_state()
                     self._init_combat_tracking(self._current_state)
                     return self._encode(self._current_state), {"replay_failed": True}
                 if state.get("decision") == "game_over":
+                    self._emit_run_outcome(
+                        state, bool(state.get("victory", False)))
                     self._game_alive = False
                     self._current_state = _dummy_combat_state()
                     self._init_combat_tracking(self._current_state)
@@ -734,10 +764,24 @@ class CombatEnv(gym.Env):
 
         state = self._advance_to_combat(state)
         if state is None or state.get("decision") != "combat_play":
+            terminal_status = ("crash" if state is None else
+                               "stuck" if state.get("decision") == "stuck" else
+                               None if state.get("decision") == "game_over" else "invalid")
+            self._emit_run_outcome(
+                state or {}, bool(state and state.get("victory", False)),
+                status=terminal_status,
+            )
             self._game_alive = False
             self._current_state = _dummy_combat_state()
             self._init_combat_tracking(self._current_state)  # prevent stale max_hp=1
-            return self._encode(self._current_state), {}
+            terminal_info = {
+                "game_over": bool(state and state.get("decision") == "game_over"),
+                "victory": bool(state and state.get("victory", False)),
+                "crashed": terminal_status == "crash",
+                "stuck": terminal_status == "stuck",
+                "invalid": terminal_status == "invalid",
+            }
+            return self._encode(self._current_state), terminal_info
 
         self._init_combat_tracking(state)
         self._current_state = state
@@ -750,6 +794,7 @@ class CombatEnv(gym.Env):
 
         # Detect dead process (e.g. potion crash in _greedy_use_potions during reset)
         if not self._game_alive:
+            self._emit_run_outcome(self._current_state, False, status="crash")
             return (self._encode(self._current_state), -2.0, True, False,
                     {"crashed": True, "floor": self._current_floor})
 
@@ -757,6 +802,9 @@ class CombatEnv(gym.Env):
         if self._combat_steps > self.max_combat_steps:
             # Combat too long — treat as defeat to avoid wasting time
             last_obs = self._encode(self._current_state)
+            self._game_alive = False
+            self._emit_run_outcome(self._current_state, False, status="timeout")
+            self._kill_proc()
             return last_obs, -2.0, True, False, {"timeout": True}
 
         cmd = self.enc.decode(int(action), self._current_state)
@@ -783,11 +831,13 @@ class CombatEnv(gym.Env):
                 # Still stuck — kill this combat
                 last_obs = self._encode(self._current_state)
                 self._game_alive = False
+                self._emit_run_outcome(self._current_state, False, status="stuck")
                 self._kill_proc()
                 return last_obs, -2.0, True, False, {"stuck": True}
 
         if state is None:
             self._game_alive = False
+            self._emit_run_outcome(self._current_state, False, status="crash")
             last_obs = self._encode(self._current_state)
             cmd_str = json.dumps(getattr(self, "_last_cmd", None))
             floor = self._current_floor
@@ -812,7 +862,7 @@ class CombatEnv(gym.Env):
                 print(f"\n[CRASH→WIN] floor={floor} reward={reward:.2f}",
                       file=sys.stderr, flush=True)
                 return last_obs, reward, True, False, {
-                    "floor": floor, "combat_won": True,
+                    "floor": floor, "combat_won": True, "crashed": True,
                 }
 
             print(f"\n[CRASH] floor={floor} cmd={cmd_str} hand={hand_size} enemies={n_enemies}",
@@ -824,9 +874,12 @@ class CombatEnv(gym.Env):
         # continuing would corrupt the C# process → cr=100% cascade.
         if state.get("decision") == "stuck":
             self._game_alive = False
+            self._emit_run_outcome(self._current_state, False, status="stuck")
             self._kill_proc()
             last_obs = self._encode(self._current_state)
-            return last_obs, -2.0, True, False, {"crashed": True, "floor": self._current_floor}
+            return last_obs, -2.0, True, False, {
+                "crashed": True, "stuck": True, "floor": self._current_floor,
+            }
 
         decision = state.get("decision", "")
         if self._current_floor > self._run_max_floor:
@@ -898,6 +951,7 @@ class CombatEnv(gym.Env):
                     state = self._send(auto_cmd)
                     if state is None:
                         self._game_alive = False
+                        self._emit_run_outcome(self._current_state, False, status="crash")
                         return last_obs, -2.0, True, False, {"crashed": True}
                     if state.get("decision") in ("combat_play", "game_over"):
                         break
@@ -1279,24 +1333,42 @@ class CombatEnv(gym.Env):
             "ts": time.time(),
         })
 
-    def _emit_run_outcome(self, state: dict, victory: bool):
+    def _emit_run_outcome(self, state: dict, victory: bool,
+                          status: str | None = None):
         """Flush buffered milestone + card_pick records to disk with the final
         outcome appended. Called once per run from terminal paths (game_over,
         crash, etc.)."""
-        has_any = self._run_milestone_records or self._run_card_pick_records
-        if not self._deck_history_path or not has_any:
+        if self._run_outcome_emitted:
             return
+        self._run_outcome_emitted = True
+        technical_statuses = {"crash", "timeout", "stuck", "reset_failure", "invalid"}
+        final_status = status or ("win" if victory else "dead")
+        if final_status not in technical_statuses | {"win", "dead"}:
+            final_status = "invalid"
+        technical_failure_kind = (final_status if final_status in technical_statuses
+                                  else None)
         outcome = {
             "event": "outcome",
             "run_id": self._run_id,
             "max_floor": int(self._run_max_floor),
-            "won": bool(victory),
+            "won": bool(victory) and technical_failure_kind is None,
             "boss": getattr(self, "_run_boss_id", None),
+            "seed": self._run_seed,
+            "character": self.character,
+            "ascension": self.ascension,
+            "checkpoint": self._run_context.get("checkpoint"),
+            "evaluation_mode": self._run_context.get("evaluation_mode"),
+            "scenario": self._run_context.get("scenario"),
+            "game_version": self._run_context.get("game_version"),
+            "status": final_status,
+            "technical_failure_kind": technical_failure_kind,
             "ts": time.time(),
         }
         try:
+            if not self._deck_history_path:
+                return
             os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
-            with open(self._deck_history_path, "a") as f:
+            with open(self._deck_history_path, "a", encoding="utf-8") as f:
                 for rec in self._run_milestone_records:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 for rec in self._run_card_pick_records:
@@ -1319,6 +1391,7 @@ class CombatEnv(gym.Env):
         except Exception:
             pass
         self._run_milestone_records = []
+        self._run_card_pick_records = []
 
     def _terminal_reward(self, state: dict) -> float:
         if state.get("victory", False):

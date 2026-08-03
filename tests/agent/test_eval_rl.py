@@ -9,6 +9,7 @@ from agent.eval_rl import (
     _resolve_combat_snapshot_config,
     _write_boss_deck_record,
     _write_combat_record,
+    append_eval_result_row,
     classify_eval_result,
     format_floor_label,
     format_floor_labels,
@@ -16,6 +17,25 @@ from agent.eval_rl import (
     summarize_eval_results,
     run_eval_verbose,
 )
+
+
+def test_append_eval_result_row_writes_one_strict_json_object(tmp_path):
+    path = tmp_path / "nested" / "eval_results.jsonl"
+    row = {
+        "event": "eval_result",
+        "run_id": "eval-14000k-000",
+        "score": 21,
+    }
+
+    append_eval_result_row(path, row)
+
+    assert path.read_text(encoding="utf-8").count("\n") == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == row
+
+
+def test_append_eval_result_row_rejects_nonstandard_json_numbers(tmp_path):
+    with pytest.raises(ValueError):
+        append_eval_result_row(tmp_path / "results.jsonl", {"score": float("nan")})
 
 
 def test_format_floor_label_uses_act_relative_floor():
@@ -96,6 +116,7 @@ def test_verbose_card_reward_log_uses_actual_greedy_command(monkeypatch):
         (False, False, {"timeout": True}, "timeout"),
         (False, False, {"stuck": True}, "stuck"),
         (True, False, {"crashed": True}, "timeout"),
+        (False, True, {"crashed": True}, "crash"),
     ],
 )
 def test_classify_eval_result(timed_out, run_won, info, expected):
@@ -148,6 +169,104 @@ def test_eval_cli_requires_checkpoint_and_defaults_to_fixed_seeds():
     assert args.fixed_seeds is True
     assert parser.parse_args(["checkpoints/model.zip", "--random-seeds"]).fixed_seeds is False
     assert args.invalid_retries == 1
+    assert args.results_log == "data/eval_results.jsonl"
+    assert args.scenario == "full_run"
+
+
+def test_eval_cli_game_version_defaults_from_environment(monkeypatch):
+    monkeypatch.setenv("STS2_GAME_VERSION", "v0.103.2")
+
+    args = _build_parser().parse_args(["checkpoints/model.zip"])
+
+    assert args.game_version == "v0.103.2"
+
+
+def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_path):
+    import agent.eval_rl as eval_rl
+
+    behaviors = [
+        ("crash", 7),
+        ("timeout", 8),
+        ("stuck", 9),
+        ("dead", 11),
+    ]
+    contexts = []
+
+    class FakeEnv:
+        def __init__(self, **kwargs):
+            contexts.append(kwargs["run_context"])
+            self.status, self._current_floor = behaviors.pop(0)
+            self._current_state = {
+                "decision": "combat_play",
+                "round": 2,
+                "context": {"floor": self._current_floor},
+                "player": {"hp": 10, "max_hp": 80},
+            }
+
+        def reset(self):
+            return [0.0] * 161, {}
+
+        def action_masks(self):
+            return [True]
+
+        def step(self, action):
+            if self.status == "timeout":
+                raise eval_rl._GameTimeout()
+            info = {"floor": self._current_floor}
+            if self.status == "crash":
+                info["crashed"] = True
+            elif self.status == "stuck":
+                info["stuck"] = True
+            return [0.0] * 161, 0.0, True, False, info
+
+        def close(self):
+            pass
+
+    class FakeModel:
+        observation_space = SimpleNamespace(shape=(161,))
+
+        def predict(self, obs, **kwargs):
+            return 0, None
+
+    monkeypatch.setattr(eval_rl, "CombatEnv", FakeEnv)
+    monkeypatch.setattr(eval_rl, "ActionMasker", lambda env, mask_fn: env)
+    monkeypatch.setattr(eval_rl.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(eval_rl.signal, "alarm", lambda *args: None)
+    results_path = tmp_path / "eval_results.jsonl"
+
+    stats = run_eval_verbose(
+        FakeModel(),
+        "Ironclad",
+        n_games=1,
+        fixed_seeds=True,
+        invalid_retries=3,
+        checkpoint_name="checkpoints/model_14000k.zip",
+        batch_id="eval-14000k-20260803T120000",
+        game_version="v0.103.2",
+        scenario="full_run",
+        results_log_path=str(results_path),
+    )
+
+    rows = [json.loads(line) for line in results_path.read_text().splitlines()]
+    assert [row["status"] for row in rows] == ["crash", "timeout", "stuck", "dead"]
+    assert len({row["run_id"] for row in rows}) == 4
+    assert [row["retrying"] for row in rows] == [True, True, True, False]
+    assert [row["included_in_gameplay"] for row in rows] == [False, False, False, True]
+    assert all(row["event"] == "eval_result" for row in rows)
+    assert all(row["batch_id"] == "eval-14000k-20260803T120000" for row in rows)
+    assert all(row["checkpoint"] == "model_14000k.zip" for row in rows)
+    assert all(row["character"] == "Ironclad" for row in rows)
+    assert all(row["game_version"] == "v0.103.2" for row in rows)
+    assert all(row["evaluation_mode"] == "fixed" for row in rows)
+    assert all(row["scenario"] == "full_run" for row in rows)
+    assert all(row["seed"] == "eval_fixed_0" for row in rows)
+    assert [row["attempt_index"] for row in rows] == [1, 2, 3, 4]
+    assert [context["run_id"] for context in contexts] == [row["run_id"] for row in rows]
+    assert stats["results"] == rows
+    assert stats["avg_floor"] == 11.0
+    assert stats["floors"] == [11]
+    assert stats["valid_n"] == 1
+    assert stats["invalid_attempts"] == 3
 
 
 def test_run_eval_retries_invalid_attempt_with_the_same_fixed_seed(monkeypatch):
@@ -209,8 +328,9 @@ def test_run_eval_retries_invalid_attempt_with_the_same_fixed_seed(monkeypatch):
     assert stats["invalid_n"] == 0
     assert stats["invalid_attempts"] == 1
     assert stats["status_counts"] == {"crash": 1, "dead": 1}
-    assert stats["results"][0]["status"] == "dead"
-    assert stats["results"][0]["attempts"] == 2
+    assert [row["status"] for row in stats["results"]] == ["crash", "dead"]
+    assert stats["results"][0]["included_in_gameplay"] is False
+    assert stats["results"][1]["included_in_gameplay"] is True
 
 
 def test_run_eval_marks_act1_boss_beaten_after_entering_act2(monkeypatch, tmp_path):

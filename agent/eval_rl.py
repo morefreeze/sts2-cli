@@ -21,6 +21,7 @@ from agent.card_scoring import score_card_in_deck, deck_quality_score
 
 
 _GAME_TIMEOUT_SEC = 300  # 5 min per game — kills deadlocked C# processes
+_TECHNICAL_STATUSES = {"crash", "timeout", "stuck", "reset_failure", "invalid"}
 
 # STS2_PLANNER=1 → combat decisions use turn_planner search instead of the
 # PPO policy (Jun 11). Falls back to model.predict per-decision on any failure.
@@ -92,18 +93,22 @@ def classify_eval_result(*, timed_out: bool, run_won: bool, info: dict) -> str:
     """Classify one completed evaluation attempt."""
     if timed_out or info.get("timeout"):
         return "timeout"
-    if run_won:
-        return "win"
+    if info.get("reset_failure") or info.get("load_failed"):
+        return "reset_failure"
+    if info.get("invalid") or info.get("replay_failed"):
+        return "invalid"
     if info.get("stuck"):
         return "stuck"
     if info.get("crashed"):
         return "crash"
+    if run_won:
+        return "win"
     return "dead"
 
 
 def should_retry_invalid_result(status: str, *, retries_used: int,
                                 retry_limit: int) -> bool:
-    return status in {"crash", "timeout", "stuck"} and retries_used < retry_limit
+    return status in _TECHNICAL_STATUSES and retries_used < retry_limit
 
 
 def summarize_eval_results(results: list[dict], *, requested_n: int,
@@ -119,7 +124,7 @@ def summarize_eval_results(results: list[dict], *, requested_n: int,
     counts = Counter(statuses)
     invalid_attempts = sum(
         count for status, count in counts.items()
-        if status in {"crash", "timeout", "stuck"}
+        if status in _TECHNICAL_STATUSES
     )
     return {
         "avg_floor": float(np.mean(floors)) if floors else 0.0,
@@ -136,6 +141,30 @@ def summarize_eval_results(results: list[dict], *, requested_n: int,
         "status_counts": dict(sorted(counts.items())),
         "results": results,
     }
+
+
+def append_eval_result_row(path, row: dict) -> None:
+    """Append one strict UTF-8 JSON object line to an evaluation result log."""
+    if not isinstance(row, dict):
+        raise TypeError("evaluation result row must be a dict")
+    path_string = os.fspath(path)
+    parent = os.path.dirname(path_string)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    encoded = json.dumps(
+        row,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    with open(path_string, "a", encoding="utf-8") as result_file:
+        result_file.write(encoded + "\n")
+
+
+def _default_eval_batch_id(checkpoint_name: str | None, character: str) -> str:
+    checkpoint_stem = os.path.splitext(os.path.basename(str(checkpoint_name or "")))[0]
+    label = checkpoint_stem or character.lower()
+    return f"eval-{label}-{time.strftime('%Y%m%dT%H%M%S')}"
 
 
 class _GameTimeout(Exception):
@@ -434,7 +463,11 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                      boss_snapshot_min_hp: int = 50,
                      combat_snapshot_dir: str = None,
                      combat_snapshot_floors: set = None,
-                     checkpoint_name: str = None) -> dict:
+                     checkpoint_name: str = None,
+                     batch_id: str = None,
+                     game_version: str = None,
+                     scenario: str = None,
+                     results_log_path: str = None) -> dict:
     """Full-run eval with per-game floor breakdown.
 
     verbose=True: show per-room summaries; for wins, show last combat step-by-step.
@@ -454,12 +487,17 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         raise ValueError("invalid_retries cannot be negative")
 
     results: list[dict] = []
+    attempt_results: list[dict] = []
     attempt_statuses: list[str] = []
     boss_records = []  # per-game: {"boss": id, "reached": bool, "won": bool}
     i = 0
     retries_used = 0
     total_attempts = 0
     game_seed = None
+    batch_id = str(batch_id or _default_eval_batch_id(checkpoint_name, character))
+    checkpoint = (os.path.basename(str(checkpoint_name)) if checkpoint_name else None)
+    evaluation_mode = "fixed" if fixed_seeds else "random"
+    effective_scenario = scenario or ("native_save" if native_save_path else "full_run")
     while i < n_games:
         total_attempts += 1
         if retries_used == 0:
@@ -470,9 +508,17 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             else:
                 game_seed = f"eval_r{random.randint(0, 0xFFFFFF):06x}_{i}"
 
+        run_id = f"{batch_id}-{i:03d}-a{total_attempts:02d}"
+        run_context = {
+            "run_id": run_id,
+            "checkpoint": checkpoint,
+            "evaluation_mode": evaluation_mode,
+            "scenario": effective_scenario,
+            "game_version": game_version,
+        }
         env_kwargs = dict(character=character, seed=game_seed,
                           seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs,
-                          relic_obs=relic_obs)
+                          relic_obs=relic_obs, run_context=run_context)
         if replay_actions:
             env_kwargs["replay_actions"] = replay_actions
         if native_save_path:
@@ -483,11 +529,20 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         else:
             env = CombatEnv(**env_kwargs)
         env_wrapped = ActionMasker(env, mask_fn)
-        obs, _ = env_wrapped.reset()
+        obs, initial_info = env_wrapped.reset()
         ep_combat_wins = 0
         max_floor = global_floor_from_state(env._current_state, fallback=1)
         run_won = False
-        run_over = False
+        last_info = dict(initial_info or {})
+        run_over = bool(
+            last_info.get("game_over")
+            or any(last_info.get(key) for key in (
+                "crashed", "timeout", "stuck", "reset_failure", "load_failed",
+                "invalid", "replay_failed",
+            ))
+        )
+        if last_info.get("victory"):
+            run_won = True
         timed_out = False
         all_combat_logs = []  # list of (floor, steps_log)
         # Track which boss floors we've already logged this run, so each boss
@@ -623,13 +678,19 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                             if env._current_state else "?")
                 all_combat_logs.append((cur_floor, hp_before, hp_after, steps_log))
 
-                if last_info.get("combat_won"):
+                if any(last_info.get(key) for key in (
+                        "crashed", "timeout", "stuck", "reset_failure", "invalid")):
+                    run_over = True
+                elif last_info.get("combat_won"):
                     ep_combat_wins += 1
                     floor_won = last_info.get("floor", 0)
                     obs, reset_info = env_wrapped.reset()
                     # reset() returns game_over info when run ended during advance
                     # (crash or legit game_over between combats)
-                    if reset_info.get("game_over"):
+                    if (reset_info.get("game_over")
+                            or any(reset_info.get(key) for key in (
+                                "crashed", "timeout", "stuck", "reset_failure",
+                                "load_failed", "invalid", "replay_failed"))):
                         run_over = True
                         last_info = reset_info
                         if reset_info.get("victory"):
@@ -643,12 +704,18 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         finally:
             signal.alarm(0)
 
-        env_wrapped.close()
         status = classify_eval_result(
             timed_out=timed_out,
             run_won=run_won,
             info=last_info,
         )
+        try:
+            emit_outcome = getattr(env, "_emit_run_outcome", None)
+            if emit_outcome is not None:
+                emit_outcome(env._current_state or {}, run_won, status=status)
+        except Exception:
+            pass
+        env_wrapped.close()
         attempt_statuses.append(status)
         retrying = should_retry_invalid_result(
             status,
@@ -660,6 +727,35 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                       if retrying else "")
         print(f"  game {i+1:2d}: floor={format_floor_label(max_floor):>5s} combats={ep_combat_wins} "
               f"boss={game_boss_id or '?':<20s} [{end_reason}{retry_note}]")
+
+        attempt_row = {
+            "event": "eval_result",
+            "run_id": run_id,
+            "batch_id": batch_id,
+            "checkpoint": checkpoint,
+            "character": character,
+            "game_version": game_version,
+            "evaluation_mode": evaluation_mode,
+            "scenario": effective_scenario,
+            "seed": game_seed,
+            "status": status,
+            "max_global_floor": max_floor,
+            "floor": max_floor,
+            "combat_wins": ep_combat_wins,
+            "attempt_index": retries_used + 1,
+            "game_index": i,
+            "retrying": retrying,
+            "included_in_gameplay": status in {"win", "dead"},
+            "boss": game_boss_id or "?",
+            "run_won": run_won,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        attempt_results.append(attempt_row)
+        if results_log_path:
+            try:
+                append_eval_result_row(results_log_path, attempt_row)
+            except Exception:
+                pass
 
         if verbose:
             # Print per-room log
@@ -697,16 +793,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             retries_used += 1
             continue
 
-        results.append({
-            "seed": game_seed,
-            "game_index": i,
-            "status": status,
-            "floor": max_floor,
-            "combat_wins": ep_combat_wins,
-            "boss": game_boss_id or "?",
-            "run_won": run_won,
-            "attempts": retries_used + 1,
-        })
+        results.append({**attempt_row, "attempts": retries_used + 1})
         boss_beaten = run_won or max_floor > 17
         if status in {"win", "dead"}:
             boss_records.append({"boss": game_boss_id or "?",
@@ -746,6 +833,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         total_attempts=total_attempts,
         attempt_statuses=attempt_statuses,
     )
+    stats["results"] = attempt_results
     stats["per_boss"] = per_boss
     return stats
 
@@ -765,6 +853,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Offset for fixed seed index")
     p.add_argument("--invalid-retries", type=int, default=1,
                    help="Retry crash/timeout/stuck attempts on the same seed (default: 1)")
+    p.add_argument("--results-log", default="data/eval_results.jsonl",
+                   help="JSONL file for every evaluation attempt. Pass 'none' to disable.")
+    p.add_argument("--game-version", default=os.environ.get("STS2_GAME_VERSION"),
+                   help="Explicit STS2 game version stored with evaluation results")
+    p.add_argument("--scenario", default="full_run",
+                   help="Evaluation scenario label stored with evaluation results")
     p.add_argument("--verbose", action="store_true", default=False,
                    help="Per-room summaries + detailed last-combat trace on wins")
     p.add_argument("--load", default=None,
@@ -796,6 +890,8 @@ def main():
     args = p.parse_args()
     boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
                           else args.deck_log)
+    results_log_path = (None if str(args.results_log).lower() in ("", "none")
+                        else args.results_log)
     try:
         combat_snapshot_dir, combat_snapshot_floors = _resolve_combat_snapshot_config(
             preset=args.snapshot_preset,
@@ -857,7 +953,10 @@ def main():
                              boss_snapshot_min_hp=args.boss_snapshot_min_hp,
                              combat_snapshot_dir=combat_snapshot_dir,
                              combat_snapshot_floors=combat_snapshot_floors,
-                             checkpoint_name=checkpoint)
+                             checkpoint_name=checkpoint,
+                             game_version=args.game_version,
+                             scenario=args.scenario,
+                             results_log_path=results_log_path)
     print(f"---")
     print(f"valid games    : {stats['valid_n']}/{stats['requested_n']} "
           f"(attempts={stats['attempts']}, invalid_seeds={stats['invalid_n']}, "

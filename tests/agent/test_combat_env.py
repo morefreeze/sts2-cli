@@ -93,6 +93,137 @@ def test_step_dry_run_terminates():
     assert terminated  # dry_run always terminates
 
 
+def _read_history_rows(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _recording_env(monkeypatch, tmp_path, **kwargs):
+    history_path = tmp_path / "deck_history.jsonl"
+    monkeypatch.setenv("DECK_HISTORY_PATH", str(history_path))
+    context = {
+        "run_id": "eval-14000k-000",
+        "checkpoint": "model_14000k.zip",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "game_version": "v0.103.2",
+    }
+    context.update(kwargs.pop("run_context", {}))
+    env = CombatEnv(
+        cards_json=CARDS_JSON,
+        character="Ironclad",
+        ascension=3,
+        dry_run=True,
+        run_context=context,
+        **kwargs,
+    )
+    env._run_seed = "eval_fixed_0"
+    return env, history_path
+
+
+def test_run_outcome_retains_identity_and_is_idempotent(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env._run_milestone_records = [{"event": "milestone", "floor": 7}]
+    env._run_max_floor = 21
+
+    env._emit_run_outcome({}, victory=False, status="dead")
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    rows = _read_history_rows(history_path)
+    assert len(rows) == 2
+    outcome = rows[-1]
+    assert outcome["event"] == "outcome"
+    assert outcome["run_id"] == "eval-14000k-000"
+    assert outcome["max_floor"] == 21
+    assert outcome["won"] is False
+    assert outcome["seed"] == "eval_fixed_0"
+    assert outcome["character"] == "Ironclad"
+    assert outcome["ascension"] == 3
+    assert outcome["checkpoint"] == "model_14000k.zip"
+    assert outcome["evaluation_mode"] == "fixed"
+    assert outcome["scenario"] == "full_run"
+    assert outcome["game_version"] == "v0.103.2"
+    assert outcome["status"] == "dead"
+    assert outcome["technical_failure_kind"] is None
+
+
+@pytest.mark.parametrize("status", ["crash", "timeout", "stuck", "reset_failure", "invalid"])
+def test_technical_run_outcome_is_never_a_win(monkeypatch, tmp_path, status):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+
+    env._emit_run_outcome({}, victory=True, status=status)
+
+    outcome = _read_history_rows(history_path)[-1]
+    assert outcome["status"] == status
+    assert outcome["won"] is False
+    assert outcome["technical_failure_kind"] == status
+
+
+def test_dead_process_step_emits_crash_outcome(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    env._current_state = combat_env._dummy_combat_state()
+    env._game_alive = False
+
+    _, _, terminated, _, info = env.step(40)
+
+    assert terminated
+    assert info["crashed"] is True
+    assert _read_history_rows(history_path)[-1]["status"] == "crash"
+
+
+def test_combat_step_limit_emits_timeout_outcome(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    env._current_state = combat_env._dummy_combat_state()
+    env._game_alive = True
+    env._combat_steps = env.max_combat_steps
+
+    _, _, terminated, _, info = env.step(40)
+
+    assert terminated
+    assert info["timeout"] is True
+    assert _read_history_rows(history_path)[-1]["status"] == "timeout"
+
+
+def test_ignored_end_turn_emits_stuck_outcome(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    env._current_state = combat_env._dummy_combat_state()
+    env._current_state["round"] = 2
+    env._game_alive = True
+    monkeypatch.setattr(env.enc, "decode", lambda action, state: {"action": "end_turn"})
+    monkeypatch.setattr(env, "_send", lambda command: env._current_state)
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+
+    _, _, terminated, _, info = env.step(40)
+
+    assert terminated
+    assert info["stuck"] is True
+    assert _read_history_rows(history_path)[-1]["status"] == "stuck"
+
+
+def test_failed_start_emits_reset_failure_outcome(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+    monkeypatch.setattr(env, "_start_proc", lambda: None)
+    monkeypatch.setattr(env, "_send", lambda command: {"type": "error", "message": "nope"})
+
+    _, info = env.reset()
+
+    assert info["reset_failure"] is True
+    assert _read_history_rows(history_path)[-1]["status"] == "reset_failure"
+
+
+def test_run_outcome_logging_failure_does_not_escape(monkeypatch, tmp_path):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    env._deck_history_path = str(tmp_path)
+
+    env._emit_run_outcome({}, victory=False, status="crash")
+
+    assert env._run_outcome_emitted is True
+
+
 def test_reset_uses_updated_state_after_hp_override(monkeypatch):
     load_state = {
         "decision": "combat_play",
