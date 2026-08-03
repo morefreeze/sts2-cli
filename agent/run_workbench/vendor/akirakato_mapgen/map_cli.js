@@ -73,14 +73,14 @@ function validateRequest(value) {
   if (typeof value.act_id !== 'string' || value.act_id.trim() === '') {
     throw new Error('act_id must be a non-empty string');
   }
-  if (!Number.isInteger(value.act_index) || value.act_index < 0) {
-    throw new Error('act_index must be a nonnegative integer');
+  if (!Number.isSafeInteger(value.act_index) || value.act_index < 0 || value.act_index > 3) {
+    throw new Error('act_index must be an integer from 0 to 3');
   }
-  if (typeof value.seed !== 'string') {
-    throw new Error('seed must be a string');
+  if (typeof value.seed !== 'string' || value.seed.trim() === '') {
+    throw new Error('seed must be a non-empty string');
   }
-  if (!Number.isInteger(value.ascension) || value.ascension < 0) {
-    throw new Error('ascension must be a nonnegative integer');
+  if (!Number.isSafeInteger(value.ascension) || value.ascension < 0 || value.ascension > 10) {
+    throw new Error('ascension must be an integer from 0 to 10');
   }
   if (!Array.isArray(value.modifiers) || !value.modifiers.every((item) => typeof item === 'string')) {
     throw new Error('modifiers must be an array of strings');

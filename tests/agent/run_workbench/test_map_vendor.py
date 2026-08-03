@@ -106,14 +106,23 @@ def test_map_cli_reports_invalid_input_as_json_without_stdout_diagnostics():
         (_without("act_id"), "act_id must be a non-empty string"),
         ({**REQUEST, "act_id": ""}, "act_id must be a non-empty string"),
         ({**REQUEST, "act_id": "   "}, "act_id must be a non-empty string"),
-        (_without("act_index"), "act_index must be a nonnegative integer"),
-        ({**REQUEST, "act_index": -1}, "act_index must be a nonnegative integer"),
-        ({**REQUEST, "act_index": 0.5}, "act_index must be a nonnegative integer"),
-        (_without("seed"), "seed must be a string"),
-        ({**REQUEST, "seed": 123}, "seed must be a string"),
-        (_without("ascension"), "ascension must be a nonnegative integer"),
-        ({**REQUEST, "ascension": -1}, "ascension must be a nonnegative integer"),
-        ({**REQUEST, "ascension": 0.5}, "ascension must be a nonnegative integer"),
+        (_without("act_index"), "act_index must be an integer from 0 to 3"),
+        ({**REQUEST, "act_index": -1}, "act_index must be an integer from 0 to 3"),
+        ({**REQUEST, "act_index": 0.5}, "act_index must be an integer from 0 to 3"),
+        ({**REQUEST, "act_index": 4}, "act_index must be an integer from 0 to 3"),
+        ({**REQUEST, "act_index": 1e300}, "act_index must be an integer from 0 to 3"),
+        (_without("seed"), "seed must be a non-empty string"),
+        ({**REQUEST, "seed": 123}, "seed must be a non-empty string"),
+        ({**REQUEST, "seed": ""}, "seed must be a non-empty string"),
+        ({**REQUEST, "seed": "   "}, "seed must be a non-empty string"),
+        (_without("ascension"), "ascension must be an integer from 0 to 10"),
+        ({**REQUEST, "ascension": -1}, "ascension must be an integer from 0 to 10"),
+        ({**REQUEST, "ascension": 0.5}, "ascension must be an integer from 0 to 10"),
+        ({**REQUEST, "ascension": 11}, "ascension must be an integer from 0 to 10"),
+        (
+            {**REQUEST, "ascension": 2**32},
+            "ascension must be an integer from 0 to 10",
+        ),
         (_without("modifiers"), "modifiers must be an array of strings"),
         ({**REQUEST, "modifiers": "none"}, "modifiers must be an array of strings"),
         ({**REQUEST, "modifiers": ["ok", 3]}, "modifiers must be an array of strings"),
@@ -148,6 +157,20 @@ def test_map_cli_rejects_visited_history_over_the_safe_act_limit():
 
     assert result.returncode != 0
     assert json.loads(result.stdout)["error"] == "visited exceeds 256 nodes"
+
+
+def test_map_cli_accepts_the_pinned_generator_upper_boundaries():
+    result = _invoke(
+        {
+            **REQUEST,
+            "act_id": "ACT.GLORY",
+            "act_index": 3,
+            "ascension": 10,
+        }
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["ok"] is True
 
 
 def test_map_cli_rejects_oversized_stdin_before_attempting_json_parse():
