@@ -228,6 +228,39 @@ def test_technical_eval_statuses_remain_technical(tmp_path: Path, status: str) -
     assert run.outcome.technical_failure_kind == status
 
 
+@pytest.mark.parametrize(
+    ("status", "raw_victory", "expected_victory"),
+    [
+        ("win", False, True),
+        ("dead", True, False),
+        ("in_progress", True, None),
+    ],
+)
+def test_explicit_eval_status_is_authoritative_over_contradictory_victory(
+    tmp_path: Path,
+    status: str,
+    raw_victory: bool,
+    expected_victory: bool | None,
+) -> None:
+    path = tmp_path / "contradictory_eval.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "event": "eval_result",
+                "run_id": status,
+                "status": status,
+                "victory": raw_victory,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(path).runs[0]
+
+    assert run.outcome.status.value == status
+    assert run.outcome.victory is expected_victory
+
+
 def test_summary_source_returns_summary_without_fabricating_a_run() -> None:
     adapted = adapt_path(FIXTURES / "summary.jsonl")
 

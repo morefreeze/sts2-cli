@@ -440,15 +440,16 @@ def _status_from_record(
         if isinstance(record.get(key), bool):
             victory = record[key]
             break
-    if status.is_technical:
+    if status is RunStatus.WIN:
+        victory = True
+    elif status is RunStatus.DEAD:
         victory = False
+    elif status.is_technical:
+        victory = False
+    elif status is RunStatus.IN_PROGRESS:
+        victory = None
     elif status is RunStatus.UNKNOWN and victory is not None:
         status = RunStatus.WIN if victory else RunStatus.DEAD
-    elif victory is None:
-        if status is RunStatus.WIN:
-            victory = True
-        elif status is RunStatus.DEAD:
-            victory = False
     technical_kind = status.value if status.is_technical else None
     return status, victory, technical_kind
 
