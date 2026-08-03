@@ -118,6 +118,38 @@ def test_replay_top_level_run_id_wins_over_nested_conflict_with_warning(
     )
 
 
+def test_replay_start_metadata_requires_integer_ascension(tmp_path: Path) -> None:
+    path = tmp_path / "typed-ascension.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "action",
+                        "data": {
+                            "cmd": "start_run",
+                            "run_id": "typed-run",
+                            "ascension": 3.0,
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "state",
+                        "status": "dead",
+                        "data": {"run_id": "typed-run"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(path, replay_parser=parse_game_progress).runs[0]
+
+    assert run.metadata.ascension is None
+
+
 def test_partial_replay_reports_only_observed_coverage() -> None:
     adapted = adapt_path(
         FIXTURES / "partial_replay.jsonl",

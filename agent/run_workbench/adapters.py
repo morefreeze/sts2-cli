@@ -210,14 +210,23 @@ def _adapt_replay(
 
     starts = [_first_number(row, "ts") for row in records]
     timestamps = [value for value in starts if value is not None]
+    start_action = _replay_start_action(records)
+    ascension = _first_nonnegative_int(summary, "ascension")
+    if ascension is None:
+        ascension = _first_nonnegative_int(start_action, "ascension")
     metadata = RunMetadata(
-        character=_first_text(summary, "character") or _replay_action_value(records, "character"),
-        seed=_first_text(summary, "seed") or _replay_action_value(records, "seed"),
-        game_version=_first_text(summary, "game_version", "build_id"),
-        checkpoint=_first_text(summary, "checkpoint"),
-        evaluation_mode=_first_text(summary, "evaluation_mode"),
-        scenario=_first_text(summary, "scenario"),
-        ascension=_first_int(summary, "ascension"),
+        character=_first_text(summary, "character")
+        or _first_text(start_action, "character"),
+        seed=_first_text(summary, "seed") or _first_text(start_action, "seed"),
+        game_version=_first_text(summary, "game_version", "build_id")
+        or _first_text(start_action, "game_version", "build_id"),
+        checkpoint=_first_text(summary, "checkpoint")
+        or _first_text(start_action, "checkpoint"),
+        evaluation_mode=_first_text(summary, "evaluation_mode")
+        or _first_text(start_action, "evaluation_mode"),
+        scenario=_first_text(summary, "scenario")
+        or _first_text(start_action, "scenario"),
+        ascension=ascension,
         started_at=min(timestamps) if timestamps else None,
         ended_at=max(timestamps) if timestamps else None,
     )
@@ -534,14 +543,14 @@ def _deck_floors(records: list[dict[str, Any]]) -> list[int]:
     return floors
 
 
-def _replay_action_value(records: list[dict[str, Any]], key: str) -> str | None:
+def _replay_start_action(records: list[dict[str, Any]]) -> dict[str, Any]:
     for row in records:
         if row.get("type") != "action" or not isinstance(row.get("data"), dict):
             continue
-        value = _first_text(row["data"], key)
-        if value:
-            return value
-    return None
+        data = row["data"]
+        if _first_text(data, "cmd", "decision") == "start_run":
+            return data
+    return {}
 
 
 def _replay_run_identity(
@@ -614,6 +623,14 @@ def _first_int(record: dict[str, Any], *keys: str) -> int | None:
             return value
         if isinstance(value, float) and value.is_integer():
             return int(value)
+    return None
+
+
+def _first_nonnegative_int(record: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = record.get(key)
+        if type(value) is int and value >= 0:
+            return value
     return None
 
 

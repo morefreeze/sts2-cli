@@ -32,6 +32,7 @@ SUPPORTED_SUFFIXES = frozenset({".run", ".json", ".jsonl"})
 INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
+REPLAY_WARNING_ID_LIMIT = 16
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
 _WORKBENCH_JSON_MARKERS = (
     b'"players"',
@@ -870,6 +871,35 @@ def _reject_scan_constant(value: str) -> None:
     raise _ScanConstantError(f"non-standard numeric constant {value}")
 
 
+def _add_bounded_replay_id(observed: set[str], value: str | None) -> bool:
+    if value is None or value in observed:
+        return False
+    if len(observed) >= REPLAY_WARNING_ID_LIMIT:
+        return True
+    observed.add(value)
+    return False
+
+
+def _compact_replay_identity_warnings(
+    resolved: str,
+    observed: set[str],
+    ids_omitted: bool,
+) -> tuple[str, ...]:
+    displayed = set(observed)
+    if resolved and resolved not in displayed:
+        if len(displayed) >= REPLAY_WARNING_ID_LIMIT:
+            displayed.remove(max(displayed))
+            ids_omitted = True
+        displayed.add(resolved)
+    if len(displayed) <= 1 and not ids_omitted:
+        return ()
+    omitted_note = "; additional run_id values omitted" if ids_omitted else ""
+    return (
+        "conflicting replay run_id values: "
+        f"observed={', '.join(sorted(displayed))}{omitted_note}; using {resolved}",
+    )
+
+
 def _scan_jsonl_index(path: Path) -> _JsonlScan:
     """Scan an entire JSONL source while retaining only bounded raw evidence."""
 
@@ -883,6 +913,8 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     source_replay_run: _CompactRun | None = None
     replay_top_level_id: str | None = None
     replay_nested_id: str | None = None
+    replay_observed_ids: set[str] = set()
+    replay_ids_omitted = False
     eval_runs: list[_CompactRun] = []
     types: set[str] = set()
     events: set[str] = set()
@@ -930,24 +962,38 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     "hp_at_entry",
                 }.issubset(record)
                 record_run_ids = _lightweight_run_ids([record])
-                run_ids.update(record_run_ids)
                 is_replay_row = record.get("type") in {"state", "action"}
                 if event == "eval_result":
+                    run_ids.update(record_run_ids)
                     compact = _CompactRun(run_id=_record_run_id(record))
                     _update_compact_run(compact, record)
                     eval_runs.append(compact)
                 elif is_replay_row or (has_action_command and event == "outcome"):
-                    if replay_top_level_id is None:
-                        replay_top_level_id = _first_scalar_text(record, "run_id")
+                    top_level_id = _first_scalar_text(record, "run_id")
+                    if replay_top_level_id is None and top_level_id is not None:
+                        replay_top_level_id = top_level_id
                     data = record.get("data")
-                    if replay_nested_id is None and isinstance(data, dict):
-                        replay_nested_id = _first_scalar_text(data, "run_id")
+                    nested_id = (
+                        _first_scalar_text(data, "run_id")
+                        if isinstance(data, dict)
+                        else None
+                    )
+                    if replay_nested_id is None and nested_id is not None:
+                        replay_nested_id = nested_id
+                    for observed_id in (top_level_id, nested_id):
+                        replay_ids_omitted = (
+                            _add_bounded_replay_id(
+                                replay_observed_ids, observed_id
+                            )
+                            or replay_ids_omitted
+                        )
                     if source_replay_run is None:
                         source_replay_run = _CompactRun(run_id="")
                     _update_compact_run(source_replay_run, record)
                     if is_replay_row:
                         _update_compact_replay(source_replay_run, record)
                 elif event in {"milestone", "card_pick", "outcome"}:
+                    run_ids.update(record_run_ids)
                     run_id = _record_run_id(record)
                     if run_id:
                         compact = grouped_runs_by_id.setdefault(
@@ -957,6 +1003,8 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                         compact = _CompactRun(run_id="")
                         anonymous_deck_runs.append(compact)
                     _update_compact_run(compact, record)
+                else:
+                    run_ids.update(record_run_ids)
     except UnicodeDecodeError as error:
         errors.append(f"{path.name}: invalid UTF-8 at byte {error.start}")
     except OSError as error:
@@ -983,16 +1031,11 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
             source_replay_run.run_id = (
                 replay_top_level_id or replay_nested_id or ""
             )
-            if (
-                replay_top_level_id is not None
-                and replay_nested_id is not None
-                and replay_top_level_id != replay_nested_id
-            ):
-                source_replay_run.warnings = (
-                    "conflicting replay run_id values: "
-                    f"observed={', '.join(sorted({replay_top_level_id, replay_nested_id}))}; "
-                    f"using {source_replay_run.run_id}",
-                )
+            source_replay_run.warnings = _compact_replay_identity_warnings(
+                source_replay_run.run_id,
+                replay_observed_ids,
+                replay_ids_omitted,
+            )
             compact_runs = (source_replay_run,)
             run_ids = {source_replay_run.run_id} if source_replay_run.run_id else set()
     else:
