@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -267,6 +268,48 @@ def test_refresh_reuses_unchanged_index_records_without_rereading(
     catalog.get_source(source_id)
     assert read_calls == 2
     assert parser_calls == 2
+
+
+def test_mutating_replay_parser_cannot_change_indexed_record_snapshot(tmp_path: Path):
+    _write_jsonl(tmp_path / "replay.jsonl", _replay("stable"))
+    parser_calls = 0
+
+    def mutating_parser(
+        records: list[dict], source_name: str | None = None
+    ) -> dict:
+        nonlocal parser_calls
+        parser_calls += 1
+        original_run_id = records[0].pop("run_id")
+        original_floor = records[0]["data"]["context"]["floor"]
+        records[0]["data"]["context"]["floor"] = 999
+        return {
+            "summary": {
+                "run_id": original_run_id,
+                "character": "Ironclad",
+                "game_version": "v1",
+                "checkpoint": "ckpt-a",
+                "evaluation_mode": "fixed",
+                "scenario": "standard",
+                "ascension": 0,
+                "max_global_floor": original_floor,
+            },
+            "rooms": [{"id": "room", "global_floor": original_floor}],
+        }
+
+    catalog = RunCatalog([tmp_path], replay_parser=mutating_parser)
+    source_id = catalog.list_sources()[0]["source_id"]
+    indexed_before = deepcopy(catalog._sources[source_id].records)
+
+    source_view = catalog.get_source(source_id)
+    catalog.list_sources()
+    run_view = catalog.get_run("stable")
+
+    assert parser_calls == 1
+    assert source_view["runs"][0]["run_id"] == "stable"
+    assert run_view["run"]["run_id"] == "stable"
+    assert catalog._sources[source_id].records == indexed_before
+    assert catalog._sources[source_id].records[0]["run_id"] == "stable"
+    assert catalog._sources[source_id].records[0]["data"]["context"]["floor"] == 4
 
 
 def test_get_run_parses_only_exact_candidate_sources_and_joins(tmp_path: Path):

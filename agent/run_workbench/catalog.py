@@ -341,7 +341,7 @@ class RunCatalog:
         else:
             adapted = adapt_records(
                 source.path.name,
-                list(source.records),
+                deepcopy(list(source.records)),
                 descriptor=source.descriptor,
                 replay_parser=self.replay_parser,
                 source_path=source.path,
