@@ -4,9 +4,11 @@ import errno
 import json
 import os
 from pathlib import Path
+from threading import Event, Thread, current_thread
 
 import pytest
 
+import agent.run_workbench.catalog as catalog_module
 from agent.run_workbench.catalog import (
     CatalogNotFoundError,
     RunCatalog,
@@ -224,6 +226,49 @@ def test_source_adaptation_is_lazy_cached_and_invalidated_by_file_change(tmp_pat
     assert calls == 2
 
 
+def test_refresh_reuses_unchanged_index_records_without_rereading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = _write_jsonl(tmp_path / "replay.jsonl", _replay("run-1"))
+    read_calls = 0
+    parser_calls = 0
+    original_reader = catalog_module.read_json_records
+
+    def reader(path: Path):
+        nonlocal read_calls
+        read_calls += 1
+        return original_reader(path)
+
+    def parser(records: list[dict], source_name: str | None = None) -> dict:
+        nonlocal parser_calls
+        parser_calls += 1
+        return _replay_parser(records, source_name)
+
+    monkeypatch.setattr(catalog_module, "read_json_records", reader)
+    catalog = RunCatalog([tmp_path], replay_parser=parser)
+
+    source_id = catalog.list_sources()[0]["source_id"]
+    catalog.list_sources()
+    catalog.get_source(source_id)
+    catalog.get_source(source_id)
+    assert read_calls == 1
+    assert parser_calls == 1
+
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {"run_id": "run-1", "type": "action", "data": {"cmd": "end_turn"}}
+            )
+            + "\n"
+        )
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    catalog.get_source(source_id)
+    assert read_calls == 2
+    assert parser_calls == 2
+
+
 def test_get_run_parses_only_exact_candidate_sources_and_joins(tmp_path: Path):
     _write_jsonl(tmp_path / "wanted.jsonl", _replay("wanted"))
     _write_jsonl(tmp_path / "other.jsonl", _replay("other"))
@@ -329,6 +374,164 @@ def test_cohorts_keep_metadata_axes_separate_and_feed_metrics(tmp_path: Path):
     compared = catalog.get_metrics(current["cohort_id"], baseline["cohort_id"])
     assert compared["current"]["valid_n"] == 2
     assert compared["comparison"]["comparable"] is False
+
+
+def test_ascension_levels_form_distinct_stable_catalog_cohorts(tmp_path: Path):
+    records = [
+        {
+            "event": "eval_result",
+            "run_id": f"a{ascension}",
+            "status": "dead",
+            "max_global_floor": 8,
+            "character": "Ironclad",
+            "game_version": "v1",
+            "checkpoint": "same",
+            "evaluation_mode": "fixed",
+            "scenario": "standard",
+            "ascension": ascension,
+            "seed": "same-seed",
+        }
+        for ascension in (0, 20)
+    ]
+    _write_jsonl(tmp_path / "eval.jsonl", records)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    first = catalog.list_cohorts()
+    second = catalog.list_cohorts()
+
+    assert len(first) == 2
+    assert [cohort["cohort_id"] for cohort in first] == [
+        cohort["cohort_id"] for cohort in second
+    ]
+    assert {cohort["filters"]["ascension"] for cohort in first} == {0, 20}
+    ascension_labels = {
+        next(
+            part
+            for part in cohort["label"].split(" · ")
+            if part.startswith("A")
+        )
+        for cohort in first
+    }
+    assert ascension_labels == {"A0", "A20"}
+    compared = catalog.get_metrics(first[0]["cohort_id"], first[1]["cohort_id"])
+    assert compared["comparison"]["comparable"] is False
+    assert any(
+        "ascension mismatch" in reason
+        for reason in compared["comparison"]["mismatch_reasons"]
+    )
+
+
+def test_metrics_uses_one_cohort_snapshot_for_current_and_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                "event": "eval_result",
+                "run_id": checkpoint,
+                "status": "dead",
+                "max_global_floor": 8,
+                "character": "Ironclad",
+                "game_version": "v1",
+                "checkpoint": checkpoint,
+                "evaluation_mode": "fixed",
+                "scenario": "standard",
+                "ascension": 0,
+                "seed": "same",
+            }
+            for checkpoint in ("current", "baseline")
+        ],
+    )
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    cohorts = catalog.list_cohorts()
+    current_id, baseline_id = (cohort["cohort_id"] for cohort in cohorts)
+    build_calls = 0
+    original_build = catalog._build_cohorts
+
+    def counted_build():
+        nonlocal build_calls
+        build_calls += 1
+        return original_build()
+
+    monkeypatch.setattr(catalog, "_build_cohorts", counted_build)
+
+    catalog.get_metrics(current_id, baseline_id)
+
+    assert build_calls == 1
+
+
+def test_catalog_get_run_and_refresh_share_one_locked_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = _write_jsonl(tmp_path / "run.jsonl", _replay("stable"))
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    catalog.list_sources()
+    reader_ready = Event()
+    release_reader = Event()
+    reader_result: dict[str, object] = {}
+    refresher_result: dict[str, object] = {}
+    original_refresh = catalog._refresh
+
+    def controlled_refresh():
+        original_refresh()
+        if current_thread().name == "catalog-reader":
+            reader_ready.set()
+            assert release_reader.wait(timeout=2)
+
+    monkeypatch.setattr(catalog, "_refresh", controlled_refresh)
+
+    def read_run():
+        try:
+            reader_result["payload"] = catalog.get_run("stable")
+        except Exception as error:  # captured for deterministic assertion
+            reader_result["error"] = error
+
+    def refresh_catalog():
+        try:
+            refresher_result["sources"] = catalog.list_sources()
+        except Exception as error:  # captured for deterministic assertion
+            refresher_result["error"] = error
+
+    reader = Thread(target=read_run, name="catalog-reader")
+    reader.start()
+    assert reader_ready.wait(timeout=2)
+    assert catalog._lock.acquire(blocking=False) is False
+    source.unlink()
+    refresher = Thread(target=refresh_catalog, name="catalog-refresher")
+    refresher.start()
+    release_reader.set()
+    reader.join(timeout=2)
+    refresher.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert not refresher.is_alive()
+    assert "error" not in reader_result
+    assert reader_result["payload"]["run"]["run_id"] == "stable"
+    assert refresher_result == {"sources": []}
+
+
+def test_refresh_skips_source_that_disappears_during_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    good = _write_jsonl(tmp_path / "good.jsonl", _replay("good"))
+    vanished = _write_jsonl(tmp_path / "vanished.jsonl", _replay("bad"))
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    monkeypatch.setattr(
+        catalog, "_discover", lambda: [(tmp_path, good), (tmp_path, vanished)]
+    )
+    original_stat = Path.stat
+
+    def flaky_stat(path: Path, *args, **kwargs):
+        if path == vanished:
+            raise FileNotFoundError(2, "No such file", str(vanished))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    entries = catalog.list_sources()
+
+    assert [entry["display_name"] for entry in entries] == ["good.jsonl"]
 
 
 @pytest.mark.parametrize(

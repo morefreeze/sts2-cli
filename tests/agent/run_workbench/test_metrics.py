@@ -22,6 +22,7 @@ def _run(
     version: str | None = "2026.08",
     mode: str | None = "evaluation",
     scenario: str | None = "standard",
+    ascension: object = 0,
     seed: str | None = "seed-1",
     started_at: float | None = None,
     ended_at: float | None = None,
@@ -36,6 +37,7 @@ def _run(
             game_version=version,
             evaluation_mode=mode,
             scenario=scenario,
+            ascension=ascension,
             seed=seed,
             started_at=started_at,
             ended_at=ended_at,
@@ -449,6 +451,7 @@ def test_technical_noise_does_not_create_metadata_or_pairing_mismatches():
             version="other",
             mode="other",
             scenario="other",
+            ascension=20,
             seed="other",
         ),
     ]
@@ -457,6 +460,57 @@ def test_technical_noise_does_not_create_metadata_or_pairing_mismatches():
 
     assert result.comparable is True
     assert result.paired is True
+
+
+def test_ascension_mismatch_makes_cohorts_incompatible():
+    result = compare_cohorts(
+        [_run("current", ascension=20, seed="same")],
+        [_run("baseline", ascension=0, seed="same")],
+    )
+
+    assert result.comparable is False
+    assert any(
+        reason == "ascension mismatch: current=20, baseline=0"
+        for reason in result.mismatch_reasons
+    )
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [
+        (None, "current ascension is missing"),
+        (True, "current ascension is invalid"),
+        (-1, "current ascension is invalid"),
+        (1.0, "current ascension is invalid"),
+    ],
+)
+def test_missing_or_invalid_ascension_has_deterministic_reason(current, expected):
+    result = compare_cohorts(
+        [_run("current", ascension=current, seed="same")],
+        [_run("baseline", ascension=0, seed="same")],
+    )
+
+    assert result.comparable is False
+    assert any(reason.startswith(expected) for reason in result.mismatch_reasons)
+
+
+def test_mixed_ascension_has_deterministic_reason():
+    result = compare_cohorts(
+        [
+            _run("current-a", ascension=0, seed="a"),
+            _run("current-b", ascension=20, seed="b"),
+        ],
+        [
+            _run("baseline-a", ascension=0, seed="a"),
+            _run("baseline-b", ascension=0, seed="b"),
+        ],
+    )
+
+    assert result.comparable is False
+    assert any(
+        reason == "current ascension is mixed: values=0, 20"
+        for reason in result.mismatch_reasons
+    )
 
 
 def test_empty_valid_cohorts_fail_with_explicit_current_and_baseline_reasons():

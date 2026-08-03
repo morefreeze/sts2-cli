@@ -117,6 +117,21 @@ def test_http_errors_use_stable_json_statuses(
     assert message in payload["error"]
 
 
+def test_unexpected_http_error_is_logged_but_not_exposed(tmp_path: Path):
+    secret = "/private/secret/catalog.jsonl"
+
+    class ExplodingCatalog:
+        def list_sources(self):
+            raise OSError(5, "backend exploded", secret)
+
+    with _server(ExplodingCatalog()) as base:
+        status, payload = _request(base, "/api/catalog")
+
+    assert status == 500
+    assert payload == {"error": "internal server error"}
+    assert secret not in json.dumps(payload)
+
+
 @pytest.mark.parametrize(
     ("payload", "status", "message"),
     [

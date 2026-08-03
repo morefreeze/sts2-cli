@@ -8,9 +8,11 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
+import stat as stat_module
+from threading import RLock
 from typing import Any, Callable, Iterable
 
-from .adapters import AdaptedSource, adapt_path, adapt_records
+from .adapters import AdaptedSource, adapt_records
 from .joiner import join_records
 from .metrics import compare_cohorts, summarize_cohort
 from .models import RunRecord, RunStatus, SourceKind
@@ -63,91 +65,106 @@ class RunCatalog:
         self._run_sources: dict[str, tuple[str, ...]] = {}
         self._adapt_cache: dict[tuple[Path, int, int], AdaptedSource] = {}
         self._cohort_records: dict[str, tuple[RunRecord, ...]] = {}
+        self._lock = RLock()
 
     def list_sources(self) -> list[dict[str, Any]]:
-        self._refresh()
-        return [deepcopy(source.entry) for source in self._ordered_sources()]
+        with self._lock:
+            self._refresh()
+            return [deepcopy(source.entry) for source in self._ordered_sources()]
 
     def get_source(self, source_id: str) -> dict[str, Any]:
-        self._refresh()
-        source = self._sources.get(source_id)
-        if source is None:
-            raise CatalogNotFoundError(f"unknown source id: {source_id}")
-        if source.entry["open_mode"] == "error":
-            return {
-                "view": "error",
-                "source": deepcopy(source.entry),
-                "errors": list(source.entry["errors"]),
-            }
-        adapted = self._adapt(source)
-        return self._source_view(source, adapted)
+        with self._lock:
+            self._refresh()
+            source = self._sources.get(source_id)
+            if source is None:
+                raise CatalogNotFoundError(f"unknown source id: {source_id}")
+            if source.entry["open_mode"] == "error":
+                return {
+                    "view": "error",
+                    "source": deepcopy(source.entry),
+                    "errors": list(source.entry["errors"]),
+                }
+            adapted = self._adapt(source)
+            return self._source_view(source, adapted)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         if not isinstance(run_id, str) or not run_id:
             raise CatalogError("run id must be a non-empty string")
-        self._refresh()
-        candidate_ids = self._run_sources.get(run_id)
-        if not candidate_ids:
-            raise CatalogNotFoundError(f"unknown run id: {run_id}")
+        with self._lock:
+            self._refresh()
+            candidate_ids = self._run_sources.get(run_id)
+            if not candidate_ids:
+                raise CatalogNotFoundError(f"unknown run id: {run_id}")
 
-        matched: list[RunRecord] = []
-        sources: list[dict[str, Any]] = []
-        path_ids: dict[str, str] = {}
-        errors: list[str] = []
-        for source_id in candidate_ids:
-            source = self._sources[source_id]
-            sources.append(deepcopy(source.entry))
-            path_ids.update(_source_redactions(source))
-            adapted = self._adapt(source)
-            errors.extend(adapted.errors)
-            for record in self._public_records(source, adapted):
-                if record.run_id == run_id:
-                    matched.append(record)
-        if not matched:
-            raise CatalogNotFoundError(
-                f"run id {run_id!r} was indexed but could not be normalized"
-            )
-        merged = join_records(matched)
-        if len(merged) != 1:
-            raise CatalogError(f"ambiguous run id: {run_id}")
-        payload = _scrub_paths(merged[0].to_dict(), path_ids)
-        return {
-            "view": "run",
-            "run": payload,
-            "sources": sorted(sources, key=lambda item: item["source_id"]),
-            "errors": _scrub_paths(list(dict.fromkeys(errors)), path_ids),
-        }
+            matched: list[RunRecord] = []
+            sources: list[dict[str, Any]] = []
+            path_ids: dict[str, str] = {}
+            errors: list[str] = []
+            for source_id in candidate_ids:
+                source = self._sources[source_id]
+                sources.append(deepcopy(source.entry))
+                path_ids.update(_source_redactions(source))
+                adapted = self._adapt(source)
+                errors.extend(adapted.errors)
+                for record in self._public_records(source, adapted):
+                    if record.run_id == run_id:
+                        matched.append(record)
+            if not matched:
+                raise CatalogNotFoundError(
+                    f"run id {run_id!r} was indexed but could not be normalized"
+                )
+            merged = join_records(matched)
+            if len(merged) != 1:
+                raise CatalogError(f"ambiguous run id: {run_id}")
+            payload = _scrub_paths(merged[0].to_dict(), path_ids)
+            return {
+                "view": "run",
+                "run": payload,
+                "sources": sorted(sources, key=lambda item: item["source_id"]),
+                "errors": _scrub_paths(list(dict.fromkeys(errors)), path_ids),
+            }
 
     def list_cohorts(self) -> list[dict[str, Any]]:
-        descriptors = self._build_cohorts()
-        return deepcopy(descriptors)
+        with self._lock:
+            descriptors = self._build_cohorts()
+            return deepcopy(descriptors)
 
     def get_cohort_records(self, cohort_id: str) -> tuple[RunRecord, ...]:
-        self._build_cohorts()
+        with self._lock:
+            self._build_cohorts()
+            return self._cohort_records_for_id(cohort_id)
+
+    def get_metrics(
+        self, current_id: str, baseline_id: str | None = None
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._build_cohorts()
+            current = self._cohort_records_for_id(current_id)
+            comparison = None
+            baseline_summary = None
+            if baseline_id is not None:
+                baseline = self._cohort_records_for_id(baseline_id)
+                baseline_summary = summarize_cohort(baseline).to_dict()
+                comparison = compare_cohorts(current, baseline).to_dict()
+            return {
+                "current_cohort_id": current_id,
+                "baseline_cohort_id": baseline_id,
+                "current": summarize_cohort(current).to_dict(),
+                "baseline": baseline_summary,
+                "comparison": comparison,
+            }
+
+    def _cohort_records_for_id(self, cohort_id: str) -> tuple[RunRecord, ...]:
         records = self._cohort_records.get(cohort_id)
         if records is None:
             raise CatalogNotFoundError(f"unknown cohort id: {cohort_id}")
         return tuple(deepcopy(record) for record in records)
 
-    def get_metrics(
-        self, current_id: str, baseline_id: str | None = None
-    ) -> dict[str, Any]:
-        current = self.get_cohort_records(current_id)
-        comparison = None
-        baseline_summary = None
-        if baseline_id is not None:
-            baseline = self.get_cohort_records(baseline_id)
-            baseline_summary = summarize_cohort(baseline).to_dict()
-            comparison = compare_cohorts(current, baseline).to_dict()
-        return {
-            "current_cohort_id": current_id,
-            "baseline_cohort_id": baseline_id,
-            "current": summarize_cohort(current).to_dict(),
-            "baseline": baseline_summary,
-            "comparison": comparison,
-        }
-
     def parse_upload(self, source_name: str, text: str) -> dict[str, Any]:
+        with self._lock:
+            return self._parse_upload(source_name, text)
+
+    def _parse_upload(self, source_name: str, text: str) -> dict[str, Any]:
         if not isinstance(source_name, str):
             raise CatalogError("source_name must be a string")
         if not isinstance(text, str):
@@ -201,7 +218,21 @@ class RunCatalog:
         indexed: dict[str, _IndexedSource] = {}
         run_sources: dict[str, list[str]] = {}
         for root, path in discovered:
-            source = self._index_source(root, path)
+            try:
+                file_stat = path.stat()
+                if not stat_module.S_ISREG(file_stat.st_mode):
+                    continue
+                relative = path.relative_to(root).as_posix()
+                source_id = _source_id(root, relative)
+                cache_key = (path, file_stat.st_mtime_ns, file_stat.st_size)
+                previous = self._sources.get(source_id)
+                source = (
+                    previous
+                    if previous is not None and previous.cache_key == cache_key
+                    else self._index_source(root, path, file_stat)
+                )
+            except OSError:
+                continue
             indexed[source.source_id] = source
             if source.entry["open_mode"] == "run":
                 for run_id in source.run_ids:
@@ -240,8 +271,9 @@ class RunCatalog:
                 discovered.append((root, resolved))
         return discovered
 
-    def _index_source(self, root: Path, path: Path) -> _IndexedSource:
-        stat = path.stat()
+    def _index_source(
+        self, root: Path, path: Path, file_stat: Any
+    ) -> _IndexedSource:
         relative = path.relative_to(root).as_posix()
         source_id = _source_id(root, relative)
         display_name = relative
@@ -273,9 +305,9 @@ class RunCatalog:
             "display_name": display_name,
             "source_kind": descriptor.kind.value,
             "open_mode": open_mode,
-            "mtime": stat.st_mtime,
-            "mtime_ns": stat.st_mtime_ns,
-            "size": stat.st_size,
+            "mtime": file_stat.st_mtime,
+            "mtime_ns": file_stat.st_mtime_ns,
+            "size": file_stat.st_size,
             "record_count": descriptor.record_count,
             "message": public_message,
             "errors": public_errors,
@@ -287,9 +319,9 @@ class RunCatalog:
             path=path,
             entry=entry,
             descriptor=descriptor,
-            records=tuple(deepcopy(records)) if records is not None else None,
+            records=tuple(records) if records is not None else None,
             run_ids=tuple(sorted(_lightweight_run_ids(records or []))),
-            cache_key=(path, stat.st_mtime_ns, stat.st_size),
+            cache_key=(path, file_stat.st_mtime_ns, file_stat.st_size),
         )
 
     def _ordered_sources(self) -> list[_IndexedSource]:
@@ -302,7 +334,18 @@ class RunCatalog:
         cached = self._adapt_cache.get(source.cache_key)
         if cached is not None:
             return cached
-        adapted = adapt_path(source.path, replay_parser=self.replay_parser)
+        if source.records is None:
+            adapted = AdaptedSource(
+                source.descriptor, errors=tuple(source.entry["errors"])
+            )
+        else:
+            adapted = adapt_records(
+                source.path.name,
+                list(source.records),
+                descriptor=source.descriptor,
+                replay_parser=self.replay_parser,
+                source_path=source.path,
+            )
         self._adapt_cache[source.cache_key] = adapted
         return adapted
 
@@ -369,6 +412,7 @@ class RunCatalog:
                 record.metadata.game_version,
                 record.metadata.evaluation_mode,
                 record.metadata.scenario,
+                record.metadata.ascension,
             )
             grouped.setdefault(key, []).append(record)
 
@@ -377,7 +421,14 @@ class RunCatalog:
         for key, group in sorted(
             grouped.items(), key=lambda item: _sortable_key(item[0])
         ):
-            checkpoint_or_source, character, version, mode, scenario = key
+            (
+                checkpoint_or_source,
+                character,
+                version,
+                mode,
+                scenario,
+                ascension,
+            ) = key
             cohort_id = _cohort_id(key)
             ordered = tuple(
                 sorted(group, key=lambda record: (record.run_id, record.source_id))
@@ -403,6 +454,7 @@ class RunCatalog:
                 "game_version": version,
                 "evaluation_mode": mode,
                 "scenario": scenario,
+                "ascension": ascension,
             }
             label_parts = [
                 checkpoint or checkpoint_or_source,
@@ -410,6 +462,9 @@ class RunCatalog:
                 version,
                 mode,
                 scenario,
+                f"A{ascension}"
+                if type(ascension) is int and ascension >= 0
+                else "A?",
             ]
             descriptors.append(
                 {

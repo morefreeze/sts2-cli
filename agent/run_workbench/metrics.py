@@ -130,6 +130,13 @@ class _StringDetails:
     invalid_types: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _AscensionDetails:
+    values: frozenset[int]
+    missing: bool
+    invalid: tuple[str, ...]
+
+
 def _rate(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
@@ -346,6 +353,50 @@ def _axis_value(
     return next(iter(details.values)), ()
 
 
+def _ascension_details(records: tuple[RunRecord, ...]) -> _AscensionDetails:
+    values: list[int] = []
+    missing = False
+    invalid: list[str] = []
+    for record in records:
+        value = record.metadata.ascension
+        if value is None:
+            missing = True
+        elif type(value) is int and value >= 0:
+            values.append(value)
+        else:
+            invalid.append(f"{type(value).__name__}={value!r}")
+    return _AscensionDetails(
+        values=frozenset(values),
+        missing=missing,
+        invalid=tuple(sorted(set(invalid))),
+    )
+
+
+def _ascension_axis_value(
+    records: tuple[RunRecord, ...], cohort: str
+) -> tuple[int | None, tuple[str, ...]]:
+    details = _ascension_details(records)
+    rendered_values = ", ".join(str(value) for value in sorted(details.values))
+    rendered_invalid = ", ".join(details.invalid)
+    if details.invalid and not details.values and not details.missing:
+        return None, (
+            f"{cohort} ascension is invalid: expected nonnegative int; "
+            f"values={rendered_invalid}",
+        )
+    if not details.values and details.missing and not details.invalid:
+        return None, (f"{cohort} ascension is missing",)
+    if len(details.values) > 1 or details.missing or details.invalid:
+        parts: list[str] = []
+        if details.missing:
+            parts.append("missing")
+        if rendered_values:
+            parts.append(f"values={rendered_values}")
+        if rendered_invalid:
+            parts.append(f"invalid={rendered_invalid}")
+        return None, (f"{cohort} ascension is mixed: {'; '.join(parts)}",)
+    return next(iter(details.values)), ()
+
+
 def _seed_details(records: tuple[RunRecord, ...]) -> _StringDetails:
     return _string_details(record.metadata.seed for record in records)
 
@@ -415,6 +466,24 @@ def compare_cohorts(
                         f"{label} mismatch: "
                         f"current={current_value}, baseline={baseline_value}"
                     )
+
+        current_ascension, current_ascension_errors = _ascension_axis_value(
+            current_valid, "current"
+        )
+        baseline_ascension, baseline_ascension_errors = _ascension_axis_value(
+            baseline_valid, "baseline"
+        )
+        reasons.extend(current_ascension_errors)
+        reasons.extend(baseline_ascension_errors)
+        if (
+            not current_ascension_errors
+            and not baseline_ascension_errors
+            and current_ascension != baseline_ascension
+        ):
+            reasons.append(
+                "ascension mismatch: "
+                f"current={current_ascension}, baseline={baseline_ascension}"
+            )
 
         current_seed_details = _seed_details(current_valid)
         baseline_seed_details = _seed_details(baseline_valid)

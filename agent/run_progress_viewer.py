@@ -1850,6 +1850,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _send_error(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
         self._send_json({"error": message}, status)
 
+    def _send_internal_error(self, error: Exception) -> None:
+        self.log_error("unhandled request error: %r", error)
+        self._send_error(
+            "internal server error", HTTPStatus.INTERNAL_SERVER_ERROR
+        )
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         try:
@@ -1921,7 +1927,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         except CatalogError as exc:
             self._send_error(str(exc), HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # pragma: no cover - defensive for interactive server
-            self._send_error(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_internal_error(exc)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -1966,7 +1972,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         except CatalogError as exc:
             self._send_error(str(exc), HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # pragma: no cover - defensive server boundary
-            self._send_error(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_internal_error(exc)
 
 
 def make_viewer_handler(catalog: RunCatalog) -> type[ViewerHandler]:
