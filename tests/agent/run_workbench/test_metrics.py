@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 
 import pytest
@@ -83,6 +84,53 @@ def test_missing_floor_is_not_treated_as_zero_and_denominators_are_explicit():
     assert summary.max_global_floor == 12
     assert summary.act2_entry_denominator == 1
     assert summary.act2_entry_rate == 0.0
+
+
+@pytest.mark.parametrize(
+    "invalid_floor",
+    [
+        True,
+        False,
+        0,
+        -1,
+        7.0,
+        7.9,
+        "7",
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**1000,
+    ],
+)
+def test_invalid_floor_values_are_consistently_treated_as_missing(invalid_floor):
+    record = _run("invalid-floor", floor=invalid_floor)
+
+    summary = summarize_cohort([record])
+
+    assert summary.valid_n == 1
+    assert summary.valid_floor_n == 0
+    assert summary.floor_n == 0
+    assert summary.avg_global_floor is None
+    assert summary.median_global_floor is None
+    assert summary.max_global_floor is None
+    assert summary.act2_entry_denominator == 0
+    assert summary.histogram == ()
+    assert summary.trend[0].global_floor is None
+    assert summary.trend[0].cumulative_avg_global_floor is None
+    json.dumps(summary.to_dict(), allow_nan=False)
+
+
+def test_invalid_technical_floor_is_excluded_from_distribution_and_trend_floor():
+    summary = summarize_cohort(
+        [_run("crash", status=RunStatus.CRASH, floor=True)],
+        include_technical=True,
+    )
+
+    assert summary.technical_n == 1
+    assert summary.technical_floor_n == 0
+    assert summary.floor_n == 0
+    assert summary.histogram == ()
+    assert summary.trend[0].global_floor is None
 
 
 def test_win_rate_uses_all_valid_gameplay_results():
@@ -275,6 +323,9 @@ def test_allow_cross_version_bypasses_only_cross_cohort_version_mismatch():
     assert result.comparable is True
     assert result.paired is True
     assert not any("version" in reason for reason in result.mismatch_reasons)
+    assert result.notes == (
+        "cross-version comparison: current=2026.09, baseline=2026.08",
+    )
 
 
 def test_allow_cross_version_does_not_hide_missing_or_mixed_version_metadata():
@@ -288,6 +339,63 @@ def test_allow_cross_version_does_not_hide_missing_or_mixed_version_metadata():
 
     assert result.comparable is False
     assert any("current version" in reason and "missing" in reason for reason in result.mismatch_reasons)
+
+
+@pytest.mark.parametrize(
+    ("override", "axis"),
+    [
+        ({"character": ["ironclad"]}, "character"),
+        ({"version": {"build": "2026.08"}}, "version"),
+        ({"mode": 7}, "evaluation mode"),
+        ({"scenario": True}, "scenario"),
+    ],
+)
+def test_invalid_unhashable_or_nonstring_comparison_metadata_returns_reason(
+    override, axis
+):
+    result = compare_cohorts([_run("current", **override)], [_run("baseline")])
+
+    assert result.comparable is False
+    assert any(
+        f"current {axis}" in reason and "invalid" in reason
+        for reason in result.mismatch_reasons
+    )
+    json.dumps(result.to_dict(), allow_nan=False)
+
+
+def test_mixed_valid_and_invalid_metadata_is_reported_without_sorting_type_error():
+    result = compare_cohorts(
+        [
+            _run("current-valid", character="ironclad", seed="a"),
+            _run("current-invalid", character=7, seed="b"),
+        ],
+        [
+            _run("baseline-a", seed="a"),
+            _run("baseline-b", seed="b"),
+        ],
+    )
+
+    assert result.comparable is False
+    assert any(
+        "current character" in reason and "mixed" in reason and "int" in reason
+        for reason in result.mismatch_reasons
+    )
+
+
+@pytest.mark.parametrize("invalid_seed", [["seed"], {"seed": 1}, 7, True])
+def test_invalid_seed_types_fail_strict_pairing_without_throwing(invalid_seed):
+    result = compare_cohorts(
+        [_run("current", seed=invalid_seed)],
+        [_run("baseline", seed="seed")],
+    )
+
+    assert result.comparable is False
+    assert result.paired is False
+    assert any(
+        "current seed set" in reason and "invalid" in reason
+        for reason in result.mismatch_reasons
+    )
+    json.dumps(result.to_dict(), allow_nan=False)
 
 
 def test_strict_pairing_rejects_different_seed_sets_and_missing_seeds():
@@ -406,3 +514,29 @@ def test_comparison_consumes_generators_without_mutating_records():
     assert result.comparable is True
     assert current_record.outcome.max_global_floor == 18
     assert baseline_record.outcome.max_global_floor == 7
+
+
+@pytest.mark.parametrize(
+    "invalid_timestamp", [float("nan"), float("inf"), float("-inf"), 10**1000]
+)
+def test_invalid_ended_timestamp_falls_back_to_finite_started_timestamp(
+    invalid_timestamp,
+):
+    summary = summarize_cohort(
+        [
+            _run("fallback", ended_at=invalid_timestamp, started_at=2),
+            _run("ended", ended_at=4, seed="b"),
+        ]
+    )
+
+    assert [point.timestamp for point in summary.trend] == [2.0, 4.0]
+
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
+def test_public_to_dict_rejects_nonfinite_and_unsupported_values(nonfinite):
+    summary = summarize_cohort([_run("valid")])
+
+    with pytest.raises(ValueError, match="non-finite"):
+        replace(summary, avg_global_floor=nonfinite).to_dict()
+    with pytest.raises(TypeError, match="object"):
+        replace(summary, histogram=(object(),)).to_dict()

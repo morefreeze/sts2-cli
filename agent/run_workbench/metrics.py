@@ -11,7 +11,7 @@ the number of points in the selected floor distribution.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import math
 from statistics import mean, median
 from typing import Any, Iterable
@@ -24,12 +24,25 @@ _GAMEPLAY_STATUSES = frozenset({RunStatus.WIN, RunStatus.DEAD})
 
 def _to_json_value(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
-        return _to_json_value(asdict(value))
+        return {
+            item.name: _to_json_value(getattr(value, item.name))
+            for item in fields(value)
+        }
     if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("Metric serialization requires string dict keys")
         return {key: _to_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_to_json_value(item) for item in value]
-    return value
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Metric serialization does not support non-finite floats")
+        return value
+    raise TypeError(
+        f"Metric serialization does not support {type(value).__name__} values"
+    )
 
 
 @dataclass(frozen=True)
@@ -104,6 +117,19 @@ class ComparisonResult:
         return _to_json_value(self)
 
 
+@dataclass(frozen=True)
+class _MetricRecord:
+    record: RunRecord
+    floor: int | None
+
+
+@dataclass(frozen=True)
+class _StringDetails:
+    values: frozenset[str]
+    missing: bool
+    invalid_types: tuple[str, ...]
+
+
 def _rate(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
@@ -113,8 +139,25 @@ def _rate(numerator: int, denominator: int) -> float | None:
 def _finite_timestamp(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    numeric = float(value)
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        return None
     return numeric if math.isfinite(numeric) else None
+
+
+def _normalize_floor(value: object) -> int | None:
+    """Return a positive, finite, exactly integral floor or ``None``."""
+
+    if type(value) is not int or value <= 0:
+        return None
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return value
 
 
 def _trend_sort_key(record: RunRecord) -> tuple[object, ...]:
@@ -139,35 +182,38 @@ def summarize_cohort(
 ) -> CohortSummary:
     """Summarize a cohort without mutating it or treating missing floors as zero."""
 
-    materialized = tuple(records)
-    valid = tuple(
-        record for record in materialized if record.outcome.status in _GAMEPLAY_STATUSES
+    materialized = tuple(
+        _MetricRecord(
+            record=record,
+            floor=_normalize_floor(record.outcome.max_global_floor),
+        )
+        for record in records
     )
-    technical = tuple(record for record in materialized if record.outcome.status.is_technical)
+    valid = tuple(
+        item
+        for item in materialized
+        if item.record.outcome.status in _GAMEPLAY_STATUSES
+    )
+    technical = tuple(
+        item for item in materialized if item.record.outcome.status.is_technical
+    )
     excluded_n = len(materialized) - len(valid) - len(technical)
 
-    valid_with_floor = tuple(
-        record for record in valid if record.outcome.max_global_floor is not None
-    )
-    technical_with_floor = tuple(
-        record for record in technical if record.outcome.max_global_floor is not None
-    )
+    valid_with_floor = tuple(item for item in valid if item.floor is not None)
+    technical_with_floor = tuple(item for item in technical if item.floor is not None)
     distribution_records = valid_with_floor
     if include_technical:
         distribution_records += technical_with_floor
 
-    floors = tuple(record.outcome.max_global_floor for record in distribution_records)
-    # The filter above narrows these values at runtime; this assertion also protects
-    # the statistics calls if a noncanonical record reaches this boundary.
-    assert all(floor is not None for floor in floors)
-    numeric_floors = tuple(int(floor) for floor in floors if floor is not None)
-
-    wins = sum(record.outcome.status == RunStatus.WIN for record in valid)
-    act2_entries = sum(
-        int(record.outcome.max_global_floor is not None)
-        and record.outcome.max_global_floor >= 18
-        for record in valid_with_floor
+    numeric_floors = tuple(
+        item.floor for item in distribution_records if item.floor is not None
     )
+
+    wins = sum(item.record.outcome.status == RunStatus.WIN for item in valid)
+    valid_floors = tuple(
+        item.floor for item in valid_with_floor if item.floor is not None
+    )
+    act2_entries = sum(floor >= 18 for floor in valid_floors)
 
     histogram = tuple(
         HistogramPoint(global_floor=floor, count=count)
@@ -188,20 +234,23 @@ def summarize_cohort(
             len(valid),
             _rate(valid_floor_count, len(valid)),
         ),
-        _floor_funnel_point("act1_boss_or_later", 17, valid_with_floor),
-        _floor_funnel_point("act2_entry", 18, valid_with_floor),
-        _floor_funnel_point("act2_boss_or_later", 34, valid_with_floor),
-        _floor_funnel_point("act3_entry", 35, valid_with_floor),
+        _floor_funnel_point("act1_boss_or_later", 17, valid_floors),
+        _floor_funnel_point("act2_entry", 18, valid_floors),
+        _floor_funnel_point("act2_boss_or_later", 34, valid_floors),
+        _floor_funnel_point("act3_entry", 35, valid_floors),
         FunnelPoint("completion", wins, len(valid), _rate(wins, len(valid))),
     )
 
-    trend_records: tuple[RunRecord, ...] = valid
+    trend_records: tuple[_MetricRecord, ...] = valid
     if include_technical:
         trend_records += technical
     cumulative_floors: list[int] = []
     trend_points: list[TrendPoint] = []
-    for record in sorted(trend_records, key=_trend_sort_key):
-        floor = record.outcome.max_global_floor
+    for item in sorted(
+        trend_records, key=lambda candidate: _trend_sort_key(candidate.record)
+    ):
+        record = item.record
+        floor = item.floor
         if floor is not None:
             cumulative_floors.append(floor)
         trend_points.append(
@@ -242,44 +291,63 @@ def summarize_cohort(
 
 
 def _floor_funnel_point(
-    key: str, threshold: int, records: tuple[RunRecord, ...]
+    key: str, threshold: int, floors: tuple[int, ...]
 ) -> FunnelPoint:
-    count = sum(
-        record.outcome.max_global_floor is not None
-        and record.outcome.max_global_floor >= threshold
-        for record in records
-    )
+    count = sum(floor >= threshold for floor in floors)
     return FunnelPoint(
         key=key,
         count=count,
-        denominator=len(records),
-        rate=_rate(count, len(records)),
+        denominator=len(floors),
+        rate=_rate(count, len(floors)),
         min_global_floor=threshold,
+    )
+
+
+def _string_details(values: Iterable[object]) -> _StringDetails:
+    valid_values: list[str] = []
+    missing = False
+    invalid_types: list[str] = []
+    for value in values:
+        if type(value) is str and value:
+            valid_values.append(value)
+        elif value is None or (type(value) is str and not value):
+            missing = True
+        else:
+            invalid_types.append(type(value).__name__)
+    return _StringDetails(
+        values=frozenset(valid_values),
+        missing=missing,
+        invalid_types=tuple(sorted(set(invalid_types))),
     )
 
 
 def _axis_value(
     records: tuple[RunRecord, ...], axis: str, label: str, cohort: str
 ) -> tuple[str | None, tuple[str, ...]]:
-    values = tuple(getattr(record.metadata, axis) for record in records)
-    present = {value for value in values if value not in (None, "")}
-    missing = any(value in (None, "") for value in values)
-    if not present:
+    details = _string_details(getattr(record.metadata, axis) for record in records)
+    rendered_values = ", ".join(sorted(details.values))
+    rendered_types = ", ".join(details.invalid_types)
+    if details.invalid_types and not details.values and not details.missing:
+        return None, (
+            f"{cohort} {label} is invalid: expected nonempty string; "
+            f"types={rendered_types}",
+        )
+    if not details.values and details.missing and not details.invalid_types:
         return None, (f"{cohort} {label} is missing",)
-    if len(present) > 1 or missing:
-        rendered = ", ".join(sorted(present))
-        if missing:
-            rendered = f"missing, {rendered}"
-        return None, (f"{cohort} {label} is mixed: {rendered}",)
-    return next(iter(present)), ()
+    if len(details.values) > 1 or details.missing or details.invalid_types:
+        parts: list[str] = []
+        if details.missing:
+            parts.append("missing")
+        if rendered_values:
+            parts.append(f"values={rendered_values}")
+        if rendered_types:
+            parts.append(f"invalid types={rendered_types}")
+        return None, (f"{cohort} {label} is mixed: {'; '.join(parts)}",)
+    return next(iter(details.values)), ()
 
 
-def _seed_details(records: tuple[RunRecord, ...]) -> tuple[frozenset[str], bool]:
-    values = tuple(record.metadata.seed for record in records)
-    return (
-        frozenset(value for value in values if value not in (None, "")),
-        any(value in (None, "") for value in values),
-    )
+def _seed_details(records: tuple[RunRecord, ...]) -> _StringDetails:
+    return _string_details(record.metadata.seed for record in records)
 
 
 def _delta(current: float | int | None, baseline: float | int | None) -> Any:
@@ -336,25 +404,45 @@ def compare_cohorts(
                 not current_errors
                 and not baseline_errors
                 and current_value != baseline_value
-                and not (attribute == "game_version" and allow_cross_version)
             ):
-                reasons.append(
-                    f"{label} mismatch: current={current_value}, baseline={baseline_value}"
-                )
+                if attribute == "game_version" and allow_cross_version:
+                    notes.append(
+                        "cross-version comparison: "
+                        f"current={current_value}, baseline={baseline_value}"
+                    )
+                else:
+                    reasons.append(
+                        f"{label} mismatch: "
+                        f"current={current_value}, baseline={baseline_value}"
+                    )
 
-        current_seeds, current_missing_seeds = _seed_details(current_valid)
-        baseline_seeds, baseline_missing_seeds = _seed_details(baseline_valid)
+        current_seed_details = _seed_details(current_valid)
+        baseline_seed_details = _seed_details(baseline_valid)
+        current_seeds = current_seed_details.values
+        baseline_seeds = baseline_seed_details.values
         paired = (
             bool(current_seeds)
             and current_seeds == baseline_seeds
-            and not current_missing_seeds
-            and not baseline_missing_seeds
+            and not current_seed_details.missing
+            and not baseline_seed_details.missing
+            and not current_seed_details.invalid_types
+            and not baseline_seed_details.invalid_types
         )
         if require_paired_seeds:
-            if current_missing_seeds or not current_seeds:
+            if current_seed_details.missing:
                 reasons.append("current seed set has missing seed values")
-            if baseline_missing_seeds or not baseline_seeds:
+            if current_seed_details.invalid_types:
+                reasons.append(
+                    "current seed set has invalid seed types: "
+                    f"{', '.join(current_seed_details.invalid_types)}"
+                )
+            if baseline_seed_details.missing:
                 reasons.append("baseline seed set has missing seed values")
+            if baseline_seed_details.invalid_types:
+                reasons.append(
+                    "baseline seed set has invalid seed types: "
+                    f"{', '.join(baseline_seed_details.invalid_types)}"
+                )
             if current_seeds != baseline_seeds:
                 reasons.append(
                     "fixed seed set mismatch: "
@@ -362,7 +450,8 @@ def compare_cohorts(
                 )
         elif not paired:
             notes.append(
-                "non-paired comparison: fixed seed sets differ or contain missing values"
+                "non-paired comparison: fixed seed sets differ or contain "
+                "missing/invalid values"
             )
 
     comparable = not reasons
