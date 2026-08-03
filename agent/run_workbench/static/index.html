@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>STS2 训练进度工作台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#dashboardMain">跳到训练指标</a>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">STS2 TRAINING WORKBENCH</p>
+      <h1>训练进度工作台</h1>
+      <p class="lede">先判断平均推进是否在改善，再从异常点抽查单局。</p>
+    </div>
+    <div class="topbar-actions">
+      <p id="workbenchStatus" class="status" role="status" aria-live="polite">正在读取训练记录…</p>
+      <label class="upload-button" for="sourceFile">载入单个记录</label>
+      <input id="sourceFile" class="visually-hidden" type="file" accept=".run,.json,.jsonl,application/json">
+    </div>
+  </header>
+
+  <main id="dashboardMain" class="dashboard" tabindex="-1">
+    <section class="panel filter-panel" aria-labelledby="filterTitle">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">比较范围</p>
+          <h2 id="filterTitle">训练批次与口径</h2>
+        </div>
+        <button id="reloadButton" class="quiet-button" type="button">刷新数据</button>
+      </div>
+      <div class="filter-grid">
+        <label>当前批次
+          <select id="currentCohort" aria-describedby="currentHelp"></select>
+          <small id="currentHelp">默认选择列表中最新的可用批次</small>
+        </label>
+        <label>基线批次
+          <select id="baselineCohort" aria-describedby="baselineHelp"></select>
+          <small id="baselineHelp">可留空；是否可比由服务端判定</small>
+        </label>
+        <label>角色
+          <select id="characterFilter"><option value="">全部角色</option></select>
+        </label>
+        <label>游戏版本
+          <select id="versionFilter"><option value="">全部版本</option></select>
+        </label>
+        <label>记录状态
+          <select id="validityFilter">
+            <option value="all">全部批次</option>
+            <option value="valid">含有效对局</option>
+            <option value="technical">含技术失败</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="metrics-section" aria-labelledby="metricsTitle">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="section-kicker">核心结果</p>
+          <h2 id="metricsTitle">推进程度</h2>
+        </div>
+        <p class="section-note">缺失数据统一显示为“—”，不会按 0 计入。</p>
+      </div>
+      <div class="metric-grid">
+        <article class="metric-card metric-card-primary">
+          <span>平均推进</span><strong id="avgFloor">—</strong>
+          <small data-subtext-for="avgFloor">等待有效层数</small>
+        </article>
+        <article class="metric-card">
+          <span>中位推进</span><strong id="medianFloor">—</strong>
+          <small data-subtext-for="medianFloor">等待有效层数</small>
+        </article>
+        <article class="metric-card">
+          <span>最远房间</span><strong id="maxFloor">—</strong>
+          <small data-subtext-for="maxFloor">等待有效层数</small>
+        </article>
+        <article class="metric-card">
+          <span>进入第二幕</span><strong id="act2Rate">—</strong>
+          <small data-subtext-for="act2Rate">等待推进记录</small>
+        </article>
+        <article class="metric-card">
+          <span>有效对局</span><strong id="validCount">—</strong>
+          <small data-subtext-for="validCount">胜利与正常失败</small>
+        </article>
+        <article class="metric-card metric-card-alert">
+          <span>技术失败</span><strong id="technicalCount">—</strong>
+          <small data-subtext-for="technicalCount">单独统计，不混入平均值</small>
+        </article>
+      </div>
+    </section>
+
+    <section class="chart-grid" aria-label="训练趋势与转化">
+      <article class="panel chart-panel">
+        <div class="section-heading">
+          <div><p class="section-kicker">随训练变化</p><h2>推进趋势</h2></div>
+        </div>
+        <div id="trendChart" class="chart-stage" aria-live="polite"></div>
+      </article>
+      <article class="panel chart-panel">
+        <div class="section-heading">
+          <div><p class="section-kicker">关键门槛</p><h2>推进漏斗</h2></div>
+        </div>
+        <div id="funnelChart" class="funnel-list" aria-live="polite"></div>
+      </article>
+    </section>
+
+    <section id="comparisonBanner" class="comparison-banner" aria-labelledby="comparisonTitle" aria-live="polite">
+      <div><p class="section-kicker">批次比较</p><h2 id="comparisonTitle">等待选择基线</h2></div>
+      <div data-comparison-body></div>
+    </section>
+
+    <section class="inspection-grid" aria-label="异常和代表性对局">
+      <article class="panel">
+        <div class="section-heading">
+          <div><p class="section-kicker">优先抽查</p><h2>异常提醒</h2></div>
+        </div>
+        <div id="anomalyList" class="stack-list" aria-live="polite"></div>
+      </article>
+      <article class="panel">
+        <div class="section-heading">
+          <div><p class="section-kicker">快速下钻</p><h2>代表性对局与来源</h2></div>
+        </div>
+        <div id="representativeRuns" class="stack-list" aria-live="polite"></div>
+      </article>
+    </section>
+
+    <section class="panel catalog-panel" aria-labelledby="catalogTitle">
+      <div class="section-heading">
+        <div><p class="section-kicker">数据覆盖</p><h2 id="catalogTitle">已分类来源</h2></div>
+        <p class="section-note">点击来源查看规范化摘要；能力缺失会明确说明。</p>
+      </div>
+      <div id="sourceCatalog" class="catalog-table" aria-live="polite"></div>
+    </section>
+
+    <aside id="detailPanel" class="detail-panel" aria-labelledby="detailTitle" aria-hidden="true">
+      <div class="detail-header">
+        <div><p class="section-kicker">记录抽查</p><h2 id="detailTitle">来源详情</h2></div>
+        <button id="closeDetail" class="icon-button" type="button" aria-label="关闭详情">×</button>
+      </div>
+      <div id="detailBody" class="detail-body"></div>
+    </aside>
+  </main>
+</body>
+</html>
