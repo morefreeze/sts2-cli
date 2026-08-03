@@ -625,31 +625,60 @@ function currentCohortDescriptor() {
   return state.cohorts.find((cohort) => cohort.cohort_id === id) || null;
 }
 
+function stablePointKey(point) {
+  const sourceId = point && typeof point.source_id === 'string' ? point.source_id.trim() : '';
+  const runId = point && typeof point.run_id === 'string' ? point.run_id.trim() : '';
+  return `${sourceId}\u0000${runId}`;
+}
+
+function stablePointComesFirst(candidate, incumbent) {
+  return stablePointKey(candidate).localeCompare(stablePointKey(incumbent)) < 0;
+}
+
 function representativeCandidates(metrics, descriptor) {
-  const trend = metrics && metrics.current && Array.isArray(metrics.current.trend) ? metrics.current.trend : [];
+  const rawTrend = metrics && metrics.current && Array.isArray(metrics.current.trend) ? metrics.current.trend : [];
+  const trend = boundedTimestampedTrend(rawTrend).points;
   const candidates = [];
   const seen = new Set();
   const add = (point, reason) => {
     if (!point) return;
     const sourceId = typeof point.source_id === 'string' ? point.source_id.trim() : '';
     const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
-    const key = sourceId || runId ? `${sourceId}\u0000${runId}` : '';
+    const key = sourceId || runId ? stablePointKey(point) : '';
     if (key && seen.has(key)) return;
     if (key) seen.add(key);
     candidates.push({ point, reason });
   };
-  const floorPoints = trend.filter((point) => Number.isFinite(point.global_floor));
-  const timed = trend.filter((point) => Number.isFinite(point.timestamp));
-  const latestTimed = [...timed].sort((a, b) =>
-    b.timestamp - a.timestamp
-      || String(a.run_id || '').localeCompare(String(b.run_id || ''))
-      || String(a.source_id || '').localeCompare(String(b.source_id || ''))
-  )[0];
+  let latestTimed = null;
+  let maxFloorPoint = null;
+  let minFloorPoint = null;
+  let missingFloorPoint = null;
+  for (const point of trend) {
+    if (Number.isFinite(point.timestamp) && (
+      !latestTimed
+      || point.timestamp > latestTimed.timestamp
+      || (point.timestamp === latestTimed.timestamp && stablePointComesFirst(point, latestTimed))
+    )) latestTimed = point;
+    if (Number.isFinite(point.global_floor)) {
+      if (!maxFloorPoint
+        || point.global_floor > maxFloorPoint.global_floor
+        || (point.global_floor === maxFloorPoint.global_floor && stablePointComesFirst(point, maxFloorPoint))) {
+        maxFloorPoint = point;
+      }
+      if (!minFloorPoint
+        || point.global_floor < minFloorPoint.global_floor
+        || (point.global_floor === minFloorPoint.global_floor && stablePointComesFirst(point, minFloorPoint))) {
+        minFloorPoint = point;
+      }
+    } else if (!missingFloorPoint || stablePointComesFirst(point, missingFloorPoint)) {
+      missingFloorPoint = point;
+    }
+  }
   if (latestTimed) add(latestTimed, '最近有时间记录');
-  else add(trend[0], '趋势样本');
-  add([...floorPoints].sort((a, b) => b.global_floor - a.global_floor || String(a.run_id || '').localeCompare(String(b.run_id || '')))[0], '推进最远');
-  add([...floorPoints].sort((a, b) => a.global_floor - b.global_floor || String(a.run_id || '').localeCompare(String(b.run_id || '')))[0], '推进最浅');
-  add(trend.find((point) => !Number.isFinite(point.global_floor)), '层数缺失');
+  else add(rawTrend[0], '趋势样本');
+  add(maxFloorPoint, '推进最远');
+  add(minFloorPoint, '推进最浅');
+  add(missingFloorPoint, '层数缺失');
   if (!candidates.length && descriptor) {
     const ids = Array.isArray(descriptor.representative_run_ids) && descriptor.representative_run_ids.length
       ? descriptor.representative_run_ids

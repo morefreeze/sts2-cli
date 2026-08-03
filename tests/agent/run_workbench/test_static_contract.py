@@ -247,9 +247,14 @@ def test_representative_recency_requires_a_finite_timestamp():
 
     assert "最近一局" not in representatives
     assert "Number.isFinite(point.timestamp)" in representatives
-    assert "b.timestamp - a.timestamp" in representatives
+    assert "boundedTimestampedTrend(rawTrend).points" in representatives
+    assert "for (const point of trend)" in representatives
+    assert "stablePointKey(point)" in representatives
+    assert "point.timestamp > latestTimed.timestamp" in representatives
     assert "最近有时间记录" in representatives
     assert "趋势样本" in representatives
+    assert "[..." not in representatives
+    assert ".sort(" not in representatives
 
 
 def test_trend_rendering_is_bounded_timestamped_and_explains_sampling():
