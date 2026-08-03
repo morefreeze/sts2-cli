@@ -213,6 +213,16 @@ def test_baseline_default_is_distinct_without_client_comparability_logic():
     assert "nearestDistinctCohortId(candidates, current)" in script
 
 
+def test_current_default_uses_server_latest_order_instead_of_label_order():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    selector = _javascript_section(
+        script, "function updateCohortOptions", "function resetMetrics"
+    )
+
+    assert "candidates[0].cohort_id" in selector
+    assert "candidates[candidates.length - 1].cohort_id" not in selector
+
+
 def test_funnel_is_an_accessible_inline_svg_with_explicit_denominators():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     funnel = _javascript_section(script, "function renderFunnel", "function appendList")

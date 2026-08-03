@@ -196,9 +196,9 @@ function updateCohortOptions({ chooseDefaults = false } = {}) {
   }));
   let current = previousCurrent;
   if (!candidates.some((cohort) => cohort.cohort_id === current)) {
-    current = candidates.length ? candidates[candidates.length - 1].cohort_id : '';
+    current = candidates.length ? candidates[0].cohort_id : '';
   }
-  if (chooseDefaults && candidates.length) current = candidates[candidates.length - 1].cohort_id;
+  if (chooseDefaults && candidates.length) current = candidates[0].cohort_id;
   setSelectOptions(currentSelect, options, candidates.length ? null : '没有匹配批次', current);
   currentSelect.value = current;
 

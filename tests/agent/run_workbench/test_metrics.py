@@ -1,5 +1,7 @@
 from dataclasses import replace
+import gc
 import json
+import weakref
 
 import pytest
 
@@ -117,8 +119,8 @@ def test_invalid_floor_values_are_consistently_treated_as_missing(invalid_floor)
     assert summary.max_global_floor is None
     assert summary.act2_entry_denominator == 0
     assert summary.histogram == ()
-    assert summary.trend[0].global_floor is None
-    assert summary.trend[0].cumulative_avg_global_floor is None
+    assert summary.trend == ()
+    assert summary.trend_unknown_time_n == 1
     json.dumps(summary.to_dict(), allow_nan=False)
 
 
@@ -132,7 +134,8 @@ def test_invalid_technical_floor_is_excluded_from_distribution_and_trend_floor()
     assert summary.technical_floor_n == 0
     assert summary.floor_n == 0
     assert summary.histogram == ()
-    assert summary.trend[0].global_floor is None
+    assert summary.trend == ()
+    assert summary.trend_unknown_time_n == 1
 
 
 def test_win_rate_uses_all_valid_gameplay_results():
@@ -238,7 +241,7 @@ def test_histogram_funnel_and_trend_are_immutable_and_deterministic():
         summary.histogram[0].count = 2
 
 
-def test_trend_uses_started_at_as_chronological_fallback_and_puts_missing_last():
+def test_trend_uses_started_at_as_chronological_fallback_and_excludes_missing_time():
     summary = summarize_cohort(
         [
             _run("ended", floor=4, ended_at=4, source_id="z"),
@@ -248,13 +251,52 @@ def test_trend_uses_started_at_as_chronological_fallback_and_puts_missing_last()
         ]
     )
 
-    assert [point.timestamp for point in summary.trend] == [2.0, 4.0, None, None]
+    assert [point.timestamp for point in summary.trend] == [2.0, 4.0]
     assert [point.run_id for point in summary.trend] == [
         "started",
         "ended",
-        "missing-a",
-        "missing-b",
     ]
+    assert summary.trend_eligible_n == 4
+    assert summary.trend_timestamped_n == 2
+    assert summary.trend_unknown_time_n == 2
+    assert summary.trend_sampled_n == 2
+    assert summary.trend_sampling_method == "all_timestamped"
+
+
+def test_large_trend_is_bounded_deterministic_and_preserves_exact_aggregates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("agent.run_workbench.metrics.TREND_SAMPLE_LIMIT", 16)
+    records = [
+        _run(
+            f"run-{index:04d}",
+            floor=index % 51 + 1,
+            ended_at=float(index) if index % 5 else None,
+            source_id=f"source-{index:04d}",
+            seed=str(index),
+        )
+        for index in range(1_000)
+    ]
+
+    forward = summarize_cohort(records)
+    reverse = summarize_cohort(reversed(records))
+
+    assert forward.valid_n == 1_000
+    assert forward.floor_n == 1_000
+    assert forward.avg_global_floor == pytest.approx(
+        sum(index % 51 + 1 for index in range(1_000)) / 1_000
+    )
+    assert forward.median_global_floor == 25.5
+    assert forward.max_global_floor == 51
+    assert forward.trend_eligible_n == 1_000
+    assert forward.trend_timestamped_n == 800
+    assert forward.trend_unknown_time_n == 200
+    assert forward.trend_sampled_n == 16
+    assert forward.trend_sample_limit == 16
+    assert forward.trend_sampling_method == "deterministic_hash"
+    assert len(forward.trend) == 16
+    assert forward.trend == reverse.trend
+    assert all(point.timestamp is not None for point in forward.trend)
 
 
 def test_summary_consumes_generator_once_and_is_json_safe():
@@ -269,6 +311,29 @@ def test_summary_consumes_generator_once_and_is_json_safe():
         {"global_floor": 18, "count": 1},
     ]
     json.dumps(payload, allow_nan=False)
+
+
+def test_comparison_streams_without_retaining_every_run_record():
+    def generated(prefix: str):
+        old_refs: list[weakref.ReferenceType[RunRecord]] = []
+        for index in range(40):
+            if len(old_refs) >= 2:
+                gc.collect()
+                assert old_refs[-2]() is None
+            record = _run(
+                f"{prefix}-{index}",
+                floor=index % 20 + 1,
+                seed="paired-seed",
+                ended_at=float(index + 1),
+            )
+            old_refs.append(weakref.ref(record))
+            yield record
+
+    result = compare_cohorts(generated("current"), generated("baseline"))
+
+    assert result.comparable is True
+    assert result.current.valid_n == 40
+    assert result.baseline.valid_n == 40
 
 
 def test_empty_summary_has_no_fabricated_rates_or_floor_values():

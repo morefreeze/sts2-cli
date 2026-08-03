@@ -183,6 +183,37 @@ def test_distinct_nonempty_run_ids_remain_distinct() -> None:
     assert [run.run_id for run in join_records([second, first])] == ["one", "two"]
 
 
+def test_join_sort_key_never_serializes_full_run_evidence(
+    monkeypatch,
+) -> None:
+    first = RunRecord(
+        "same",
+        "same-source",
+        SourceKind.DECK_HISTORY,
+        metadata=RunMetadata(character="Ironclad", seed="seed-b"),
+        nodes=[{"payload": "x" * 1_000_000}],
+    )
+    second = RunRecord(
+        "same",
+        "same-source",
+        SourceKind.DECK_HISTORY,
+        metadata=RunMetadata(character="Silent", seed="seed-a"),
+        nodes=[{"payload": "y" * 1_000_000}],
+    )
+
+    def fail_to_dict(self):
+        raise AssertionError("join sort key serialized full evidence")
+
+    monkeypatch.setattr(RunRecord, "to_dict", fail_to_dict)
+
+    forward = join_records([first, second])[0]
+    reverse = join_records([second, first])[0]
+
+    assert forward.metadata == reverse.metadata
+    assert forward.metadata.character == "Ironclad"
+    assert forward.metadata.seed == "seed-b"
+
+
 def test_equal_provenance_keys_use_content_tiebreaker_for_metadata_conflicts() -> None:
     ironclad = RunRecord(
         run_id="same",

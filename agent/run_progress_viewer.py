@@ -742,7 +742,9 @@ def _safe_log_path(name: str) -> Path:
 class ViewerHandler(BaseHTTPRequestHandler):
     server_version = "RunProgressViewer/1.0"
     catalog = RunCatalog(
-        [LOG_DIR, ROOT / "data"], replay_parser=parse_game_progress
+        [LOG_DIR, ROOT / "data"],
+        replay_parser=parse_game_progress,
+        include_policy="workbench",
     )
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -925,7 +927,11 @@ def serve(
     host: str, port: int, source_roots: list[Path] | tuple[Path, ...] | None = None
 ) -> None:
     roots = list(source_roots) if source_roots is not None else [LOG_DIR, ROOT / "data"]
-    catalog = RunCatalog(roots, replay_parser=parse_game_progress)
+    catalog = RunCatalog(
+        roots,
+        replay_parser=parse_game_progress,
+        include_policy="workbench" if source_roots is None else "all",
+    )
     httpd = ThreadingHTTPServer((host, port), make_viewer_handler(catalog))
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Run progress viewer: {url}", flush=True)

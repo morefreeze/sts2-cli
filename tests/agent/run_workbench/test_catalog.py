@@ -126,14 +126,14 @@ def test_catalog_read_errors_keep_errno_but_never_expose_absolute_path(
 ):
     source = tmp_path / "unreadable.jsonl"
     source.write_text("{}\n", encoding="utf-8")
-    original_read_text = Path.read_text
+    original_open = Path.open
 
-    def fail_read(path: Path, *args, **kwargs):
+    def fail_open(path: Path, *args, **kwargs):
         if path == source:
             raise OSError(errno.EACCES, "Permission denied", str(source))
-        return original_read_text(path, *args, **kwargs)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", fail_read)
+    monkeypatch.setattr(Path, "open", fail_open)
     catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
 
     entry = catalog.list_sources()[0]
@@ -233,19 +233,19 @@ def test_refresh_reuses_unchanged_index_records_without_rereading(
     source = _write_jsonl(tmp_path / "replay.jsonl", _replay("run-1"))
     read_calls = 0
     parser_calls = 0
-    original_reader = catalog_module.read_json_records
+    original_scanner = catalog_module._scan_jsonl_index
 
-    def reader(path: Path):
+    def scanner(path: Path):
         nonlocal read_calls
         read_calls += 1
-        return original_reader(path)
+        return original_scanner(path)
 
     def parser(records: list[dict], source_name: str | None = None) -> dict:
         nonlocal parser_calls
         parser_calls += 1
         return _replay_parser(records, source_name)
 
-    monkeypatch.setattr(catalog_module, "read_json_records", reader)
+    monkeypatch.setattr(catalog_module, "_scan_jsonl_index", scanner)
     catalog = RunCatalog([tmp_path], replay_parser=parser)
 
     source_id = catalog.list_sources()[0]["source_id"]
@@ -629,3 +629,134 @@ def test_uploads_reject_malformed_or_non_object_records(
 
     assert payload["view"] == "error"
     assert message in payload["errors"][0]
+
+
+def test_large_deck_history_uses_bounded_index_and_exact_streamed_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 8)
+    monkeypatch.setattr(catalog_module, "COHORT_ID_SAMPLE_LIMIT", 5)
+    monkeypatch.setattr("agent.run_workbench.metrics.TREND_SAMPLE_LIMIT", 7)
+    source = tmp_path / "deck_history.jsonl"
+    expected_floors: list[int] = []
+    with source.open("w", encoding="utf-8") as handle:
+        for index in range(40):
+            floor = index % 20 + 1
+            expected_floors.append(floor)
+            common = {
+                "run_id": f"run-{index:03d}",
+                "character": "Ironclad",
+                "game_version": "2026.08",
+                "checkpoint": "model-1",
+                "evaluation_mode": "training",
+                "scenario": "standard",
+                "ascension": 0,
+            }
+            handle.write(json.dumps({"event": "milestone", "floor": floor, **common}) + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "event": "card_pick",
+                        "floor": floor,
+                        "cards": ["Strike"],
+                        **common,
+                    }
+                )
+                + "\n"
+            )
+            if index == 25:
+                handle.write("{late malformed json\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "event": "outcome",
+                        "status": "win" if index == 39 else "dead",
+                        "max_floor": floor,
+                        "ts": float(index + 1),
+                        **common,
+                    }
+                )
+                + "\n"
+            )
+
+    scan_calls = 0
+    original_scanner = catalog_module._scan_jsonl_index
+
+    def counted_scanner(path: Path):
+        nonlocal scan_calls
+        scan_calls += 1
+        return original_scanner(path)
+
+    monkeypatch.setattr(catalog_module, "_scan_jsonl_index", counted_scanner)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    entry = catalog.list_sources()[0]
+    indexed = catalog._sources[entry["source_id"]]
+    assert entry["source_kind"] == "deck_history"
+    assert entry["open_mode"] == "run"
+    assert entry["record_count"] == 120
+    assert any("deck_history.jsonl:78" in error for error in entry["errors"])
+    assert indexed.records_complete is False
+    assert len(indexed.records or ()) == 8
+    assert len(indexed.deck_outcomes) == 40
+
+    cohort = catalog.list_cohorts()[0]
+    assert cohort["run_count"] == 40
+    assert cohort["run_ids_complete"] is False
+    assert cohort["run_ids"] == []
+    assert len(cohort["representative_run_ids"]) == 5
+    assert cohort["latest_at"] == 40.0
+    metrics = catalog.get_metrics(cohort["cohort_id"])["current"]
+    assert metrics["valid_n"] == 40
+    assert metrics["avg_global_floor"] == pytest.approx(sum(expected_floors) / 40)
+    assert metrics["median_global_floor"] == 10.5
+    assert metrics["max_global_floor"] == 20
+    assert metrics["win_n"] == 1
+    assert metrics["trend_eligible_n"] == 40
+    assert metrics["trend_sampled_n"] == 7
+    assert len(metrics["trend"]) == 7
+
+    source_view = catalog.get_source(entry["source_id"])
+    assert source_view["view"] == "runs_summary"
+    assert source_view["run_count"] == 40
+    assert source_view["runs_complete"] is False
+    assert len(source_view["representative_run_ids"]) == 5
+    run_view = catalog.get_run("run-039")
+    assert run_view["run"]["run_id"] == "run-039"
+    assert {node["event"] for node in run_view["run"]["nodes"]} == {
+        "milestone",
+        "card_pick",
+        "outcome",
+    }
+    assert scan_calls == 1
+    catalog.list_sources()
+    catalog.list_cohorts()
+    catalog.get_metrics(cohort["cohort_id"])
+    assert scan_calls == 1
+
+
+def test_workbench_discovery_ignores_unrelated_json_but_accepts_schema_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "unrelated-project"}), encoding="utf-8"
+    )
+    (tmp_path / "future-training.json").write_text(
+        json.dumps({"event": "eval_result", "run_id": "future"}), encoding="utf-8"
+    )
+    reads: list[str] = []
+    original_reader = catalog_module.read_json_records
+
+    def tracked_reader(path: Path):
+        reads.append(path.name)
+        return original_reader(path)
+
+    monkeypatch.setattr(catalog_module, "read_json_records", tracked_reader)
+    catalog = RunCatalog(
+        [tmp_path], replay_parser=_replay_parser, include_policy="workbench"
+    )
+
+    entries = catalog.list_sources()
+
+    assert [entry["display_name"] for entry in entries] == ["future-training.json"]
+    assert reads == ["future-training.json"]

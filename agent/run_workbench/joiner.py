@@ -361,18 +361,41 @@ def _timestamp_range(metadata: RunMetadata) -> tuple[float, float] | None:
     return min(timestamps), max(timestamps)
 
 
-def _record_key(record: RunRecord) -> tuple[str, str, str, str]:
+def _record_key(record: RunRecord) -> tuple[str, ...]:
+    """Order provenance without serializing acts, nodes, or replay evidence."""
+
     return (
         record.source_id,
         record.source_kind.value,
         record.run_id,
-        json.dumps(
-            record.to_dict(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        *(
+            _lightweight_value(getattr(record.metadata, field.name))
+            for field in fields(RunMetadata)
         ),
+        *(_lightweight_value(getattr(record.outcome, field.name)) for field in fields(RunOutcome)),
+        *(_lightweight_value(getattr(record.coverage, field.name)) for field in fields(Coverage)),
+        *(
+            _lightweight_value(getattr(record.capabilities, field.name))
+            for field in fields(Capabilities)
+        ),
+        str(len(record.acts)),
+        str(len(record.nodes)),
+        str(len(record.replay_by_node)),
     )
+
+
+def _lightweight_value(value: Any) -> str:
+    if value is None:
+        return "0:"
+    if isinstance(value, RunStatus):
+        return f"1:{value.value}"
+    if isinstance(value, SourceKind):
+        return f"1:{value.value}"
+    if type(value) in {bool, int, float, str}:
+        return f"1:{type(value).__name__}:{value!r}"
+    if isinstance(value, tuple):
+        return "2:" + "\0".join(_lightweight_value(item) for item in value)
+    return f"3:{type(value).__name__}:{repr(value)[:256]}"
 
 
 def _status_key(status: RunStatus) -> tuple[int, str]:

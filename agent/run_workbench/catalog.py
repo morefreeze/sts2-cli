@@ -15,11 +15,31 @@ from typing import Any, Callable, Iterable
 from .adapters import AdaptedSource, adapt_records
 from .joiner import join_records
 from .metrics import compare_cohorts, summarize_cohort
-from .models import RunRecord, RunStatus, SourceKind
+from .models import (
+    Capabilities,
+    Coverage,
+    RunMetadata,
+    RunOutcome,
+    RunRecord,
+    RunStatus,
+    SourceKind,
+)
 from .sources import SourceDescriptor, SourceFormatError, classify_records, read_json_records
 
 
 SUPPORTED_SUFFIXES = frozenset({".run", ".json", ".jsonl"})
+INDEX_RECORD_LIMIT = 512
+COHORT_ID_SAMPLE_LIMIT = 100
+SOURCE_REF_LIMIT = 32
+_WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
+_WORKBENCH_JSON_MARKERS = (
+    b'"players"',
+    b'"map_point_history"',
+    b'"event"',
+    b'"type"',
+    b'"run_id"',
+    b'"rooms"',
+)
 _METADATA_FIELDS = (
     "character",
     "seed",
@@ -47,8 +67,85 @@ class _IndexedSource:
     entry: dict[str, Any]
     descriptor: SourceDescriptor
     records: tuple[dict[str, Any], ...] | None
+    records_complete: bool
+    deck_outcomes: tuple["_CompactRun", ...]
     run_ids: tuple[str, ...]
     cache_key: tuple[Path, int, int]
+
+
+@dataclass(slots=True)
+class _CompactRun:
+    """One outcome and scalar metadata, never per-room/card evidence."""
+
+    run_id: str
+    source_id: str = ""
+    character: str | None = None
+    seed: str | None = None
+    game_version: str | None = None
+    checkpoint: str | None = None
+    evaluation_mode: str | None = None
+    scenario: str | None = None
+    ascension: int | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
+    status: RunStatus = RunStatus.UNKNOWN
+    victory: bool | None = None
+    max_global_floor: int | None = None
+    max_floor_label: str | None = None
+    technical_failure_kind: str | None = None
+    first_recorded_floor: int | None = None
+    has_outcome: bool = False
+    has_floor: bool = False
+    has_card_pick: bool = False
+
+    def to_record(self) -> RunRecord:
+        return RunRecord(
+            run_id=self.run_id,
+            source_id=self.source_id,
+            source_kind=SourceKind.DECK_HISTORY,
+            metadata=RunMetadata(
+                character=self.character,
+                seed=self.seed,
+                game_version=self.game_version,
+                checkpoint=self.checkpoint,
+                evaluation_mode=self.evaluation_mode,
+                scenario=self.scenario,
+                ascension=self.ascension,
+                started_at=self.started_at,
+                ended_at=self.ended_at,
+            ),
+            outcome=RunOutcome(
+                status=self.status,
+                victory=self.victory,
+                max_global_floor=self.max_global_floor,
+                max_floor_label=self.max_floor_label,
+                technical_failure_kind=self.technical_failure_kind,
+            ),
+            coverage=Coverage(
+                complete_run=self.has_outcome,
+                first_recorded_floor=self.first_recorded_floor,
+                last_recorded_floor=self.max_global_floor,
+            ),
+            capabilities=Capabilities(
+                visited_route=self.has_floor,
+                node_rewards=self.has_card_pick,
+                decisions=self.has_card_pick,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class _JsonlScan:
+    records: tuple[dict[str, Any], ...]
+    records_complete: bool
+    descriptor: SourceDescriptor
+    run_ids: tuple[str, ...]
+    metadata_completeness: dict[str, Any]
+    deck_outcomes: tuple[_CompactRun, ...]
+    errors: tuple[str, ...]
+
+
+_CohortItem = RunRecord | _CompactRun
 
 
 class RunCatalog:
@@ -58,13 +155,20 @@ class RunCatalog:
         self,
         roots: Iterable[Path],
         replay_parser: Callable[[list[dict], str | None], dict] | None = None,
+        *,
+        include_policy: str = "all",
     ) -> None:
+        if include_policy not in {"all", "workbench"}:
+            raise ValueError("include_policy must be 'all' or 'workbench'")
         self.roots = tuple(sorted({Path(root).resolve() for root in roots}, key=str))
         self.replay_parser = replay_parser
+        self.include_policy = include_policy
         self._sources: dict[str, _IndexedSource] = {}
         self._run_sources: dict[str, tuple[str, ...]] = {}
         self._adapt_cache: dict[tuple[Path, int, int], AdaptedSource] = {}
-        self._cohort_records: dict[str, tuple[RunRecord, ...]] = {}
+        self._cohort_records: dict[str, tuple[_CohortItem, ...]] = {}
+        self._cohort_descriptors: list[dict[str, Any]] = []
+        self._cohort_cache_key: tuple[tuple[Path, int, int], ...] | None = None
         self._lock = RLock()
 
     def list_sources(self) -> list[dict[str, Any]]:
@@ -82,6 +186,17 @@ class RunCatalog:
                 return {
                     "view": "error",
                     "source": deepcopy(source.entry),
+                    "errors": list(source.entry["errors"]),
+                }
+            if not source.records_complete:
+                return {
+                    "view": "runs_summary",
+                    "source": deepcopy(source.entry),
+                    "run_count": len(source.deck_outcomes) or len(source.run_ids),
+                    "runs_complete": False,
+                    "representative_run_ids": list(
+                        source.run_ids[:COHORT_ID_SAMPLE_LIMIT]
+                    ),
                     "errors": list(source.entry["errors"]),
                 }
             adapted = self._adapt(source)
@@ -104,7 +219,28 @@ class RunCatalog:
                 source = self._sources[source_id]
                 sources.append(deepcopy(source.entry))
                 path_ids.update(_source_redactions(source))
-                adapted = self._adapt(source)
+                if (
+                    source.descriptor.kind is SourceKind.DECK_HISTORY
+                    and not source.records_complete
+                ):
+                    matching_records, scan_errors = _scan_jsonl_run(
+                        source.path, run_id
+                    )
+                    errors.extend(source.entry["errors"])
+                    errors.extend(scan_errors)
+                    adapted = adapt_records(
+                        source.path.name,
+                        matching_records,
+                        descriptor=SourceDescriptor(
+                            SourceKind.DECK_HISTORY,
+                            len(matching_records),
+                            source.descriptor.message,
+                        ),
+                        replay_parser=self.replay_parser,
+                        source_path=source.path,
+                    )
+                else:
+                    adapted = self._adapt(source)
                 errors.extend(adapted.errors)
                 for record in self._public_records(source, adapted):
                     if record.run_id == run_id:
@@ -132,33 +268,49 @@ class RunCatalog:
     def get_cohort_records(self, cohort_id: str) -> tuple[RunRecord, ...]:
         with self._lock:
             self._build_cohorts()
-            return self._cohort_records_for_id(cohort_id)
+            return tuple(self._iter_cohort_records(self._cohort_items_for_id(cohort_id)))
 
     def get_metrics(
         self, current_id: str, baseline_id: str | None = None
     ) -> dict[str, Any]:
         with self._lock:
             self._build_cohorts()
-            current = self._cohort_records_for_id(current_id)
+            current = self._cohort_items_for_id(current_id)
             comparison = None
             baseline_summary = None
             if baseline_id is not None:
-                baseline = self._cohort_records_for_id(baseline_id)
-                baseline_summary = summarize_cohort(baseline).to_dict()
-                comparison = compare_cohorts(current, baseline).to_dict()
+                baseline = self._cohort_items_for_id(baseline_id)
+                baseline_summary = summarize_cohort(
+                    self._iter_cohort_records(baseline)
+                ).to_dict()
+                comparison = compare_cohorts(
+                    self._iter_cohort_records(current),
+                    self._iter_cohort_records(baseline),
+                ).to_dict()
             return {
                 "current_cohort_id": current_id,
                 "baseline_cohort_id": baseline_id,
-                "current": summarize_cohort(current).to_dict(),
+                "current": summarize_cohort(
+                    self._iter_cohort_records(current)
+                ).to_dict(),
                 "baseline": baseline_summary,
                 "comparison": comparison,
             }
 
-    def _cohort_records_for_id(self, cohort_id: str) -> tuple[RunRecord, ...]:
+    def _cohort_items_for_id(self, cohort_id: str) -> tuple[_CohortItem, ...]:
         records = self._cohort_records.get(cohort_id)
         if records is None:
             raise CatalogNotFoundError(f"unknown cohort id: {cohort_id}")
-        return tuple(deepcopy(record) for record in records)
+        return records
+
+    def _iter_cohort_records(
+        self, items: Iterable[_CohortItem]
+    ) -> Iterable[RunRecord]:
+        for item in items:
+            if isinstance(item, _CompactRun):
+                yield item.to_record()
+            else:
+                yield deepcopy(item)
 
     def parse_upload(self, source_name: str, text: str) -> dict[str, Any]:
         with self._lock:
@@ -258,6 +410,12 @@ class RunCatalog:
             for candidate in sorted(root.rglob("*"), key=lambda path: path.as_posix()):
                 if candidate.suffix.lower() not in SUPPORTED_SUFFIXES:
                     continue
+                if (
+                    self.include_policy == "workbench"
+                    and candidate.suffix.lower() == ".json"
+                    and not _looks_like_workbench_json(candidate)
+                ):
+                    continue
                 if candidate.is_symlink() or _has_symlink_component(candidate, root):
                     continue
                 try:
@@ -280,23 +438,41 @@ class RunCatalog:
         if len(self.roots) > 1:
             display_name = f"{root.name}/{relative}"
         errors: list[str] = []
-        records: list[dict[str, Any]] | None
-        try:
-            records = read_json_records(path)
-            descriptor = classify_records(records, suffix=path.suffix)
-        except SourceFormatError as error:
-            records = None
-            descriptor = SourceDescriptor(SourceKind.UNKNOWN, 0, str(error))
-            errors.append(str(error))
+        records: tuple[dict[str, Any], ...] | None
+        records_complete = True
+        deck_outcomes: tuple[_CompactRun, ...] = ()
+        if path.suffix.lower() == ".jsonl":
+            scan = _scan_jsonl_index(path)
+            records = scan.records
+            records_complete = scan.records_complete
+            descriptor = scan.descriptor
+            errors.extend(scan.errors)
+            run_ids = scan.run_ids
+            metadata = scan.metadata_completeness
+            deck_outcomes = scan.deck_outcomes
+            for outcome in deck_outcomes:
+                outcome.source_id = source_id
+        else:
+            try:
+                loaded_records = read_json_records(path)
+                records = tuple(loaded_records)
+                descriptor = classify_records(loaded_records, suffix=path.suffix)
+            except SourceFormatError as error:
+                records = None
+                descriptor = SourceDescriptor(SourceKind.UNKNOWN, 0, str(error))
+                errors.append(str(error))
+            run_ids = tuple(sorted(_lightweight_run_ids(list(records or ()))))
+            metadata = _metadata_completeness(list(records or ()))
         if descriptor.kind is SourceKind.SUMMARY:
             open_mode = "summary"
         elif descriptor.kind is SourceKind.UNKNOWN:
             open_mode = "error"
             if not errors:
                 errors.append(f"{path.name}: {descriptor.message}")
+        elif errors and records_complete:
+            open_mode = "error"
         else:
             open_mode = "run"
-        metadata = _metadata_completeness(records or [])
         redactions = _path_redactions(path, root, source_id)
         public_errors = _scrub_paths(errors, redactions)
         public_message = _scrub_paths(descriptor.message, redactions)
@@ -319,8 +495,10 @@ class RunCatalog:
             path=path,
             entry=entry,
             descriptor=descriptor,
-            records=tuple(records) if records is not None else None,
-            run_ids=tuple(sorted(_lightweight_run_ids(records or []))),
+            records=records,
+            records_complete=records_complete,
+            deck_outcomes=deck_outcomes,
+            run_ids=run_ids,
             cache_key=(path, file_stat.st_mtime_ns, file_stat.st_size),
         )
 
@@ -334,7 +512,7 @@ class RunCatalog:
         cached = self._adapt_cache.get(source.cache_key)
         if cached is not None:
             return cached
-        if source.records is None:
+        if source.records is None or not source.records_complete:
             adapted = AdaptedSource(
                 source.descriptor, errors=tuple(source.entry["errors"])
             )
@@ -390,34 +568,53 @@ class RunCatalog:
 
     def _build_cohorts(self) -> list[dict[str, Any]]:
         self._refresh()
+        cache_key = tuple(
+            source.cache_key for source in self._ordered_sources()
+        )
+        if self._cohort_cache_key == cache_key:
+            return deepcopy(self._cohort_descriptors)
         records: list[RunRecord] = []
+        compact_records: list[_CompactRun] = []
         for source in self._ordered_sources():
             if source.entry["open_mode"] != "run":
                 continue
-            records.extend(self._public_records(source, self._adapt(source)))
+            if (
+                source.descriptor.kind is SourceKind.DECK_HISTORY
+                and not source.records_complete
+            ):
+                compact_records.extend(source.deck_outcomes)
+            else:
+                records.extend(self._public_records(source, self._adapt(source)))
         joined = join_records(records)
-        eligible = [
+        eligible: list[_CohortItem] = [
             record
             for record in joined
             if record.outcome.status in {RunStatus.WIN, RunStatus.DEAD}
             or record.outcome.status.is_technical
         ]
-        grouped: dict[tuple[Any, ...], list[RunRecord]] = {}
+        eligible.extend(
+            record
+            for record in compact_records
+            if record.status in {RunStatus.WIN, RunStatus.DEAD}
+            or record.status.is_technical
+        )
+        grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
         for record in eligible:
-            checkpoint = record.metadata.checkpoint
+            metadata = _item_metadata(record)
+            checkpoint = metadata.checkpoint
             fallback = checkpoint or f"source:{record.source_id}"
             key = (
                 fallback,
-                record.metadata.character,
-                record.metadata.game_version,
-                record.metadata.evaluation_mode,
-                record.metadata.scenario,
-                record.metadata.ascension,
+                metadata.character,
+                metadata.game_version,
+                metadata.evaluation_mode,
+                metadata.scenario,
+                metadata.ascension,
             )
             grouped.setdefault(key, []).append(record)
 
         descriptors: list[dict[str, Any]] = []
-        cohort_records: dict[str, tuple[RunRecord, ...]] = {}
+        cohort_records: dict[str, tuple[_CohortItem, ...]] = {}
         for key, group in sorted(
             grouped.items(), key=lambda item: _sortable_key(item[0])
         ):
@@ -434,7 +631,7 @@ class RunCatalog:
                 sorted(group, key=lambda record: (record.run_id, record.source_id))
             )
             cohort_records[cohort_id] = ordered
-            source_refs = sorted(
+            all_source_refs = sorted(
                 {
                     source_id
                     for record in ordered
@@ -442,6 +639,14 @@ class RunCatalog:
                     if source_id
                 }
             )
+            source_refs = all_source_refs[:SOURCE_REF_LIMIT]
+            run_ids = sorted(record.run_id for record in ordered if record.run_id)
+            run_ids_complete = len(run_ids) <= COHORT_ID_SAMPLE_LIMIT
+            timestamps = [
+                timestamp
+                for record in ordered
+                if (timestamp := _item_timestamp(record)) is not None
+            ]
             checkpoint = (
                 checkpoint_or_source
                 if isinstance(checkpoint_or_source, str)
@@ -472,20 +677,410 @@ class RunCatalog:
                     "label": " · ".join(str(value) for value in label_parts if value),
                     "filters": filters,
                     "run_count": len(ordered),
-                    "run_ids": sorted(record.run_id for record in ordered if record.run_id),
+                    "run_id_count": len(run_ids),
+                    "run_ids": run_ids if run_ids_complete else [],
+                    "run_ids_complete": run_ids_complete,
+                    "representative_run_ids": run_ids[:COHORT_ID_SAMPLE_LIMIT],
                     "source_refs": source_refs,
+                    "source_ref_count": len(all_source_refs),
+                    "source_refs_complete": len(all_source_refs) <= SOURCE_REF_LIMIT,
+                    "latest_at": max(timestamps) if timestamps else None,
                     "technical_count": sum(
-                        record.outcome.status.is_technical for record in ordered
+                        _item_status(record).is_technical for record in ordered
                     ),
                 }
             )
         self._cohort_records = cohort_records
-        return sorted(descriptors, key=lambda item: (item["label"], item["cohort_id"]))
+        self._cohort_descriptors = sorted(
+            descriptors,
+            key=lambda item: (
+                item["latest_at"] is None,
+                -(item["latest_at"] or 0),
+                item["label"],
+                item["cohort_id"],
+            ),
+        )
+        self._cohort_cache_key = cache_key
+        return deepcopy(self._cohort_descriptors)
 
 
 def _source_id(root: Path, relative: str) -> str:
     digest = sha256(f"{root}\0{relative}".encode("utf-8")).hexdigest()[:20]
     return f"src_{digest}"
+
+
+def _item_metadata(record: _CohortItem) -> RunMetadata:
+    if isinstance(record, RunRecord):
+        return record.metadata
+    return RunMetadata(
+        character=record.character,
+        seed=record.seed,
+        game_version=record.game_version,
+        checkpoint=record.checkpoint,
+        evaluation_mode=record.evaluation_mode,
+        scenario=record.scenario,
+        ascension=record.ascension,
+        started_at=record.started_at,
+        ended_at=record.ended_at,
+    )
+
+
+def _item_status(record: _CohortItem) -> RunStatus:
+    return record.outcome.status if isinstance(record, RunRecord) else record.status
+
+
+def _item_timestamp(record: _CohortItem) -> float | None:
+    metadata = _item_metadata(record)
+    for value in (metadata.ended_at, metadata.started_at):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            return numeric
+    return None
+
+
+class _ScanConstantError(ValueError):
+    pass
+
+
+def _reject_scan_constant(value: str) -> None:
+    raise _ScanConstantError(f"non-standard numeric constant {value}")
+
+
+def _scan_jsonl_index(path: Path) -> _JsonlScan:
+    """Scan an entire JSONL source while retaining only bounded raw evidence."""
+
+    records: list[dict[str, Any]] = []
+    record_count = 0
+    errors: list[str] = []
+    run_ids: set[str] = set()
+    present_metadata: set[str] = set()
+    deck_runs: dict[str, _CompactRun] = {}
+    anonymous: list[_CompactRun] = []
+    types: set[str] = set()
+    events: set[str] = set()
+    has_action_command = False
+    looks_like_boss_deck = False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(
+                        line, parse_constant=_reject_scan_constant
+                    )
+                except _ScanConstantError as error:
+                    errors.append(
+                        f"{path.name}:{line_number}: invalid JSON: {error}"
+                    )
+                    continue
+                except json.JSONDecodeError as error:
+                    errors.append(
+                        f"{path.name}:{line_number}: invalid JSON: {error.msg}"
+                    )
+                    continue
+                if not isinstance(record, dict):
+                    errors.append(
+                        f"{path.name}:{line_number}: expected an object record"
+                    )
+                    continue
+                record_count += 1
+                if len(records) < INDEX_RECORD_LIMIT:
+                    records.append(record)
+                _collect_metadata_presence(record, present_metadata)
+                types.add(str(record.get("type", "")))
+                event = str(record.get("event", ""))
+                events.add(event)
+                has_action_command = has_action_command or (
+                    record.get("type") == "action"
+                    and isinstance(record.get("data"), dict)
+                )
+                looks_like_boss_deck = looks_like_boss_deck or {
+                    "checkpoint",
+                    "cards",
+                    "enemies",
+                    "hp_at_entry",
+                }.issubset(record)
+                record_run_ids = _lightweight_run_ids([record])
+                run_ids.update(record_run_ids)
+                if event in {"milestone", "card_pick", "outcome"}:
+                    run_id = next(iter(record_run_ids), "")
+                    if run_id:
+                        compact = deck_runs.setdefault(
+                            run_id, _CompactRun(run_id=run_id)
+                        )
+                    else:
+                        compact = _CompactRun(run_id="")
+                        anonymous.append(compact)
+                    _update_compact_run(compact, record)
+    except UnicodeDecodeError as error:
+        errors.append(f"{path.name}: invalid UTF-8 at byte {error.start}")
+    except OSError as error:
+        detail = str(error.strerror or type(error).__name__).replace(
+            str(path), path.name
+        )
+        errno_label = f"[Errno {error.errno}] " if error.errno is not None else ""
+        errors.append(f"{path.name}: could not read source: {errno_label}{detail}")
+
+    descriptor = _classify_jsonl_scan(
+        record_count=record_count,
+        types=types,
+        events=events,
+        has_action_command=has_action_command,
+        looks_like_boss_deck=looks_like_boss_deck,
+    )
+    compact_runs = tuple(deck_runs.values()) + tuple(anonymous)
+    return _JsonlScan(
+        records=tuple(records),
+        records_complete=record_count <= INDEX_RECORD_LIMIT,
+        descriptor=descriptor,
+        run_ids=tuple(sorted(run_ids)),
+        metadata_completeness=_metadata_completeness_from_present(present_metadata),
+        deck_outcomes=compact_runs,
+        errors=tuple(errors),
+    )
+
+
+def _scan_jsonl_run(
+    path: Path, run_id: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line, parse_constant=_reject_scan_constant)
+                except (_ScanConstantError, json.JSONDecodeError) as error:
+                    detail = (
+                        str(error)
+                        if isinstance(error, _ScanConstantError)
+                        else error.msg
+                    )
+                    errors.append(
+                        f"{path.name}:{line_number}: invalid JSON: {detail}"
+                    )
+                    continue
+                if not isinstance(record, dict):
+                    errors.append(
+                        f"{path.name}:{line_number}: expected an object record"
+                    )
+                    continue
+                if run_id in _lightweight_run_ids([record]):
+                    records.append(record)
+    except (OSError, UnicodeDecodeError) as error:
+        errors.append(f"{path.name}: could not rescan source: {error}")
+    return records, errors
+
+
+def _classify_jsonl_scan(
+    *,
+    record_count: int,
+    types: set[str],
+    events: set[str],
+    has_action_command: bool,
+    looks_like_boss_deck: bool,
+) -> SourceDescriptor:
+    if "state" in types or has_action_command:
+        return SourceDescriptor(
+            SourceKind.REPLAY_JSONL, record_count, "state/action replay"
+        )
+    if events & {"milestone", "card_pick", "outcome"}:
+        return SourceDescriptor(
+            SourceKind.DECK_HISTORY, record_count, "training deck history"
+        )
+    if "eval_result" in events:
+        return SourceDescriptor(
+            SourceKind.EVAL_RESULTS, record_count, "per-game evaluation results"
+        )
+    if events & {"result", "summary"} or looks_like_boss_deck:
+        return SourceDescriptor(
+            SourceKind.SUMMARY, record_count, "summary records; no replay states"
+        )
+    return SourceDescriptor(
+        SourceKind.UNKNOWN, record_count, "unsupported JSON shape"
+    )
+
+
+def _update_compact_run(compact: _CompactRun, record: dict[str, Any]) -> None:
+    for attribute, keys in (
+        ("character", ("character",)),
+        ("seed", ("seed",)),
+        ("game_version", ("game_version", "build_id")),
+        ("checkpoint", ("checkpoint",)),
+        ("evaluation_mode", ("evaluation_mode",)),
+        ("scenario", ("scenario",)),
+        ("max_floor_label", ("max_floor_label",)),
+    ):
+        if getattr(compact, attribute) is None:
+            setattr(compact, attribute, _first_scalar_text(record, *keys))
+    if compact.ascension is None:
+        compact.ascension = _first_positive_or_zero_int(record, "ascension")
+
+    timestamp = _first_finite_number(
+        record, "ts", "timestamp", "ended_at", "end_ts", "started_at", "start_ts"
+    )
+    if timestamp is not None:
+        compact.started_at = (
+            timestamp
+            if compact.started_at is None
+            else min(compact.started_at, timestamp)
+        )
+
+    floor = _first_positive_int(
+        record,
+        "max_global_floor",
+        "max_floor",
+        "floor_crossed",
+        "global_floor",
+        "floor",
+    )
+    if floor is not None:
+        compact.has_floor = True
+        compact.first_recorded_floor = (
+            floor
+            if compact.first_recorded_floor is None
+            else min(compact.first_recorded_floor, floor)
+        )
+        compact.max_global_floor = (
+            floor
+            if compact.max_global_floor is None
+            else max(compact.max_global_floor, floor)
+        )
+
+    event = record.get("event")
+    compact.has_card_pick = compact.has_card_pick or event == "card_pick"
+    if event == "outcome":
+        compact.has_outcome = True
+        compact.ended_at = timestamp
+        status, victory, technical_kind = _compact_status(record)
+        compact.status = status
+        compact.victory = victory
+        compact.technical_failure_kind = technical_kind
+
+
+def _compact_status(
+    record: dict[str, Any],
+) -> tuple[RunStatus, bool | None, str | None]:
+    raw_status = _first_scalar_text(
+        record, "status", "end_reason", "technical_failure_kind"
+    )
+    aliases = {
+        "won": "win",
+        "victory": "win",
+        "loss": "dead",
+        "lost": "dead",
+        "defeat": "dead",
+        "reset-failure": "reset_failure",
+    }
+    normalized = aliases.get((raw_status or "").lower(), (raw_status or "").lower())
+    try:
+        status = RunStatus(normalized) if normalized else RunStatus.UNKNOWN
+    except ValueError:
+        status = RunStatus.UNKNOWN
+    victory = next(
+        (
+            record[key]
+            for key in ("victory", "won", "run_won")
+            if isinstance(record.get(key), bool)
+        ),
+        None,
+    )
+    if status is RunStatus.WIN:
+        victory = True
+    elif status is RunStatus.DEAD or status.is_technical:
+        victory = False
+    elif status is RunStatus.UNKNOWN and victory is not None:
+        status = RunStatus.WIN if victory else RunStatus.DEAD
+    technical_kind = status.value if status.is_technical else None
+    return status, victory, technical_kind
+
+
+def _collect_metadata_presence(
+    record: dict[str, Any], present: set[str]
+) -> None:
+    player: dict[str, Any] = {}
+    players = record.get("players")
+    if isinstance(players, list) and players and isinstance(players[0], dict):
+        player = players[0]
+    if _present(record.get("character")) or _present(player.get("character")):
+        present.add("character")
+    if _present(record.get("game_version")) or _present(record.get("build_id")):
+        present.add("game_version")
+    for field in ("seed", "checkpoint", "evaluation_mode", "scenario", "ascension"):
+        if _present(record.get(field)):
+            present.add(field)
+
+
+def _metadata_completeness_from_present(present: set[str]) -> dict[str, Any]:
+    fields = list(_METADATA_FIELDS)
+    return {
+        "present_fields": sorted(present),
+        "missing_fields": [field for field in fields if field not in present],
+        "present_count": len(present),
+        "total_fields": len(fields),
+        "score": len(present) / len(fields),
+    }
+
+
+def _first_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    return None
+
+
+def _first_positive_or_zero_int(
+    record: dict[str, Any], *keys: str
+) -> int | None:
+    for key in keys:
+        value = record.get(key)
+        if type(value) is int and value >= 0:
+            return value
+    return None
+
+
+def _first_positive_int(record: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = record.get(key)
+        if type(value) is int and value > 0:
+            return value
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer() and value > 0:
+            return int(value)
+    return None
+
+
+def _first_finite_number(record: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            return numeric
+    return None
+
+
+def _looks_like_workbench_json(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(_WORKBENCH_JSON_PROBE_BYTES)
+    except OSError:
+        return True
+    return any(marker in prefix for marker in _WORKBENCH_JSON_MARKERS)
 
 
 def _path_redactions(path: Path, root: Path, source_id: str) -> dict[str, str]:

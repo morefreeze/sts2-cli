@@ -11,15 +11,18 @@ the number of points in the selected floor distribution.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
+from hashlib import sha256
+import heapq
 import math
-from statistics import mean, median
 from typing import Any, Iterable
 
 from .models import RunRecord, RunStatus
 
 
 _GAMEPLAY_STATUSES = frozenset({RunStatus.WIN, RunStatus.DEAD})
+TREND_SAMPLE_LIMIT = 512
+COMPARISON_DISTINCT_LIMIT = 4_096
 
 
 def _to_json_value(value: Any) -> Any:
@@ -94,6 +97,12 @@ class CohortSummary:
     histogram: tuple[HistogramPoint, ...]
     funnel: tuple[FunnelPoint, ...]
     trend: tuple[TrendPoint, ...]
+    trend_eligible_n: int
+    trend_timestamped_n: int
+    trend_unknown_time_n: int
+    trend_sampled_n: int
+    trend_sample_limit: int
+    trend_sampling_method: str
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_value(self)
@@ -117,10 +126,13 @@ class ComparisonResult:
         return _to_json_value(self)
 
 
-@dataclass(frozen=True)
-class _MetricRecord:
-    record: RunRecord
-    floor: int | None
+@dataclass(frozen=True, order=True)
+class _TrendSeed:
+    timestamp: float
+    source_id: str
+    run_id: str
+    status: str
+    global_floor: int | None
 
 
 @dataclass(frozen=True)
@@ -128,6 +140,7 @@ class _StringDetails:
     values: frozenset[str]
     missing: bool
     invalid_types: tuple[str, ...]
+    overflow: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +148,73 @@ class _AscensionDetails:
     values: frozenset[int]
     missing: bool
     invalid: tuple[str, ...]
+
+
+@dataclass
+class _BoundedStrings:
+    values: set[str] = field(default_factory=set)
+    missing: bool = False
+    invalid_types: set[str] = field(default_factory=set)
+    overflow: bool = False
+
+    def add(self, value: object) -> None:
+        if type(value) is str and value:
+            if not self.overflow:
+                self.values.add(value)
+                if len(self.values) > COMPARISON_DISTINCT_LIMIT:
+                    self.values.clear()
+                    self.overflow = True
+        elif value is None or (type(value) is str and not value):
+            self.missing = True
+        else:
+            self.invalid_types.add(type(value).__name__)
+
+    def details(self) -> _StringDetails:
+        return _StringDetails(
+            values=frozenset(self.values),
+            missing=self.missing,
+            invalid_types=tuple(sorted(self.invalid_types)),
+            overflow=self.overflow,
+        )
+
+
+@dataclass
+class _ComparisonAccumulator:
+    valid_n: int = 0
+    axes: dict[str, _BoundedStrings] = field(
+        default_factory=lambda: {
+            "character": _BoundedStrings(),
+            "game_version": _BoundedStrings(),
+            "evaluation_mode": _BoundedStrings(),
+            "scenario": _BoundedStrings(),
+        }
+    )
+    seeds: _BoundedStrings = field(default_factory=_BoundedStrings)
+    ascension_values: set[int] = field(default_factory=set)
+    ascension_missing: bool = False
+    ascension_invalid: set[str] = field(default_factory=set)
+
+    def observe(self, record: RunRecord) -> None:
+        if record.outcome.status not in _GAMEPLAY_STATUSES:
+            return
+        self.valid_n += 1
+        for attribute, details in self.axes.items():
+            details.add(getattr(record.metadata, attribute))
+        self.seeds.add(record.metadata.seed)
+        value = record.metadata.ascension
+        if value is None:
+            self.ascension_missing = True
+        elif type(value) is int and value >= 0:
+            self.ascension_values.add(value)
+        else:
+            self.ascension_invalid.add(f"{type(value).__name__}={value!r}")
+
+    def ascension_details(self) -> _AscensionDetails:
+        return _AscensionDetails(
+            values=frozenset(self.ascension_values),
+            missing=self.ascension_missing,
+            invalid=tuple(sorted(self.ascension_invalid)),
+        )
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -189,125 +269,193 @@ def summarize_cohort(
 ) -> CohortSummary:
     """Summarize a cohort without mutating it or treating missing floors as zero."""
 
-    materialized = tuple(
-        _MetricRecord(
-            record=record,
-            floor=_normalize_floor(record.outcome.max_global_floor),
-        )
-        for record in records
-    )
-    valid = tuple(
-        item
-        for item in materialized
-        if item.record.outcome.status in _GAMEPLAY_STATUSES
-    )
-    technical = tuple(
-        item for item in materialized if item.record.outcome.status.is_technical
-    )
-    excluded_n = len(materialized) - len(valid) - len(technical)
+    all_n = 0
+    valid_n = 0
+    valid_floor_n = 0
+    technical_n = 0
+    technical_floor_n = 0
+    excluded_n = 0
+    wins = 0
+    act2_entries = 0
+    valid_floor_counts: Counter[int] = Counter()
+    distribution_counts: Counter[int] = Counter()
+    trend_eligible_n = 0
+    trend_timestamped_n = 0
+    trend_unknown_time_n = 0
+    trend_heap: list[tuple[int, _TrendSeed]] = []
 
-    valid_with_floor = tuple(item for item in valid if item.floor is not None)
-    technical_with_floor = tuple(item for item in technical if item.floor is not None)
-    distribution_records = valid_with_floor
-    if include_technical:
-        distribution_records += technical_with_floor
+    for record in records:
+        all_n += 1
+        status = record.outcome.status
+        floor = _normalize_floor(record.outcome.max_global_floor)
+        is_valid = status in _GAMEPLAY_STATUSES
+        is_technical = status.is_technical
+        if is_valid:
+            valid_n += 1
+            wins += status is RunStatus.WIN
+            if floor is not None:
+                valid_floor_n += 1
+                valid_floor_counts[floor] += 1
+                distribution_counts[floor] += 1
+                act2_entries += floor >= 18
+        elif is_technical:
+            technical_n += 1
+            if floor is not None:
+                technical_floor_n += 1
+                if include_technical:
+                    distribution_counts[floor] += 1
+        else:
+            excluded_n += 1
 
-    numeric_floors = tuple(
-        item.floor for item in distribution_records if item.floor is not None
-    )
-
-    wins = sum(item.record.outcome.status == RunStatus.WIN for item in valid)
-    valid_floors = tuple(
-        item.floor for item in valid_with_floor if item.floor is not None
-    )
-    act2_entries = sum(floor >= 18 for floor in valid_floors)
+        if is_valid or (include_technical and is_technical):
+            trend_eligible_n += 1
+            timestamp = _effective_timestamp(record)
+            if timestamp is None:
+                trend_unknown_time_n += 1
+            else:
+                trend_timestamped_n += 1
+                seed = _TrendSeed(
+                    timestamp=timestamp,
+                    source_id=record.source_id,
+                    run_id=record.run_id,
+                    status=status.value,
+                    global_floor=floor,
+                )
+                priority = _trend_priority(seed)
+                item = (-priority, seed)
+                if len(trend_heap) < TREND_SAMPLE_LIMIT:
+                    heapq.heappush(trend_heap, item)
+                elif priority < -trend_heap[0][0]:
+                    heapq.heapreplace(trend_heap, item)
 
     histogram = tuple(
         HistogramPoint(global_floor=floor, count=count)
-        for floor, count in sorted(Counter(numeric_floors).items())
+        for floor, count in sorted(distribution_counts.items())
     )
 
-    valid_floor_count = len(valid_with_floor)
     funnel = (
         FunnelPoint(
             "all_runs",
-            len(materialized),
-            len(materialized),
-            _rate(len(materialized), len(materialized)),
+            all_n,
+            all_n,
+            _rate(all_n, all_n),
         ),
         FunnelPoint(
             "floor_bearing",
-            valid_floor_count,
-            len(valid),
-            _rate(valid_floor_count, len(valid)),
+            valid_floor_n,
+            valid_n,
+            _rate(valid_floor_n, valid_n),
         ),
-        _floor_funnel_point("act1_boss_or_later", 17, valid_floors),
-        _floor_funnel_point("act2_entry", 18, valid_floors),
-        _floor_funnel_point("act2_boss_or_later", 34, valid_floors),
-        _floor_funnel_point("act3_entry", 35, valid_floors),
-        FunnelPoint("completion", wins, len(valid), _rate(wins, len(valid))),
+        _floor_funnel_point_from_counts("act1_boss_or_later", 17, valid_floor_counts),
+        _floor_funnel_point_from_counts("act2_entry", 18, valid_floor_counts),
+        _floor_funnel_point_from_counts("act2_boss_or_later", 34, valid_floor_counts),
+        _floor_funnel_point_from_counts("act3_entry", 35, valid_floor_counts),
+        FunnelPoint("completion", wins, valid_n, _rate(wins, valid_n)),
     )
 
-    trend_records: tuple[_MetricRecord, ...] = valid
-    if include_technical:
-        trend_records += technical
-    cumulative_floors: list[int] = []
+    selected_trend = sorted(seed for _, seed in trend_heap)
+    cumulative_floor_sum = 0
+    cumulative_floor_n = 0
     trend_points: list[TrendPoint] = []
-    for item in sorted(
-        trend_records, key=lambda candidate: _trend_sort_key(candidate.record)
-    ):
-        record = item.record
-        floor = item.floor
-        if floor is not None:
-            cumulative_floors.append(floor)
+    for seed in selected_trend:
+        if seed.global_floor is not None:
+            cumulative_floor_sum += seed.global_floor
+            cumulative_floor_n += 1
         trend_points.append(
             TrendPoint(
-                run_id=record.run_id,
-                source_id=record.source_id,
-                timestamp=_effective_timestamp(record),
-                status=record.outcome.status.value,
-                global_floor=floor,
+                run_id=seed.run_id,
+                source_id=seed.source_id,
+                timestamp=seed.timestamp,
+                status=seed.status,
+                global_floor=seed.global_floor,
                 cumulative_avg_global_floor=(
-                    float(mean(cumulative_floors)) if cumulative_floors else None
+                    cumulative_floor_sum / cumulative_floor_n
+                    if cumulative_floor_n
+                    else None
                 ),
             )
         )
 
+    floor_n = sum(distribution_counts.values())
+    floor_sum = sum(floor * count for floor, count in distribution_counts.items())
+
     return CohortSummary(
-        all_n=len(materialized),
-        valid_n=len(valid),
-        valid_floor_n=valid_floor_count,
-        floor_n=len(numeric_floors),
-        technical_n=len(technical),
-        technical_floor_n=len(technical_with_floor),
+        all_n=all_n,
+        valid_n=valid_n,
+        valid_floor_n=valid_floor_n,
+        floor_n=floor_n,
+        technical_n=technical_n,
+        technical_floor_n=technical_floor_n,
         excluded_n=excluded_n,
         win_n=wins,
-        win_denominator=len(valid),
-        win_rate=_rate(wins, len(valid)),
-        avg_global_floor=float(mean(numeric_floors)) if numeric_floors else None,
-        median_global_floor=float(median(numeric_floors)) if numeric_floors else None,
-        max_global_floor=max(numeric_floors) if numeric_floors else None,
+        win_denominator=valid_n,
+        win_rate=_rate(wins, valid_n),
+        avg_global_floor=floor_sum / floor_n if floor_n else None,
+        median_global_floor=_counter_median(distribution_counts),
+        max_global_floor=max(distribution_counts) if distribution_counts else None,
         act2_entry_n=act2_entries,
-        act2_entry_denominator=valid_floor_count,
-        act2_entry_rate=_rate(act2_entries, valid_floor_count),
+        act2_entry_denominator=valid_floor_n,
+        act2_entry_rate=_rate(act2_entries, valid_floor_n),
         include_technical=include_technical,
         histogram=histogram,
         funnel=funnel,
         trend=tuple(trend_points),
+        trend_eligible_n=trend_eligible_n,
+        trend_timestamped_n=trend_timestamped_n,
+        trend_unknown_time_n=trend_unknown_time_n,
+        trend_sampled_n=len(trend_points),
+        trend_sample_limit=TREND_SAMPLE_LIMIT,
+        trend_sampling_method=(
+            "all_timestamped"
+            if trend_timestamped_n <= TREND_SAMPLE_LIMIT
+            else "deterministic_hash"
+        ),
     )
 
 
-def _floor_funnel_point(
-    key: str, threshold: int, floors: tuple[int, ...]
+def _floor_funnel_point_from_counts(
+    key: str, threshold: int, floors: Counter[int]
 ) -> FunnelPoint:
-    count = sum(floor >= threshold for floor in floors)
+    denominator = sum(floors.values())
+    count = sum(amount for floor, amount in floors.items() if floor >= threshold)
     return FunnelPoint(
         key=key,
         count=count,
-        denominator=len(floors),
-        rate=_rate(count, len(floors)),
+        denominator=denominator,
+        rate=_rate(count, denominator),
         min_global_floor=threshold,
     )
+
+
+def _counter_median(counts: Counter[int]) -> float | None:
+    total = sum(counts.values())
+    if total == 0:
+        return None
+    left_rank = (total - 1) // 2
+    right_rank = total // 2
+    cumulative = 0
+    left: int | None = None
+    for floor, count in sorted(counts.items()):
+        previous = cumulative
+        cumulative += count
+        if left is None and previous <= left_rank < cumulative:
+            left = floor
+        if previous <= right_rank < cumulative:
+            return (left + floor) / 2 if left is not None else float(floor)
+    raise AssertionError("floor histogram count mismatch")
+
+
+def _trend_priority(seed: _TrendSeed) -> int:
+    payload = "\0".join(
+        (
+            repr(seed.timestamp),
+            seed.source_id,
+            seed.run_id,
+            seed.status,
+            repr(seed.global_floor),
+        )
+    )
+    return int.from_bytes(sha256(payload.encode("utf-8")).digest(), "big")
 
 
 def _string_details(values: Iterable[object]) -> _StringDetails:
@@ -332,8 +480,19 @@ def _axis_value(
     records: tuple[RunRecord, ...], axis: str, label: str, cohort: str
 ) -> tuple[str | None, tuple[str, ...]]:
     details = _string_details(getattr(record.metadata, axis) for record in records)
+    return _axis_value_from_details(details, label, cohort)
+
+
+def _axis_value_from_details(
+    details: _StringDetails, label: str, cohort: str
+) -> tuple[str | None, tuple[str, ...]]:
     rendered_values = ", ".join(sorted(details.values))
     rendered_types = ", ".join(details.invalid_types)
+    if details.overflow:
+        return None, (
+            f"{cohort} {label} has more than "
+            f"{COMPARISON_DISTINCT_LIMIT} distinct values",
+        )
     if details.invalid_types and not details.values and not details.missing:
         return None, (
             f"{cohort} {label} is invalid: expected nonempty string; "
@@ -376,6 +535,12 @@ def _ascension_axis_value(
     records: tuple[RunRecord, ...], cohort: str
 ) -> tuple[int | None, tuple[str, ...]]:
     details = _ascension_details(records)
+    return _ascension_axis_value_from_details(details, cohort)
+
+
+def _ascension_axis_value_from_details(
+    details: _AscensionDetails, cohort: str
+) -> tuple[int | None, tuple[str, ...]]:
     rendered_values = ", ".join(str(value) for value in sorted(details.values))
     rendered_invalid = ", ".join(details.invalid)
     if details.invalid and not details.values and not details.missing:
@@ -401,6 +566,14 @@ def _seed_details(records: tuple[RunRecord, ...]) -> _StringDetails:
     return _string_details(record.metadata.seed for record in records)
 
 
+def _observed_records(
+    records: Iterable[RunRecord], accumulator: _ComparisonAccumulator
+) -> Iterable[RunRecord]:
+    for record in records:
+        accumulator.observe(record)
+        yield record
+
+
 def _delta(current: float | int | None, baseline: float | int | None) -> Any:
     if current is None or baseline is None:
         return None
@@ -416,26 +589,20 @@ def compare_cohorts(
 ) -> ComparisonResult:
     """Compare cohorts only when their gameplay-result metadata is compatible."""
 
-    current_records = tuple(current)
-    baseline_records = tuple(baseline)
-    current_summary = summarize_cohort(current_records)
-    baseline_summary = summarize_cohort(baseline_records)
-    current_valid = tuple(
-        record for record in current_records if record.outcome.status in _GAMEPLAY_STATUSES
-    )
-    baseline_valid = tuple(
-        record for record in baseline_records if record.outcome.status in _GAMEPLAY_STATUSES
-    )
+    current_details = _ComparisonAccumulator()
+    baseline_details = _ComparisonAccumulator()
+    current_summary = summarize_cohort(_observed_records(current, current_details))
+    baseline_summary = summarize_cohort(_observed_records(baseline, baseline_details))
 
     reasons: list[str] = []
     notes: list[str] = []
-    if not current_valid:
+    if not current_details.valid_n:
         reasons.append("current cohort has no valid gameplay results")
-    if not baseline_valid:
+    if not baseline_details.valid_n:
         reasons.append("baseline cohort has no valid gameplay results")
 
     paired = False
-    if current_valid and baseline_valid:
+    if current_details.valid_n and baseline_details.valid_n:
         axes = (
             ("character", "character"),
             ("game_version", "version"),
@@ -443,11 +610,11 @@ def compare_cohorts(
             ("scenario", "scenario"),
         )
         for attribute, label in axes:
-            current_value, current_errors = _axis_value(
-                current_valid, attribute, label, "current"
+            current_value, current_errors = _axis_value_from_details(
+                current_details.axes[attribute].details(), label, "current"
             )
-            baseline_value, baseline_errors = _axis_value(
-                baseline_valid, attribute, label, "baseline"
+            baseline_value, baseline_errors = _axis_value_from_details(
+                baseline_details.axes[attribute].details(), label, "baseline"
             )
             reasons.extend(current_errors)
             reasons.extend(baseline_errors)
@@ -467,11 +634,11 @@ def compare_cohorts(
                         f"current={current_value}, baseline={baseline_value}"
                     )
 
-        current_ascension, current_ascension_errors = _ascension_axis_value(
-            current_valid, "current"
+        current_ascension, current_ascension_errors = _ascension_axis_value_from_details(
+            current_details.ascension_details(), "current"
         )
-        baseline_ascension, baseline_ascension_errors = _ascension_axis_value(
-            baseline_valid, "baseline"
+        baseline_ascension, baseline_ascension_errors = _ascension_axis_value_from_details(
+            baseline_details.ascension_details(), "baseline"
         )
         reasons.extend(current_ascension_errors)
         reasons.extend(baseline_ascension_errors)
@@ -485,8 +652,8 @@ def compare_cohorts(
                 f"current={current_ascension}, baseline={baseline_ascension}"
             )
 
-        current_seed_details = _seed_details(current_valid)
-        baseline_seed_details = _seed_details(baseline_valid)
+        current_seed_details = current_details.seeds.details()
+        baseline_seed_details = baseline_details.seeds.details()
         current_seeds = current_seed_details.values
         baseline_seeds = baseline_seed_details.values
         paired = (
@@ -496,8 +663,18 @@ def compare_cohorts(
             and not baseline_seed_details.missing
             and not current_seed_details.invalid_types
             and not baseline_seed_details.invalid_types
+            and not current_seed_details.overflow
+            and not baseline_seed_details.overflow
         )
         if require_paired_seeds:
+            if current_seed_details.overflow:
+                reasons.append(
+                    "current seed set exceeds bounded comparison limit"
+                )
+            if baseline_seed_details.overflow:
+                reasons.append(
+                    "baseline seed set exceeds bounded comparison limit"
+                )
             if current_seed_details.missing:
                 reasons.append("current seed set has missing seed values")
             if current_seed_details.invalid_types:
