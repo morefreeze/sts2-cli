@@ -30,6 +30,17 @@ def test_format_floor_labels_sorts_numeric_floors_before_formatting():
     assert format_floor_labels([22, 7, 18]) == "[A1F7, A2F1, A2F5]"
 
 
+def test_global_floor_uses_context_act_when_local_floor_resets():
+    import agent.eval_rl as eval_rl
+
+    state = {
+        "floor": None,
+        "context": {"act": 2, "floor": 4},
+    }
+
+    assert eval_rl.global_floor_from_state(state, fallback=17) == 21
+
+
 def test_verbose_card_reward_log_uses_actual_greedy_command(monkeypatch):
     import agent.eval_rl as eval_rl
 
@@ -199,6 +210,86 @@ def test_run_eval_retries_invalid_attempt_with_the_same_fixed_seed(monkeypatch):
     assert stats["status_counts"] == {"crash": 1, "dead": 1}
     assert stats["results"][0]["status"] == "dead"
     assert stats["results"][0]["attempts"] == 2
+
+
+def test_run_eval_marks_act1_boss_beaten_after_entering_act2(monkeypatch, tmp_path):
+    import agent.eval_rl as eval_rl
+
+    class FakeEnv:
+        def __init__(self, **kwargs):
+            self._current_floor = 17
+            self._current_state = {
+                "decision": "combat_play",
+                "round": 1,
+                "floor": None,
+                "context": {
+                    "act": 1,
+                    "floor": 17,
+                    "room_type": "Boss",
+                    "boss": {"id": "CEREMONIAL_BEAST_BOSS"},
+                },
+                "player": {"hp": 85, "max_hp": 90, "deck": []},
+            }
+            self._reset_count = 0
+            self._step_count = 0
+
+        def reset(self):
+            self._reset_count += 1
+            if self._reset_count == 2:
+                self._current_floor = 4
+                self._current_state = {
+                    "decision": "combat_play",
+                    "round": 1,
+                    "floor": None,
+                    "context": {
+                        "act": 2,
+                        "floor": 4,
+                        "room_type": "Monster",
+                    },
+                    "player": {"hp": 20, "max_hp": 90},
+                }
+            return [0.0] * 161, {}
+
+        def action_masks(self):
+            return [True]
+
+        def step(self, action):
+            self._step_count += 1
+            if self._step_count == 1:
+                return [0.0] * 161, 0.0, True, False, {
+                    "floor": 17,
+                    "combat_won": True,
+                }
+            return [0.0] * 161, 0.0, True, False, {"floor": 4}
+
+        def close(self):
+            pass
+
+    class FakeModel:
+        observation_space = SimpleNamespace(shape=(161,))
+
+        def predict(self, obs, **kwargs):
+            return 0, None
+
+    monkeypatch.setattr(eval_rl, "CombatEnv", FakeEnv)
+    monkeypatch.setattr(eval_rl, "ActionMasker", lambda env, mask_fn: env)
+    monkeypatch.setattr(eval_rl.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(eval_rl.signal, "alarm", lambda *args: None)
+
+    deck_log = tmp_path / "boss.jsonl"
+    stats = run_eval_verbose(
+        FakeModel(),
+        "Ironclad",
+        n_games=1,
+        invalid_retries=0,
+        boss_deck_log_path=str(deck_log),
+    )
+
+    result = json.loads(deck_log.read_text().strip())
+    assert stats["results"][0]["floor"] == 21
+    assert stats["per_boss"]["CEREMONIAL_BEAST"]["won"] == 1
+    assert result["max_floor"] == 21
+    assert result["boss_beaten"] is True
 
 
 def test_midact_elite_snapshot_preset_targets_floor_6_and_7():

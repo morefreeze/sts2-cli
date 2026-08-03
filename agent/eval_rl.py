@@ -54,6 +54,20 @@ def format_floor_labels(floors: list[int] | tuple[int, ...]) -> str:
     return "[" + ", ".join(format_floor_label(f) for f in sorted(floors)) + "]"
 
 
+def global_floor_from_state(state: dict | None, fallback: int = 1) -> int:
+    """Convert the engine's act-local floor into an absolute run floor."""
+    if not isinstance(state, dict):
+        return int(fallback)
+    context = state.get("context") or {}
+    act = context.get("act") or 1
+    floor = state.get("floor") or context.get("floor")
+    if not isinstance(act, (int, float)) or not isinstance(floor, (int, float)):
+        return int(fallback)
+    if act < 1 or floor < 1:
+        return int(fallback)
+    return (int(act) - 1) * 17 + int(floor)
+
+
 def _resolve_combat_snapshot_config(*, preset: str | None,
                                     snapshot_dir: str | None,
                                     floors_spec: str | None) -> tuple[str | None, set[int] | None]:
@@ -469,7 +483,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         env_wrapped = ActionMasker(env, mask_fn)
         obs, _ = env_wrapped.reset()
         ep_combat_wins = 0
-        max_floor = 1
+        max_floor = global_floor_from_state(env._current_state, fallback=1)
         run_won = False
         run_over = False
         timed_out = False
@@ -487,20 +501,28 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             while not run_over:
                 done = False
                 last_info = {}
-                cur_floor = env._current_floor
+                cur_floor = global_floor_from_state(
+                    env._current_state,
+                    fallback=env._current_floor,
+                )
                 hp_before = (env._current_state.get("player", {}).get("hp", "?")
                              if env._current_state else "?")
                 steps_log = []
 
                 while not done:
                     state_snap = env._current_state
+                    state_floor = global_floor_from_state(
+                        state_snap,
+                        fallback=env._current_floor,
+                    )
+                    max_floor = max(max_floor, state_floor)
                     if game_boss_id is None and state_snap:
                         _b = (state_snap.get("context") or {}).get("boss") or {}
                         _bid = _b.get("id")
                         if _bid:
                             game_boss_id = str(_bid).replace("_BOSS", "")
                     if boss_deck_log_path and _is_boss_combat_round1(state_snap):
-                        fl = state_snap.get("floor", 0)
+                        fl = state_floor
                         if fl not in logged_boss_floors:
                             _write_boss_deck_record(
                                 state_snap, checkpoint=checkpoint_name,
@@ -508,9 +530,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                                 game_index=i, jsonl_path=boss_deck_log_path)
                             logged_boss_floors.add(fl)
                     if boss_snapshot_dir and _is_boss_combat_round1(state_snap):
-                        fl = (state_snap.get("floor")
-                              or state_snap.get("context", {}).get("floor")
-                              or env._current_floor)
+                        fl = state_floor
                         hp = state_snap.get("player", {}).get("hp", 0)
                         if (fl not in snapshotted_boss_floors
                                 and isinstance(hp, (int, float))
@@ -537,8 +557,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                                 print(f"  [snapshot] {snap_name} (hp={int(hp)})")
                             snapshotted_boss_floors.add(fl)
                     if (combat_snapshot_floors and _is_combat_round1(state_snap)
-                            and env._current_floor in combat_snapshot_floors):
-                        fl = env._current_floor
+                            and state_floor in combat_snapshot_floors):
+                        fl = state_floor
                         if fl not in snapshotted_combat_floors:
                             snapshotted_combat_floors.add(fl)
                             os.makedirs(combat_snapshot_dir, exist_ok=True)
@@ -685,9 +705,10 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             "run_won": run_won,
             "attempts": retries_used + 1,
         })
+        boss_beaten = run_won or max_floor > 17
         if status in {"win", "dead"}:
             boss_records.append({"boss": game_boss_id or "?",
-                                 "reached": max_floor >= 17, "won": run_won})
+                                 "reached": max_floor >= 17, "won": boss_beaten})
 
         # Result row for the boss-deck log: joined by seed in the viewer.
         # Only written when this game logged a boss-entry deck (reached boss).
@@ -698,7 +719,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                         "event": "result", "seed": game_seed,
                         "game_index": i, "boss": game_boss_id,
                         "max_floor": max_floor, "run_won": run_won,
-                        "boss_beaten": run_won or max_floor > 17,
+                        "boss_beaten": boss_beaten,
                         "end_reason": status,
                         "attempts": retries_used + 1,
                         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
