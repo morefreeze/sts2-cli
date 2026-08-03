@@ -76,6 +76,19 @@ def test_jsonl_ignores_blank_lines(tmp_path: Path) -> None:
     assert read_json_records(path) == [{"event": "eval_result"}]
 
 
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_invalid_utf8_is_reported_as_a_source_format_error(
+    tmp_path: Path, suffix: str
+) -> None:
+    path = tmp_path / f"invalid_utf8{suffix}"
+    path.write_bytes(b"\x80")
+
+    with pytest.raises(SourceFormatError, match=rf"{path.name}.*invalid UTF-8.*byte 0") as error:
+        read_json_records(path)
+
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
+
+
 @pytest.mark.parametrize(
     ("name", "contents", "location"),
     [
@@ -102,6 +115,23 @@ def test_unknown_valid_shape_is_not_an_error(tmp_path: Path) -> None:
 
     assert descriptor.kind is SourceKind.UNKNOWN
     assert descriptor.message == "unsupported JSON shape"
+
+
+def test_action_only_gamelogger_records_are_a_replay(tmp_path: Path) -> None:
+    path = tmp_path / "actions.jsonl"
+    path.write_text(
+        '{"type":"action","data":{"cmd":"action","action":"end_turn","args":{}}}\n',
+        encoding="utf-8",
+    )
+
+    assert classify_path(path).kind is SourceKind.REPLAY_JSONL
+
+
+def test_action_with_non_mapping_data_is_not_a_replay(tmp_path: Path) -> None:
+    path = tmp_path / "not_a_replay.jsonl"
+    path.write_text('{"type":"action","data":"not a command object"}\n', encoding="utf-8")
+
+    assert classify_path(path).kind is SourceKind.UNKNOWN
 
 
 def test_classification_precedence_is_deterministic() -> None:

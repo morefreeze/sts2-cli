@@ -26,6 +26,10 @@ def read_json_records(path: Path) -> list[dict]:
 
     try:
         contents = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise SourceFormatError(
+            f"{path.name}: invalid UTF-8 at byte {error.start}"
+        ) from error
     except OSError as error:
         raise SourceFormatError(f"{path.name}: could not read source: {error}") from error
 
@@ -84,7 +88,11 @@ def classify_records(records: list[dict], *, suffix: str) -> SourceDescriptor:
 
     types = {str(row.get("type", "")) for row in records}
     events = {str(row.get("event", "")) for row in records}
-    if "state" in types:
+    has_action_command = any(
+        row.get("type") == "action" and isinstance(row.get("data"), dict)
+        for row in records
+    )
+    if "state" in types or has_action_command:
         return SourceDescriptor(SourceKind.REPLAY_JSONL, len(records), "state/action replay")
     if events & {"milestone", "card_pick", "outcome"}:
         return SourceDescriptor(SourceKind.DECK_HISTORY, len(records), "training deck history")
