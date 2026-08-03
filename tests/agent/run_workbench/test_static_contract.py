@@ -66,6 +66,12 @@ def _get(base: str, path: str) -> tuple[int, str, bytes]:
         return error.code, error.headers.get("Content-Type", ""), error.read()
 
 
+def _javascript_section(script: str, start: str, end: str) -> str:
+    start_index = script.index(start)
+    end_index = script.index(end, start_index)
+    return script[start_index:end_index]
+
+
 def test_shell_uses_external_assets_and_stable_landmark_order():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     parser = _ShellParser()
@@ -191,6 +197,49 @@ def test_app_bootstraps_apis_and_renders_server_owned_comparison():
     assert "act2_entry_denominator" in script
     assert "technical_n" in script
     assert "createElementNS" in script
+
+
+def test_baseline_default_is_distinct_without_client_comparability_logic():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    selector = _javascript_section(
+        script, "function nearestDistinctCohortId", "function updateCohortOptions"
+    )
+
+    assert "comparisonCompatible" not in script
+    assert ".filters" not in selector
+    assert "currentIndex - 1" in selector
+    assert "currentIndex + 1" in selector
+    assert "cohort_id" in selector
+    assert "nearestDistinctCohortId(candidates, current)" in script
+
+
+def test_funnel_is_an_accessible_inline_svg_with_explicit_denominators():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    funnel = _javascript_section(script, "function renderFunnel", "function appendList")
+
+    assert "svgElement('svg'" in funnel
+    assert "role: 'img'" in funnel
+    assert "svgElement('title'" in funnel
+    assert "svgElement('desc'" in funnel
+    assert "svgElement('rect'" in funnel
+    assert "svgElement('text'" in funnel
+    assert "point.count" in funnel
+    assert "point.denominator" in funnel
+    assert "formatRate(point.rate)" in funnel
+    assert "Number.isFinite" in funnel
+
+
+def test_representative_recency_requires_a_finite_timestamp():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    representatives = _javascript_section(
+        script, "function representativeCandidates", "function renderRepresentatives"
+    )
+
+    assert "最近一局" not in representatives
+    assert "Number.isFinite(point.timestamp)" in representatives
+    assert "b.timestamp - a.timestamp" in representatives
+    assert "最近有时间记录" in representatives
+    assert "趋势样本" in representatives
 
 
 def test_app_does_not_reparse_sources_or_inject_untrusted_html():

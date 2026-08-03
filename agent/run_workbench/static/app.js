@@ -177,14 +177,11 @@ function filteredCohorts() {
   });
 }
 
-function comparisonCompatible(current, candidate) {
-  if (!current || !candidate || current.cohort_id === candidate.cohort_id) return false;
-  const keys = ['character', 'game_version', 'evaluation_mode', 'scenario', 'ascension'];
-  return keys.every((key) => {
-    const currentValue = current.filters ? current.filters[key] : null;
-    const candidateValue = candidate.filters ? candidate.filters[key] : null;
-    return currentValue === candidateValue;
-  });
+function nearestDistinctCohortId(candidates, currentId) {
+  const currentIndex = candidates.findIndex((cohort) => cohort.cohort_id === currentId);
+  if (currentIndex < 0 || candidates.length < 2) return '';
+  if (currentIndex > 0) return candidates[currentIndex - 1].cohort_id;
+  return candidates[currentIndex + 1].cohort_id;
 }
 
 function updateCohortOptions({ chooseDefaults = false } = {}) {
@@ -205,15 +202,12 @@ function updateCohortOptions({ chooseDefaults = false } = {}) {
   setSelectOptions(currentSelect, options, candidates.length ? null : '没有匹配批次', current);
   currentSelect.value = current;
 
-  const currentCohort = candidates.find((cohort) => cohort.cohort_id === current);
   let baseline = previousBaseline;
   if (!candidates.some((cohort) => cohort.cohort_id === baseline && baseline !== current)) {
-    const compatible = [...candidates].reverse().find((cohort) => comparisonCompatible(currentCohort, cohort));
-    baseline = compatible ? compatible.cohort_id : '';
+    baseline = nearestDistinctCohortId(candidates, current);
   }
   if (chooseDefaults) {
-    const compatible = [...candidates].reverse().find((cohort) => comparisonCompatible(currentCohort, cohort));
-    baseline = compatible ? compatible.cohort_id : '';
+    baseline = nearestDistinctCohortId(candidates, current);
   }
   const baselineOptions = options.filter((option) => option.value !== current);
   setSelectOptions(baselineSelect, baselineOptions, '不比较基线', baseline);
@@ -363,21 +357,47 @@ function renderFunnel(summary) {
     renderEmpty(container, '当前批次没有漏斗数据。');
     return;
   }
-  funnel.forEach((point) => {
-    const row = element('div', { className: 'funnel-row' });
-    const label = element('span', { text: FUNNEL_LABELS[point.key] || point.key });
-    const track = element('div', { className: 'funnel-track', attrs: { 'aria-hidden': 'true' } });
-    const fill = element('div', { className: 'funnel-fill' });
-    const percent = typeof point.rate === 'number' ? Math.max(0, Math.min(100, point.rate * 100)) : 0;
-    fill.style.width = `${percent}%`;
-    track.append(fill);
-    const value = element('strong', {
-      className: 'funnel-value',
-      text: `${point.count} / ${point.denominator} · ${formatRate(point.rate)}`,
-    });
-    row.append(label, track, value);
-    container.append(row);
+  const width = 560;
+  const rowHeight = 40;
+  const height = Math.max(150, funnel.length * rowHeight + 26);
+  const barX = 150;
+  const barWidth = 190;
+  const svg = svgElement('svg', {
+    class: 'funnel-svg', viewBox: `0 0 ${width} ${height}`,
+    role: 'img', 'aria-labelledby': 'funnelTitle funnelDescription',
   });
+  const title = svgElement('title', { id: 'funnelTitle' });
+  title.textContent = '当前批次推进转化漏斗';
+  const description = svgElement('desc', { id: 'funnelDescription' });
+  description.textContent = funnel.map((point) => {
+    const label = FUNNEL_LABELS[point.key] || point.key;
+    return `${label}：${point.count} / ${point.denominator}，${formatRate(point.rate)}`;
+  }).join('；');
+  svg.append(title, description);
+
+  funnel.forEach((point, index) => {
+    const centerY = 21 + index * rowHeight;
+    const finiteRate = Number.isFinite(point.rate);
+    const percent = finiteRate ? Math.max(0, Math.min(1, point.rate)) : 0;
+    const label = svgElement('text', {
+      x: 0, y: centerY + 4, class: 'funnel-label',
+    });
+    label.textContent = FUNNEL_LABELS[point.key] || point.key;
+    const track = svgElement('rect', {
+      x: barX, y: centerY - 7, width: barWidth, height: 12,
+      rx: 6, class: 'funnel-track',
+    });
+    const fill = svgElement('rect', {
+      x: barX, y: centerY - 7, width: barWidth * percent, height: 12,
+      rx: 6, class: 'funnel-fill',
+    });
+    const value = svgElement('text', {
+      x: barX + barWidth + 14, y: centerY + 4, class: 'funnel-value',
+    });
+    value.textContent = `${point.count} / ${point.denominator} · ${formatRate(point.rate)}`;
+    svg.append(label, track, fill, value);
+  });
+  container.append(svg);
 }
 
 function appendList(container, values) {
@@ -507,7 +527,14 @@ function representativeCandidates(metrics, descriptor) {
     candidates.push({ point, reason });
   };
   const floorPoints = trend.filter((point) => typeof point.global_floor === 'number');
-  add(trend[trend.length - 1], '最近一局');
+  const timed = trend.filter((point) => Number.isFinite(point.timestamp));
+  const latestTimed = [...timed].sort((a, b) =>
+    b.timestamp - a.timestamp
+      || String(a.run_id || '').localeCompare(String(b.run_id || ''))
+      || String(a.source_id || '').localeCompare(String(b.source_id || ''))
+  )[0];
+  if (latestTimed) add(latestTimed, '最近有时间记录');
+  else add(trend[0], '趋势样本');
   add([...floorPoints].sort((a, b) => b.global_floor - a.global_floor || a.run_id.localeCompare(b.run_id))[0], '推进最远');
   add([...floorPoints].sort((a, b) => a.global_floor - b.global_floor || a.run_id.localeCompare(b.run_id))[0], '推进最浅');
   add(trend.find((point) => typeof point.global_floor !== 'number'), '层数缺失');

@@ -448,42 +448,34 @@ select {
 }
 
 .funnel-list {
-  display: flex;
   min-height: 285px;
-  flex-direction: column;
-  gap: 12px;
 }
 
-.funnel-row {
-  display: grid;
-  grid-template-columns: minmax(105px, 1fr) minmax(120px, 2fr) auto;
-  align-items: center;
-  gap: 10px;
+.funnel-svg {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
-.funnel-row > span:first-child {
-  color: var(--slate-650);
+.funnel-label,
+.funnel-value {
+  fill: var(--slate-650);
   font-size: 12px;
 }
 
 .funnel-track {
-  height: 9px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: #e8e5dd;
+  fill: #e8e5dd;
 }
 
 .funnel-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--teal);
+  fill: var(--teal);
 }
 
 .funnel-value {
-  min-width: 82px;
+  fill: var(--slate-950);
   font-size: 11px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  text-align: right;
 }
 
 .comparison-banner {
@@ -860,14 +852,6 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .funnel-row {
-    grid-template-columns: 1fr auto;
-  }
-
-  .funnel-track {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
