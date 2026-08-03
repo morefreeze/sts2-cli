@@ -121,11 +121,18 @@ class _CompactRun:
     technical_failure_kind: str | None = None
     first_recorded_floor: int | None = None
     observed_max_floor: int | None = None
+    observed_max_floor_label: str | None = None
     outcome_max_floor: int | None = None
     latest_timestamp: float | None = None
     has_outcome: bool = False
     has_floor: bool = False
     has_card_pick: bool = False
+    has_replay_action: bool = False
+    has_replay_state: bool = False
+    replay_parser_succeeded: bool = False
+    has_replay_nodes: bool = False
+    has_node_decisions: bool = False
+    usable_per_node_replay: bool = False
     warnings: tuple[str, ...] = ()
 
     def to_record(self) -> RunRecord:
@@ -139,7 +146,7 @@ class _CompactRun:
         elif self.source_kind is SourceKind.REPLAY_JSONL:
             complete_run = self.has_outcome and self.first_recorded_floor == 1
             first_recorded_floor = self.first_recorded_floor
-            visited_route = self.has_floor
+            visited_route = self.has_floor or self.has_replay_nodes
         else:
             complete_run = self.has_outcome
             first_recorded_floor = self.first_recorded_floor
@@ -169,12 +176,33 @@ class _CompactRun:
             coverage=Coverage(
                 complete_run=complete_run,
                 first_recorded_floor=first_recorded_floor,
-                last_recorded_floor=self.max_global_floor,
+                last_recorded_floor=(
+                    self.observed_max_floor
+                    if self.source_kind is SourceKind.REPLAY_JSONL
+                    else self.max_global_floor
+                ),
             ),
             capabilities=Capabilities(
                 visited_route=visited_route,
-                node_rewards=self.has_card_pick,
-                decisions=self.has_card_pick,
+                node_rewards=(
+                    self.has_card_pick
+                    if self.source_kind is SourceKind.DECK_HISTORY
+                    else False
+                ),
+                decisions=(
+                    self.has_replay_action or self.has_node_decisions
+                    if self.source_kind is SourceKind.REPLAY_JSONL
+                    else self.has_card_pick
+                ),
+                turn_replay=(
+                    self.replay_parser_succeeded
+                    and (
+                        (self.has_replay_state and self.has_replay_action)
+                        or self.usable_per_node_replay
+                    )
+                    if self.source_kind is SourceKind.REPLAY_JSONL
+                    else False
+                ),
             ),
             warnings=list(self.warnings),
         )
@@ -526,6 +554,17 @@ class RunCatalog:
             run_ids = scan.run_ids
             metadata = scan.metadata_completeness
             deck_outcomes = scan.deck_outcomes
+            if (
+                descriptor.kind is SourceKind.REPLAY_JSONL
+                and not records_complete
+                and deck_outcomes
+            ):
+                _probe_compact_replay_capabilities(
+                    deck_outcomes[0],
+                    records,
+                    self.replay_parser,
+                    path.name,
+                )
             for outcome in deck_outcomes:
                 outcome.source_id = source_id
         else:
@@ -987,7 +1026,10 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 if len(records) < INDEX_RECORD_LIMIT:
                     records.append(record)
                 _collect_metadata_presence(record, present_metadata)
-                record_type = record.get("type")
+                raw_record_type = record.get("type")
+                record_type = (
+                    raw_record_type if isinstance(raw_record_type, str) else ""
+                )
                 if record_type in {"state", "action"}:
                     types.add(record_type)
                 event = str(record.get("event", ""))
@@ -1001,7 +1043,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 }:
                     events.add(event)
                 has_action_command = has_action_command or (
-                    record.get("type") == "action"
+                    record_type == "action"
                     and isinstance(record.get("data"), dict)
                 )
                 looks_like_boss_deck = looks_like_boss_deck or {
@@ -1011,10 +1053,11 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     "hp_at_entry",
                 }.issubset(record)
                 record_run_ids = _lightweight_run_ids([record])
-                is_replay_row = record.get("type") in {"state", "action"}
+                is_replay_row = record_type in {"state", "action"}
                 is_replay_candidate = is_replay_row or event in {
                     "outcome",
                     "result",
+                    "eval_result",
                 }
                 if is_replay_candidate:
                     top_level_id = _first_scalar_text(record, "run_id")
@@ -1210,7 +1253,11 @@ def _update_compact_timestamp_range(
     return timestamp
 
 
-def _update_observed_floor(compact: _CompactRun, floor: int | None) -> None:
+def _update_observed_floor(
+    compact: _CompactRun,
+    floor: int | None,
+    label: str | None = None,
+) -> None:
     if floor is None:
         return
     compact.has_floor = True
@@ -1219,11 +1266,9 @@ def _update_observed_floor(compact: _CompactRun, floor: int | None) -> None:
         if compact.first_recorded_floor is None
         else min(compact.first_recorded_floor, floor)
     )
-    compact.observed_max_floor = (
-        floor
-        if compact.observed_max_floor is None
-        else max(compact.observed_max_floor, floor)
-    )
+    if compact.observed_max_floor is None or floor > compact.observed_max_floor:
+        compact.observed_max_floor = floor
+        compact.observed_max_floor_label = label
 
 
 def _update_compact_eval(compact: _CompactRun, record: dict[str, Any]) -> None:
@@ -1276,22 +1321,28 @@ def _update_compact_replay(
     _update_compact_metadata(compact, record)
     _update_compact_timestamp_range(compact, record)
 
-    explicit_floor = _first_integral_int(
-        record, "max_global_floor", "max_floor"
+    record_type = record.get("type")
+    if not isinstance(record_type, str):
+        record_type = ""
+    compact.has_replay_action = compact.has_replay_action or (
+        record_type == "action" and isinstance(record.get("data"), dict)
     )
-    if explicit_floor is not None:
-        compact.outcome_max_floor = (
-            explicit_floor
-            if compact.outcome_max_floor is None
-            else max(compact.outcome_max_floor, explicit_floor)
-        )
+    compact.has_replay_state = compact.has_replay_state or (
+        record_type == "state" and isinstance(record.get("data"), dict)
+    )
 
     status, victory, technical_kind = _compact_status(record)
     if status is not RunStatus.UNKNOWN:
         compact.status = status
         compact.victory = victory
         compact.technical_failure_kind = technical_kind
-    if record.get("event") in {"outcome", "result"} or status is not RunStatus.UNKNOWN:
+    event = record.get("event")
+    is_terminal_event = isinstance(event, str) and event in {
+        "outcome",
+        "result",
+        "eval_result",
+    }
+    if is_terminal_event or status is not RunStatus.UNKNOWN:
         compact.has_outcome = True
 
     data = record.get("data")
@@ -1302,20 +1353,20 @@ def _update_compact_replay(
         _update_compact_metadata(compact, data)
     context = data.get("context")
     floor = None
+    floor_label = None
     if isinstance(context, dict):
-        floor = _first_integral_int(context, "global_floor")
-        if floor is None:
-            local_floor = _first_integral_int(context, "floor")
-            act = _first_integral_int(context, "act")
-            if local_floor is not None:
-                floor = (
-                    (act - 1) * 17 + local_floor
-                    if act is not None and act > 0
-                    else local_floor
-                )
+        local_floor = _first_integral_int(context, "floor")
+        act = _first_integral_int(context, "act")
+        if local_floor is not None:
+            floor = (
+                (act - 1) * 17 + local_floor
+                if act is not None and act > 0
+                else local_floor
+            )
+            floor_label = f"A{act or 1}F{local_floor}"
     if floor is None:
         floor = _first_integral_int(data, "global_floor", "floor")
-    _update_observed_floor(compact, floor)
+    _update_observed_floor(compact, floor, floor_label)
 
     nested_status, nested_victory, nested_technical_kind = _compact_status(data)
     if nested_status is not RunStatus.UNKNOWN:
@@ -1339,13 +1390,71 @@ def _finalize_compact(compact: _CompactRun) -> None:
         if not compact.has_outcome:
             compact.ended_at = compact.latest_timestamp
     elif compact.source_kind is SourceKind.REPLAY_JSONL:
-        floor_candidates = [
-            floor
-            for floor in (compact.observed_max_floor, compact.outcome_max_floor)
-            if floor is not None
-        ]
-        compact.max_global_floor = max(floor_candidates) if floor_candidates else None
+        compact.max_global_floor = compact.observed_max_floor
+        compact.max_floor_label = compact.observed_max_floor_label
         compact.ended_at = compact.latest_timestamp
+
+
+def _probe_compact_replay_capabilities(
+    compact: _CompactRun,
+    records: tuple[dict[str, Any], ...],
+    replay_parser: Callable[[list[dict], str | None], dict] | None,
+    source_name: str,
+) -> None:
+    """Probe parser-derived capability flags using only the bounded index prefix."""
+
+    if replay_parser is None:
+        return
+    try:
+        candidate = replay_parser(deepcopy(list(records)), source_name)
+    except Exception:
+        return
+    if not isinstance(candidate, dict):
+        return
+
+    compact.replay_parser_succeeded = True
+    rooms = candidate.get("rooms")
+    if not isinstance(rooms, list):
+        return
+    nodes = [node for node in rooms if isinstance(node, dict)]
+    compact.has_replay_nodes = bool(nodes)
+    for node in nodes:
+        _update_observed_floor(
+            compact,
+            _first_integral_int(node, "global_floor", "floor"),
+            _first_scalar_text(node, "label"),
+        )
+    summary = candidate.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    parser_max_floor = _first_integral_int(summary, "max_global_floor")
+    if (
+        parser_max_floor is not None
+        and (
+            compact.observed_max_floor is None
+            or parser_max_floor >= compact.observed_max_floor
+        )
+    ):
+        compact.max_global_floor = parser_max_floor
+        compact.max_floor_label = _first_scalar_text(summary, "max_floor_label")
+    else:
+        compact.max_global_floor = compact.observed_max_floor
+        compact.max_floor_label = compact.observed_max_floor_label
+    compact.has_node_decisions = any(
+        _compact_node_has_decision_evidence(node) for node in nodes
+    )
+    compact.usable_per_node_replay = any(
+        node.get("id") is not None
+        and _compact_node_has_decision_evidence(node)
+        for node in nodes
+    )
+
+
+def _compact_node_has_decision_evidence(node: dict[str, Any]) -> bool:
+    return any(
+        isinstance(node.get(key), list) and bool(node[key])
+        for key in ("actions", "decisions", "options", "choices")
+    )
 
 
 def _compact_status(

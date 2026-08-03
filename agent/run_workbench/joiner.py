@@ -40,7 +40,7 @@ def join_records(records: Iterable[RunRecord]) -> list[RunRecord]:
 
 
 def _merge_group(records: list[RunRecord]) -> RunRecord:
-    records = sorted(records, key=_record_key)
+    records = _deterministic_tie_records(records)
     if len(records) == 1:
         return records[0]
 
@@ -325,11 +325,23 @@ def _deterministic_evidence_records(
     return ordered
 
 
+def _deterministic_tie_records(records: Iterable[RunRecord]) -> list[RunRecord]:
+    lightweight_order = sorted(records, key=_record_key)
+    ordered: list[RunRecord] = []
+    for _, group in groupby(lightweight_order, key=_record_key):
+        tied = list(group)
+        if len(tied) > 1:
+            tied.sort(key=_record_evidence_digest)
+        ordered.extend(tied)
+    return ordered
+
+
 def _record_evidence_digest(record: RunRecord) -> bytes:
     digest = sha256()
     _update_structural_digest(digest, record.acts)
     _update_structural_digest(digest, record.nodes)
     _update_structural_digest(digest, record.replay_by_node)
+    _update_structural_digest(digest, record.warnings)
     return digest.digest()
 
 

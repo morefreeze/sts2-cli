@@ -498,7 +498,10 @@ def _status_from_record(
 
 def _is_terminal_replay_entry(row: dict[str, Any]) -> bool:
     data = row.get("data") if isinstance(row.get("data"), dict) else {}
-    if data.get("decision") == "game_over" or row.get("event") in {"outcome", "result"}:
+    event = row.get("event")
+    if data.get("decision") == "game_over" or (
+        isinstance(event, str) and event in {"outcome", "result", "eval_result"}
+    ):
         return True
     status, _, _ = _status_from_record(row)
     if status is not RunStatus.UNKNOWN:

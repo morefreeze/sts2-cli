@@ -260,6 +260,27 @@ def test_equal_scalar_keys_use_structural_tiebreaker_for_evidence_conflicts() ->
     assert any("conflicting replay data" in warning for warning in forward.warnings)
 
 
+def test_equal_scalar_warning_ties_have_deterministic_warning_order() -> None:
+    warning_a = RunRecord(
+        run_id="same",
+        source_id="same-source",
+        source_kind=SourceKind.DECK_HISTORY,
+        warnings=["warning-a"],
+    )
+    warning_b = RunRecord(
+        run_id="same",
+        source_id="same-source",
+        source_kind=SourceKind.DECK_HISTORY,
+        warnings=["warning-b"],
+    )
+
+    forward = join_records([warning_a, warning_b])[0]
+    reverse = join_records([warning_b, warning_a])[0]
+
+    assert forward.to_dict() == reverse.to_dict()
+    assert set(forward.warnings) == {"warning-a", "warning-b"}
+
+
 def test_conflicting_stable_evidence_is_deduplicated_with_provenance() -> None:
     native = RunRecord(
         run_id="same",

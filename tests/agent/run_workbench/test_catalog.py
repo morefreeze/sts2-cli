@@ -146,6 +146,49 @@ def test_malformed_jsonl_errors_are_bounded_with_exact_omitted_count(
     assert payload["source"]["errors_omitted"] == 9_996
 
 
+def test_non_scalar_jsonl_type_is_classified_without_crashing(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "non-scalar-type.jsonl",
+        [{"type": [], "event": [], "status": []}],
+    )
+
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    entry = catalog.list_sources()[0]
+
+    assert entry["source_kind"] == "unknown"
+    assert entry["open_mode"] == "error"
+    assert entry["record_count"] == 1
+    assert entry["errors"]
+
+
+def test_non_scalar_replay_event_and_status_are_ignored_safely(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "non-scalar-replay.jsonl",
+        [
+            {
+                "type": "state",
+                "run_id": "safe-run",
+                "event": [],
+                "status": [],
+                "data": {"context": {"act": 1, "floor": 1}},
+            },
+            {
+                "type": "state",
+                "run_id": "safe-run",
+                "status": "dead",
+                "data": {"context": {"act": 1, "floor": 2}},
+            },
+        ],
+    )
+
+    catalog = RunCatalog([tmp_path], replay_parser=parse_game_progress)
+    cohort = catalog.list_cohorts()[0]
+    run = catalog.get_cohort_records(cohort["cohort_id"])[0]
+
+    assert run.run_id == "safe-run"
+    assert run.outcome.status is RunStatus.DEAD
+
+
 def test_catalog_read_errors_keep_errno_but_never_expose_absolute_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1235,7 +1278,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
             }
             for index in range(2, count + 1)
         ]
-        result[-1].update({"status": "dead", "max_global_floor": 7})
+        result[-1].update({"status": "dead", "max_global_floor": 99})
         return result
 
     small_root = tmp_path / "small"
@@ -1260,7 +1303,11 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     assert large_run.coverage == small_run.coverage
     assert large_run.coverage.complete_run is False
     assert large_run.coverage.first_recorded_floor == 7
-    assert large_run.capabilities.visited_route is True
+    assert large_run.outcome == small_run.outcome
+    assert large_run.outcome.max_global_floor == 7
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.capabilities.decisions is True
+    assert large_run.capabilities.turn_replay is True
     expected_metadata = {
         "character": "Ironclad",
         "seed": "nested-seed",
@@ -1277,6 +1324,82 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     for key, value in expected_metadata.items():
         assert exact["metadata"][key] == value
     assert len(exact["nodes"]) == 1
+
+
+def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(
+    tmp_path: Path,
+) -> None:
+    def rows(count: int) -> list[dict]:
+        records = [
+            {
+                "type": "action",
+                "ts": 1,
+                "data": {
+                    "cmd": "start_run",
+                    "run_id": "mixed-run",
+                    "character": "Ironclad",
+                    "seed": "mixed-seed",
+                },
+            },
+            {
+                "type": "state",
+                "ts": 2,
+                "data": {
+                    "run_id": "mixed-run",
+                    "context": {"act": 1, "floor": 1, "room_type": "Map"},
+                },
+            },
+            {
+                "event": "eval_result",
+                "run_id": "mixed-run",
+                "status": "dead",
+                "max_global_floor": 99,
+                "ts": 3,
+            },
+        ]
+        records.extend(
+            {
+                "type": "state",
+                "data": {
+                    "run_id": "mixed-run",
+                    "context": {"act": 1, "floor": 7, "room_type": "Map"},
+                },
+            }
+            for _ in range(count - len(records))
+        )
+        return records
+
+    small_root = tmp_path / "small-mixed"
+    large_root = tmp_path / "large-mixed"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(511))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=parse_game_progress)
+    small_cohort = small.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+    small_metrics = small.get_metrics(small_cohort["cohort_id"])["current"]
+
+    large = RunCatalog([large_root], replay_parser=parse_game_progress)
+    large_cohort = large.list_cohorts()[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+    large_metrics = large.get_metrics(large_cohort["cohort_id"])["current"]
+
+    assert large_run.metadata == small_run.metadata
+    assert large_run.outcome == small_run.outcome
+    assert large_run.coverage == small_run.coverage
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.outcome.status is RunStatus.DEAD
+    assert large_run.outcome.max_global_floor == 7
+    assert large_run.coverage.complete_run is True
+    assert large_run.coverage.first_recorded_floor == 1
+    assert large_run.capabilities.decisions is True
+    assert large_run.capabilities.turn_replay is True
+    for metrics in (small_metrics, large_metrics):
+        for point in metrics["trend"]:
+            point.pop("source_id", None)
+    assert large_metrics == small_metrics
 
 
 def test_late_replay_id_conflict_matches_for_511_and_513_records(
