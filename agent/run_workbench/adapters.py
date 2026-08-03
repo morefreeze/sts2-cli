@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable
 
@@ -641,7 +642,9 @@ def _first_nonnegative_int(record: dict[str, Any], *keys: str) -> int | None:
 def _first_number(record: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
         value = record.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return float(value)
+        if isinstance(value, float) and math.isfinite(value):
             return float(value)
     return None
 
@@ -656,47 +659,32 @@ def _adapt_native_history(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
 
-    if any(isinstance(entry, list) for entry in value):
-        flattened: list[dict[str, Any]] = []
-        previous_node: dict[str, Any] | None = None
-        for act_index, act_nodes in enumerate(value):
-            if not isinstance(act_nodes, list):
-                continue
-            for node_index, node in enumerate(act_nodes):
-                if not isinstance(node, dict):
-                    continue
-                flattened.append(
-                    _annotate_native_node(
-                        node,
-                        previous_node,
-                        act_index=act_index,
-                        node_index=node_index,
-                    )
-                )
-                previous_node = node
-        return flattened
-
-    return _annotate_native_nodes(
-        [deepcopy(entry) for entry in value if isinstance(entry, dict)]
-    )
-
-
-def _annotate_native_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     previous_node: dict[str, Any] | None = None
     act_node_indices: dict[int, int] = {}
     annotated: list[dict[str, Any]] = []
-    for node in nodes:
-        act_index = _native_act_index(node)
-        node_index = act_node_indices.get(act_index, 0)
-        act_node_indices[act_index] = node_index + 1
-        enriched = _annotate_native_node(
-            node,
-            previous_node,
-            act_index=act_index,
-            node_index=node_index,
-        )
-        annotated.append(enriched)
-        previous_node = node
+    for outer_index, entry in enumerate(value):
+        if isinstance(entry, dict):
+            entries = [(_native_act_index(entry), entry)]
+        elif isinstance(entry, list):
+            entries = [
+                (outer_index, node)
+                for node in entry
+                if isinstance(node, dict)
+            ]
+        else:
+            continue
+        for act_index, node in entries:
+            node_index = act_node_indices.get(act_index, 0)
+            act_node_indices[act_index] = node_index + 1
+            annotated.append(
+                _annotate_native_node(
+                    node,
+                    previous_node,
+                    act_index=act_index,
+                    node_index=node_index,
+                )
+            )
+            previous_node = node
     return annotated
 
 
@@ -710,6 +698,7 @@ def _annotate_native_node(
     enriched = deepcopy(node)
     enriched["id"] = f"a{act_index}:n{node_index}"
     enriched["deltas"] = native_node_deltas(node, previous_node).to_dict()
+    _sanitize_delta_measurements(enriched)
     return enriched
 
 
@@ -735,6 +724,7 @@ def _annotate_replay_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         enriched["deltas"] = derive_snapshot_deltas(
             end_snapshot or {}, start_snapshot
         ).to_dict()
+        _sanitize_delta_measurements(enriched)
         annotated.append(enriched)
     return annotated
 
@@ -743,13 +733,90 @@ def _replay_room_snapshot(
     node: dict[str, Any], *, phase: str
 ) -> dict[str, Any] | None:
     player = node.get(f"{phase}_player")
-    if isinstance(player, dict):
-        return deepcopy(player)
+    player = player if isinstance(player, dict) else {}
     snapshot: dict[str, Any] = {}
-    hp_key = f"{phase}_hp"
-    if hp_key in node:
-        snapshot["hp"] = deepcopy(node[hp_key])
+    fields = (
+        ("hp", ("hp", "current_hp"), (f"{phase}_hp", f"{phase}_current_hp"), "number"),
+        ("max_hp", ("max_hp",), (f"{phase}_max_hp",), "number"),
+        (
+            "gold",
+            ("gold", "current_gold"),
+            (f"{phase}_gold", f"{phase}_current_gold"),
+            "number",
+        ),
+        ("deck", ("deck",), (f"{phase}_deck",), "list"),
+        ("relic_items", ("relic_items",), (f"{phase}_relic_items",), "list"),
+        ("relics", ("relics",), (f"{phase}_relics",), "list"),
+        ("potion_items", ("potion_items",), (f"{phase}_potion_items",), "list"),
+        ("potions", ("potions",), (f"{phase}_potions",), "list"),
+    )
+    for target, player_keys, room_keys, kind in fields:
+        value = _snapshot_field(player, player_keys, kind=kind)
+        if value is _MISSING:
+            value = _snapshot_field(node, room_keys, kind=kind)
+        if value is not _MISSING:
+            snapshot[target] = deepcopy(value)
     return snapshot or None
+
+
+_MISSING = object()
+
+
+def _snapshot_field(
+    record: dict[str, Any], keys: tuple[str, ...], *, kind: str
+) -> Any:
+    for key in keys:
+        if key not in record:
+            continue
+        value = record[key]
+        if kind == "number" and _is_finite_number(value):
+            return value
+        if kind == "list" and isinstance(value, list):
+            return value
+    return _MISSING
+
+
+def _is_finite_number(value: Any) -> bool:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _sanitize_delta_measurements(node: dict[str, Any]) -> None:
+    records = [node]
+    for key in ("player_stats",):
+        values = node.get(key)
+        if isinstance(values, list):
+            records.extend(value for value in values if isinstance(value, dict))
+    for key in ("start_player", "end_player", "player"):
+        value = node.get(key)
+        if isinstance(value, dict):
+            records.append(value)
+
+    measurement_keys = {
+        "hp",
+        "current_hp",
+        "max_hp",
+        "gold",
+        "current_gold",
+        "damage_taken",
+        "hp_healed",
+        "start_hp",
+        "end_hp",
+        "start_max_hp",
+        "end_max_hp",
+        "start_gold",
+        "end_gold",
+        "start_current_hp",
+        "end_current_hp",
+        "start_current_gold",
+        "end_current_gold",
+    }
+    for record in records:
+        for key in measurement_keys:
+            value = record.get(key)
+            if isinstance(value, float) and not math.isfinite(value):
+                record[key] = None
 
 
 def _node_has_decision_evidence(node: dict[str, Any]) -> bool:

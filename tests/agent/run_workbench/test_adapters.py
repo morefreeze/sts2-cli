@@ -1,10 +1,11 @@
+import math
 import json
 from pathlib import Path
 
 import pytest
 
 from agent.run_progress_viewer import parse_game_progress
-from agent.run_workbench.adapters import adapt_path
+from agent.run_workbench.adapters import adapt_path, adapt_records
 from agent.run_workbench.models import RunStatus, SourceKind
 
 
@@ -198,6 +199,44 @@ def test_native_nested_act_history_uses_act_local_stable_node_ids(
     }
 
 
+def test_native_mixed_flat_and_nested_history_retains_all_nodes_and_coverage(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "mixed-history.run"
+    path.write_text(
+        json.dumps(
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "acts": [{"act": 1}, {"act": 2}],
+                "map_point_history": [
+                    {
+                        "act_index": 0,
+                        "floor": 1,
+                        "player_stats": [{"current_hp": 80}],
+                    },
+                    [
+                        {
+                            "global_floor": 18,
+                            "player_stats": [{"current_hp": 75}],
+                        }
+                    ],
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(path).runs[0]
+
+    assert [node["id"] for node in run.nodes] == ["a0:n0", "a1:n0"]
+    assert [node.get("global_floor", node.get("floor")) for node in run.nodes] == [
+        1,
+        18,
+    ]
+    assert run.coverage.first_recorded_floor == 1
+    assert run.coverage.last_recorded_floor == 18
+
+
 def test_replay_room_deltas_are_derived_within_each_room() -> None:
     rooms = [
         {
@@ -294,6 +333,111 @@ def test_replay_room_with_missing_start_snapshot_has_unknown_changes() -> None:
         "quality": "unknown",
     }
     assert run.nodes[1]["deltas"]["gold_change"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+
+
+def test_replay_empty_player_objects_use_room_level_phase_snapshots() -> None:
+    room = {
+        "id": "room-with-fallbacks",
+        "start_player": {},
+        "end_player": {},
+        "start_hp": 20,
+        "end_hp": 15,
+        "start_max_hp": 70,
+        "end_max_hp": 72,
+        "start_gold": 5,
+        "end_gold": 7,
+        "start_deck": [],
+        "end_deck": [{"id": "CARD.BASH"}],
+        "start_relic_items": [],
+        "end_relic_items": [],
+        "start_potion_items": [],
+        "end_potion_items": [],
+    }
+
+    run = adapt_path(
+        FIXTURES / "replay.jsonl",
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": [room],
+        },
+    ).runs[0]
+    deltas = run.nodes[0]["deltas"]
+
+    assert deltas["hp_change"] == {"value": -5, "quality": "derived"}
+    assert deltas["max_hp_change"] == {"value": 2, "quality": "derived"}
+    assert deltas["gold_change"] == {"value": 2, "quality": "derived"}
+    assert deltas["cards_gained"] == {
+        "value": [{"id": "CARD.BASH"}],
+        "quality": "derived",
+    }
+    assert deltas["relics_gained"] == {"value": [], "quality": "derived"}
+    assert deltas["potions_gained"] == {"value": [], "quality": "derived"}
+
+
+def test_replay_empty_player_objects_without_fallbacks_stay_unknown() -> None:
+    run = adapt_path(
+        FIXTURES / "replay.jsonl",
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": [
+                {"id": "empty-room", "start_player": {}, "end_player": {}}
+            ],
+        },
+    ).runs[0]
+    deltas = run.nodes[0]["deltas"]
+
+    assert deltas["hp_change"] == {"value": None, "quality": "unknown"}
+    assert deltas["cards_gained"] == {"value": None, "quality": "unknown"}
+    assert deltas["relics_gained"] == {"value": None, "quality": "unknown"}
+
+
+@pytest.mark.parametrize("invalid", [math.nan, math.inf, -math.inf])
+def test_nonfinite_delta_measurements_do_not_drop_native_or_replay_runs(
+    invalid: float,
+) -> None:
+    native = adapt_records(
+        "nonfinite.run",
+        [
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "map_point_history": [
+                    {
+                        "player_stats": [
+                            {"current_hp": invalid, "damage_taken": invalid}
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+    replay = adapt_path(
+        FIXTURES / "replay.jsonl",
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": [
+                {
+                    "id": "nonfinite-room",
+                    "start_player": {"hp": 20},
+                    "end_player": {"hp": invalid},
+                }
+            ],
+        },
+    )
+
+    assert len(native.runs) == 1
+    assert native.runs[0].nodes[0]["deltas"]["hp_after"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert native.runs[0].nodes[0]["deltas"]["damage_taken"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert len(replay.runs) == 1
+    assert replay.runs[0].nodes[0]["deltas"]["hp_change"] == {
         "value": None,
         "quality": "unknown",
     }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, fields
-import json
+import math
 from typing import Any
 
 from .models import DeltaQuality, RunDelta
@@ -198,7 +198,9 @@ def _native_player_stats(
 
 
 def _number(value: Any) -> int | float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
         return value
     return None
 
@@ -232,7 +234,8 @@ def _subtract(current: RunDelta, previous: RunDelta) -> RunDelta:
     previous_value = _number(previous.value)
     if current_value is None or previous_value is None:
         return _unknown()
-    return _derived(current_value - previous_value)
+    difference = _number(current_value - previous_value)
+    return _derived(difference) if difference is not None else _unknown()
 
 
 def _native_event_list(
@@ -275,17 +278,22 @@ def _picked_choices(choices: list[Any]) -> list[Any] | None:
         "was_picked",
         "was_chosen",
     )
-    has_selection_markers = any(
-        isinstance(choice, dict) and any(key in choice for key in selection_keys)
-        for choice in choices
-    )
-    if not has_selection_markers:
+    selections: list[bool] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            return None
+        markers = [choice[key] for key in selection_keys if key in choice]
+        if not markers or any(type(marker) is not bool for marker in markers):
+            return None
+        if any(marker != markers[0] for marker in markers[1:]):
+            return None
+        selections.append(markers[0])
+    if not selections:
         return None
     return [
         deepcopy(choice)
-        for choice in choices
-        if isinstance(choice, dict)
-        and any(bool(choice.get(key)) for key in selection_keys)
+        for choice, selected in zip(choices, selections)
+        if selected
     ]
 
 
@@ -347,11 +355,47 @@ def _derived_inventory_gain(
 
 def _item_identity(item: Any) -> str:
     if isinstance(item, dict):
-        for key in ("id", "card_id", "relic_id", "potion_id", "model_id", "name"):
-            value = item.get(key)
-            if isinstance(value, (str, int)) and not isinstance(value, bool):
-                return f"{key}:{value}"
-    return json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        for key in ("id", "card_id", "relic_id", "potion_id", "model_id"):
+            if key not in item:
+                continue
+            identifier = _canonical_identifier(item[key])
+            if identifier is not None:
+                return f"model:{identifier}"
+        # Display names are deliberately excluded: localization changes must
+        # not appear as inventory churn when no model identifier is available.
+        return "anonymous:dict"
+    identifier = _canonical_identifier(item)
+    if identifier is not None:
+        return f"scalar:{identifier}"
+    return f"anonymous:{type(item).__name__}"
+
+
+def _canonical_identifier(value: Any, *, depth: int = 0) -> str | None:
+    if depth > 4:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        return f"str:{normalized}" if normalized else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"int:{value}"
+    if isinstance(value, dict):
+        for key in (
+            "id",
+            "card_id",
+            "relic_id",
+            "potion_id",
+            "model_id",
+            "key",
+            "value",
+            "text_key",
+            "TextKey",
+        ):
+            if key not in value:
+                continue
+            identifier = _canonical_identifier(value[key], depth=depth + 1)
+            if identifier is not None:
+                return identifier
+    return None
 
 
 def _multiset_difference(
@@ -379,34 +423,133 @@ def _multiset_difference(
 def _card_differences(
     current: list[Any], previous: list[Any]
 ) -> tuple[list[Any], list[Any], list[Any]]:
-    previous_by_identity: dict[str, list[Any]] = defaultdict(list)
-    current_by_identity: dict[str, list[Any]] = defaultdict(list)
-    for card in previous:
-        previous_by_identity[_item_identity(card)].append(card)
-    for card in current:
-        current_by_identity[_item_identity(card)].append(card)
+    old_remaining = list(previous)
+    new_remaining = list(current)
+    old_matched: set[int] = set()
+    new_matched: set[int] = set()
+    upgraded: list[Any] = []
+
+    old_instances = _unique_instance_indices(old_remaining)
+    new_instances = _unique_instance_indices(new_remaining)
+    for instance_id in old_instances:
+        if instance_id not in new_instances:
+            continue
+        old_index = old_instances[instance_id]
+        new_index = new_instances[instance_id]
+        old_matched.add(old_index)
+        new_matched.add(new_index)
+        if _is_explicit_upgrade(old_remaining[old_index], new_remaining[new_index]):
+            upgraded.append(deepcopy(new_remaining[new_index]))
+
+    old_by_model: dict[str, list[Any]] = defaultdict(list)
+    new_by_model: dict[str, list[Any]] = defaultdict(list)
+    for index, card in enumerate(old_remaining):
+        if index not in old_matched:
+            old_by_model[_item_identity(card)].append(card)
+    for index, card in enumerate(new_remaining):
+        if index not in new_matched:
+            new_by_model[_item_identity(card)].append(card)
 
     gained: list[Any] = []
     removed: list[Any] = []
-    upgraded: list[Any] = []
-    identities = dict.fromkeys(
-        [*previous_by_identity.keys(), *current_by_identity.keys()]
-    )
-    for identity in identities:
-        old_cards = previous_by_identity.get(identity, [])
-        new_cards = current_by_identity.get(identity, [])
-        paired = min(len(old_cards), len(new_cards))
-        for old_card, new_card in zip(old_cards[:paired], new_cards[:paired]):
-            if (
-                isinstance(old_card, dict)
-                and isinstance(new_card, dict)
-                and not bool(old_card.get("upgraded"))
-                and bool(new_card.get("upgraded"))
-            ):
-                upgraded.append(deepcopy(new_card))
-        gained.extend(deepcopy(new_cards[paired:]))
-        removed.extend(deepcopy(old_cards[paired:]))
+    model_ids = dict.fromkeys([*old_by_model.keys(), *new_by_model.keys()])
+    for model_id in model_ids:
+        old_cards = old_by_model.get(model_id, [])
+        new_cards = new_by_model.get(model_id, [])
+        old_total = len(old_cards)
+        new_total = len(new_cards)
+        if old_total == new_total:
+            upgraded.extend(_conservative_model_upgrades(old_cards, new_cards))
+            continue
+        if new_total > old_total:
+            candidates = _state_surplus(new_cards, old_cards)
+            gained.extend(deepcopy(candidates[: new_total - old_total]))
+        else:
+            candidates = _state_surplus(old_cards, new_cards)
+            removed.extend(deepcopy(candidates[: old_total - new_total]))
     return gained, removed, upgraded
+
+
+def _unique_instance_indices(cards: list[Any]) -> dict[str, int]:
+    indices: dict[str, list[int]] = defaultdict(list)
+    for index, card in enumerate(cards):
+        instance_id = _card_instance_identity(card)
+        if instance_id is not None:
+            indices[instance_id].append(index)
+    return {
+        instance_id: positions[0]
+        for instance_id, positions in indices.items()
+        if len(positions) == 1
+    }
+
+
+def _card_instance_identity(card: Any) -> str | None:
+    if not isinstance(card, dict):
+        return None
+    for key in ("instance_id", "card_instance_id", "uuid", "unique_id", "entity_id"):
+        if key not in card:
+            continue
+        identifier = _canonical_identifier(card[key])
+        if identifier is not None:
+            return f"instance:{identifier}"
+    return None
+
+
+def _card_upgrade_state(card: Any) -> bool | None:
+    if not isinstance(card, dict):
+        return None
+    if "upgraded" in card:
+        return card["upgraded"] if type(card["upgraded"]) is bool else None
+    level = card.get("current_upgrade_level")
+    if isinstance(level, int) and not isinstance(level, bool):
+        return level > 0
+    if isinstance(level, float) and math.isfinite(level):
+        return level > 0
+    return None
+
+
+def _is_explicit_upgrade(previous: Any, current: Any) -> bool:
+    return (
+        _card_upgrade_state(previous) is False
+        and _card_upgrade_state(current) is True
+    )
+
+
+def _conservative_model_upgrades(
+    previous: list[Any], current: list[Any]
+) -> list[Any]:
+    old_states = [_card_upgrade_state(card) for card in previous]
+    new_states = [_card_upgrade_state(card) for card in current]
+    if any(state is None for state in [*old_states, *new_states]):
+        return []
+    old_false = old_states.count(False)
+    old_true = old_states.count(True)
+    new_false = new_states.count(False)
+    new_true = new_states.count(True)
+    transition_count = old_false - new_false
+    if transition_count <= 0 or new_true - old_true != transition_count:
+        return []
+    unmatched_true = max(0, new_true - old_true)
+    candidates = [
+        deepcopy(card)
+        for card in current
+        if _card_upgrade_state(card) is True
+    ]
+    return candidates[:unmatched_true]
+
+
+def _state_surplus(primary: list[Any], comparison: list[Any]) -> list[Any]:
+    available: dict[bool | None, int] = defaultdict(int)
+    for card in comparison:
+        available[_card_upgrade_state(card)] += 1
+    surplus: list[Any] = []
+    for card in primary:
+        state = _card_upgrade_state(card)
+        if available[state] > 0:
+            available[state] -= 1
+        else:
+            surplus.append(card)
+    return surplus
 
 
 def _derived(value: Any) -> RunDelta:
