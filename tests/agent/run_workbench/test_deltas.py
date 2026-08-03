@@ -419,3 +419,125 @@ def test_snapshot_identity_aliases_and_localized_names_do_not_fake_changes() -> 
     assert result["cards_removed"]["value"] == []
     assert result["relics_gained"]["value"] == []
     assert result["potions_gained"]["value"] == []
+
+
+def test_snapshot_localized_ids_and_scalar_object_aliases_share_identity() -> None:
+    result = _as_dict(
+        derive_snapshot_deltas(
+            {
+                "relic_items": [
+                    {"id": {"en": "RELIC.A"}},
+                    {"id": {"en": "RELIC.C"}},
+                ],
+                "potion_items": [{"id": "POTION.ANCHOR"}],
+            },
+            {
+                "relic_items": [
+                    {"id": {"en": "RELIC.A"}},
+                    {"id": {"en": "RELIC.B"}},
+                ],
+                "potion_items": ["POTION.ANCHOR"],
+            },
+        )
+    )
+
+    assert result["relics_gained"] == {
+        "value": [{"id": {"en": "RELIC.C"}}],
+        "quality": "derived",
+    }
+    assert result["potions_gained"] == {"value": [], "quality": "derived"}
+
+
+def test_unidentifiable_inventory_and_cards_produce_unknown_differences() -> None:
+    result = _as_dict(
+        derive_snapshot_deltas(
+            {
+                "deck": [{"name": "Mystery B", "upgraded": True}],
+                "relic_items": [{"name": "Mystery Relic B"}],
+            },
+            {
+                "deck": [{"name": "Mystery A", "upgraded": False}],
+                "relic_items": [{"name": "Mystery Relic A"}],
+            },
+        )
+    )
+
+    assert result["cards_gained"] == {"value": None, "quality": "unknown"}
+    assert result["cards_removed"] == {"value": None, "quality": "unknown"}
+    assert result["cards_upgraded"] == {"value": None, "quality": "unknown"}
+    assert result["relics_gained"] == {"value": None, "quality": "unknown"}
+
+
+def test_card_counts_report_minimum_certain_upgrades_with_net_churn() -> None:
+    gained_copy = _as_dict(
+        derive_snapshot_deltas(
+            {
+                "deck": [
+                    {"id": "CARD.X", "upgraded": True},
+                    {"id": "CARD.X", "upgraded": True},
+                ]
+            },
+            {"deck": [{"id": "CARD.X", "upgraded": False}]},
+        )
+    )
+    removed_copy = _as_dict(
+        derive_snapshot_deltas(
+            {"deck": [{"id": "CARD.X", "upgraded": True}]},
+            {
+                "deck": [
+                    {"id": "CARD.X", "upgraded": False},
+                    {"id": "CARD.X", "upgraded": False},
+                ]
+            },
+        )
+    )
+
+    assert len(gained_copy["cards_gained"]["value"]) == 1
+    assert len(gained_copy["cards_upgraded"]["value"]) == 1
+    assert len(removed_copy["cards_removed"]["value"]) == 1
+    assert len(removed_copy["cards_upgraded"]["value"]) == 1
+
+
+def test_unknown_card_upgrade_state_keeps_upgrade_delta_unknown() -> None:
+    result = _as_dict(
+        derive_snapshot_deltas(
+            {"deck": [{"id": "CARD.X"}]},
+            {"deck": [{"id": "CARD.X"}]},
+        )
+    )
+
+    assert result["cards_gained"] == {"value": [], "quality": "derived"}
+    assert result["cards_removed"] == {"value": [], "quality": "derived"}
+    assert result["cards_upgraded"] == {"value": None, "quality": "unknown"}
+
+
+def test_nested_nonfinite_exact_and_derived_values_become_unknown() -> None:
+    native = _as_dict(
+        native_node_deltas(
+            {
+                "player_stats": [
+                    {
+                        "cards_gained": [{"id": "CARD.X", "score": math.nan}],
+                        "relic_choices": [
+                            {
+                                "choice": "RELIC.X",
+                                "was_picked": True,
+                                "score": math.inf,
+                            }
+                        ],
+                    }
+                ]
+            },
+            None,
+        )
+    )
+    replay = _as_dict(
+        derive_snapshot_deltas(
+            {"deck": [{"id": "CARD.X", "score": math.inf}]},
+            {"deck": []},
+        )
+    )
+
+    assert native["cards_gained"] == {"value": None, "quality": "unknown"}
+    assert native["relics_gained"] == {"value": None, "quality": "unknown"}
+    assert replay["cards_gained"] == {"value": None, "quality": "unknown"}

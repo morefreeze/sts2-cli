@@ -151,12 +151,14 @@ def derive_snapshot_deltas(
         current_deck = _observed_list(current, "deck")
         previous_deck = _observed_list(previous, "deck")
         if current_deck is not None and previous_deck is not None:
-            gained, removed, upgraded = _card_differences(
-                current_deck, previous_deck
-            )
-            cards_gained = _derived(gained)
-            cards_removed = _derived(removed)
-            cards_upgraded = _derived(upgraded)
+            differences = _card_differences(current_deck, previous_deck)
+            if differences is not None:
+                gained, removed, upgraded = differences
+                cards_gained = _derived(gained)
+                cards_removed = _derived(removed)
+                cards_upgraded = (
+                    _derived(upgraded) if upgraded is not None else _unknown()
+                )
 
     relics_gained = _derived_inventory_gain(
         current,
@@ -210,7 +212,7 @@ def _exact_number(record: dict[str, Any], *keys: str) -> RunDelta:
         if key in record:
             value = _number(record[key])
             return (
-                RunDelta(value=deepcopy(value), quality=DeltaQuality.EXACT)
+                _safe_delta(value, DeltaQuality.EXACT)
                 if value is not None
                 else _unknown()
             )
@@ -222,7 +224,7 @@ def _derived_observation(record: dict[str, Any], *keys: str) -> RunDelta:
         if key in record:
             value = _number(record[key])
             return (
-                RunDelta(value=deepcopy(value), quality=DeltaQuality.DERIVED)
+                _safe_delta(value, DeltaQuality.DERIVED)
                 if value is not None
                 else _unknown()
             )
@@ -244,7 +246,7 @@ def _native_event_list(
     value = _first_present(stats, node, keys=keys)
     if value is _MISSING or not isinstance(value, list):
         return _unknown()
-    return RunDelta(value=deepcopy(value), quality=DeltaQuality.EXACT)
+    return _safe_delta(value, DeltaQuality.EXACT)
 
 
 def _native_gain_list(
@@ -258,7 +260,7 @@ def _native_gain_list(
     if explicit is not _MISSING:
         if not isinstance(explicit, list):
             return _unknown()
-        return RunDelta(value=deepcopy(explicit), quality=DeltaQuality.EXACT)
+        return _safe_delta(explicit, DeltaQuality.EXACT)
 
     choices = _first_present(stats, node, keys=(choice_key,))
     if choices is _MISSING or not isinstance(choices, list):
@@ -266,7 +268,7 @@ def _native_gain_list(
     picked = _picked_choices(choices)
     if picked is None:
         return _unknown()
-    return RunDelta(value=picked, quality=DeltaQuality.EXACT)
+    return _safe_delta(picked, DeltaQuality.EXACT)
 
 
 def _picked_choices(choices: list[Any]) -> list[Any] | None:
@@ -349,25 +351,40 @@ def _derived_inventory_gain(
     previous_items = _preferred_observed_list(previous, preferred_key, fallback_key)
     if current_items is None or previous_items is None:
         return _unknown()
-    gained, _ = _multiset_difference(current_items, previous_items)
+    differences = _multiset_difference(current_items, previous_items)
+    if differences is None:
+        return _unknown()
+    gained, _ = differences
     return _derived(gained)
 
 
-def _item_identity(item: Any) -> str:
+def _item_identity(item: Any) -> str | None:
     if isinstance(item, dict):
         for key in ("id", "card_id", "relic_id", "potion_id", "model_id"):
             if key not in item:
                 continue
             identifier = _canonical_identifier(item[key])
             if identifier is not None:
-                return f"model:{identifier}"
+                return f"identity:{identifier}"
+        for key in (
+            "instance_id",
+            "card_instance_id",
+            "uuid",
+            "unique_id",
+            "entity_id",
+        ):
+            if key not in item:
+                continue
+            identifier = _canonical_identifier(item[key])
+            if identifier is not None:
+                return f"instance:{identifier}"
         # Display names are deliberately excluded: localization changes must
         # not appear as inventory churn when no model identifier is available.
-        return "anonymous:dict"
+        return None
     identifier = _canonical_identifier(item)
     if identifier is not None:
-        return f"scalar:{identifier}"
-    return f"anonymous:{type(item).__name__}"
+        return f"identity:{identifier}"
+    return None
 
 
 def _canonical_identifier(value: Any, *, depth: int = 0) -> str | None:
@@ -389,6 +406,7 @@ def _canonical_identifier(value: Any, *, depth: int = 0) -> str | None:
             "value",
             "text_key",
             "TextKey",
+            "en",
         ):
             if key not in value:
                 continue
@@ -400,14 +418,19 @@ def _canonical_identifier(value: Any, *, depth: int = 0) -> str | None:
 
 def _multiset_difference(
     current: list[Any], previous: list[Any]
-) -> tuple[list[Any], list[Any]]:
+) -> tuple[list[Any], list[Any]] | None:
     remaining_previous: dict[str, list[Any]] = defaultdict(list)
     for item in previous:
-        remaining_previous[_item_identity(item)].append(item)
+        identity = _item_identity(item)
+        if identity is None:
+            return None
+        remaining_previous[identity].append(item)
 
     gained: list[Any] = []
     for item in current:
         identity = _item_identity(item)
+        if identity is None:
+            return None
         candidates = remaining_previous.get(identity)
         if candidates:
             candidates.pop(0)
@@ -422,12 +445,18 @@ def _multiset_difference(
 
 def _card_differences(
     current: list[Any], previous: list[Any]
-) -> tuple[list[Any], list[Any], list[Any]]:
+) -> tuple[list[Any], list[Any], list[Any] | None] | None:
+    identities = [_item_identity(card) for card in [*previous, *current]]
+    if any(identity is None for identity in identities):
+        return None
+    states_known = all(
+        _card_upgrade_state(card) is not None for card in [*previous, *current]
+    )
     old_remaining = list(previous)
     new_remaining = list(current)
     old_matched: set[int] = set()
     new_matched: set[int] = set()
-    upgraded: list[Any] = []
+    upgraded: list[Any] | None = [] if states_known else None
 
     old_instances = _unique_instance_indices(old_remaining)
     new_instances = _unique_instance_indices(new_remaining)
@@ -438,17 +467,23 @@ def _card_differences(
         new_index = new_instances[instance_id]
         old_matched.add(old_index)
         new_matched.add(new_index)
-        if _is_explicit_upgrade(old_remaining[old_index], new_remaining[new_index]):
+        if upgraded is not None and _is_explicit_upgrade(
+            old_remaining[old_index], new_remaining[new_index]
+        ):
             upgraded.append(deepcopy(new_remaining[new_index]))
 
     old_by_model: dict[str, list[Any]] = defaultdict(list)
     new_by_model: dict[str, list[Any]] = defaultdict(list)
     for index, card in enumerate(old_remaining):
         if index not in old_matched:
-            old_by_model[_item_identity(card)].append(card)
+            identity = _item_identity(card)
+            assert identity is not None
+            old_by_model[identity].append(card)
     for index, card in enumerate(new_remaining):
         if index not in new_matched:
-            new_by_model[_item_identity(card)].append(card)
+            identity = _item_identity(card)
+            assert identity is not None
+            new_by_model[identity].append(card)
 
     gained: list[Any] = []
     removed: list[Any] = []
@@ -458,15 +493,25 @@ def _card_differences(
         new_cards = new_by_model.get(model_id, [])
         old_total = len(old_cards)
         new_total = len(new_cards)
-        if old_total == new_total:
-            upgraded.extend(_conservative_model_upgrades(old_cards, new_cards))
-            continue
+        gain_indices: list[int] = []
         if new_total > old_total:
-            candidates = _state_surplus(new_cards, old_cards)
-            gained.extend(deepcopy(candidates[: new_total - old_total]))
-        else:
-            candidates = _state_surplus(old_cards, new_cards)
-            removed.extend(deepcopy(candidates[: old_total - new_total]))
+            gain_indices = _state_surplus_indices(new_cards, old_cards)[
+                : new_total - old_total
+            ]
+            gained.extend(deepcopy(new_cards[index]) for index in gain_indices)
+        elif old_total > new_total:
+            removal_indices = _state_surplus_indices(old_cards, new_cards)[
+                : old_total - new_total
+            ]
+            removed.extend(deepcopy(old_cards[index]) for index in removal_indices)
+        if upgraded is not None:
+            upgraded.extend(
+                _minimum_certain_model_upgrades(
+                    old_cards,
+                    new_cards,
+                    gained_indices=set(gain_indices),
+                )
+            )
     return gained, removed, upgraded
 
 
@@ -515,42 +560,61 @@ def _is_explicit_upgrade(previous: Any, current: Any) -> bool:
     )
 
 
-def _conservative_model_upgrades(
-    previous: list[Any], current: list[Any]
+def _minimum_certain_model_upgrades(
+    previous: list[Any],
+    current: list[Any],
+    *,
+    gained_indices: set[int],
 ) -> list[Any]:
     old_states = [_card_upgrade_state(card) for card in previous]
     new_states = [_card_upgrade_state(card) for card in current]
-    if any(state is None for state in [*old_states, *new_states]):
-        return []
+    assert all(state is not None for state in [*old_states, *new_states])
     old_false = old_states.count(False)
     old_true = old_states.count(True)
     new_false = new_states.count(False)
     new_true = new_states.count(True)
-    transition_count = old_false - new_false
-    if transition_count <= 0 or new_true - old_true != transition_count:
+    net_gained = max(0, len(current) - len(previous))
+    net_removed = max(0, len(previous) - len(current))
+    transition_count = max(
+        0,
+        new_true - old_true - net_gained,
+        old_false - new_false - net_removed,
+    )
+    if transition_count == 0:
         return []
-    unmatched_true = max(0, new_true - old_true)
-    candidates = [
-        deepcopy(card)
-        for card in current
-        if _card_upgrade_state(card) is True
+    remaining_true = [
+        card
+        for index, card in enumerate(current)
+        if index not in gained_indices and _card_upgrade_state(card) is True
     ]
-    return candidates[:unmatched_true]
+    candidates = remaining_true[min(old_true, len(remaining_true)) :]
+    return deepcopy(candidates[:transition_count])
 
 
-def _state_surplus(primary: list[Any], comparison: list[Any]) -> list[Any]:
+def _state_surplus_indices(
+    primary: list[Any], comparison: list[Any]
+) -> list[int]:
     available: dict[bool | None, int] = defaultdict(int)
     for card in comparison:
         available[_card_upgrade_state(card)] += 1
-    surplus: list[Any] = []
-    for card in primary:
+    surplus: list[int] = []
+    for index, card in enumerate(primary):
         state = _card_upgrade_state(card)
         if available[state] > 0:
             available[state] -= 1
         else:
-            surplus.append(card)
+            surplus.append(index)
     return surplus
 
 
 def _derived(value: Any) -> RunDelta:
-    return RunDelta(value=deepcopy(value), quality=DeltaQuality.DERIVED)
+    return _safe_delta(value, DeltaQuality.DERIVED)
+
+
+def _safe_delta(value: Any, quality: DeltaQuality) -> RunDelta:
+    candidate = RunDelta(value=deepcopy(value), quality=quality)
+    try:
+        candidate.to_dict()
+    except (TypeError, ValueError):
+        return _unknown()
+    return candidate

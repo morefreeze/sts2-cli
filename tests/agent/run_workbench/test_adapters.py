@@ -443,6 +443,65 @@ def test_nonfinite_delta_measurements_do_not_drop_native_or_replay_runs(
     }
 
 
+def test_nested_nonfinite_delta_lists_do_not_drop_native_or_replay_runs() -> None:
+    native = adapt_records(
+        "nested-nonfinite.run",
+        [
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "map_point_history": [
+                    {
+                        "player_stats": [
+                            {
+                                "cards_gained": [
+                                    {"id": "CARD.X", "score": math.nan}
+                                ],
+                                "potion_choices": [
+                                    {
+                                        "choice": "POTION.X",
+                                        "was_picked": True,
+                                        "score": math.inf,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+    replay = adapt_path(
+        FIXTURES / "replay.jsonl",
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": [
+                {
+                    "id": "nested-nonfinite-room",
+                    "start_player": {"deck": []},
+                    "end_player": {
+                        "deck": [{"id": "CARD.X", "score": math.inf}]
+                    },
+                }
+            ],
+        },
+    )
+
+    assert len(native.runs) == 1
+    assert native.runs[0].nodes[0]["deltas"]["cards_gained"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert native.runs[0].nodes[0]["deltas"]["potions_gained"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert len(replay.runs) == 1
+    assert replay.runs[0].nodes[0]["deltas"]["cards_gained"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+
+
 def test_replay_top_level_run_id_wins_over_nested_conflict_with_warning(
     tmp_path: Path,
 ) -> None:

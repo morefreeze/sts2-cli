@@ -15,6 +15,7 @@ from .models import (
     Coverage,
     RunMetadata,
     RunOutcome,
+    RunDelta,
     RunRecord,
     RunStatus,
     SourceKind,
@@ -812,11 +813,51 @@ def _sanitize_delta_measurements(node: dict[str, Any]) -> None:
         "start_current_gold",
         "end_current_gold",
     }
+    delta_value_keys = {
+        "cards_gained",
+        "cards_removed",
+        "cards_transformed",
+        "cards_enchanted",
+        "cards_upgraded",
+        "upgraded_cards",
+        "relic_choices",
+        "relics_gained",
+        "potion_choices",
+        "potions_gained",
+        "potions_used",
+        "potions_discarded",
+        "deck",
+        "relic_items",
+        "relics",
+        "potion_items",
+        "potions",
+        "start_deck",
+        "end_deck",
+        "start_relic_items",
+        "end_relic_items",
+        "start_relics",
+        "end_relics",
+        "start_potion_items",
+        "end_potion_items",
+        "start_potions",
+        "end_potions",
+    }
     for record in records:
         for key in measurement_keys:
             value = record.get(key)
             if isinstance(value, float) and not math.isfinite(value):
                 record[key] = None
+        for key in delta_value_keys:
+            if key in record and not _is_safe_delta_value(record[key]):
+                record[key] = None
+
+
+def _is_safe_delta_value(value: Any) -> bool:
+    try:
+        RunDelta(value=value).to_dict()
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _node_has_decision_evidence(node: dict[str, Any]) -> bool:
