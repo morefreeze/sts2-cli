@@ -112,9 +112,15 @@ def test_unknown_and_in_progress_are_reported_as_excluded():
 
 def test_include_technical_adds_only_floor_bearing_failures_to_distribution():
     records = [
-        _run("dead", floor=21),
-        _run("crash", status=RunStatus.CRASH, floor=3, seed="b"),
-        _run("timeout", status=RunStatus.TIMEOUT, floor=None, seed="c"),
+        _run("dead", floor=21, ended_at=1),
+        _run("crash", status=RunStatus.CRASH, floor=3, seed="b", ended_at=2),
+        _run(
+            "timeout",
+            status=RunStatus.TIMEOUT,
+            floor=None,
+            seed="c",
+            ended_at=3,
+        ),
     ]
 
     summary = summarize_cohort(records, include_technical=True)
@@ -131,6 +137,13 @@ def test_include_technical_adds_only_floor_bearing_failures_to_distribution():
     assert summary.act2_entry_denominator == 1
     assert summary.act2_entry_rate == 1.0
     assert [(point.global_floor, point.count) for point in summary.histogram] == [(3, 1), (21, 1)]
+    assert [point.run_id for point in summary.trend] == ["dead", "crash", "timeout"]
+    assert [point.global_floor for point in summary.trend] == [21, 3, None]
+    assert [point.cumulative_avg_global_floor for point in summary.trend] == [
+        21.0,
+        12.0,
+        12.0,
+    ]
 
 
 def test_histogram_funnel_and_trend_are_immutable_and_deterministic():
@@ -159,20 +172,39 @@ def test_histogram_funnel_and_trend_are_immutable_and_deterministic():
     assert (funnel["completion"].count, funnel["completion"].denominator) == (1, 5)
     assert [point.run_id for point in summary.trend] == [
         "early",
-        "late",
-        "win",
         "fallback-a",
         "fallback-b",
+        "late",
+        "win",
     ]
     assert [point.cumulative_avg_global_floor for point in summary.trend] == [
         17.0,
-        26.0,
-        pytest.approx(34.333333333333336),
-        30.25,
+        17.5,
+        pytest.approx(17.666666666666668),
+        22.0,
         27.8,
     ]
     with pytest.raises(AttributeError):
         summary.histogram[0].count = 2
+
+
+def test_trend_uses_started_at_as_chronological_fallback_and_puts_missing_last():
+    summary = summarize_cohort(
+        [
+            _run("ended", floor=4, ended_at=4, source_id="z"),
+            _run("started", floor=2, started_at=2, source_id="z", seed="b"),
+            _run("missing-b", floor=8, source_id="b", seed="c"),
+            _run("missing-a", floor=6, source_id="a", seed="d"),
+        ]
+    )
+
+    assert [point.timestamp for point in summary.trend] == [2.0, 4.0, None, None]
+    assert [point.run_id for point in summary.trend] == [
+        "started",
+        "ended",
+        "missing-a",
+        "missing-b",
+    ]
 
 
 def test_summary_consumes_generator_once_and_is_json_safe():

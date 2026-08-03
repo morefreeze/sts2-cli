@@ -2,9 +2,10 @@
 
 ``valid_n`` always means completed gameplay outcomes (wins and deaths).  The
 optional ``include_technical`` flag only expands the floor distribution and
-trend with floor-bearing technical failures; it never changes gameplay or win
-denominators.  ``valid_floor_n`` is the gameplay-only floor denominator, while
-``floor_n`` is the number of points in the selected floor distribution.
+histogram with floor-bearing technical failures, while the trend retains all
+technical failures.  It never changes gameplay or win denominators.
+``valid_floor_n`` is the gameplay-only floor denominator, while ``floor_n`` is
+the number of points in the selected floor distribution.
 """
 
 from __future__ import annotations
@@ -117,16 +118,20 @@ def _finite_timestamp(value: object) -> float | None:
 
 
 def _trend_sort_key(record: RunRecord) -> tuple[object, ...]:
-    ended_at = _finite_timestamp(record.metadata.ended_at)
-    started_at = _finite_timestamp(record.metadata.started_at)
+    timestamp = _effective_timestamp(record)
     return (
-        ended_at is None,
-        ended_at if ended_at is not None else 0.0,
-        started_at is None,
-        started_at if started_at is not None else 0.0,
+        timestamp is None,
+        timestamp if timestamp is not None else 0.0,
         record.source_id,
         record.run_id,
     )
+
+
+def _effective_timestamp(record: RunRecord) -> float | None:
+    ended_at = _finite_timestamp(record.metadata.ended_at)
+    if ended_at is not None:
+        return ended_at
+    return _finite_timestamp(record.metadata.started_at)
 
 
 def summarize_cohort(
@@ -192,22 +197,18 @@ def summarize_cohort(
 
     trend_records: tuple[RunRecord, ...] = valid
     if include_technical:
-        trend_records += technical_with_floor
+        trend_records += technical
     cumulative_floors: list[int] = []
     trend_points: list[TrendPoint] = []
     for record in sorted(trend_records, key=_trend_sort_key):
         floor = record.outcome.max_global_floor
         if floor is not None:
             cumulative_floors.append(floor)
-        ended_at = _finite_timestamp(record.metadata.ended_at)
-        timestamp = ended_at
-        if timestamp is None:
-            timestamp = _finite_timestamp(record.metadata.started_at)
         trend_points.append(
             TrendPoint(
                 run_id=record.run_id,
                 source_id=record.source_id,
-                timestamp=timestamp,
+                timestamp=_effective_timestamp(record),
                 status=record.outcome.status.value,
                 global_floor=floor,
                 cumulative_avg_global_floor=(
