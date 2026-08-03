@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from .deltas import derive_snapshot_deltas, native_node_deltas
 from .models import (
     Capabilities,
     Coverage,
@@ -124,7 +125,7 @@ def adapt_records(
 def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
     players = record.get("players")
     player = players[0] if isinstance(players, list) and players and isinstance(players[0], dict) else {}
-    nodes = _dict_list(record.get("map_point_history"))
+    nodes = _adapt_native_history(record.get("map_point_history"))
     acts = _dict_list(record.get("acts"))
     floors = _node_floors(nodes)
     status, victory, technical_kind = _status_from_record(record)
@@ -200,7 +201,7 @@ def _adapt_replay(
             errors.append(f"{path.name}: replay parser failed: {error}")
 
     summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
-    nodes = _dict_list(parsed.get("rooms"))
+    nodes = _annotate_replay_nodes(_dict_list(parsed.get("rooms")))
     observed_floors = _observed_replay_floors(records)
     observed_floors.extend(_node_floors(nodes))
     status, victory, technical_kind = _status_from_records(records)
@@ -649,6 +650,114 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [deepcopy(item) for item in value if isinstance(item, dict)]
+
+
+def _adapt_native_history(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    if any(isinstance(entry, list) for entry in value):
+        flattened: list[dict[str, Any]] = []
+        previous_node: dict[str, Any] | None = None
+        for act_index, act_nodes in enumerate(value):
+            if not isinstance(act_nodes, list):
+                continue
+            for node_index, node in enumerate(act_nodes):
+                if not isinstance(node, dict):
+                    continue
+                flattened.append(
+                    _annotate_native_node(
+                        node,
+                        previous_node,
+                        act_index=act_index,
+                        node_index=node_index,
+                    )
+                )
+                previous_node = node
+        return flattened
+
+    return _annotate_native_nodes(
+        [deepcopy(entry) for entry in value if isinstance(entry, dict)]
+    )
+
+
+def _annotate_native_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    previous_node: dict[str, Any] | None = None
+    act_node_indices: dict[int, int] = {}
+    annotated: list[dict[str, Any]] = []
+    for node in nodes:
+        act_index = _native_act_index(node)
+        node_index = act_node_indices.get(act_index, 0)
+        act_node_indices[act_index] = node_index + 1
+        enriched = _annotate_native_node(
+            node,
+            previous_node,
+            act_index=act_index,
+            node_index=node_index,
+        )
+        annotated.append(enriched)
+        previous_node = node
+    return annotated
+
+
+def _annotate_native_node(
+    node: dict[str, Any],
+    previous_node: dict[str, Any] | None,
+    *,
+    act_index: int,
+    node_index: int,
+) -> dict[str, Any]:
+    enriched = deepcopy(node)
+    enriched["id"] = f"a{act_index}:n{node_index}"
+    enriched["deltas"] = native_node_deltas(node, previous_node).to_dict()
+    return enriched
+
+
+def _native_act_index(node: dict[str, Any]) -> int:
+    act_index = _first_int(node, "act_index")
+    if act_index is not None and act_index >= 0:
+        return act_index
+    act = _first_int(node, "act")
+    if act is not None:
+        return max(0, act - 1)
+    global_floor = _first_int(node, "global_floor")
+    if global_floor is not None and global_floor > 0:
+        return (global_floor - 1) // 17
+    return 0
+
+
+def _annotate_replay_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    previous_snapshot: dict[str, Any] | None = None
+    annotated: list[dict[str, Any]] = []
+    for node in nodes:
+        snapshot = _replay_room_snapshot(node)
+        enriched = deepcopy(node)
+        enriched["deltas"] = derive_snapshot_deltas(
+            snapshot, previous_snapshot
+        ).to_dict()
+        annotated.append(enriched)
+        previous_snapshot = snapshot
+    return annotated
+
+
+def _replay_room_snapshot(node: dict[str, Any]) -> dict[str, Any]:
+    end_player = node.get("end_player")
+    if isinstance(end_player, dict):
+        return deepcopy(end_player)
+    snapshot: dict[str, Any] = {}
+    aliases = {
+        "hp": "end_hp",
+        "max_hp": "max_hp",
+        "gold": "gold",
+        "deck": "deck",
+        "relic_items": "relic_items",
+        "potions": "potions",
+        "potion_items": "potion_items",
+    }
+    for target, source in aliases.items():
+        if source in node:
+            snapshot[target] = deepcopy(node[source])
+    return snapshot
 
 
 def _node_has_decision_evidence(node: dict[str, Any]) -> bool:

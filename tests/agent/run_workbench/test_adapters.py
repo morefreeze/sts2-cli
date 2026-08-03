@@ -23,7 +23,12 @@ def test_native_run_preserves_identity_and_format_capabilities() -> None:
     assert run.capabilities.visited_route is True
     assert run.capabilities.node_rewards is True
     assert run.capabilities.turn_replay is False
-    assert run.nodes == [{"floor": 1}]
+    assert run.nodes[0]["floor"] == 1
+    assert run.nodes[0]["id"] == "a0:n0"
+    assert run.nodes[0]["deltas"]["hp_change"] == {
+        "value": None,
+        "quality": "unknown",
+    }
 
 
 def test_invalid_run_suffix_does_not_fabricate_a_complete_capable_run(
@@ -54,7 +59,7 @@ def test_replay_uses_injected_legacy_parser_and_records_observed_floor_range() -
     assert run.coverage.last_recorded_floor == 1
 
 
-def test_replay_nodes_are_exactly_the_injected_parser_rooms() -> None:
+def test_replay_nodes_preserve_injected_parser_room_ids_and_add_deltas() -> None:
     calls: list[tuple[list[dict], str | None]] = []
     rooms = [{"id": "room-1", "global_floor": 3}]
 
@@ -68,9 +73,180 @@ def test_replay_nodes_are_exactly_the_injected_parser_rooms() -> None:
     adapted = adapt_path(FIXTURES / "replay.jsonl", replay_parser=parser)
 
     assert calls and calls[0][1] == "replay.jsonl"
-    assert adapted.runs[0].nodes == rooms
+    assert adapted.runs[0].nodes[0]["id"] == "room-1"
+    assert adapted.runs[0].nodes[0]["global_floor"] == 3
+    assert adapted.runs[0].nodes[0]["deltas"]["hp_change"] == {
+        "value": None,
+        "quality": "unknown",
+    }
     assert adapted.runs[0].metadata.seed == "parser-seed"
     assert adapted.runs[0].metadata.character == "Parser"
+
+
+def test_native_nodes_receive_stable_ids_retain_details_and_exact_deltas(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "detailed.run"
+    path.write_text(
+        json.dumps(
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "acts": [{"act": 1}],
+                "map_point_history": [
+                    {
+                        "act_index": 0,
+                        "map_point_type": "monster",
+                        "rooms": [
+                            {
+                                "model_id": "ENCOUNTER.JAW_WORM",
+                                "monster_ids": ["MONSTER.JAW_WORM"],
+                            }
+                        ],
+                        "choices": [{"id": "left"}],
+                        "player_stats": [
+                            {
+                                "current_hp": 75,
+                                "max_hp": 80,
+                                "current_gold": 10,
+                                "damage_taken": 5,
+                                "hp_healed": 0,
+                            }
+                        ],
+                    },
+                    {
+                        "act_index": 0,
+                        "map_point_type": "shop",
+                        "rooms": [{"model_id": "ROOM.SHOP"}],
+                        "monster_ids": [],
+                        "choices": [{"id": "buy-card"}],
+                        "player_stats": [
+                            {
+                                "current_hp": 75,
+                                "max_hp": 80,
+                                "current_gold": 2,
+                                "damage_taken": 0,
+                                "hp_healed": 0,
+                                "cards_gained": [{"id": "BASH"}],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    nodes = adapt_path(path).runs[0].nodes
+
+    assert [node["id"] for node in nodes] == ["a0:n0", "a0:n1"]
+    assert nodes[1]["map_point_type"] == "shop"
+    assert nodes[1]["rooms"] == [{"model_id": "ROOM.SHOP"}]
+    assert nodes[0]["rooms"][0] == {
+        "model_id": "ENCOUNTER.JAW_WORM",
+        "monster_ids": ["MONSTER.JAW_WORM"],
+    }
+    assert nodes[1]["choices"] == [{"id": "buy-card"}]
+    assert nodes[1]["deltas"]["gold_change"] == {
+        "value": -8,
+        "quality": "derived",
+    }
+    assert nodes[1]["deltas"]["cards_gained"] == {
+        "value": [{"id": "BASH"}],
+        "quality": "exact",
+    }
+
+
+def test_native_nested_act_history_uses_act_local_stable_node_ids(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nested-acts.run"
+    path.write_text(
+        json.dumps(
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "acts": [{"act": 1}, {"act": 2}],
+                "map_point_history": [
+                    [
+                        {
+                            "map_point_type": "monster",
+                            "player_stats": [{"current_hp": 70}],
+                        },
+                        {
+                            "map_point_type": "shop",
+                            "player_stats": [{"current_hp": 70}],
+                        },
+                    ],
+                    [
+                        {
+                            "map_point_type": "ancient",
+                            "player_stats": [{"current_hp": 68}],
+                        }
+                    ],
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    nodes = adapt_path(path).runs[0].nodes
+
+    assert [node["id"] for node in nodes] == ["a0:n0", "a0:n1", "a1:n0"]
+    assert nodes[2]["map_point_type"] == "ancient"
+    assert nodes[2]["deltas"]["hp_change"] == {
+        "value": -2,
+        "quality": "derived",
+    }
+
+
+def test_replay_room_deltas_are_derived_from_adjacent_end_snapshots() -> None:
+    rooms = [
+        {
+            "id": "legacy-room-1",
+            "global_floor": 1,
+            "end_player": {
+                "hp": 70,
+                "max_hp": 80,
+                "gold": 10,
+                "deck": [{"id": "STRIKE"}],
+                "relic_items": [],
+                "potion_items": [],
+            },
+        },
+        {
+            "id": "legacy-room-2",
+            "global_floor": 2,
+            "end_player": {
+                "hp": 65,
+                "max_hp": 80,
+                "gold": 22,
+                "deck": [{"id": "STRIKE"}, {"id": "BASH"}],
+                "relic_items": [{"id": "ANCHOR"}],
+                "potion_items": [],
+            },
+        },
+    ]
+
+    run = adapt_path(
+        FIXTURES / "replay.jsonl",
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": rooms,
+        },
+    ).runs[0]
+
+    assert [node["id"] for node in run.nodes] == [
+        "legacy-room-1",
+        "legacy-room-2",
+    ]
+    assert run.nodes[1]["deltas"]["hp_change"] == {
+        "value": -5,
+        "quality": "derived",
+    }
+    assert run.nodes[1]["deltas"]["cards_gained"] == {
+        "value": [{"id": "BASH"}],
+        "quality": "derived",
+    }
+    assert run.replay_by_node["legacy-room-2"]["deltas"] == run.nodes[1]["deltas"]
 
 
 def test_replay_top_level_run_id_wins_over_nested_conflict_with_warning(
