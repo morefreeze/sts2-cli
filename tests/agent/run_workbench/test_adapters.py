@@ -90,7 +90,60 @@ def test_replay_parser_is_a_dependency_and_is_not_required_for_safe_adaptation()
 
     assert len(adapted.runs) == 1
     assert adapted.runs[0].nodes == []
+    assert adapted.runs[0].capabilities.turn_replay is False
     assert any("replay parser" in error for error in adapted.errors)
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [
+        lambda entries, source_name=None: (_ for _ in ()).throw(RuntimeError("boom")),
+        lambda entries, source_name=None: ["not", "an", "object"],
+    ],
+)
+def test_failed_replay_parser_does_not_claim_turn_replay(parser) -> None:
+    adapted = adapt_path(FIXTURES / "replay.jsonl", replay_parser=parser)
+
+    assert len(adapted.runs) == 1
+    assert adapted.runs[0].capabilities.turn_replay is False
+    assert adapted.errors
+
+
+def test_action_only_replay_has_decision_evidence_but_no_turn_replay(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "actions.jsonl"
+    path.write_text(
+        '{"type":"action","data":{"cmd":"action","action":"end_turn","args":{}}}\n',
+        encoding="utf-8",
+    )
+
+    adapted = adapt_path(
+        path,
+        replay_parser=lambda entries, source_name=None: {"summary": {}, "rooms": []},
+    )
+
+    run = adapted.runs[0]
+    assert run.capabilities.visited_route is False
+    assert run.capabilities.decisions is True
+    assert run.capabilities.turn_replay is False
+    assert "__unassigned_actions__" in run.replay_by_node
+
+
+@pytest.mark.parametrize("unsafe_value", [{"bad"}, float("nan"), float("inf")])
+def test_unsafe_injected_replay_data_is_reported_and_not_returned(
+    unsafe_value: object,
+) -> None:
+    def parser(entries: list[dict], source_name: str | None = None) -> dict:
+        return {
+            "summary": {},
+            "rooms": [{"id": "unsafe-room", "score": unsafe_value}],
+        }
+
+    adapted = adapt_path(FIXTURES / "replay.jsonl", replay_parser=parser)
+
+    assert adapted.runs == ()
+    assert any("JSON-safe" in error for error in adapted.errors)
 
 
 def test_deck_history_produces_one_outcome_per_exact_run_id() -> None:
@@ -104,6 +157,8 @@ def test_deck_history_produces_one_outcome_per_exact_run_id() -> None:
     assert run.metadata.character is None
     assert run.metadata.seed is None
     assert run.metadata.checkpoint is None
+    assert all(node["_workbench_evidence_kind"] == "deck_history_event" for node in run.nodes)
+    assert all(node["_workbench_provenance"] for node in run.nodes)
 
 
 def test_deck_history_does_not_group_empty_run_ids(tmp_path: Path) -> None:
@@ -169,6 +224,7 @@ def test_technical_eval_statuses_remain_technical(tmp_path: Path, status: str) -
 
     assert run.outcome.status.value == status
     assert run.outcome.status.is_technical
+    assert run.outcome.victory is False
     assert run.outcome.technical_failure_kind == status
 
 

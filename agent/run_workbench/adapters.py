@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -63,13 +64,20 @@ def adapt_path(
                     f"{path.name}: native run is missing players and map_point_history lists",
                 ),
             )
-        return AdaptedSource(descriptor, runs=(_adapt_native(path, records[0]),))
+        adapted = AdaptedSource(descriptor, runs=(_adapt_native(path, records[0]),))
+        return _validate_adapted_source(adapted)
     if descriptor.kind is SourceKind.REPLAY_JSONL:
-        return _adapt_replay(path, descriptor, records, replay_parser)
+        return _validate_adapted_source(
+            _adapt_replay(path, descriptor, records, replay_parser)
+        )
     if descriptor.kind is SourceKind.DECK_HISTORY:
-        return _adapt_deck_history(path, descriptor, records)
+        return _validate_adapted_source(
+            _adapt_deck_history(path, descriptor, records)
+        )
     if descriptor.kind is SourceKind.EVAL_RESULTS:
-        return _adapt_eval_results(path, descriptor, records)
+        return _validate_adapted_source(
+            _adapt_eval_results(path, descriptor, records)
+        )
     if descriptor.kind is SourceKind.SUMMARY:
         return AdaptedSource(
             descriptor,
@@ -145,6 +153,7 @@ def _adapt_replay(
 ) -> AdaptedSource:
     errors: list[str] = []
     parsed: dict[str, Any] = {}
+    parser_succeeded = False
     if replay_parser is None:
         errors.append(f"{path.name}: no replay parser was provided")
     else:
@@ -152,6 +161,7 @@ def _adapt_replay(
             candidate = replay_parser(records, path.name)
             if isinstance(candidate, dict):
                 parsed = candidate
+                parser_succeeded = True
             else:
                 errors.append(f"{path.name}: replay parser returned a non-object result")
         except Exception as error:  # adapter errors must not make the catalog unreadable
@@ -183,6 +193,33 @@ def _adapt_replay(
     max_floor = _first_int(summary, "max_global_floor")
     if max_floor is None and observed_floors:
         max_floor = max(observed_floors)
+    raw_actions = [
+        deepcopy(row["data"])
+        for row in records
+        if row.get("type") == "action" and isinstance(row.get("data"), dict)
+    ]
+    has_state = any(
+        row.get("type") == "state" and isinstance(row.get("data"), dict)
+        for row in records
+    )
+    replay_by_node = {
+        str(node["id"]): deepcopy(node)
+        for node in nodes
+        if node.get("id") is not None
+    }
+    if raw_actions:
+        replay_by_node["__unassigned_actions__"] = {
+            "_workbench_evidence_kind": "unassigned_replay_actions",
+            "_workbench_provenance": [
+                {"source_id": str(path), "source_kind": SourceKind.REPLAY_JSONL.value}
+            ],
+            "actions": raw_actions,
+        }
+    has_node_decisions = any(_node_has_decision_evidence(node) for node in nodes)
+    usable_per_node_replay = any(
+        node.get("id") is not None and _node_has_decision_evidence(node)
+        for node in nodes
+    )
     run = RunRecord(
         run_id=run_id,
         source_id=str(path),
@@ -201,16 +238,13 @@ def _adapt_replay(
             last_recorded_floor=max(observed_floors) if observed_floors else None,
         ),
         capabilities=Capabilities(
-            visited_route=True,
-            decisions=True,
-            turn_replay=True,
+            visited_route=bool(observed_floors or nodes),
+            decisions=bool(raw_actions or has_node_decisions),
+            turn_replay=parser_succeeded
+            and ((has_state and bool(raw_actions)) or usable_per_node_replay),
         ),
         nodes=nodes,
-        replay_by_node={
-            str(node["id"]): deepcopy(node)
-            for node in nodes
-            if node.get("id") is not None
-        },
+        replay_by_node=replay_by_node,
     )
     return AdaptedSource(descriptor, runs=(run,), errors=tuple(errors))
 
@@ -260,6 +294,7 @@ def _adapt_deck_run(
     source_id: str | None = None,
     warnings: list[str] | None = None,
 ) -> RunRecord:
+    resolved_source_id = source_id or f"{path}:{run_id}"
     outcome_rows = [row for row in records if row.get("event") == "outcome"]
     outcome_row = outcome_rows[-1] if outcome_rows else {}
     status, victory, technical_kind = _status_from_record(outcome_row)
@@ -281,7 +316,7 @@ def _adapt_deck_run(
     )
     return RunRecord(
         run_id=run_id,
-        source_id=source_id or f"{path}:{run_id}",
+        source_id=resolved_source_id,
         source_kind=SourceKind.DECK_HISTORY,
         metadata=metadata,
         outcome=RunOutcome(
@@ -301,7 +336,10 @@ def _adapt_deck_run(
             node_rewards=any(row.get("event") == "card_pick" for row in records),
             decisions=any(row.get("event") == "card_pick" for row in records),
         ),
-        nodes=deepcopy(records),
+        nodes=[
+            _annotate_deck_history_evidence(row, resolved_source_id)
+            for row in records
+        ],
         warnings=list(warnings or ()),
     )
 
@@ -402,7 +440,9 @@ def _status_from_record(
         if isinstance(record.get(key), bool):
             victory = record[key]
             break
-    if status is RunStatus.UNKNOWN and victory is not None:
+    if status.is_technical:
+        victory = False
+    elif status is RunStatus.UNKNOWN and victory is not None:
         status = RunStatus.WIN if victory else RunStatus.DEAD
     elif victory is None:
         if status is RunStatus.WIN:
@@ -518,3 +558,43 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [deepcopy(item) for item in value if isinstance(item, dict)]
+
+
+def _node_has_decision_evidence(node: dict[str, Any]) -> bool:
+    return any(
+        isinstance(node.get(key), list) and bool(node[key])
+        for key in ("actions", "decisions", "options", "choices")
+    )
+
+
+def _annotate_deck_history_evidence(
+    record: dict[str, Any],
+    source_id: str,
+) -> dict[str, Any]:
+    evidence = deepcopy(record)
+    evidence["_workbench_evidence_kind"] = "deck_history_event"
+    evidence["_workbench_provenance"] = [
+        {"source_id": source_id, "source_kind": SourceKind.DECK_HISTORY.value}
+    ]
+    return evidence
+
+
+def _validate_adapted_source(adapted: AdaptedSource) -> AdaptedSource:
+    valid_runs: list[RunRecord] = []
+    errors = list(adapted.errors)
+    for run in adapted.runs:
+        try:
+            payload = run.to_dict()
+            json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            errors.append(
+                f"{run.source_id}: normalized run is not JSON-safe: {error}"
+            )
+            continue
+        valid_runs.append(run)
+    return AdaptedSource(
+        descriptor=adapted.descriptor,
+        runs=tuple(valid_runs),
+        summary=adapted.summary,
+        errors=tuple(errors),
+    )

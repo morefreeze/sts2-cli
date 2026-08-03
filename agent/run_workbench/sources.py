@@ -11,6 +11,12 @@ class SourceFormatError(ValueError):
     """Raised when a supported source file cannot be read as object records."""
 
 
+class _NonStandardJSONConstant(ValueError):
+    def __init__(self, constant: str) -> None:
+        self.constant = constant
+        super().__init__(f"non-standard numeric constant {constant}")
+
+
 @dataclass(frozen=True)
 class SourceDescriptor:
     kind: SourceKind
@@ -40,7 +46,12 @@ def read_json_records(path: Path) -> list[dict]:
 
 def _read_json_document_records(path: Path, contents: str, suffix: str) -> list[dict]:
     try:
-        value = json.loads(contents)
+        value = json.loads(contents, parse_constant=_reject_nonstandard_constant)
+    except _NonStandardJSONConstant as error:
+        line_number = _constant_line_number(contents, error.constant)
+        raise SourceFormatError(
+            f"{path.name}:{line_number}: invalid JSON: {error}"
+        ) from error
     except json.JSONDecodeError as error:
         raise SourceFormatError(f"{path.name}:{error.lineno}: invalid JSON: {error.msg}") from error
 
@@ -65,7 +76,11 @@ def _read_jsonl_records(path: Path, contents: str) -> list[dict]:
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
+            record = json.loads(line, parse_constant=_reject_nonstandard_constant)
+        except _NonStandardJSONConstant as error:
+            raise SourceFormatError(
+                f"{path.name}:{line_number}: invalid JSON: {error}"
+            ) from error
         except json.JSONDecodeError as error:
             raise SourceFormatError(
                 f"{path.name}:{line_number}: invalid JSON: {error.msg}"
@@ -74,6 +89,15 @@ def _read_jsonl_records(path: Path, contents: str) -> list[dict]:
             raise SourceFormatError(f"{path.name}:{line_number}: expected an object record")
         records.append(record)
     return records
+
+
+def _reject_nonstandard_constant(constant: str) -> None:
+    raise _NonStandardJSONConstant(constant)
+
+
+def _constant_line_number(contents: str, constant: str) -> int:
+    index = contents.find(constant)
+    return contents.count("\n", 0, max(index, 0)) + 1
 
 
 def classify_records(records: list[dict], *, suffix: str) -> SourceDescriptor:

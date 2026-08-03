@@ -90,6 +90,38 @@ def test_invalid_utf8_is_reported_as_a_source_format_error(
 
 
 @pytest.mark.parametrize(
+    ("name", "contents", "location", "constant"),
+    [
+        ("nan.json", '{"value": NaN}', "nan.json:1", "NaN"),
+        (
+            "infinity.jsonl",
+            '{"event":"eval_result"}\n{"value": Infinity}\n',
+            "infinity.jsonl:2",
+            "Infinity",
+        ),
+        (
+            "negative_infinity.jsonl",
+            '{"value": -Infinity}\n',
+            "negative_infinity.jsonl:1",
+            "-Infinity",
+        ),
+    ],
+)
+def test_nonstandard_json_numeric_constants_are_rejected_with_location(
+    tmp_path: Path,
+    name: str,
+    contents: str,
+    location: str,
+    constant: str,
+) -> None:
+    path = tmp_path / name
+    path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(SourceFormatError, match=rf"{location}.*{constant}"):
+        read_json_records(path)
+
+
+@pytest.mark.parametrize(
     ("name", "contents", "location"),
     [
         ("scalar.json", '"not an object"', "scalar.json:top-level"),

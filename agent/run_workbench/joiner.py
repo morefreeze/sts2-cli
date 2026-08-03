@@ -52,7 +52,7 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
     source_kind = min((record.source_kind for record in records), key=lambda kind: _SOURCE_PRIORITY[kind])
 
     replay_by_node: dict[str, Any] = {}
-    for record in records:
+    for record in sorted(records, key=_evidence_record_key):
         for node_id, replay in sorted(record.replay_by_node.items()):
             if node_id in replay_by_node and replay_by_node[node_id] != replay:
                 warnings.append(f"conflicting replay data for node {node_id!r}")
@@ -75,6 +75,10 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
             for field in fields(Capabilities)
         }
     )
+    merged_acts, act_warnings = _merge_evidence(records, evidence_type="act")
+    merged_nodes, node_warnings = _merge_evidence(records, evidence_type="node")
+    warnings.extend(act_warnings)
+    warnings.extend(node_warnings)
     return RunRecord(
         run_id=records[0].run_id,
         source_id=" | ".join(source_ids),
@@ -87,8 +91,8 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
             last_recorded_floor=max(last_floors) if last_floors else None,
         ),
         capabilities=capabilities,
-        acts=[deepcopy(act) for record in records for act in record.acts],
-        nodes=[deepcopy(node) for record in records for node in record.nodes],
+        acts=merged_acts,
+        nodes=merged_nodes,
         replay_by_node=replay_by_node,
         warnings=_unique(warnings),
     )
@@ -134,9 +138,18 @@ def _merge_outcome(records: list[RunRecord]) -> tuple[RunOutcome, list[str]]:
         for record in records
         if record.outcome.victory is not None
     )
-    victory = victories[0] if victories else None
-    if len(victories) > 1:
-        warnings.append(f"conflicting outcome victory: {victories!r}; kept {victory!r}")
+    if status is RunStatus.WIN:
+        victory: bool | None = True
+    elif status is RunStatus.DEAD or status.is_technical:
+        victory = False
+    elif len(victories) == 1:
+        victory = victories[0]
+    else:
+        victory = None
+    if victories and (len(victories) > 1 or any(value != victory for value in victories)):
+        warnings.append(
+            f"conflicting outcome victory: {victories!r}; kept {victory!r}"
+        )
 
     floors = [
         record.outcome.max_global_floor
@@ -150,12 +163,7 @@ def _merge_outcome(records: list[RunRecord]) -> tuple[RunOutcome, list[str]]:
         if record.outcome.max_floor_label is not None
     ]
     label = labels[0] if labels else None
-    technical_kinds = [
-        record.outcome.technical_failure_kind
-        for record in records
-        if record.outcome.technical_failure_kind is not None
-    ]
-    technical_kind = status.value if status.is_technical else (technical_kinds[0] if technical_kinds else None)
+    technical_kind = status.value if status.is_technical else None
     return (
         RunOutcome(
             status=status,
@@ -165,6 +173,150 @@ def _merge_outcome(records: list[RunRecord]) -> tuple[RunOutcome, list[str]]:
             technical_failure_kind=technical_kind,
         ),
         warnings,
+    )
+
+
+def _merge_evidence(
+    records: list[RunRecord],
+    *,
+    evidence_type: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    merged: list[dict[str, Any]] = []
+    by_identity: dict[str, int] = {}
+    warnings: list[str] = []
+    attribute = "acts" if evidence_type == "act" else "nodes"
+    for record in sorted(records, key=_evidence_record_key):
+        for item in getattr(record, attribute):
+            evidence = _annotate_evidence(item, record, evidence_type)
+            identity = _stable_evidence_identity(evidence, evidence_type)
+            if identity is None:
+                merged.append(evidence)
+                continue
+            existing_index = by_identity.get(identity)
+            if existing_index is None:
+                by_identity[identity] = len(merged)
+                merged.append(evidence)
+                continue
+
+            existing = merged[existing_index]
+            if _evidence_payload(existing) == _evidence_payload(evidence):
+                existing["_workbench_provenance"] = _merge_provenance(
+                    existing.get("_workbench_provenance"),
+                    evidence.get("_workbench_provenance"),
+                )
+                continue
+
+            conflict = {
+                "payload": _evidence_payload(evidence),
+                "provenance": deepcopy(evidence["_workbench_provenance"]),
+            }
+            conflicts = existing.setdefault("_workbench_conflicting_evidence", [])
+            if conflict not in conflicts:
+                conflicts.append(conflict)
+            existing["_workbench_provenance"] = _merge_provenance(
+                existing.get("_workbench_provenance"),
+                evidence.get("_workbench_provenance"),
+            )
+            warning = (
+                f"conflicting {evidence_type} payload for {identity}; "
+                f"kept {_primary_evidence_source(existing)}"
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+    return merged, warnings
+
+
+def _annotate_evidence(
+    item: dict[str, Any],
+    record: RunRecord,
+    evidence_type: str,
+) -> dict[str, Any]:
+    evidence = deepcopy(item)
+    evidence.setdefault(
+        "_workbench_evidence_kind",
+        "act" if evidence_type == "act" else "route_node",
+    )
+    evidence["_workbench_provenance"] = _merge_provenance(
+        evidence.get("_workbench_provenance"),
+        [
+            {
+                "source_id": record.source_id,
+                "source_kind": record.source_kind.value,
+            }
+        ],
+    )
+    return evidence
+
+
+def _stable_evidence_identity(
+    evidence: dict[str, Any],
+    evidence_type: str,
+) -> str | None:
+    keys = ("id", "act_id", "act") if evidence_type == "act" else ("id", "node_id")
+    for key in keys:
+        if evidence.get(key) is not None:
+            return f"{key}={_stable_json(evidence[key])}"
+    return None
+
+
+def _evidence_payload(evidence: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: deepcopy(value)
+        for key, value in evidence.items()
+        if key
+        not in {
+            "_workbench_provenance",
+            "_workbench_conflicting_evidence",
+        }
+    }
+
+
+def _merge_provenance(*groups: Any) -> list[dict[str, str]]:
+    provenance: dict[tuple[str, str], dict[str, str]] = {}
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            source_id = item.get("source_id")
+            source_kind = item.get("source_kind")
+            if not isinstance(source_id, str) or not isinstance(source_kind, str):
+                continue
+            provenance[(source_kind, source_id)] = {
+                "source_id": source_id,
+                "source_kind": source_kind,
+            }
+    return sorted(provenance.values(), key=_provenance_key)
+
+
+def _provenance_key(item: dict[str, str]) -> tuple[int, str, str]:
+    try:
+        priority = _SOURCE_PRIORITY[SourceKind(item["source_kind"])]
+    except (KeyError, ValueError):
+        priority = len(_SOURCE_PRIORITY)
+    return priority, item.get("source_id", ""), item.get("source_kind", "")
+
+
+def _primary_evidence_source(evidence: dict[str, Any]) -> str:
+    provenance = evidence.get("_workbench_provenance")
+    if isinstance(provenance, list) and provenance:
+        source_id = provenance[0].get("source_id")
+        if isinstance(source_id, str):
+            return f"evidence from {source_id}"
+    return "deterministic evidence"
+
+
+def _evidence_record_key(record: RunRecord) -> tuple[Any, ...]:
+    return (_SOURCE_PRIORITY[record.source_kind],) + _record_key(record)
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 

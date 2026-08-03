@@ -67,6 +67,53 @@ def test_conflicting_non_null_metadata_is_deterministic_and_warned() -> None:
     assert any("conflicting metadata seed" in warning for warning in forward.warnings)
 
 
+def test_conflicting_gameplay_outcomes_keep_status_and_victory_coherent() -> None:
+    won = RunRecord(
+        run_id="same",
+        source_id="a-win",
+        source_kind=SourceKind.EVAL_RESULTS,
+        outcome=RunOutcome(status=RunStatus.WIN, victory=True),
+    )
+    dead = RunRecord(
+        run_id="same",
+        source_id="b-dead",
+        source_kind=SourceKind.DECK_HISTORY,
+        outcome=RunOutcome(
+            status=RunStatus.DEAD,
+            victory=False,
+            technical_failure_kind="stale-technical-kind",
+        ),
+    )
+
+    outcome = join_records([dead, won])[0].outcome
+
+    assert outcome.status is RunStatus.WIN
+    assert outcome.victory is True
+    assert outcome.technical_failure_kind is None
+
+
+def test_technical_outcome_precedence_sets_false_victory_and_matching_kind() -> None:
+    gameplay = RunRecord(
+        run_id="same",
+        source_id="a-gameplay",
+        source_kind=SourceKind.DECK_HISTORY,
+        outcome=RunOutcome(status=RunStatus.WIN, victory=True),
+    )
+    technical = RunRecord(
+        run_id="same",
+        source_id="b-technical",
+        source_kind=SourceKind.EVAL_RESULTS,
+        outcome=RunOutcome(status=RunStatus.TIMEOUT, victory=None),
+    )
+
+    run = join_records([technical, gameplay])[0]
+
+    assert run.outcome.status is RunStatus.TIMEOUT
+    assert run.outcome.victory is False
+    assert run.outcome.technical_failure_kind == "timeout"
+    assert any("conflicting outcome status" in warning for warning in run.warnings)
+
+
 def test_missing_run_ids_never_merge_on_matching_seed_and_timestamp() -> None:
     deck = RunRecord(
         run_id="",
@@ -156,6 +203,46 @@ def test_equal_provenance_keys_use_content_tiebreaker_for_metadata_conflicts() -
     assert forward.to_dict() == reverse.to_dict()
     assert any("conflicting metadata character" in warning for warning in forward.warnings)
     assert any("conflicting metadata seed" in warning for warning in forward.warnings)
+
+
+def test_conflicting_stable_evidence_is_deduplicated_with_provenance() -> None:
+    native = RunRecord(
+        run_id="same",
+        source_id="native.run",
+        source_kind=SourceKind.NATIVE_RUN,
+        acts=[{"act": 1, "name": "native-act"}],
+        nodes=[
+            {"id": "shared-node", "gold": 10},
+            {"room_type": "Event", "description": "native-only"},
+        ],
+    )
+    replay = RunRecord(
+        run_id="same",
+        source_id="replay.jsonl",
+        source_kind=SourceKind.REPLAY_JSONL,
+        acts=[{"act": 1, "name": "replay-act"}],
+        nodes=[
+            {"id": "shared-node", "gold": 20},
+            {"room_type": "Event", "description": "replay-only"},
+        ],
+    )
+
+    run = join_records([replay, native])[0]
+
+    assert len(run.nodes) == 3
+    shared = next(node for node in run.nodes if node.get("id") == "shared-node")
+    assert shared["gold"] == 10
+    assert {item["source_kind"] for item in shared["_workbench_provenance"]} == {
+        "native_run",
+        "replay_jsonl",
+    }
+    assert shared["_workbench_conflicting_evidence"][0]["payload"]["gold"] == 20
+    assert all(node["_workbench_provenance"] for node in run.nodes)
+    assert len(run.acts) == 1
+    assert run.acts[0]["name"] == "native-act"
+    assert run.acts[0]["_workbench_conflicting_evidence"][0]["payload"]["name"] == "replay-act"
+    assert any("conflicting node payload" in warning for warning in run.warnings)
+    assert any("conflicting act payload" in warning for warning in run.warnings)
 
 
 def test_join_does_not_mutate_input_records() -> None:
