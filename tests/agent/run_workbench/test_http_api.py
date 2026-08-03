@@ -228,6 +228,74 @@ def test_historical_replay_map_falls_back_to_recorded_route_with_reason(
 
 
 @pytest.mark.parametrize(
+    ("multiplayer_value", "reason_fragment"),
+    [(True, "multiplayer"), (None, "multiplayer flag")],
+)
+def test_native_map_never_claims_full_graph_without_exact_single_player_metadata(
+    tmp_path: Path, multiplayer_value: bool | None, reason_fragment: str
+) -> None:
+    run = _map_fixture()
+    if multiplayer_value is None:
+        run.pop("is_multiplayer")
+    else:
+        run["is_multiplayer"] = multiplayer_value
+    (tmp_path / "native.run").write_text(json.dumps(run), encoding="utf-8")
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert payload["full_map"] is False
+    assert reason_fragment in payload["fallback_reason"].lower()
+
+
+def test_only_the_globally_last_route_node_is_terminal_across_acts(
+    tmp_path: Path,
+) -> None:
+    run = {
+        "run_id": "two-act-terminal",
+        "build_id": "v0.104.0",
+        "seed": "two-act-seed",
+        "ascension": 0,
+        "modifiers": [],
+        "is_multiplayer": False,
+        "status": "dead",
+        "players": [{"character": "IRONCLAD"}],
+        "acts": [{"id": "ACT.OVERGROWTH"}, {"id": "ACT.HIVE"}],
+        "map_point_history": [
+            [
+                {"map_point_type": "ancient"},
+                {"map_point_type": "boss"},
+            ],
+            [
+                {"map_point_type": "ancient"},
+                {"map_point_type": "monster"},
+            ],
+        ],
+    }
+    (tmp_path / "two-act.run").write_text(json.dumps(run), encoding="utf-8")
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        first_status, first = _request(
+            base, "/api/run/map?id=two-act-terminal&act=0"
+        )
+        final_status, final = _request(
+            base, "/api/run/map?id=two-act-terminal&act=1"
+        )
+
+    assert first_status == final_status == 200
+    assert first["summary"]["terminal_node_id"] is None
+    assert all(node["terminal"] is False for node in first["nodes"])
+    assert all(node["terminal_status"] is None for node in first["nodes"])
+    terminal_nodes = [node for node in final["nodes"] if node["terminal"]]
+    assert len(terminal_nodes) == 1
+    assert terminal_nodes[0]["path_index"] == 1
+    assert terminal_nodes[0]["terminal_status"] == "dead"
+
+
+@pytest.mark.parametrize(
     ("path", "message"),
     [
         ("/api/run/map", "missing run id"),

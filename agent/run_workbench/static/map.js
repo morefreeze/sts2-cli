@@ -181,9 +181,10 @@
     if (node.visited) {
       BADGE_FIELDS.forEach((field) => {
         const measurement = node.deltas && node.deltas[field.key];
-        if (nonzeroMeasurement(measurement, field)) {
-          parts.push(`${field.label} ${measurementDisplay(measurement, field)}，${QUALITY_LABELS[measurement.quality]}`);
-        }
+        const quality = measurement && QUALITY_LABELS[measurement.quality]
+          ? QUALITY_LABELS[measurement.quality]
+          : QUALITY_LABELS.unknown;
+        parts.push(`${field.label} ${measurementDisplay(measurement, field)}，${quality}`);
       });
     }
     return parts.join('；');
@@ -286,7 +287,7 @@
         },
       });
       button.disabled = !act.available;
-      button.addEventListener('click', () => loadAct(mapState.runId, act.index, { pushHistory: true }));
+      button.addEventListener('click', () => loadAct(mapState.runId, act.index, { historyMode: 'replace' }));
       tabs.append(button);
     });
   }
@@ -321,7 +322,7 @@
     return `#run=${encodeURIComponent(runId)}&act=${actIndex}`;
   }
 
-  async function loadAct(runId, actIndex, { pushHistory = false, opener = null } = {}) {
+  async function loadAct(runId, actIndex, { historyMode = 'none', opener = null } = {}) {
     runId = typeof runId === 'string' ? runId.trim() : '';
     if (!runId) {
       setStatus('无法打开地图：缺少对局 ID', 'error');
@@ -336,8 +337,11 @@
     renderEmpty(byId('actSummary'), '正在重建地图…', 'loading-state');
     renderEmpty(byId('selectedNodeSummary'), '载入地图后，选择一个已访问节点查看收益。');
     clear(byId('mapSvg'));
-    if (pushHistory) {
+    if (historyMode === 'push') {
       history.pushState({ view: 'run-map', runId, actIndex, fromDashboard: true }, '', mapLocation(runId, actIndex));
+    } else if (historyMode === 'replace') {
+      const fromDashboard = Boolean(history.state && history.state.fromDashboard);
+      history.replaceState({ view: 'run-map', runId, actIndex, fromDashboard }, '', mapLocation(runId, actIndex));
     }
     mapState.requestToken += 1;
     const token = mapState.requestToken;
@@ -393,20 +397,20 @@
     const route = event.state && event.state.view === 'run-map'
       ? { runId: event.state.runId, actIndex: event.state.actIndex }
       : parseMapLocation();
-    if (route) loadAct(route.runId, route.actIndex, { pushHistory: false });
+    if (route) loadAct(route.runId, route.actIndex, { historyMode: 'none' });
     else showDashboardPage();
   });
 
   window.STS2Map = Object.freeze({
     openRun(runId, opener = null) {
-      loadAct(runId, 0, { pushHistory: true, opener });
+      loadAct(runId, 0, { historyMode: 'push', opener });
     },
   });
 
   const initialRoute = parseMapLocation();
   if (initialRoute) {
     history.replaceState({ view: 'run-map', ...initialRoute, fromDashboard: false }, '', location.href);
-    loadAct(initialRoute.runId, initialRoute.actIndex, { pushHistory: false });
+    loadAct(initialRoute.runId, initialRoute.actIndex, { historyMode: 'none' });
   } else {
     history.replaceState({ view: 'dashboard' }, '', location.href);
   }

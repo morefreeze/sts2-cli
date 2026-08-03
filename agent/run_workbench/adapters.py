@@ -148,6 +148,11 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
             evaluation_mode=_first_text(record, "evaluation_mode"),
             scenario=_first_text(record, "scenario"),
             ascension=_first_int(record, "ascension"),
+            is_multiplayer=(
+                record.get("is_multiplayer")
+                if type(record.get("is_multiplayer")) is bool
+                else None
+            ),
             started_at=_first_number(record, "started_at", "start_ts"),
             ended_at=_first_number(record, "ended_at", "end_ts", "ts"),
         ),

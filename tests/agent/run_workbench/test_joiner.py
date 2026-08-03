@@ -43,6 +43,25 @@ def test_exact_nonempty_run_id_joins_deck_and_eval_records() -> None:
     assert "eval.jsonl:1" in run.source_id
 
 
+def test_join_preserves_exact_native_multiplayer_metadata() -> None:
+    native = RunRecord(
+        run_id="shared-multiplayer",
+        source_id="native.run",
+        source_kind=SourceKind.NATIVE_RUN,
+        metadata=RunMetadata(is_multiplayer=True),
+    )
+    deck = RunRecord(
+        run_id="shared-multiplayer",
+        source_id="deck.jsonl:shared-multiplayer",
+        source_kind=SourceKind.DECK_HISTORY,
+    )
+
+    joined = join_records([deck, native])[0]
+
+    assert joined.metadata.is_multiplayer is True
+    assert joined.to_dict()["metadata"]["is_multiplayer"] is True
+
+
 def test_conflicting_non_null_metadata_is_deterministic_and_warned() -> None:
     later_source = RunRecord(
         run_id="same",

@@ -198,6 +198,24 @@ def test_map_renderer_uses_safe_svg_layering_accessibility_and_history():
     assert "terminal_status" in script
 
 
+def test_act_switch_replaces_the_open_map_history_entry_and_tooltips_keep_unknowns():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    tabs = _javascript_section(script, "function renderActTabs", "function showMapPage")
+    load = _javascript_section(script, "async function loadAct", "function closeMapPage")
+    tooltip = _javascript_section(script, "function nodeTooltip", "function renderNodes")
+
+    assert "historyMode: 'replace'" in tabs
+    assert "historyMode === 'push'" in load
+    assert "history.pushState" in load
+    assert "historyMode === 'replace'" in load
+    assert "history.replaceState" in load
+    assert script.count("history.pushState") == 1
+    assert "measurementDisplay(measurement, field)" in tooltip
+    assert "QUALITY_LABELS[measurement.quality]" in tooltip
+    assert "nonzeroMeasurement" not in tooltip
+    assert "'—'" in script
+
+
 def test_static_routes_reject_unknown_traversal_encoding_and_queries(tmp_path: Path):
     unsafe = [
         "/static/unknown.js",

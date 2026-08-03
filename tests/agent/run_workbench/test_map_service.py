@@ -106,6 +106,7 @@ def test_second_identical_request_uses_the_in_memory_cache(monkeypatch) -> None:
         ({"game_version": None}, "version"),
         ({"game_version": "v0.104.0"}, "unsupported"),
         ({"is_multiplayer": True}, "multiplayer"),
+        ({"is_multiplayer": None}, "multiplayer flag"),
     ],
 )
 def test_unreconstructable_requests_return_a_human_readable_visited_route(

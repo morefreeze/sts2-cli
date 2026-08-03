@@ -144,6 +144,7 @@ class RunMetadata:
     scenario: str | None = None
     ascension: int | None = None
     modifiers: tuple[str, ...] = ()
+    is_multiplayer: bool | None = None
     started_at: float | None = None
     ended_at: float | None = None
 

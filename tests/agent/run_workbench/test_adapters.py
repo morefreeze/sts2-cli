@@ -21,6 +21,7 @@ def test_native_run_preserves_identity_and_format_capabilities() -> None:
     assert run.metadata.game_version == "fixture-build"
     assert run.metadata.seed == "fixture-seed"
     assert run.metadata.character == "IRONCLAD"
+    assert run.metadata.is_multiplayer is None
     assert run.capabilities.visited_route is True
     assert run.capabilities.node_rewards is True
     assert run.capabilities.turn_replay is False
@@ -30,6 +31,28 @@ def test_native_run_preserves_identity_and_format_capabilities() -> None:
         "value": None,
         "quality": "unknown",
     }
+
+
+@pytest.mark.parametrize("is_multiplayer", [False, True])
+def test_native_run_preserves_exact_multiplayer_flag(
+    tmp_path: Path, is_multiplayer: bool
+) -> None:
+    path = tmp_path / "multiplayer.run"
+    path.write_text(
+        json.dumps(
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "is_multiplayer": is_multiplayer,
+                "map_point_history": [{"map_point_type": "ancient"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(path).runs[0]
+
+    assert run.metadata.is_multiplayer is is_multiplayer
+    assert run.to_dict()["metadata"]["is_multiplayer"] is is_multiplayer
 
 
 def test_invalid_run_suffix_does_not_fabricate_a_complete_capable_run(

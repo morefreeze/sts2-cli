@@ -148,6 +148,17 @@ def test_model_output_is_json_safe_with_string_enum_values() -> None:
     json.dumps(payload, allow_nan=False)
 
 
+def test_native_multiplayer_truth_is_serialized_as_canonical_metadata() -> None:
+    record = RunRecord(
+        run_id="multiplayer-run",
+        source_id="native.run",
+        source_kind=SourceKind.NATIVE_RUN,
+        metadata=RunMetadata(is_multiplayer=True),
+    )
+
+    assert record.to_dict()["metadata"]["is_multiplayer"] is True
+
+
 @pytest.mark.parametrize(
     ("value", "type_name"),
     [

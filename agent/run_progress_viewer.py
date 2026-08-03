@@ -78,6 +78,31 @@ def _is_canonical_route_node(node: dict[str, Any]) -> bool:
     return evidence_kind is None or evidence_kind == "route_node"
 
 
+def _route_node_source_kinds(node: dict[str, Any]) -> set[str]:
+    provenance = node.get("_workbench_provenance")
+    if not isinstance(provenance, list):
+        return set()
+    return {
+        item["source_kind"]
+        for item in provenance
+        if isinstance(item, dict) and isinstance(item.get("source_kind"), str)
+    }
+
+
+def _canonical_route_nodes(run: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = [
+        node
+        for node in (run.get("nodes") if isinstance(run.get("nodes"), list) else [])
+        if isinstance(node, dict) and _is_canonical_route_node(node)
+    ]
+    native_nodes = [
+        node
+        for node in nodes
+        if "native_run" in _route_node_source_kinds(node)
+    ]
+    return native_nodes or nodes
+
+
 def _act_identifier(act: dict[str, Any] | None) -> str:
     if not isinstance(act, dict):
         return ""
@@ -90,11 +115,7 @@ def _act_identifier(act: dict[str, Any] | None) -> str:
 
 def _act_descriptors(run: dict[str, Any]) -> list[dict[str, Any]]:
     acts = run.get("acts") if isinstance(run.get("acts"), list) else []
-    nodes = [
-        node
-        for node in (run.get("nodes") if isinstance(run.get("nodes"), list) else [])
-        if isinstance(node, dict) and _is_canonical_route_node(node)
-    ]
+    nodes = _canonical_route_nodes(run)
     node_indices = {
         _canonical_node_act_index(node)
         for node in nodes
@@ -181,12 +202,11 @@ def _run_map_payload(
         raise CatalogNotFoundError(
             f"run {run_id!r} has no act {act_index}"
         )
+    all_recorded_nodes = _canonical_route_nodes(run)
     recorded_nodes = [
         node
-        for node in (run.get("nodes") or [])
-        if isinstance(node, dict)
-        and _is_canonical_route_node(node)
-        and _canonical_node_act_index(node) == act_index
+        for node in all_recorded_nodes
+        if _canonical_node_act_index(node) == act_index
     ]
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
@@ -210,7 +230,11 @@ def _run_map_payload(
         modifiers=tuple(
             value for value in modifiers if isinstance(value, str)
         ) if isinstance(modifiers, list) else (),
-        is_multiplayer=False,
+        is_multiplayer=(
+            metadata.get("is_multiplayer")
+            if type(metadata.get("is_multiplayer")) is bool
+            else None
+        ),
         visited=tuple(_map_visited_entry(node) for node in recorded_nodes),
         allow_partial_path=outcome.get("status") == "in_progress",
     )
@@ -223,7 +247,14 @@ def _run_map_payload(
             key=lambda item: item["path_index"],
         )
     ]
-    terminal_node_id = path_ids[-1] if path_ids else None
+    contains_global_terminal = bool(
+        recorded_nodes
+        and all_recorded_nodes
+        and recorded_nodes[-1] is all_recorded_nodes[-1]
+    )
+    terminal_node_id = (
+        path_ids[-1] if path_ids and contains_global_terminal else None
+    )
     terminal_status = outcome.get("status") or "unknown"
     for node in payload["nodes"]:
         source_node = None

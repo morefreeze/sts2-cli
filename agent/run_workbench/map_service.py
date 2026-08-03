@@ -62,7 +62,7 @@ class MapRequest:
     game_version: str | None
     ascension: int | None
     modifiers: tuple[str, ...]
-    is_multiplayer: bool
+    is_multiplayer: bool | None
     visited: tuple[dict, ...]
     allow_partial_path: bool
 
