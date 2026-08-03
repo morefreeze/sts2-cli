@@ -852,21 +852,13 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 except InvalidNodeArtModelError as exc:
                     self._send_error(str(exc))
                     return
-                if art.kind != "original" or art.image_path is None:
+                if art.kind != "original" or art.image_bytes is None:
                     self._send_json(
                         {"error": "node art not found", "art": art.to_dict()},
                         HTTPStatus.NOT_FOUND,
                     )
                     return
-                try:
-                    body = art.image_path.read_bytes()
-                except OSError:
-                    self._send_json(
-                        {"error": "node art not found", "art": art.to_dict()},
-                        HTTPStatus.NOT_FOUND,
-                    )
-                    return
-                self._send_bytes(body, "image/png")
+                self._send_bytes(art.image_bytes, "image/png")
             elif parsed.path == "/api/logs":
                 self._send_json({"logs": list_log_files()})
             elif parsed.path == "/api/latest":

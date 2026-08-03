@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import agent.run_workbench.assets as node_assets
 from agent.run_workbench.assets import (
     BOSS_ART_BY_MODEL,
     InvalidNodeArtModelError,
@@ -49,6 +50,7 @@ def test_configured_png_wins_and_descriptor_does_not_expose_a_file_path() -> Non
 
     assert art.kind == "original"
     assert art.image_path == ASSET_ROOT / "map_icons" / "map_monster.png"
+    assert art.image_bytes == art.image_path.read_bytes()
     assert art.to_dict() == {
         "kind": "original",
         "room_type": "monster",
@@ -59,6 +61,8 @@ def test_configured_png_wins_and_descriptor_does_not_expose_a_file_path() -> Non
         "image_url": "/api/node-art?room_type=monster",
     }
     assert str(ASSET_ROOT) not in str(art.to_dict())
+    assert "image_path" not in art.to_dict()
+    assert "image_bytes" not in art.to_dict()
 
 
 def test_missing_known_art_falls_back_to_semantic_emoji_and_letter(tmp_path: Path) -> None:
@@ -72,13 +76,22 @@ def test_missing_known_art_falls_back_to_semantic_emoji_and_letter(tmp_path: Pat
     assert art.image_url is None
 
 
-def test_unknown_room_type_uses_letter_question_mark(tmp_path: Path) -> None:
-    art = _resolver(tmp_path).resolve("modded-room")
+@pytest.mark.parametrize("room_type", ["unknown", "modded-room"])
+def test_unknown_room_type_uses_letter_even_when_unknown_art_exists(
+    tmp_path: Path, room_type: str
+) -> None:
+    icons = tmp_path / "map_icons"
+    icons.mkdir(parents=True)
+    (icons / "map_unknown.png").write_bytes(b"\x89PNG\r\n\x1a\nunknown")
+
+    art = _resolver(tmp_path).resolve(room_type)
 
     assert art.kind == "letter"
     assert art.room_type == "unknown"
     assert art.letter == "?"
     assert art.accessible_label == "未知事件"
+    assert art.image_path is None
+    assert art.image_url is None
 
 
 def test_explicit_env_and_dashboard_cache_roots_are_checked_in_order(
@@ -135,6 +148,28 @@ def test_model_specific_boss_and_ancient_art_precede_generic_art(tmp_path: Path)
     assert "model_id=EVENT.PAEL" in (ancient.image_url or "")
 
 
+def test_root_precedence_beats_later_model_specific_art(tmp_path: Path) -> None:
+    explicit = tmp_path / "explicit"
+    environment = tmp_path / "environment"
+    for root in (explicit, environment):
+        (root / "map_icons").mkdir(parents=True)
+    explicit_generic = explicit / "map_icons/map_chest_boss.png"
+    explicit_generic.write_bytes(b"\x89PNG\r\n\x1a\nexplicit-generic")
+    (environment / "map_icons/vantom_boss_icon.png").write_bytes(
+        b"\x89PNG\r\n\x1a\nenvironment-model"
+    )
+    resolver = NodeArtResolver(
+        explicit_roots=[explicit],
+        environ={"STS2_MAP_ASSET_DIR": str(environment)},
+        home=tmp_path / "home",
+    )
+
+    art = resolver.resolve("boss", model_id="ENCOUNTER.VANTOM_BOSS")
+
+    assert art.image_path == explicit_generic
+    assert art.image_url == "/api/node-art?room_type=boss"
+
+
 @pytest.mark.parametrize(
     "model_id",
     [
@@ -173,5 +208,22 @@ def test_non_png_and_symlink_escape_are_not_streamable(tmp_path: Path) -> None:
 
     art = _resolver(tmp_path).resolve("monster")
 
+    assert art.kind == "emoji"
+    assert art.image_path is None
+
+
+def test_oversized_png_is_rejected_before_an_unbounded_read(tmp_path: Path) -> None:
+    icons = tmp_path / "map_icons"
+    icons.mkdir(parents=True)
+    candidate = icons / "map_monster.png"
+    limit = getattr(node_assets, "MAX_NODE_ART_BYTES", 4096)
+    with candidate.open("wb") as stream:
+        stream.write(b"\x89PNG\r\n\x1a\n")
+        stream.seek(limit)
+        stream.write(b"x")
+
+    art = _resolver(tmp_path).resolve("monster")
+
+    assert hasattr(node_assets, "MAX_NODE_ART_BYTES")
     assert art.kind == "emoji"
     assert art.image_path is None

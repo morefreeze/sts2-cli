@@ -1,8 +1,9 @@
 """Safe local artwork resolution for STS2 map nodes.
 
 Only the fixed dashboard cache layout and fixed/validated basenames are ever
-considered.  The public descriptor deliberately omits local filesystem paths;
-callers that need bytes use :attr:`NodeArt.image_path` internally.
+considered.  The public descriptor deliberately omits local filesystem paths
+and verified bytes; the HTTP boundary serves :attr:`NodeArt.image_bytes`
+without reopening :attr:`NodeArt.image_path`.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Literal
 from urllib.parse import urlencode
 
@@ -64,6 +66,8 @@ _ROOM_ALIASES = {
 _SAFE_MODEL_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ANCIENT_MODEL_ID = re.compile(r"^EVENT\.([A-Z0-9_]+)$")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_NODE_ART_BYTES = 8 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 class InvalidNodeArtModelError(ValueError):
@@ -80,6 +84,7 @@ class NodeArt:
     tooltip: str
     image_url: str | None = None
     image_path: Path | None = None
+    image_bytes: bytes | None = None
 
     def to_dict(self) -> dict[str, str | None]:
         """Return the browser-safe descriptor without exposing a local path."""
@@ -141,25 +146,28 @@ class NodeArtResolver:
         normalized_model = _validate_model_id(model_id)
         emoji, letter, label = ROOM_FALLBACK[normalized_room]
 
-        for filename, selected_model in _candidate_filenames(
-            normalized_room, normalized_model
-        ):
-            image_path = self._find_png(filename)
-            if image_path is None:
-                continue
-            query: dict[str, str] = {"room_type": normalized_room}
-            if selected_model is not None:
-                query["model_id"] = selected_model
-            return NodeArt(
-                kind="original",
-                room_type=normalized_room,
-                emoji=emoji,
-                letter=letter,
-                accessible_label=label,
-                tooltip=label,
-                image_url=f"/api/node-art?{urlencode(query)}",
-                image_path=image_path,
-            )
+        if normalized_room != "unknown":
+            filenames = _candidate_filenames(normalized_room, normalized_model)
+            for root in self.roots:
+                for filename, selected_model in filenames:
+                    loaded = self._load_png(root, filename)
+                    if loaded is None:
+                        continue
+                    image_path, image_bytes = loaded
+                    query: dict[str, str] = {"room_type": normalized_room}
+                    if selected_model is not None:
+                        query["model_id"] = selected_model
+                    return NodeArt(
+                        kind="original",
+                        room_type=normalized_room,
+                        emoji=emoji,
+                        letter=letter,
+                        accessible_label=label,
+                        tooltip=label,
+                        image_url=f"/api/node-art?{urlencode(query)}",
+                        image_path=image_path,
+                        image_bytes=image_bytes,
+                    )
 
         kind: Literal["emoji", "letter"] = (
             "letter" if normalized_room == "unknown" else "emoji"
@@ -173,26 +181,82 @@ class NodeArtResolver:
             tooltip=label,
         )
 
-    def _find_png(self, filename: str) -> Path | None:
+    def _load_png(self, root: Path, filename: str) -> tuple[Path, bytes] | None:
         # Every filename originates in a constant mapping or a sanitized
         # ancient basename.  Still enforce basename-only here as a final guard.
         if Path(filename).name != filename or not filename.endswith(".png"):
             return None
-        for root in self.roots:
-            icon_root = root if root.name == "map_icons" else root / "map_icons"
-            try:
-                resolved_root = icon_root.resolve(strict=False)
-                candidate = (icon_root / filename).resolve(strict=True)
-                candidate.relative_to(resolved_root)
-                if not candidate.is_file():
-                    continue
-                with candidate.open("rb") as stream:
-                    if stream.read(len(_PNG_SIGNATURE)) != _PNG_SIGNATURE:
-                        continue
-            except (OSError, ValueError):
-                continue
-            return candidate
+        icon_root = root if root.name == "map_icons" else root / "map_icons"
+        directory_fd: int | None = None
+        image_fd: int | None = None
+        try:
+            resolved_root = icon_root.resolve(strict=True)
+            if not resolved_root.is_dir():
+                return None
+            directory_flags = os.O_RDONLY
+            directory_flags |= getattr(os, "O_CLOEXEC", 0)
+            directory_flags |= getattr(os, "O_DIRECTORY", 0)
+            directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+            directory_fd = os.open(resolved_root, directory_flags)
+
+            image_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            nofollow = getattr(os, "O_NOFOLLOW", 0)
+            image_flags |= nofollow
+            before = None
+            if not nofollow:
+                before = os.stat(
+                    filename, dir_fd=directory_fd, follow_symlinks=False
+                )
+                if not stat.S_ISREG(before.st_mode):
+                    return None
+            image_fd = os.open(filename, image_flags, dir_fd=directory_fd)
+            file_stat = os.fstat(image_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                return None
+            if before is not None and (
+                before.st_dev != file_stat.st_dev
+                or before.st_ino != file_stat.st_ino
+            ):
+                return None
+            if not len(_PNG_SIGNATURE) <= file_stat.st_size <= MAX_NODE_ART_BYTES:
+                return None
+            image_bytes = _read_bounded(image_fd, file_stat.st_size)
+            if image_bytes is None or not image_bytes.startswith(_PNG_SIGNATURE):
+                return None
+            after = os.fstat(image_fd)
+            if (
+                after.st_dev != file_stat.st_dev
+                or after.st_ino != file_stat.st_ino
+                or after.st_size != file_stat.st_size
+            ):
+                return None
+        except (OSError, ValueError):
+            return None
+        finally:
+            if image_fd is not None:
+                os.close(image_fd)
+            if directory_fd is not None:
+                os.close(directory_fd)
+        return resolved_root / filename, image_bytes
+
+
+def _read_bounded(file_descriptor: int, expected_size: int) -> bytes | None:
+    """Read one opened regular file without exceeding the fixed art budget."""
+
+    chunks: list[bytes] = []
+    total = 0
+    while total <= MAX_NODE_ART_BYTES:
+        remaining_budget = MAX_NODE_ART_BYTES + 1 - total
+        chunk = os.read(
+            file_descriptor, min(_READ_CHUNK_BYTES, remaining_budget)
+        )
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > MAX_NODE_ART_BYTES or total != expected_size:
         return None
+    return b"".join(chunks)
 
 
 def _expand_root(value: Path | str, home: Path) -> Path:
@@ -247,6 +311,7 @@ def _candidate_filenames(
 __all__ = [
     "BOSS_ART_BY_MODEL",
     "InvalidNodeArtModelError",
+    "MAX_NODE_ART_BYTES",
     "NodeArt",
     "NodeArtResolver",
     "ROOM_ART",

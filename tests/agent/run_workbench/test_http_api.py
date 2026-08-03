@@ -152,6 +152,68 @@ def test_missing_node_art_is_a_bounded_json_404_with_fallback_descriptor(
     assert payload["art"]["letter"] == "E"
 
 
+def test_node_art_endpoint_serves_verified_bytes_after_path_replacement(
+    tmp_path: Path,
+) -> None:
+    icons = tmp_path / "assets/map_icons"
+    icons.mkdir(parents=True)
+    candidate = icons / "map_monster.png"
+    original = b"\x89PNG\r\n\x1a\noriginal"
+    replacement = b"\x89PNG\r\n\x1a\nreplacement"
+    candidate.write_bytes(original)
+    resolver = NodeArtResolver(
+        explicit_roots=[tmp_path / "assets"], environ={}, home=tmp_path / "home"
+    )
+    verified_art = resolver.resolve("monster")
+
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(replacement)
+    candidate.unlink()
+    candidate.symlink_to(outside)
+
+    class FixedResolver(NodeArtResolver):
+        def resolve(self, room_type: str, model_id: str | None = None):
+            return verified_art
+
+    with _server(_catalog(tmp_path), art_resolver=FixedResolver()) as base:
+        with urlopen(base + "/api/node-art?room_type=monster", timeout=3) as response:
+            body = response.read()
+            assert response.status == 200
+            assert response.headers.get_content_type() == "image/png"
+            assert response.headers["Content-Length"] == str(len(original))
+
+    assert verified_art.image_bytes == original
+    assert body == original
+    assert body != replacement
+
+
+def test_node_art_endpoint_returns_fallback_after_invalid_symlink_replacement(
+    tmp_path: Path,
+) -> None:
+    icons = tmp_path / "assets/map_icons"
+    icons.mkdir(parents=True)
+    candidate = icons / "map_monster.png"
+    candidate.write_bytes(b"\x89PNG\r\n\x1a\noriginal")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"not a png")
+    candidate.unlink()
+    candidate.symlink_to(outside)
+    resolver = NodeArtResolver(
+        explicit_roots=[tmp_path / "assets"], environ={}, home=tmp_path / "home"
+    )
+
+    with _server(_catalog(tmp_path), art_resolver=resolver) as base:
+        status, content_type, body = _binary_request(
+            base, "/api/node-art?room_type=monster"
+        )
+
+    payload = json.loads(body)
+    assert status == 404
+    assert content_type == "application/json"
+    assert payload["art"]["kind"] == "emoji"
+    assert payload["art"]["image_url"] is None
+
+
 @pytest.mark.parametrize(
     ("path", "status"),
     [
