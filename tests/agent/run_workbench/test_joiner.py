@@ -90,6 +90,45 @@ def test_conflicting_non_null_metadata_is_deterministic_and_warned() -> None:
     assert any("conflicting metadata seed" in warning for warning in forward.warnings)
 
 
+def test_conflicting_metadata_prefers_native_source_kind_before_filename() -> None:
+    replay = RunRecord(
+        run_id="same-priority-run",
+        source_id="a-replay.jsonl",
+        source_kind=SourceKind.REPLAY_JSONL,
+        metadata=RunMetadata(
+            seed="replay-seed",
+            ascension=10,
+            modifiers=("MODIFIER.REPLAY",),
+            is_multiplayer=True,
+        ),
+    )
+    native = RunRecord(
+        run_id="same-priority-run",
+        source_id="z-native.run",
+        source_kind=SourceKind.NATIVE_RUN,
+        metadata=RunMetadata(
+            seed="native-seed",
+            ascension=2,
+            modifiers=("MODIFIER.BIG_GAME_HUNTER",),
+            is_multiplayer=False,
+        ),
+    )
+
+    forward = join_records([replay, native])[0]
+    reverse = join_records([native, replay])[0]
+
+    assert forward.metadata == reverse.metadata
+    assert forward.metadata.seed == "native-seed"
+    assert forward.metadata.ascension == 2
+    assert forward.metadata.modifiers == ("MODIFIER.BIG_GAME_HUNTER",)
+    assert forward.metadata.is_multiplayer is False
+    for field in ("seed", "ascension", "modifiers", "is_multiplayer"):
+        assert any(
+            f"conflicting metadata {field}" in warning
+            for warning in forward.warnings
+        )
+
+
 def test_conflicting_gameplay_outcomes_keep_status_and_victory_coherent() -> None:
     won = RunRecord(
         run_id="same",

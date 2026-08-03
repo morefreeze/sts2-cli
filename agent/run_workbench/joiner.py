@@ -102,10 +102,11 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
 def _merge_metadata(records: list[RunRecord]) -> tuple[RunMetadata, list[str]]:
     values: dict[str, Any] = {}
     warnings: list[str] = []
+    ordered_records = _deterministic_evidence_records(records)
     for field in fields(RunMetadata):
         candidates = [
             getattr(record.metadata, field.name)
-            for record in records
+            for record in ordered_records
             if _is_present(getattr(record.metadata, field.name))
         ]
         values[field.name] = candidates[0] if candidates else field.default

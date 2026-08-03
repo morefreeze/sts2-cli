@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+import re
 import subprocess
 import sys
 from threading import Thread
@@ -140,6 +141,7 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
     assert not any(script.get("src") is None for script in parser.scripts)
     assert any(label.get("for") == "sourceFile" for label in parser.labels)
     assert any(region.get("id") == "workbenchStatus" for region in parser.live_regions)
+    assert '<nav id="actTabs" class="act-tabs" role="tablist"' in html
     assert "训练进度" in html
     assert "正在读取训练记录…" in html
     assert not hasattr(viewer, "HTML")
@@ -214,6 +216,63 @@ def test_act_switch_replaces_the_open_map_history_entry_and_tooltips_keep_unknow
     assert "QUALITY_LABELS[measurement.quality]" in tooltip
     assert "nonzeroMeasurement" not in tooltip
     assert "'—'" in script
+
+
+def _js_number(script: str, name: str) -> int:
+    match = re.search(rf"const {name} = (\d+);", script)
+    assert match, f"missing numeric JavaScript constant {name}"
+    return int(match.group(1))
+
+
+def test_map_fallback_route_badge_geometry_tabs_focus_and_image_contracts():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    route = _javascript_section(script, "function routeEdgeKeys", "function appendEdge")
+    measurement = _javascript_section(
+        script, "function measurementDisplay", "function nonzeroMeasurement"
+    )
+    art = _javascript_section(script, "function renderNodeArt", "function nodeTooltip")
+    tabs = _javascript_section(script, "function renderActTabs", "function showMapPage")
+    page = _javascript_section(script, "function showMapPage", "function showDashboardPage")
+    dashboard = _javascript_section(script, "function showDashboardPage", "function mapLocation")
+
+    assert "path_node_ids.length" in route
+    assert ".sort((a, b) => a.path_index - b.path_index)" in route
+    assert "boundedListLabels" in measurement
+    assert "item.name" in script
+    assert "item.id.en" in script
+    assert "[object Object]" not in script
+    assert "textContent" in script
+    assert "addEventListener('error'" in art
+    assert "art.emoji" in art
+    assert "removeAttribute('display')" in art
+    assert "handleActTabKeydown" in tabs
+    for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
+        assert key in script
+    assert "detailPanel.contains(mapState.opener)" in page
+    assert "document.activeElement" in page
+    assert "isUsableFocusTarget" in dashboard
+
+    badge_columns = _js_number(script, "BADGE_COLUMNS")
+    badge_width = _js_number(script, "BADGE_WIDTH")
+    badge_gap_x = _js_number(script, "BADGE_GAP_X")
+    badge_start_x = _js_number(script, "BADGE_START_X")
+    badge_height = _js_number(script, "BADGE_HEIGHT")
+    badge_gap_y = _js_number(script, "BADGE_GAP_Y")
+    badge_start_y = _js_number(script, "BADGE_START_Y")
+    column_gap = _js_number(script, "MAP_COLUMN_GAP")
+    row_gap = _js_number(script, "MAP_ROW_GAP")
+    padding_bottom = _js_number(script, "MAP_PADDING_BOTTOM")
+    max_badges = 11
+    right_extent = badge_start_x + (badge_columns - 1) * badge_gap_x + badge_width
+    left_extent = badge_start_x
+    bottom_extent = (
+        badge_start_y
+        + ((max_badges - 1) // badge_columns) * badge_gap_y
+        + badge_height
+    )
+    assert column_gap > right_extent - left_extent
+    assert row_gap > bottom_extent + 28
+    assert padding_bottom >= bottom_extent
 
 
 def test_static_routes_reject_unknown_traversal_encoding_and_queries(tmp_path: Path):

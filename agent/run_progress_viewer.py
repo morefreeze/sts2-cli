@@ -33,7 +33,16 @@ from agent.run_workbench.catalog import (
     RunCatalog,
 )
 from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
-from agent.run_workbench.map_service import MapRequest, MapService
+from agent.run_workbench.map_service import (
+    MapExecutableNotFoundError,
+    MapOutputError,
+    MapRequest,
+    MapService,
+    MapServiceError,
+    MapServiceTimeoutError,
+    MapSubprocessError,
+    visited_route_map,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,6 +194,20 @@ def _map_visited_entry(node: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def _map_service_fallback_reason(error: MapServiceError) -> str:
+    """Return a stable public message without exposing local command details."""
+
+    if isinstance(error, MapServiceTimeoutError):
+        return "Map reconstruction timed out; showing the recorded route only."
+    if isinstance(error, MapExecutableNotFoundError):
+        return "Map reconstruction is unavailable; showing the recorded route only."
+    if isinstance(error, MapOutputError):
+        return "Map reconstruction returned invalid output; showing the recorded route only."
+    if isinstance(error, MapSubprocessError):
+        return "Map reconstruction failed; showing the recorded route only."
+    return "Map reconstruction could not complete; showing the recorded route only."
+
+
 def _run_map_payload(
     catalog: RunCatalog,
     map_service: MapService,
@@ -211,6 +234,12 @@ def _run_map_payload(
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
     modifiers = metadata.get("modifiers")
+    final_recorded_act_index = (
+        _canonical_node_act_index(all_recorded_nodes[-1])
+        if all_recorded_nodes
+        else None
+    )
+    run_won = outcome.get("status") == "win" or outcome.get("victory") is True
     request = MapRequest(
         run_id=run_id,
         act_id=descriptor.get("act_id") or "",
@@ -236,9 +265,17 @@ def _run_map_payload(
             else None
         ),
         visited=tuple(_map_visited_entry(node) for node in recorded_nodes),
-        allow_partial_path=outcome.get("status") == "in_progress",
+        allow_partial_path=(
+            not run_won and act_index == final_recorded_act_index
+        ),
     )
-    act_map = map_service.generate(request)
+    try:
+        act_map = map_service.generate(request)
+    except MapServiceError as error:
+        act_map = visited_route_map(
+            request,
+            reason=_map_service_fallback_reason(error),
+        )
     payload = act_map.to_dict()
     path_ids = payload["alignment"].get("path_node_ids") or [
         node["id"]

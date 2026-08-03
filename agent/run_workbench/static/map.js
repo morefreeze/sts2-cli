@@ -26,6 +26,20 @@
     { key: 'cards_removed', short: '删', label: '移除卡牌', kind: 'list' },
     { key: 'cards_transformed', short: '变', label: '变化卡牌', kind: 'list' },
   ];
+  const MAP_COLUMN_GAP = 126;
+  const MAP_ROW_GAP = 180;
+  const MAP_PADDING_X = 72;
+  const MAP_PADDING_TOP = 72;
+  const MAP_PADDING_BOTTOM = 160;
+  const BADGE_COLUMNS = 2;
+  const BADGE_WIDTH = 54;
+  const BADGE_HEIGHT = 15;
+  const BADGE_GAP_X = 58;
+  const BADGE_GAP_Y = 18;
+  const BADGE_START_X = 56;
+  const BADGE_START_Y = 34;
+  const DELTA_LIST_LABEL_LIMIT = 3;
+  const DELTA_ITEM_LABEL_LIMIT = 48;
   const mapState = {
     runId: '',
     actIndex: 0,
@@ -59,25 +73,25 @@
     const maxCol = columns.length ? Math.max(...columns) : 0;
     const minRow = rows.length ? Math.min(...rows) : 0;
     const maxRow = rows.length ? Math.max(...rows) : 0;
-    const columnGap = 126;
-    const rowGap = 112;
-    const padding = 72;
     return {
-      width: Math.max(620, (maxCol - minCol) * columnGap + padding * 2),
-      height: Math.max(360, (maxRow - minRow) * rowGap + padding * 2),
+      width: Math.max(620, (maxCol - minCol) * MAP_COLUMN_GAP + MAP_PADDING_X * 2),
+      height: Math.max(360, (maxRow - minRow) * MAP_ROW_GAP + MAP_PADDING_TOP + MAP_PADDING_BOTTOM),
       point(node) {
         const col = Number.isInteger(node.col) ? node.col : minCol;
         const row = Number.isInteger(node.row) ? node.row : minRow;
         return {
-          x: padding + (col - minCol) * columnGap,
-          y: padding + (maxRow - row) * rowGap,
+          x: MAP_PADDING_X + (col - minCol) * MAP_COLUMN_GAP,
+          y: MAP_PADDING_TOP + (maxRow - row) * MAP_ROW_GAP,
         };
       },
     };
   }
 
   function routeEdgeKeys(payload) {
-    const path = payload.alignment && Array.isArray(payload.alignment.path_node_ids)
+    const hasAlignedPath = payload.alignment
+      && Array.isArray(payload.alignment.path_node_ids)
+      && payload.alignment.path_node_ids.length > 0;
+    const path = hasAlignedPath
       ? payload.alignment.path_node_ids
       : payload.nodes.filter((node) => node.visited).sort((a, b) => a.path_index - b.path_index).map((node) => node.id);
     const keys = new Set();
@@ -118,12 +132,41 @@
     svg.append(layer);
   }
 
+  function boundedDeltaLabel(value) {
+    if (!['string', 'number', 'boolean'].includes(typeof value)) return '';
+    const label = String(value).trim();
+    return label.length > DELTA_ITEM_LABEL_LIMIT
+      ? `${label.slice(0, DELTA_ITEM_LABEL_LIMIT - 1)}…`
+      : label;
+  }
+
+  function deltaItemLabel(item) {
+    const scalar = boundedDeltaLabel(item);
+    if (scalar) return scalar;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return '未知项目';
+    const name = boundedDeltaLabel(item.name)
+      || boundedDeltaLabel(item.name && item.name.en);
+    if (name) return name;
+    const identifier = boundedDeltaLabel(item.id)
+      || boundedDeltaLabel(item.id && item.id.en)
+      || boundedDeltaLabel(item.en);
+    return identifier || '未知项目';
+  }
+
+  function boundedListLabels(items) {
+    const labels = items
+      .slice(0, DELTA_LIST_LABEL_LIMIT)
+      .map((item) => deltaItemLabel(item));
+    const overflow = items.length - labels.length;
+    return `${labels.join('、')}${overflow > 0 ? `，另 ${overflow} 项` : ''}`;
+  }
+
   function measurementDisplay(measurement, field, compact = false) {
     if (!measurement || !['exact', 'derived'].includes(measurement.quality)) return '—';
     const value = measurement.value;
     let display = '—';
     if (field.kind === 'list') {
-      if (Array.isArray(value)) display = compact ? String(value.length) : (value.length ? value.join('、') : '0');
+      if (Array.isArray(value)) display = compact ? String(value.length) : (value.length ? boundedListLabels(value) : '0');
     } else if (typeof value === 'number' && Number.isFinite(value)) {
       if (field.kind === 'negative') display = String(-Math.abs(value));
       else if (field.kind === 'positive') display = `+${Math.abs(value)}`;
@@ -144,10 +187,10 @@
       const measurement = node.deltas[field.key];
       const badge = createSvg('g', {
         class: `map-node-badge ${measurement.quality}`,
-        transform: `translate(${34 + (index % 2) * 58} ${-34 + Math.floor(index / 2) * 18})`,
+        transform: `translate(${-BADGE_START_X + (index % BADGE_COLUMNS) * BADGE_GAP_X} ${BADGE_START_Y + Math.floor(index / BADGE_COLUMNS) * BADGE_GAP_Y})`,
       });
-      badge.append(createSvg('rect', { x: 0, y: 0, width: 54, height: 15, rx: 5 }));
-      const textNode = createSvg('text', { x: 27, y: 11, 'text-anchor': 'middle' });
+      badge.append(createSvg('rect', { x: 0, y: 0, width: BADGE_WIDTH, height: BADGE_HEIGHT, rx: 5 }));
+      const textNode = createSvg('text', { x: BADGE_WIDTH / 2, y: 11, 'text-anchor': 'middle' });
       textNode.textContent = `${measurement.quality === 'derived' ? '≈' : ''}${field.short} ${measurementDisplay(measurement, field, true)}`;
       const title = createSvg('title');
       title.textContent = `${field.label}：${measurementDisplay(measurement, field)}（${QUALITY_LABELS[measurement.quality]}）`;
@@ -159,10 +202,19 @@
   function renderNodeArt(group, node) {
     const art = node.art || {};
     if (node.visited && art.kind === 'original' && art.image_url) {
-      group.append(createSvg('image', {
+      const image = createSvg('image', {
         href: art.image_url, x: -21, y: -21, width: 42, height: 42,
         preserveAspectRatio: 'xMidYMid meet',
-      }));
+      });
+      const fallback = createSvg('text', {
+        class: 'map-node-icon', x: 0, y: 8, 'text-anchor': 'middle', display: 'none',
+      });
+      fallback.textContent = art.emoji || art.letter || '?';
+      image.addEventListener('error', () => {
+        image.setAttribute('display', 'none');
+        fallback.removeAttribute('display');
+      });
+      group.append(image, fallback);
     } else {
       const icon = createSvg('text', { class: `map-node-icon${node.visited ? '' : ' neutral'}`, x: 0, y: 8, 'text-anchor': 'middle' });
       icon.textContent = node.visited && art.kind === 'emoji'
@@ -292,16 +344,46 @@
     });
   }
 
+  function handleActTabKeydown(event) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const availableTabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]:not(:disabled)'));
+    if (!availableTabs.length) return;
+    const currentIndex = Math.max(0, availableTabs.indexOf(document.activeElement));
+    let nextIndex = currentIndex;
+    if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = availableTabs.length - 1;
+    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + availableTabs.length) % availableTabs.length;
+    else nextIndex = (currentIndex + 1) % availableTabs.length;
+    event.preventDefault();
+    availableTabs[nextIndex].focus();
+    availableTabs[nextIndex].click();
+  }
+
   function showMapPage() {
     const main = byId('dashboardMain');
     const page = byId('runMapPage');
-    if (!byId('detailPanel').hidden) closeDetail();
+    const detailPanel = byId('detailPanel');
+    const openerInsideDetail = mapState.opener && detailPanel.contains(mapState.opener);
+    if (!detailPanel.hidden) {
+      closeDetail();
+      if (openerInsideDetail) {
+        const restoredOpener = document.activeElement;
+        mapState.opener = isUsableFocusTarget(restoredOpener) ? restoredOpener : null;
+      }
+    }
     if (!mapState.dashboardHidden) {
       mapState.dashboardHidden = Array.from(main.children).map((child) => ({ child, hidden: child.hidden }));
     }
     mapState.dashboardHidden.forEach(({ child }) => { child.hidden = child !== page; });
     page.hidden = false;
     page.focus();
+  }
+
+  function isUsableFocusTarget(candidate) {
+    return Boolean(candidate
+      && candidate.isConnected
+      && typeof candidate.focus === 'function'
+      && !candidate.closest('[hidden], [inert], [aria-hidden="true"]'));
   }
 
   function showDashboardPage() {
@@ -314,7 +396,7 @@
     mapState.dashboardHidden = null;
     const opener = mapState.opener;
     mapState.opener = null;
-    if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+    if (isUsableFocusTarget(opener)) opener.focus();
     else byId('dashboardMain').focus();
   }
 
@@ -387,6 +469,7 @@
   }
 
   byId('mapBackButton').addEventListener('click', closeMapPage);
+  byId('actTabs').addEventListener('keydown', handleActTabKeydown);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !byId('runMapPage').hidden) {
       event.preventDefault();

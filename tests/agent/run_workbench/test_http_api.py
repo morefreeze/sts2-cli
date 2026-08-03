@@ -15,6 +15,10 @@ from agent.run_progress_viewer import make_viewer_handler
 from agent.run_workbench.assets import NodeArtResolver
 from agent.run_workbench.catalog import RunCatalog
 from agent.run_workbench.map_service import MapRequest, visited_route_map
+from agent.run_workbench.map_service import (
+    MapOutputError,
+    MapServiceTimeoutError,
+)
 
 from .test_catalog import _native, _replay, _replay_parser, _write_jsonl
 
@@ -290,6 +294,185 @@ def test_joined_native_modifiers_reach_the_map_service_request(
     assert status == 200
     assert len(service.requests) == 1
     assert service.requests[0].modifiers == ("MODIFIER.BIG_GAME_HUNTER",)
+
+
+def test_map_request_prefers_native_metadata_over_earlier_named_replay(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    run["seed"] = "native-seed"
+    run["ascension"] = 2
+    run["modifiers"] = ["MODIFIER.BIG_GAME_HUNTER"]
+    (tmp_path / "z-native.run").write_text(json.dumps(run), encoding="utf-8")
+    _write_jsonl(tmp_path / "a-replay.jsonl", _replay(run["run_id"], floor=3))
+
+    def replay_parser(records: list[dict], source_name: str | None = None) -> dict:
+        return {
+            "summary": {
+                "run_id": run["run_id"],
+                "seed": "replay-seed",
+                "ascension": 10,
+                "game_version": "v0.104.0",
+            },
+            "rooms": [{"id": "replay-room", "global_floor": 3}],
+        }
+
+    class CapturingMapService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="captured request")
+
+    service = CapturingMapService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=replay_parser),
+        map_service=service,
+    ) as base:
+        status, _ = _request(base, f"/api/run/map?id={run['run_id']}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.seed == "native-seed"
+    assert request.ascension == 2
+    assert request.modifiers == ("MODIFIER.BIG_GAME_HUNTER",)
+    assert request.is_multiplayer is False
+
+
+def test_dead_supported_prefix_uses_partial_alignment_for_a_full_graph(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    run["status"] = "dead"
+    run["map_point_history"] = run["map_point_history"][:-1]
+    (tmp_path / "dead-prefix.run").write_text(json.dumps(run), encoding="utf-8")
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert payload["full_map"] is True
+    assert payload["alignment"]["ok"] is True
+    assert payload["summary"]["visited_count"] == len(run["map_point_history"])
+
+
+def test_winning_supported_prefix_still_requires_the_boss(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    run["status"] = "win"
+    run["victory"] = True
+    run["map_point_history"] = run["map_point_history"][:-1]
+    (tmp_path / "win-prefix.run").write_text(json.dumps(run), encoding="utf-8")
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert payload["full_map"] is False
+    assert "boss" in payload["fallback_reason"].lower()
+
+
+@pytest.mark.parametrize("status_value", ["dead", "in_progress", "crash", "invalid"])
+def test_only_final_nonwinning_act_allows_partial_alignment(
+    tmp_path: Path, status_value: str
+) -> None:
+    run = {
+        "run_id": f"partial-{status_value}",
+        "build_id": "v0.103.2",
+        "seed": "two-act-seed",
+        "ascension": 0,
+        "modifiers": [],
+        "is_multiplayer": False,
+        "status": status_value,
+        "players": [{"character": "IRONCLAD"}],
+        "acts": [{"id": "ACT.OVERGROWTH"}, {"id": "ACT.HIVE"}],
+        "map_point_history": [
+            [{"map_point_type": "ancient"}, {"map_point_type": "boss"}],
+            [{"map_point_type": "ancient"}, {"map_point_type": "monster"}],
+        ],
+    }
+    (tmp_path / "two-act.run").write_text(json.dumps(run), encoding="utf-8")
+
+    class CapturingMapService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="captured request")
+
+    service = CapturingMapService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        first_status, _ = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+        final_status, _ = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=1"
+        )
+
+    assert first_status == final_status == 200
+    assert [request.allow_partial_path for request in service.requests] == [
+        False,
+        True,
+    ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MapServiceTimeoutError("/private/secret/node timed out"),
+        MapOutputError("invalid output from /private/secret/map_cli.js"),
+    ],
+)
+def test_map_service_operational_errors_fall_back_without_losing_annotations(
+    tmp_path: Path, error: Exception
+) -> None:
+    run = _map_fixture()
+    (tmp_path / "native.run").write_text(json.dumps(run), encoding="utf-8")
+    fixture_root = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "map_assets"
+    )
+    resolver = NodeArtResolver(
+        explicit_roots=[fixture_root], environ={}, home=tmp_path / "home"
+    )
+
+    class ExplodingMapService:
+        def generate(self, request: MapRequest):
+            raise error
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        art_resolver=resolver,
+        map_service=ExplodingMapService(),
+    ) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert payload["full_map"] is False
+    assert payload["visited_route"] is True
+    assert payload["fallback_reason"]
+    assert "/private/secret" not in payload["fallback_reason"]
+    assert all("deltas" in node and "art" in node for node in payload["nodes"])
+    assert any(
+        node["art"]["kind"] == "original"
+        for node in payload["nodes"]
+        if node["room_type"] == "Monster"
+    )
 
 
 def test_only_the_globally_last_route_node_is_terminal_across_acts(
