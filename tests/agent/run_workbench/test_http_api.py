@@ -12,14 +12,18 @@ import pytest
 
 import agent.run_progress_viewer as viewer
 from agent.run_progress_viewer import make_viewer_handler
+from agent.run_workbench.assets import NodeArtResolver
 from agent.run_workbench.catalog import RunCatalog
 
 from .test_catalog import _native, _replay, _replay_parser, _write_jsonl
 
 
 @contextmanager
-def _server(catalog: RunCatalog):
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_viewer_handler(catalog))
+def _server(catalog: RunCatalog, *, art_resolver: NodeArtResolver | None = None):
+    httpd = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        make_viewer_handler(catalog, art_resolver=art_resolver),
+    )
     thread = Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
@@ -58,6 +62,15 @@ def _raw_request(base: str, path: str, body: bytes) -> tuple[int, dict]:
         return error.code, json.loads(error.read())
 
 
+def _binary_request(base: str, path: str) -> tuple[int, str, bytes]:
+    request = Request(base + path)
+    try:
+        with urlopen(request, timeout=3) as response:
+            return response.status, response.headers.get_content_type(), response.read()
+    except HTTPError as error:
+        return error.code, error.headers.get_content_type(), error.read()
+
+
 def _catalog(tmp_path: Path) -> RunCatalog:
     (tmp_path / "native.run").write_text(json.dumps(_native()), encoding="utf-8")
     _write_jsonl(tmp_path / "summary.jsonl", [{"event": "summary", "avg_floor": 8}])
@@ -94,6 +107,98 @@ def test_catalog_source_run_cohort_and_metrics_http_contracts(tmp_path: Path):
         status, metrics_payload = _request(base, f"/api/metrics?current={cohort_id}")
         assert status == 200
         assert metrics_payload["comparison"] is None
+
+
+def test_node_art_endpoint_streams_only_a_resolved_known_png(tmp_path: Path):
+    fixture_root = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "map_assets"
+    )
+    expected = (fixture_root / "map_icons" / "map_monster.png").read_bytes()
+    resolver = NodeArtResolver(
+        explicit_roots=[fixture_root],
+        environ={},
+        home=tmp_path,
+    )
+
+    with _server(_catalog(tmp_path), art_resolver=resolver) as base:
+        status, content_type, body = _binary_request(
+            base, "/api/node-art?room_type=monster"
+        )
+
+    assert status == 200
+    assert content_type == "image/png"
+    assert body == expected
+
+
+def test_missing_node_art_is_a_bounded_json_404_with_fallback_descriptor(
+    tmp_path: Path,
+) -> None:
+    resolver = NodeArtResolver(explicit_roots=[tmp_path], environ={}, home=tmp_path)
+
+    with _server(_catalog(tmp_path), art_resolver=resolver) as base:
+        status, content_type, body = _binary_request(
+            base, "/api/node-art?room_type=elite"
+        )
+
+    payload = json.loads(body)
+    assert status == 404
+    assert content_type == "application/json"
+    assert payload["error"] == "node art not found"
+    assert payload["art"]["kind"] == "emoji"
+    assert payload["art"]["emoji"] == "👹"
+    assert payload["art"]["letter"] == "E"
+
+
+@pytest.mark.parametrize(
+    ("path", "status"),
+    [
+        ("/api/node-art", 400),
+        ("/api/node-art?room_type=ancient&model_id=%252e%252e%252fsecret", 400),
+        ("/api/node-art?room_type=monster&path=/etc/passwd", 400),
+    ],
+)
+def test_node_art_endpoint_rejects_missing_or_path_like_queries(
+    tmp_path: Path, path: str, status: int
+) -> None:
+    resolver = NodeArtResolver(explicit_roots=[tmp_path], environ={}, home=tmp_path)
+
+    with _server(_catalog(tmp_path), art_resolver=resolver) as base:
+        actual_status, content_type, body = _binary_request(base, path)
+
+    assert actual_status == status
+    assert content_type == "application/json"
+    assert "error" in json.loads(body)
+
+
+def test_map_assets_cli_option_is_passed_to_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        viewer,
+        "serve",
+        lambda host, port, source_roots=None, map_assets_dir=None: calls.append(
+            {
+                "host": host,
+                "port": port,
+                "source_roots": source_roots,
+                "map_assets_dir": map_assets_dir,
+            }
+        ),
+    )
+
+    assert viewer.main(["--port", "0", "--map-assets-dir", str(tmp_path)]) == 0
+    assert calls == [
+        {
+            "host": "127.0.0.1",
+            "port": 0,
+            "source_roots": None,
+            "map_assets_dir": tmp_path,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

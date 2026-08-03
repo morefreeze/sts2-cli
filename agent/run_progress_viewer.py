@@ -31,6 +31,7 @@ from agent.run_workbench.catalog import (
     CatalogNotFoundError,
     RunCatalog,
 )
+from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -747,6 +748,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         replay_parser=parse_game_progress,
         include_policy="workbench",
     )
+    node_art_resolver = NodeArtResolver()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
@@ -826,6 +828,45 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     self._send_error("missing source id")
                     return
                 self._send_json(self.catalog.get_source(source_id))
+            elif parsed.path == "/api/node-art":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                unexpected = sorted(set(query) - {"room_type", "model_id"})
+                if unexpected:
+                    self._send_error(
+                        f"unexpected node-art query parameter: {unexpected[0]}"
+                    )
+                    return
+                room_values = query.get("room_type") or []
+                model_values = query.get("model_id") or []
+                if len(room_values) != 1 or not room_values[0]:
+                    self._send_error("missing room_type")
+                    return
+                if len(model_values) > 1:
+                    self._send_error("model_id must appear at most once")
+                    return
+                model_id = model_values[0] if model_values else None
+                try:
+                    art = self.node_art_resolver.resolve(
+                        room_values[0], model_id=model_id
+                    )
+                except InvalidNodeArtModelError as exc:
+                    self._send_error(str(exc))
+                    return
+                if art.kind != "original" or art.image_path is None:
+                    self._send_json(
+                        {"error": "node art not found", "art": art.to_dict()},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                try:
+                    body = art.image_path.read_bytes()
+                except OSError:
+                    self._send_json(
+                        {"error": "node art not found", "art": art.to_dict()},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                self._send_bytes(body, "image/png")
             elif parsed.path == "/api/logs":
                 self._send_json({"logs": list_log_files()})
             elif parsed.path == "/api/latest":
@@ -914,18 +955,25 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_internal_error(exc)
 
 
-def make_viewer_handler(catalog: RunCatalog) -> type[ViewerHandler]:
+def make_viewer_handler(
+    catalog: RunCatalog, *, art_resolver: NodeArtResolver | None = None
+) -> type[ViewerHandler]:
     """Bind one catalog to an isolated handler class for a server instance."""
 
     class BoundViewerHandler(ViewerHandler):
         pass
 
     BoundViewerHandler.catalog = catalog
+    if art_resolver is not None:
+        BoundViewerHandler.node_art_resolver = art_resolver
     return BoundViewerHandler
 
 
 def serve(
-    host: str, port: int, source_roots: list[Path] | tuple[Path, ...] | None = None
+    host: str,
+    port: int,
+    source_roots: list[Path] | tuple[Path, ...] | None = None,
+    map_assets_dir: Path | None = None,
 ) -> None:
     roots = list(source_roots) if source_roots is not None else [LOG_DIR, ROOT / "data"]
     catalog = RunCatalog(
@@ -933,7 +981,13 @@ def serve(
         replay_parser=parse_game_progress,
         include_policy="workbench" if source_roots is None else "all",
     )
-    httpd = ThreadingHTTPServer((host, port), make_viewer_handler(catalog))
+    art_resolver = NodeArtResolver(
+        explicit_roots=[map_assets_dir] if map_assets_dir is not None else ()
+    )
+    httpd = ThreadingHTTPServer(
+        (host, port),
+        make_viewer_handler(catalog, art_resolver=art_resolver),
+    )
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Run progress viewer: {url}", flush=True)
     httpd.serve_forever()
@@ -950,12 +1004,22 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Catalog source root (repeatable; defaults to logs and data)",
     )
+    parser.add_argument(
+        "--map-assets-dir",
+        type=Path,
+        help="Map artwork cache root (expects a map_icons subdirectory)",
+    )
     args = parser.parse_args(argv)
 
     if args.parse:
         print(json.dumps(parse_log_file(args.parse), ensure_ascii=False, indent=2))
         return 0
-    serve(args.host, args.port, source_roots=args.source_root)
+    serve(
+        args.host,
+        args.port,
+        source_roots=args.source_root,
+        map_assets_dir=args.map_assets_dir,
+    )
     return 0
 
 
