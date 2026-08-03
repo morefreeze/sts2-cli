@@ -4,9 +4,13 @@ from enum import Enum
 import pytest
 
 from agent.run_workbench.models import (
+    ActMap,
     Capabilities,
     Coverage,
     DeltaQuality,
+    MapAlignment,
+    MapEdge,
+    MapNode,
     RunDelta,
     RunMetadata,
     RunOutcome,
@@ -14,6 +18,64 @@ from agent.run_workbench.models import (
     RunStatus,
     SourceKind,
 )
+
+
+def test_act_map_serializes_an_authoritative_aligned_route() -> None:
+    result = ActMap(
+        act_id="ACT.OVERGROWTH",
+        full_map=True,
+        visited_route=True,
+        nodes=(
+            MapNode(
+                id="3:0",
+                col=3,
+                row=0,
+                room_type="Ancient",
+                visited=True,
+                path_index=0,
+            ),
+            MapNode(
+                id="1:1",
+                col=1,
+                row=1,
+                room_type="Monster",
+                visited=True,
+                path_index=1,
+            ),
+            MapNode(id="3:1", col=3, row=1, room_type="Monster"),
+        ),
+        edges=(MapEdge(from_id="3:0", to_id="1:1"),),
+        alignment=MapAlignment(
+            ok=True,
+            ambiguous=False,
+            path_node_ids=("3:0", "1:1"),
+        ),
+    )
+
+    payload = result.to_dict()
+
+    assert payload["act_id"] == "ACT.OVERGROWTH"
+    assert payload["full_map"] is True
+    assert payload["visited_route"] is True
+    assert payload["fallback_reason"] is None
+    assert payload["alignment"] == {
+        "ok": True,
+        "ambiguous": False,
+        "reason": None,
+        "path_node_ids": ["3:0", "1:1"],
+    }
+    assert payload["edges"] == [{"from": "3:0", "to": "1:1"}]
+    assert all(
+        node["visited"] is False or node["path_index"] is not None
+        for node in payload["nodes"]
+    )
+
+
+def test_map_models_are_immutable() -> None:
+    node = MapNode(id="visited:0", col=0, row=0, room_type="Ancient")
+
+    with pytest.raises(AttributeError):
+        node.row = 2  # type: ignore[misc]
 
 
 def test_unknown_deltas_preserve_none_values() -> None:

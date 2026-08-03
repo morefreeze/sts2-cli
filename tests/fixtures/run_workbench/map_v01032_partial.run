@@ -1,0 +1,33 @@
+{
+  "run_id": "map-v01032-golden",
+  "build_id": "v0.103.2",
+  "seed": "map-contract-seed",
+  "ascension": 0,
+  "modifiers": [],
+  "is_multiplayer": false,
+  "players": [
+    {"character": "IRONCLAD"}
+  ],
+  "acts": [
+    {"id": "ACT.OVERGROWTH"}
+  ],
+  "map_point_history": [
+    {"map_point_type": "ancient"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "treasure"},
+    {"map_point_type": "elite"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "elite"},
+    {"map_point_type": "rest_site"},
+    {"map_point_type": "boss"}
+  ]
+}

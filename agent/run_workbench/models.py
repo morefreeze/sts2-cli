@@ -80,6 +80,61 @@ class RunDelta:
 
 
 @dataclass(frozen=True)
+class MapNode:
+    id: str
+    col: int
+    row: int
+    room_type: str
+    visited: bool = False
+    path_index: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(frozen=True)
+class MapEdge:
+    from_id: str
+    to_id: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"from": self.from_id, "to": self.to_id}
+
+
+@dataclass(frozen=True)
+class MapAlignment:
+    ok: bool
+    ambiguous: bool = False
+    reason: str | None = None
+    path_node_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(self)
+
+
+@dataclass(frozen=True)
+class ActMap:
+    act_id: str
+    nodes: tuple[MapNode, ...] = ()
+    edges: tuple[MapEdge, ...] = ()
+    alignment: MapAlignment = field(default_factory=lambda: MapAlignment(ok=False))
+    full_map: bool = False
+    visited_route: bool = False
+    fallback_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "act_id": self.act_id,
+            "full_map": self.full_map,
+            "visited_route": self.visited_route,
+            "fallback_reason": self.fallback_reason,
+            "nodes": [node.to_dict() for node in self.nodes],
+            "edges": [edge.to_dict() for edge in self.edges],
+            "alignment": self.alignment.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class RunMetadata:
     character: str | None = None
     seed: str | None = None

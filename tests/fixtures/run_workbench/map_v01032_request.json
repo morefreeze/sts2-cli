@@ -1,0 +1,28 @@
+{
+  "act_id": "ACT.OVERGROWTH",
+  "act_index": 0,
+  "seed": "map-contract-seed",
+  "ascension": 0,
+  "modifiers": [],
+  "is_multiplayer": false,
+  "visited": [
+    {"map_point_type": "ancient"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "treasure"},
+    {"map_point_type": "elite"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "unknown"},
+    {"map_point_type": "monster"},
+    {"map_point_type": "elite"},
+    {"map_point_type": "rest_site"},
+    {"map_point_type": "boss"}
+  ],
+  "allow_partial_path": false
+}
