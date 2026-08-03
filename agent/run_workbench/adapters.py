@@ -56,36 +56,68 @@ def adapt_path(
         return AdaptedSource(descriptor=descriptor, errors=(str(error),))
 
     descriptor = classify_records(records, suffix=path.suffix)
-    if descriptor.kind is SourceKind.NATIVE_RUN:
+    return adapt_records(
+        path.name,
+        records,
+        descriptor=descriptor,
+        replay_parser=replay_parser,
+        source_path=path,
+    )
+
+
+def adapt_records(
+    source_name: str,
+    records: list[dict[str, Any]],
+    *,
+    descriptor: SourceDescriptor | None = None,
+    replay_parser: Callable[[list[dict], str | None], dict] | None = None,
+    source_path: Path | None = None,
+) -> AdaptedSource:
+    """Normalize already-decoded records without writing them to disk.
+
+    ``source_path`` is an internal provenance hook for ``adapt_path``. Upload
+    callers should omit it so their source name is the only recorded identity.
+    """
+    path = (
+        Path(source_path)
+        if source_path is not None
+        else Path(Path(source_name).name)
+    )
+    resolved_descriptor = descriptor or classify_records(
+        records, suffix=Path(source_name).suffix
+    )
+    if resolved_descriptor.kind is SourceKind.NATIVE_RUN:
         if not _has_native_run_structure(records[0]):
             return AdaptedSource(
-                descriptor,
+                resolved_descriptor,
                 errors=(
                     f"{path.name}: native run is missing players and map_point_history lists",
                 ),
             )
-        adapted = AdaptedSource(descriptor, runs=(_adapt_native(path, records[0]),))
+        adapted = AdaptedSource(
+            resolved_descriptor, runs=(_adapt_native(path, records[0]),)
+        )
         return _validate_adapted_source(adapted)
-    if descriptor.kind is SourceKind.REPLAY_JSONL:
+    if resolved_descriptor.kind is SourceKind.REPLAY_JSONL:
         return _validate_adapted_source(
-            _adapt_replay(path, descriptor, records, replay_parser)
+            _adapt_replay(path, resolved_descriptor, records, replay_parser)
         )
-    if descriptor.kind is SourceKind.DECK_HISTORY:
+    if resolved_descriptor.kind is SourceKind.DECK_HISTORY:
         return _validate_adapted_source(
-            _adapt_deck_history(path, descriptor, records)
+            _adapt_deck_history(path, resolved_descriptor, records)
         )
-    if descriptor.kind is SourceKind.EVAL_RESULTS:
+    if resolved_descriptor.kind is SourceKind.EVAL_RESULTS:
         return _validate_adapted_source(
-            _adapt_eval_results(path, descriptor, records)
+            _adapt_eval_results(path, resolved_descriptor, records)
         )
-    if descriptor.kind is SourceKind.SUMMARY:
+    if resolved_descriptor.kind is SourceKind.SUMMARY:
         return AdaptedSource(
-            descriptor,
+            resolved_descriptor,
             summary={"record_count": len(records), "records": deepcopy(records)},
         )
     return AdaptedSource(
-        descriptor,
-        errors=(f"{path.name}: {descriptor.message}",),
+        resolved_descriptor,
+        errors=(f"{path.name}: {resolved_descriptor.message}",),
     )
 
 

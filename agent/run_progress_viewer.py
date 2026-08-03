@@ -21,6 +21,12 @@ from typing import Any
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, unquote, urlparse
 
+from agent.run_workbench.catalog import (
+    CatalogError,
+    CatalogNotFoundError,
+    RunCatalog,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = ROOT / "logs"
@@ -1818,12 +1824,15 @@ HTML = r"""<!doctype html>
 
 class ViewerHandler(BaseHTTPRequestHandler):
     server_version = "RunProgressViewer/1.0"
+    catalog = RunCatalog(
+        [LOG_DIR, ROOT / "data"], replay_parser=parse_game_progress
+    )
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1846,6 +1855,32 @@ class ViewerHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/":
                 self._send_text(HTML)
+            elif parsed.path == "/api/catalog":
+                self._send_json({"sources": self.catalog.list_sources()})
+            elif parsed.path == "/api/cohorts":
+                self._send_json({"cohorts": self.catalog.list_cohorts()})
+            elif parsed.path == "/api/metrics":
+                query = parse_qs(parsed.query)
+                current = (query.get("current") or [""])[0]
+                baseline = (query.get("baseline") or [None])[0]
+                if not current:
+                    self._send_error("missing current cohort")
+                    return
+                self._send_json(self.catalog.get_metrics(current, baseline))
+            elif parsed.path == "/api/run":
+                query = parse_qs(parsed.query)
+                run_id = (query.get("id") or [""])[0]
+                if not run_id:
+                    self._send_error("missing run id")
+                    return
+                self._send_json(self.catalog.get_run(run_id))
+            elif parsed.path == "/api/source":
+                query = parse_qs(parsed.query)
+                source_id = (query.get("id") or [""])[0]
+                if not source_id:
+                    self._send_error("missing source id")
+                    return
+                self._send_json(self.catalog.get_source(source_id))
             elif parsed.path == "/api/logs":
                 self._send_json({"logs": list_log_files()})
             elif parsed.path == "/api/latest":
@@ -1881,6 +1916,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._send_text("", mimetypes.types_map.get(".ico", "image/x-icon"))
             else:
                 self._send_error("not found", HTTPStatus.NOT_FOUND)
+        except CatalogNotFoundError as exc:
+            self._send_error(str(exc), HTTPStatus.NOT_FOUND)
+        except CatalogError as exc:
+            self._send_error(str(exc), HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # pragma: no cover - defensive for interactive server
             self._send_error(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -1890,25 +1929,60 @@ class ViewerHandler(BaseHTTPRequestHandler):
             self._send_error("not found", HTTPStatus.NOT_FOUND)
             return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            source_name = payload.get("source_name") or "uploaded.jsonl"
-            text = payload.get("text") or ""
-            entries = []
-            for line_no, line in enumerate(text.splitlines(), start=1):
-                stripped = line.strip()
-                if stripped:
-                    try:
-                        entries.append(json.loads(stripped))
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(f"{source_name}:{line_no}: invalid JSONL: {exc}") from exc
-            self._send_json({"progress": parse_game_progress(entries, source_name=source_name)})
-        except Exception as exc:
-            self._send_error(str(exc))
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError as exc:
+                raise CatalogError("invalid Content-Length") from exc
+            if length < 0 or length > 10 * 1024 * 1024:
+                raise CatalogError("request body is too large")
+            raw = self.rfile.read(length).decode("utf-8")
+            try:
+                payload = json.loads(
+                    raw,
+                    parse_constant=lambda value: (_ for _ in ()).throw(
+                        ValueError(f"non-standard numeric constant {value}")
+                    ),
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise CatalogError(f"invalid JSON request: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise CatalogError("request must be a JSON object")
+            source_name = payload.get("source_name", "uploaded.jsonl")
+            text = payload.get("text", "")
+            if not isinstance(source_name, str):
+                raise CatalogError("source_name must be a string")
+            if not isinstance(text, str):
+                raise CatalogError("text must be a string")
+            result = self.catalog.parse_upload(source_name, text)
+            if result["view"] == "error":
+                message = (result.get("errors") or ["could not parse upload"])[0]
+                self._send_json(
+                    {"error": message, "result": result}, HTTPStatus.BAD_REQUEST
+                )
+                return
+            self._send_json(result)
+        except CatalogError as exc:
+            self._send_error(str(exc), HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # pragma: no cover - defensive server boundary
+            self._send_error(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
-def serve(host: str, port: int) -> None:
-    httpd = ThreadingHTTPServer((host, port), ViewerHandler)
+def make_viewer_handler(catalog: RunCatalog) -> type[ViewerHandler]:
+    """Bind one catalog to an isolated handler class for a server instance."""
+
+    class BoundViewerHandler(ViewerHandler):
+        pass
+
+    BoundViewerHandler.catalog = catalog
+    return BoundViewerHandler
+
+
+def serve(
+    host: str, port: int, source_roots: list[Path] | tuple[Path, ...] | None = None
+) -> None:
+    roots = list(source_roots) if source_roots is not None else [LOG_DIR, ROOT / "data"]
+    catalog = RunCatalog(roots, replay_parser=parse_game_progress)
+    httpd = ThreadingHTTPServer((host, port), make_viewer_handler(catalog))
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Run progress viewer: {url}", flush=True)
     httpd.serve_forever()
@@ -1919,12 +1993,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--parse", type=Path, help="Parse one JSONL log and print normalized JSON")
+    parser.add_argument(
+        "--source-root",
+        action="append",
+        type=Path,
+        help="Catalog source root (repeatable; defaults to logs and data)",
+    )
     args = parser.parse_args(argv)
 
     if args.parse:
         print(json.dumps(parse_log_file(args.parse), ensure_ascii=False, indent=2))
         return 0
-    serve(args.host, args.port)
+    serve(args.host, args.port, source_roots=args.source_root)
     return 0
 
 
