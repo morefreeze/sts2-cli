@@ -827,7 +827,14 @@ function appendErrors(container, errors, source = null) {
 
 function renderCanonicalRun(container, run, index = null) {
   const section = element('section', { className: 'detail-section' });
-  section.append(element('h3', { text: index === null ? `对局 ${run.run_id || '未标注'}` : `对局 ${index + 1} · ${run.run_id || '未标注'}` }));
+  const heading = element('div', { className: 'detail-run-heading' });
+  heading.append(element('h3', { text: index === null ? `对局 ${run.run_id || '未标注'}` : `对局 ${index + 1} · ${run.run_id || '未标注'}` }));
+  if (typeof run.run_id === 'string' && run.run_id.trim()) {
+    const mapButton = element('button', { text: '查看地图', attrs: { type: 'button' } });
+    mapButton.addEventListener('click', (event) => openRun(run.run_id, event.currentTarget));
+    heading.append(mapButton);
+  }
+  section.append(heading);
   appendKeyValues(section, {
     '状态': STATUS_LABELS[run.outcome && run.outcome.status] || (run.outcome && run.outcome.status),
     '最远推进': run.outcome && (run.outcome.max_floor_label || run.outcome.max_global_floor),
@@ -853,7 +860,7 @@ function renderCanonicalRun(container, run, index = null) {
   capabilitySection.append(element('p', {
     className: 'section-note',
     text: mapAvailable
-      ? '该来源含地图能力；本阶段先展示规范化摘要，完整地图视图将在后续功能中呈现。'
+      ? '该来源含地图能力；可先查看地图总览，再选择已访问节点检查收益。'
       : '该来源不含可靠地图路线；不会伪造未记录的分支或收益。',
   }));
   section.append(capabilitySection);
@@ -1020,6 +1027,10 @@ async function openRun(runId, opener = null) {
   runId = typeof runId === 'string' ? runId.trim() : '';
   if (!runId) {
     setStatus('无法打开对局：缺少对局 ID', 'error');
+    return;
+  }
+  if (window.STS2Map && typeof window.STS2Map.openRun === 'function') {
+    window.STS2Map.openRun(runId, opener);
     return;
   }
   const { token, signal } = beginDetailRequest(opener);

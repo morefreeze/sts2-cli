@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import mimetypes
 import posixpath
@@ -32,6 +33,7 @@ from agent.run_workbench.catalog import (
     RunCatalog,
 )
 from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
+from agent.run_workbench.map_service import MapRequest, MapService
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,11 +43,219 @@ STATIC_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/map.js": ("map.js", "text/javascript; charset=utf-8"),
 }
 ADVISOR_URL = "https://ing-gom.github.io/sts2-card-advisor/"
 TRANSLATION_CACHE_TTL_SECONDS = 24 * 60 * 60
 PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024
 _TRANSLATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _canonical_node_act_index(node: dict[str, Any]) -> int:
+    """Return the zero-based act owning one canonical recorded node."""
+
+    raw_id = node.get("id")
+    if isinstance(raw_id, str):
+        match = re.match(r"^a(\d+):n\d+$", raw_id)
+        if match:
+            return int(match.group(1))
+    act_index = node.get("act_index")
+    if isinstance(act_index, int) and not isinstance(act_index, bool):
+        return max(0, act_index)
+    act = node.get("act")
+    if isinstance(act, int) and not isinstance(act, bool):
+        return max(0, act - 1)
+    global_floor = node.get("global_floor")
+    if isinstance(global_floor, int) and not isinstance(global_floor, bool):
+        return max(0, (global_floor - 1) // 17)
+    return 0
+
+
+def _is_canonical_route_node(node: dict[str, Any]) -> bool:
+    """Exclude joined inventory/decision evidence from the visited map path."""
+
+    evidence_kind = node.get("_workbench_evidence_kind")
+    return evidence_kind is None or evidence_kind == "route_node"
+
+
+def _act_identifier(act: dict[str, Any] | None) -> str:
+    if not isinstance(act, dict):
+        return ""
+    for key in ("id", "act_id"):
+        value = act.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _act_descriptors(run: dict[str, Any]) -> list[dict[str, Any]]:
+    acts = run.get("acts") if isinstance(run.get("acts"), list) else []
+    nodes = [
+        node
+        for node in (run.get("nodes") if isinstance(run.get("nodes"), list) else [])
+        if isinstance(node, dict) and _is_canonical_route_node(node)
+    ]
+    node_indices = {
+        _canonical_node_act_index(node)
+        for node in nodes
+        if isinstance(node, dict)
+    }
+    indices = sorted(set(range(len(acts))) | node_indices)
+    if not indices:
+        indices = [0]
+    descriptors: list[dict[str, Any]] = []
+    for index in indices:
+        act = acts[index] if index < len(acts) and isinstance(acts[index], dict) else {}
+        act_id = _act_identifier(act)
+        visited_count = sum(
+            1
+            for node in nodes
+            if isinstance(node, dict) and _canonical_node_act_index(node) == index
+        )
+        descriptors.append(
+            {
+                "index": index,
+                "act_id": act_id or None,
+                "label": f"第 {index + 1} 幕",
+                "available": visited_count > 0,
+                "visited_count": visited_count,
+            }
+        )
+    return descriptors
+
+
+def _node_model_id(node: dict[str, Any]) -> str | None:
+    for key in ("model_id", "room_model_id", "boss_id"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    rooms = node.get("rooms")
+    if isinstance(rooms, list):
+        for room in rooms:
+            if isinstance(room, dict):
+                value = room.get("model_id")
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
+def _map_visited_entry(node: dict[str, Any]) -> dict[str, Any]:
+    """Project canonical evidence onto the generator's bounded route schema."""
+
+    entry: dict[str, Any] = {}
+    for key in (
+        "map_point_type",
+        "room_type",
+        "col",
+        "column",
+        "map_col",
+        "row",
+        "map_row",
+        "floor",
+    ):
+        value = node.get(key)
+        if isinstance(value, str) or (
+            isinstance(value, int) and not isinstance(value, bool)
+        ):
+            entry[key] = value
+    model_id = _node_model_id(node)
+    if model_id is not None:
+        entry["rooms"] = [{"model_id": model_id}]
+    return entry
+
+
+def _run_map_payload(
+    catalog: RunCatalog,
+    map_service: MapService,
+    art_resolver: NodeArtResolver,
+    run_id: str,
+    act_index: int,
+) -> dict[str, Any]:
+    """Build one act map from the catalog's joined canonical run."""
+
+    canonical_payload = catalog.get_run(run_id)
+    run = canonical_payload["run"]
+    acts = _act_descriptors(run)
+    descriptor = next((item for item in acts if item["index"] == act_index), None)
+    if descriptor is None:
+        raise CatalogNotFoundError(
+            f"run {run_id!r} has no act {act_index}"
+        )
+    recorded_nodes = [
+        node
+        for node in (run.get("nodes") or [])
+        if isinstance(node, dict)
+        and _is_canonical_route_node(node)
+        and _canonical_node_act_index(node) == act_index
+    ]
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
+    modifiers = metadata.get("modifiers")
+    request = MapRequest(
+        run_id=run_id,
+        act_id=descriptor.get("act_id") or "",
+        act_index=act_index,
+        seed=metadata.get("seed") if isinstance(metadata.get("seed"), str) else None,
+        game_version=(
+            metadata.get("game_version")
+            if isinstance(metadata.get("game_version"), str)
+            else None
+        ),
+        ascension=(
+            metadata.get("ascension")
+            if isinstance(metadata.get("ascension"), int)
+            and not isinstance(metadata.get("ascension"), bool)
+            else None
+        ),
+        modifiers=tuple(
+            value for value in modifiers if isinstance(value, str)
+        ) if isinstance(modifiers, list) else (),
+        is_multiplayer=False,
+        visited=tuple(_map_visited_entry(node) for node in recorded_nodes),
+        allow_partial_path=outcome.get("status") == "in_progress",
+    )
+    act_map = map_service.generate(request)
+    payload = act_map.to_dict()
+    path_ids = payload["alignment"].get("path_node_ids") or [
+        node["id"]
+        for node in sorted(
+            (item for item in payload["nodes"] if item["visited"]),
+            key=lambda item: item["path_index"],
+        )
+    ]
+    terminal_node_id = path_ids[-1] if path_ids else None
+    terminal_status = outcome.get("status") or "unknown"
+    for node in payload["nodes"]:
+        source_node = None
+        path_index = node.get("path_index")
+        if node.get("visited") and isinstance(path_index, int):
+            if 0 <= path_index < len(recorded_nodes):
+                source_node = recorded_nodes[path_index]
+                node["deltas"] = deepcopy(source_node.get("deltas") or {})
+                node["recorded_node_id"] = source_node.get("id")
+        model_id = _node_model_id(source_node or {})
+        try:
+            art = art_resolver.resolve(node["room_type"], model_id=model_id)
+        except InvalidNodeArtModelError:
+            art = art_resolver.resolve(node["room_type"])
+        node["art"] = art.to_dict()
+        node["terminal"] = node["id"] == terminal_node_id
+        node["terminal_status"] = terminal_status if node["terminal"] else None
+
+    payload.update(
+        {
+            "run_id": run_id,
+            "act": descriptor,
+            "acts": acts,
+            "summary": {
+                "node_count": len(payload["nodes"]),
+                "edge_count": len(payload["edges"]),
+                "visited_count": sum(1 for node in payload["nodes"] if node["visited"]),
+                "terminal_node_id": terminal_node_id,
+            },
+        }
+    )
+    return payload
 
 
 def format_room_label(context: dict[str, Any]) -> str:
@@ -749,6 +959,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         include_policy="workbench",
     )
     node_art_resolver = NodeArtResolver()
+    map_service = MapService()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
@@ -814,6 +1025,39 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     self._send_error("missing current cohort")
                     return
                 self._send_json(self.catalog.get_metrics(current, baseline))
+            elif parsed.path == "/api/run/map":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                unexpected = sorted(set(query) - {"id", "act"})
+                if unexpected:
+                    self._send_error(
+                        f"unexpected map query parameter: {unexpected[0]}"
+                    )
+                    return
+                run_values = query.get("id") or []
+                act_values = query.get("act") or ["0"]
+                if len(run_values) != 1 or not run_values[0]:
+                    self._send_error("missing run id")
+                    return
+                if len(act_values) != 1:
+                    self._send_error("act must appear exactly once")
+                    return
+                try:
+                    act_index = int(act_values[0])
+                except ValueError:
+                    self._send_error("act must be an integer")
+                    return
+                if str(act_index) != act_values[0] or not 0 <= act_index <= 3:
+                    self._send_error("act must be between 0 and 3")
+                    return
+                self._send_json(
+                    _run_map_payload(
+                        self.catalog,
+                        self.map_service,
+                        self.node_art_resolver,
+                        run_values[0],
+                        act_index,
+                    )
+                )
             elif parsed.path == "/api/run":
                 query = parse_qs(parsed.query)
                 run_id = (query.get("id") or [""])[0]
@@ -948,7 +1192,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
 
 def make_viewer_handler(
-    catalog: RunCatalog, *, art_resolver: NodeArtResolver | None = None
+    catalog: RunCatalog,
+    *,
+    art_resolver: NodeArtResolver | None = None,
+    map_service: MapService | None = None,
 ) -> type[ViewerHandler]:
     """Bind one catalog to an isolated handler class for a server instance."""
 
@@ -958,6 +1205,8 @@ def make_viewer_handler(
     BoundViewerHandler.catalog = catalog
     if art_resolver is not None:
         BoundViewerHandler.node_art_resolver = art_resolver
+    if map_service is not None:
+        BoundViewerHandler.map_service = map_service
     return BoundViewerHandler
 
 

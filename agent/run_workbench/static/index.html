@@ -7,6 +7,7 @@
   <title>STS2 训练进度工作台</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/map.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#dashboardMain">跳到训练指标</a>
@@ -26,6 +27,34 @@
   </header>
 
   <main id="dashboardMain" class="dashboard" tabindex="-1">
+    <section id="runMapPage" class="panel map-page" aria-labelledby="runMapTitle" tabindex="-1" hidden>
+      <div class="section-heading map-page-heading">
+        <div>
+          <p class="section-kicker">单局地图</p>
+          <h2 id="runMapTitle">对局路线与节点收益</h2>
+        </div>
+        <button id="mapBackButton" class="quiet-button" type="button">返回训练进度</button>
+      </div>
+      <nav id="actTabs" class="act-tabs" aria-label="选择幕"></nav>
+      <p id="mapFallback" class="map-fallback" role="status" aria-live="polite" hidden></p>
+      <div class="map-layout">
+        <div class="map-scroll" tabindex="0" aria-label="地图可横向滚动">
+          <svg id="mapSvg" class="run-map-svg" role="img" aria-labelledby="mapSvgTitle mapSvgDescription"></svg>
+        </div>
+        <aside id="mapLegend" class="map-legend" aria-label="地图图例">
+          <h3>图例</h3>
+          <p><span class="legend-line route"></span>实际路线</p>
+          <p><span class="legend-line branch"></span>未走分支</p>
+          <p><span class="legend-node terminal"></span>终点 / 阵亡点</p>
+          <p>实线收益为精确记录；带“≈”为相邻快照推导。</p>
+        </aside>
+      </div>
+      <div class="map-summary-grid">
+        <section id="actSummary" class="map-summary" aria-live="polite"></section>
+        <section id="selectedNodeSummary" class="map-summary" aria-live="polite" tabindex="-1"></section>
+      </div>
+    </section>
+
     <section class="panel filter-panel" aria-labelledby="filterTitle">
       <div class="section-heading">
         <div>

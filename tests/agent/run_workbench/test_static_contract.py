@@ -97,6 +97,13 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
         "representativeRuns",
         "sourceCatalog",
         "workbenchStatus",
+        "runMapPage",
+        "actTabs",
+        "mapFallback",
+        "mapSvg",
+        "mapLegend",
+        "actSummary",
+        "selectedNodeSummary",
     ]
     assert all(item in parser.ids for item in required_ids)
     layout_order = [
@@ -126,6 +133,9 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
     assert {"header", "main", "section", "aside"}.issubset(parser.landmarks)
     assert any(link.get("href") == "/static/styles.css" for link in parser.links)
     assert any(script.get("src") == "/static/app.js" for script in parser.scripts)
+    script_sources = [script.get("src") for script in parser.scripts]
+    assert "/static/map.js" in script_sources
+    assert script_sources.index("/static/app.js") < script_sources.index("/static/map.js")
     assert "<style" not in html.lower()
     assert not any(script.get("src") is None for script in parser.scripts)
     assert any(label.get("for") == "sourceFile" for label in parser.labels)
@@ -155,14 +165,37 @@ def test_static_assets_are_allowlisted_with_utf8_content_types(tmp_path: Path):
         root_status, root_type, root_body = _get(base, "/")
         css_status, css_type, css_body = _get(base, "/static/styles.css")
         js_status, js_type, js_body = _get(base, "/static/app.js")
+        map_status, map_type, map_body = _get(base, "/static/map.js")
 
-    assert root_status == css_status == js_status == 200
+    assert root_status == css_status == js_status == map_status == 200
     assert root_type == "text/html; charset=utf-8"
     assert css_type == "text/css; charset=utf-8"
     assert js_type == "text/javascript; charset=utf-8"
+    assert map_type == "text/javascript; charset=utf-8"
     assert root_body == (STATIC_DIR / "index.html").read_bytes()
     assert css_body == (STATIC_DIR / "styles.css").read_bytes()
     assert js_body == (STATIC_DIR / "app.js").read_bytes()
+    assert map_body == (STATIC_DIR / "map.js").read_bytes()
+
+
+def test_map_renderer_uses_safe_svg_layering_accessibility_and_history():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+
+    assert "createElementNS" in script
+    assert "innerHTML" not in script
+    assert "renderNeutralEdges" in script
+    assert "renderVisitedEdges" in script
+    assert script.index("renderNeutralEdges") < script.index("renderVisitedEdges")
+    assert "createSvg('image'" in script
+    assert "tabindex" in script
+    assert "aria-label" in script
+    assert "event.key === 'Escape'" in script
+    assert "history.pushState" in script
+    assert "popstate" in script
+    assert "/api/run/map" in script
+    assert "path_index" in script
+    assert "quality" in script
+    assert "terminal_status" in script
 
 
 def test_static_routes_reject_unknown_traversal_encoding_and_queries(tmp_path: Path):

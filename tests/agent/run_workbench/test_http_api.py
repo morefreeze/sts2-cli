@@ -77,6 +77,30 @@ def _catalog(tmp_path: Path) -> RunCatalog:
     return RunCatalog([tmp_path], replay_parser=_replay_parser)
 
 
+def _map_fixture() -> dict:
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "map_v01032_partial.run"
+    )
+    run = json.loads(fixture.read_text(encoding="utf-8"))
+    run["status"] = "dead"
+    run["map_point_history"][0]["player_stats"] = [
+        {"current_hp": 80, "max_hp": 80, "current_gold": 99}
+    ]
+    run["map_point_history"][1]["player_stats"] = [
+        {
+            "current_hp": 74,
+            "max_hp": 80,
+            "current_gold": 112,
+            "damage_taken": 6,
+            "cards_gained": ["CARD.STRIKE_PLUS"],
+        }
+    ]
+    return run
+
+
 def test_catalog_source_run_cohort_and_metrics_http_contracts(tmp_path: Path):
     catalog = _catalog(tmp_path)
     sources = catalog.list_sources()
@@ -107,6 +131,119 @@ def test_catalog_source_run_cohort_and_metrics_http_contracts(tmp_path: Path):
         status, metrics_payload = _request(base, f"/api/metrics?current={cohort_id}")
         assert status == 200
         assert metrics_payload["comparison"] is None
+
+
+def test_supported_native_run_map_returns_full_graph_route_art_and_visited_deltas(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    # The API must use catalog identity and canonical joining, not a filename convention.
+    (tmp_path / "arbitrary-name.run").write_text(
+        json.dumps(run), encoding="utf-8"
+    )
+    _write_jsonl(
+        tmp_path / "joined-deck-history.jsonl",
+        [
+            {
+                "event": "outcome",
+                "run_id": run["run_id"],
+                "status": "dead",
+                "floor": 17,
+            }
+        ],
+    )
+    fixture_root = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "map_assets"
+    )
+    resolver = NodeArtResolver(
+        explicit_roots=[fixture_root], environ={}, home=tmp_path / "home"
+    )
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser), art_resolver=resolver
+    ) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert payload["run_id"] == run["run_id"]
+    assert payload["act"]["index"] == 0
+    assert payload["act"]["act_id"] == "ACT.OVERGROWTH"
+    assert payload["full_map"] is True
+    assert payload["alignment"]["ok"] is True
+    assert len(payload["nodes"]) > len(run["map_point_history"])
+    assert payload["summary"] == {
+        "node_count": len(payload["nodes"]),
+        "edge_count": len(payload["edges"]),
+        "visited_count": len(run["map_point_history"]),
+        "terminal_node_id": payload["alignment"]["path_node_ids"][-1],
+    }
+    assert payload["acts"][0]["index"] == 0
+    assert payload["acts"][0]["available"] is True
+
+    visited = sorted(
+        (node for node in payload["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    unvisited = [node for node in payload["nodes"] if not node["visited"]]
+    assert len(visited) == len(run["map_point_history"])
+    assert all("deltas" in node for node in visited)
+    assert all("deltas" not in node and "rewards" not in node for node in unvisited)
+    assert visited[1]["deltas"]["hp_change"] == {
+        "value": -6,
+        "quality": "derived",
+    }
+    assert visited[1]["deltas"]["cards_gained"] == {
+        "value": ["CARD.STRIKE_PLUS"],
+        "quality": "exact",
+    }
+    assert visited[1]["art"]["kind"] == "original"
+    assert visited[-1]["terminal"] is True
+    assert visited[-1]["terminal_status"] == "dead"
+    assert all(node["terminal"] is False for node in visited[:-1])
+
+
+def test_historical_replay_map_falls_back_to_recorded_route_with_reason(
+    tmp_path: Path,
+) -> None:
+    _write_jsonl(tmp_path / "old-replay.jsonl", _replay("historic-route", floor=4))
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(
+            base, "/api/run/map?id=historic-route&act=0"
+        )
+
+    assert status == 200
+    assert payload["full_map"] is False
+    assert payload["visited_route"] is True
+    assert payload["fallback_reason"]
+    assert payload["alignment"]["ok"] is False
+    assert [node["path_index"] for node in payload["nodes"]] == [0]
+    assert payload["nodes"][0]["visited"] is True
+    assert payload["nodes"][0]["terminal"] is True
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/api/run/map", "missing run id"),
+        ("/api/run/map?id=native-1&act=x", "act must be an integer"),
+        ("/api/run/map?id=native-1&act=-1", "act must be between"),
+        ("/api/run/map?id=native-1&act=0&source=anything", "unexpected map query"),
+    ],
+)
+def test_run_map_query_is_strictly_validated(
+    tmp_path: Path, path: str, message: str
+) -> None:
+    with _server(_catalog(tmp_path)) as base:
+        status, payload = _request(base, path)
+
+    assert status == 400
+    assert message in payload["error"]
 
 
 def test_node_art_endpoint_streams_only_a_resolved_known_png(tmp_path: Path):
