@@ -7,6 +7,7 @@ from agent.eval_rl import (
     _VerboseCombatEnv,
     _build_parser,
     _resolve_combat_snapshot_config,
+    _write_boss_deck_record,
     _write_combat_record,
     classify_eval_result,
     format_floor_label,
@@ -317,7 +318,7 @@ def test_combat_snapshot_record_retains_explicit_checkpoint_path(tmp_path):
     record_path = tmp_path / "records.jsonl"
     state = {
         "player": {"hp": 34, "max_hp": 80, "deck": [], "relics": []},
-        "context": {"room_type": "Elite"},
+        "context": {"act": 1, "floor": 7, "room_type": "Elite"},
         "enemies": [{"name": "Byrdonis", "hp": 86, "max_hp": 86, "intents": []}],
     }
 
@@ -336,4 +337,37 @@ def test_combat_snapshot_record_retains_explicit_checkpoint_path(tmp_path):
     assert record["checkpoint_path"] == str(checkpoint.resolve())
     assert record["seed"] == "eval_fixed_0"
     assert record["floor"] == 7
+    assert record["act"] == 1
     assert record["room_type"] == "Elite"
+
+
+def test_boss_deck_record_uses_context_progress_fields(tmp_path):
+    record_path = tmp_path / "boss.jsonl"
+    state = {
+        "floor": None,
+        "player": {
+            "hp": 55,
+            "max_hp": 80,
+            "deck": [{"id": "CARD.STRIKE_IRONCLAD", "name": "Strike"}],
+            "relics": [],
+        },
+        "context": {
+            "act": 1,
+            "floor": 17,
+            "room_type": "Boss",
+            "boss": {"id": "CEREMONIAL_BEAST_BOSS"},
+        },
+    }
+
+    _write_boss_deck_record(
+        state,
+        checkpoint="checkpoints/model.zip",
+        character="Ironclad",
+        game_seed="eval_fixed_0",
+        game_index=0,
+        jsonl_path=str(record_path),
+    )
+
+    record = json.loads(record_path.read_text().strip())
+    assert record["act"] == 1
+    assert record["floor"] == 17

@@ -188,7 +188,8 @@ def _write_boss_deck_record(state: dict, *, checkpoint: str, character: str,
             "name": _card_name(c),
             "score": round(sc, 3) if sc is not None else None,
         })
-    _boss = (state.get("context") or {}).get("boss") or {}
+    _context = state.get("context") or {}
+    _boss = _context.get("boss") or {}
     _player = state.get("player") or {}
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -197,9 +198,9 @@ def _write_boss_deck_record(state: dict, *, checkpoint: str, character: str,
         "character": character,
         "seed": game_seed,
         "game_index": game_index,
-        "floor": state.get("floor"),
-        "act": state.get("act"),
-        "room_type": (state.get("context") or {}).get("room_type", ""),
+        "floor": state.get("floor") or _context.get("floor"),
+        "act": state.get("act") or _context.get("act"),
+        "room_type": _context.get("room_type", ""),
         "boss": str(_boss.get("id") or "").replace("_BOSS", "") or None,
         "hp_at_entry": _player.get("hp"),
         "max_hp": _player.get("max_hp"),
@@ -248,6 +249,7 @@ def _write_combat_record(state: dict, *, floor: int, checkpoint: str, character:
         enemies.append({"name": nm, "hp": e.get("hp"),
                         "max_hp": e.get("max_hp"), "intents": intents})
     _player = state.get("player") or {}
+    _context = state.get("context") or {}
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "checkpoint": os.path.basename(str(checkpoint)) if checkpoint else None,
@@ -256,8 +258,8 @@ def _write_combat_record(state: dict, *, floor: int, checkpoint: str, character:
         "seed": game_seed,
         "game_index": game_index,
         "floor": floor,
-        "act": state.get("act"),
-        "room_type": (state.get("context") or {}).get("room_type", ""),
+        "act": state.get("act") or _context.get("act"),
+        "room_type": _context.get("room_type", ""),
         "hp_at_entry": _player.get("hp"),
         "max_hp": _player.get("max_hp"),
         "relics": [
