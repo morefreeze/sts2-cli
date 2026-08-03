@@ -43,6 +43,7 @@ STATIC_ASSETS = {
 }
 ADVISOR_URL = "https://ing-gom.github.io/sts2-card-advisor/"
 TRANSLATION_CACHE_TTL_SECONDS = 24 * 60 * 60
+PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024
 _TRANSLATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
@@ -877,7 +878,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError as exc:
                 raise CatalogError("invalid Content-Length") from exc
-            if length < 0 or length > 10 * 1024 * 1024:
+            if length < 0 or length > PARSE_BODY_MAX_BYTES:
                 raise CatalogError("request body is too large")
             try:
                 raw = self.rfile.read(length).decode("utf-8")

@@ -251,7 +251,9 @@ def test_representative_recency_requires_a_finite_timestamp():
     assert "for (const point of trend)" in representatives
     assert "stablePointKey(point)" in representatives
     assert "point.timestamp > latestTimed.timestamp" in representatives
-    assert "最近有时间记录" in representatives
+    assert "趋势样本中最近" in representatives
+    assert "趋势样本中最远" in representatives
+    assert "趋势样本中最浅" in representatives
     assert "趋势样本" in representatives
     assert "[..." not in representatives
     assert ".sort(" not in representatives
@@ -302,11 +304,46 @@ def test_representatives_never_request_an_empty_run_id():
 
     assert "source_id" in candidates and "run_id" in candidates
     assert "seen.add(key)" in candidates
+    assert "new WeakMap" in candidates
+    assert "anonymousPointKeys" in candidates
+    assert "anonymousPointCounter" in candidates
     assert "if (runId)" in rows
     assert "不可定位" in rows
     assert "openSource(sourceId, event.currentTarget)" in rows
     assert "openRun(runId, event.currentTarget)" in rows
     assert "if (!runId)" in open_run
+    assert "不代表全量对局极值" in rows
+    assert "trend_sampled_n" in rows
+    assert "trend_timestamped_n" in rows
+
+
+def test_representative_candidates_dedupe_only_the_same_anonymous_point():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    bounding = _javascript_section(
+        script, "function boundedTimestampedTrend", "function renderTrendProvenance"
+    )
+    representatives = _javascript_section(
+        script, "function stablePointKey", "function renderRepresentatives"
+    )
+    probe = f"""
+const CLIENT_TREND_POINT_LIMIT = 256;
+{bounding}
+{representatives}
+const shared = {{ timestamp: 3, global_floor: 10, label: 'shared' }};
+const low = {{ timestamp: 1, global_floor: 1, label: 'low' }};
+const missing = {{ timestamp: 2, global_floor: null, label: 'missing' }};
+const repeated = representativeCandidates({{ current: {{ trend: [shared, shared, shared] }} }}, null);
+const distinct = representativeCandidates({{ current: {{ trend: [shared, low, missing] }} }}, null);
+if (repeated.length !== 1 || repeated[0].point !== shared) process.exit(11);
+if (distinct.length !== 3) process.exit(12);
+if (new Set(distinct.map((candidate) => candidate.point)).size !== 3) process.exit(13);
+"""
+
+    result = subprocess.run(
+        ["node", "-e", probe], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_detail_requests_are_latest_only_and_drawer_restores_focus():
@@ -318,6 +355,7 @@ def test_detail_requests_are_latest_only_and_drawer_restores_focus():
     assert 'role="dialog"' in html
     assert 'aria-modal="true"' in html
     assert 'aria-hidden="true"' in html
+    assert 'tabindex="-1"' in html
     assert " hidden" in html and " inert" in html
     assert ".detail-panel[hidden]" in css
     assert "new AbortController" in requests
@@ -331,6 +369,34 @@ def test_detail_requests_are_latest_only_and_drawer_restores_focus():
     assert "panel.inert = true" in requests
     assert "state.detailOpener" in requests
     assert ".focus()" in requests
+    assert "function focusableDetailElements" in script
+    assert "button:not([disabled])" in script
+    assert "closest('[hidden], [inert]" in script
+    assert "node.matches(':disabled')" in script
+    assert "event.shiftKey" in script
+    assert "event.preventDefault()" in script
+    assert "focusables[0]" in script
+    assert "focusables[focusables.length - 1]" in script
+    assert "handleDetailKeydown" in script
+
+
+def test_upload_size_guard_precedes_read_and_has_server_margin():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    viewer_source = Path(viewer.__file__).read_text(encoding="utf-8")
+    upload = _javascript_section(script, "async function uploadSelectedFile", "async function bootstrap")
+
+    assert viewer.PARSE_BODY_MAX_BYTES == 10 * 1024 * 1024
+    assert "length > PARSE_BODY_MAX_BYTES" in viewer_source
+    assert "const SERVER_PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024" in script
+    assert "const FILE_UPLOAD_MAX_BYTES = 1 * 1024 * 1024" in script
+    assert 1 * 1024 * 1024 * 6 + 64 * 1024 < viewer.PARSE_BODY_MAX_BYTES
+    guard_index = upload.index("file.size > FILE_UPLOAD_MAX_BYTES")
+    read_index = upload.index("await file.text()")
+    stringify_index = upload.index("JSON.stringify")
+    fetch_index = upload.index("getJSON('/api/parse'")
+    assert guard_index < read_index < fetch_index < stringify_index
+    assert "超过本地载入上限" in upload
+    assert "未读取文件内容" in upload
 
 
 def test_catalog_anomalies_are_grouped_and_bounded():

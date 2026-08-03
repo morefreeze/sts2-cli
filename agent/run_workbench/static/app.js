@@ -3,6 +3,8 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CLIENT_TREND_POINT_LIMIT = 256;
 const SOURCE_ERROR_EXAMPLE_LIMIT = 3;
+const SERVER_PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024;
+const FILE_UPLOAD_MAX_BYTES = 1 * 1024 * 1024;
 const TECHNICAL_STATUSES = new Set(['crash', 'timeout', 'stuck', 'reset_failure', 'invalid']);
 const SOURCE_LABELS = {
   native_run: '原生游戏记录',
@@ -640,13 +642,22 @@ function representativeCandidates(metrics, descriptor) {
   const trend = boundedTimestampedTrend(rawTrend).points;
   const candidates = [];
   const seen = new Set();
+  const anonymousPointKeys = new WeakMap();
+  let anonymousPointCounter = 0;
   const add = (point, reason) => {
     if (!point) return;
     const sourceId = typeof point.source_id === 'string' ? point.source_id.trim() : '';
     const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
-    const key = sourceId || runId ? stablePointKey(point) : '';
-    if (key && seen.has(key)) return;
-    if (key) seen.add(key);
+    let key = sourceId || runId ? stablePointKey(point) : '';
+    if (!key && typeof point === 'object') {
+      if (!anonymousPointKeys.has(point)) {
+        anonymousPointCounter += 1;
+        anonymousPointKeys.set(point, `anonymous:${anonymousPointCounter}`);
+      }
+      key = anonymousPointKeys.get(point);
+    }
+    if (seen.has(key)) return;
+    seen.add(key);
     candidates.push({ point, reason });
   };
   let latestTimed = null;
@@ -674,11 +685,11 @@ function representativeCandidates(metrics, descriptor) {
       missingFloorPoint = point;
     }
   }
-  if (latestTimed) add(latestTimed, '最近有时间记录');
+  if (latestTimed) add(latestTimed, '趋势样本中最近');
   else add(rawTrend[0], '趋势样本');
-  add(maxFloorPoint, '推进最远');
-  add(minFloorPoint, '推进最浅');
-  add(missingFloorPoint, '层数缺失');
+  add(maxFloorPoint, '趋势样本中最远');
+  add(minFloorPoint, '趋势样本中最浅');
+  add(missingFloorPoint, '趋势样本中层数缺失');
   if (!candidates.length && descriptor) {
     const ids = Array.isArray(descriptor.representative_run_ids) && descriptor.representative_run_ids.length
       ? descriptor.representative_run_ids
@@ -705,6 +716,14 @@ function renderRepresentatives(metrics) {
     renderEmpty(container, '选择批次后可抽查代表性对局。');
     return;
   }
+  const current = metrics && metrics.current ? metrics.current : {};
+  const browserSampleN = boundedTimestampedTrend(Array.isArray(current.trend) ? current.trend : []).points.length;
+  const serverSampleN = Number.isFinite(current.trend_sampled_n) ? current.trend_sampled_n : browserSampleN;
+  const timestampedN = Number.isFinite(current.trend_timestamped_n) ? current.trend_timestamped_n : serverSampleN;
+  container.append(element('p', {
+    className: 'section-note representative-note',
+    text: `以下最近/最远/最浅仅指趋势样本：浏览器检查 ${browserSampleN} 点，服务端返回 ${serverSampleN} / ${timestampedN} 个有时间记录；不代表全量对局极值。`,
+  }));
   representativeCandidates(metrics, descriptor).forEach(({ point, reason }) => {
     const row = element('div', { className: 'list-row' });
     const content = element('div');
@@ -938,6 +957,44 @@ function closeDetail() {
   else byId('dashboardMain').focus();
 }
 
+function focusableDetailElements() {
+  const panel = byId('detailPanel');
+  const selector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  return Array.from(panel.querySelectorAll(selector)).filter((node) => {
+    if (node.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+    if (node.matches(':disabled') || node.hasAttribute('disabled')) return false;
+    const style = window.getComputedStyle(node);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  });
+}
+
+function handleDetailKeydown(event) {
+  const panel = byId('detailPanel');
+  if (panel.hidden || panel.inert || panel.getAttribute('aria-hidden') !== 'false') return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeDetail();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusables = focusableDetailElements();
+  if (!focusables.length) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !panel.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 async function openSource(sourceId, opener = null) {
   if (!sourceId) {
     setStatus('无法打开来源：缺少来源 ID', 'error');
@@ -1017,6 +1074,18 @@ async function uploadSelectedFile(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
   const opener = event.currentTarget || event.target;
+  // JSON escaping can expand input by up to 6x; 1 MiB plus envelope remains below the server's 10 MiB body cap.
+  if (file.size > FILE_UPLOAD_MAX_BYTES) {
+    const message = `${file.name} 超过本地载入上限 ${formatBytes(FILE_UPLOAD_MAX_BYTES)}；为避免请求膨胀，未读取文件内容。`;
+    const { token } = beginDetailRequest(opener);
+    if (isCurrentDetailRequest(token)) {
+      state.detailAbortController = null;
+      renderDetail({ view: 'error', source_name: file.name, errors: [message] }, file.name, opener);
+      setStatus(message, 'error');
+    }
+    event.target.value = '';
+    return;
+  }
   state.uploadRequestToken += 1;
   const uploadToken = state.uploadRequestToken;
   const { token, signal } = beginDetailRequest(opener);
@@ -1093,8 +1162,6 @@ byId('baselineCohort').addEventListener('change', refreshMetrics);
 byId('sourceFile').addEventListener('change', uploadSelectedFile);
 byId('reloadButton').addEventListener('click', bootstrap);
 byId('closeDetail').addEventListener('click', closeDetail);
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && byId('detailPanel').getAttribute('aria-hidden') === 'false') closeDetail();
-});
+document.addEventListener('keydown', handleDetailKeydown);
 
 bootstrap();
