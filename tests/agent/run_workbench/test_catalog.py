@@ -1506,6 +1506,59 @@ def test_cross_boundary_parser_identity_matches_for_512_and_513_records(
     assert large.get_run("whole")["run"]["run_id"] == "whole"
 
 
+def test_whole_parser_summary_floor_overrides_higher_observed_floor(
+    tmp_path: Path,
+) -> None:
+    def rows(count: int) -> list[dict]:
+        records = [
+            {
+                "type": "state",
+                "run_id": "forced-floor-run",
+                "status": "dead",
+                "data": {
+                    "context": {"act": 1, "floor": 7, "room_type": "Map"}
+                },
+            }
+        ]
+        records.extend(
+            {
+                "type": "state",
+                "run_id": "forced-floor-run",
+                "data": {
+                    "context": {"act": 1, "floor": 7, "room_type": "Map"}
+                },
+            }
+            for _ in range(count - 1)
+        )
+        return records
+
+    def parser(records: list[dict], source_name: str | None = None) -> dict:
+        parsed = parse_game_progress(records, source_name)
+        parsed["summary"]["max_global_floor"] = 1
+        parsed["summary"]["max_floor_label"] = "forced-floor-one"
+        return parsed
+
+    small_root = tmp_path / "small-forced-floor"
+    large_root = tmp_path / "large-forced-floor"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(512))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=parser)
+    small_cohort = small.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+    large = RunCatalog([large_root], replay_parser=parser)
+    large_cohort = large.list_cohorts()[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert large_run.outcome == small_run.outcome
+    assert large_run.outcome.max_global_floor == 1
+    assert large_run.outcome.max_floor_label == "forced-floor-one"
+    assert large_run.coverage == small_run.coverage
+    assert large_run.coverage.last_recorded_floor == 7
+
+
 def test_late_summary_identity_uses_one_cached_whole_replay_parse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

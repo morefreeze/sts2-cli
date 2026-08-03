@@ -1494,24 +1494,10 @@ def _normalize_incomplete_replay(
         for node in nodes
     )
 
-    compact.max_global_floor = compact.observed_max_floor
-    compact.max_floor_label = compact.observed_max_floor_label
     parser_max_floor = _first_integral_int(summary, "max_global_floor")
-    parser_max_floor_label = _first_scalar_text(summary, "max_floor_label")
-    if (
-        parser_max_floor is not None
-        and (
-            compact.observed_max_floor is None
-            or parser_max_floor >= compact.observed_max_floor
-        )
-    ):
+    if parser_max_floor is not None:
         compact.max_global_floor = parser_max_floor
-        if (
-            parser_max_floor_label is not None
-            or compact.observed_max_floor is None
-            or parser_max_floor > compact.observed_max_floor
-        ):
-            compact.max_floor_label = parser_max_floor_label
+        compact.max_floor_label = _first_scalar_text(summary, "max_floor_label")
     else:
         compact.max_global_floor = compact.observed_max_floor
         compact.max_floor_label = compact.observed_max_floor_label
