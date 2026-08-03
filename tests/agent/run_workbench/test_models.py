@@ -1,0 +1,92 @@
+from agent.run_workbench.models import (
+    Capabilities,
+    Coverage,
+    DeltaQuality,
+    RunDelta,
+    RunMetadata,
+    RunOutcome,
+    RunRecord,
+    RunStatus,
+    SourceKind,
+)
+
+
+def test_unknown_deltas_preserve_none_values() -> None:
+    numeric_delta = RunDelta()
+    list_delta = RunDelta(value=None)
+
+    assert numeric_delta.to_dict() == {"value": None, "quality": "unknown"}
+    assert list_delta.to_dict() == {"value": None, "quality": "unknown"}
+
+
+def test_only_technical_failures_are_marked_technical() -> None:
+    technical_statuses = {
+        RunStatus.CRASH,
+        RunStatus.TIMEOUT,
+        RunStatus.STUCK,
+        RunStatus.RESET_FAILURE,
+        RunStatus.INVALID,
+    }
+
+    assert all(status.is_technical for status in technical_statuses)
+    assert not RunStatus.DEAD.is_technical
+    assert not RunStatus.WIN.is_technical
+
+
+def test_partial_record_serializes_coverage_and_capabilities() -> None:
+    record = RunRecord(
+        run_id="run-1",
+        source_id="eval.jsonl:1",
+        source_kind=SourceKind.EVAL_RESULTS,
+        metadata=RunMetadata(character="Ironclad", seed="eval_fixed_0"),
+        outcome=RunOutcome(status=RunStatus.DEAD, max_global_floor=21),
+        coverage=Coverage(
+            complete_run=False,
+            first_recorded_floor=18,
+            last_recorded_floor=21,
+        ),
+        capabilities=Capabilities(visited_route=True),
+    )
+
+    payload = record.to_dict()
+
+    assert payload["outcome"]["max_global_floor"] == 21
+    assert payload["coverage"] == {
+        "complete_run": False,
+        "first_recorded_floor": 18,
+        "last_recorded_floor": 21,
+    }
+    assert payload["capabilities"]["visited_route"] is True
+    assert payload["capabilities"]["turn_replay"] is False
+
+
+def test_model_output_is_json_safe_with_string_enum_values() -> None:
+    record = RunRecord(
+        run_id="run-2",
+        source_id="replay.jsonl:2",
+        source_kind=SourceKind.REPLAY_JSONL,
+        metadata=RunMetadata(modifiers=("elite", "fast")),
+        outcome=RunOutcome(status=RunStatus.IN_PROGRESS),
+        acts=[{"kind": SourceKind.SUMMARY}],
+        nodes=[{"delta": RunDelta(value=["card"], quality=DeltaQuality.DERIVED)}],
+    )
+
+    payload = record.to_dict()
+
+    assert payload["source_kind"] == "replay_jsonl"
+    assert payload["metadata"]["modifiers"] == ["elite", "fast"]
+    assert payload["outcome"]["status"] == "in_progress"
+    assert payload["acts"] == [{"kind": "summary"}]
+    assert payload["nodes"] == [{"delta": {"value": ["card"], "quality": "derived"}}]
+
+
+def test_global_floors_order_numerically_across_acts() -> None:
+    records = [
+        RunRecord("act-3", "summary:3", SourceKind.SUMMARY, outcome=RunOutcome(max_global_floor=51)),
+        RunRecord("act-1", "summary:1", SourceKind.SUMMARY, outcome=RunOutcome(max_global_floor=17)),
+        RunRecord("act-2", "summary:2", SourceKind.SUMMARY, outcome=RunOutcome(max_global_floor=34)),
+    ]
+
+    ordered = sorted(records, key=lambda record: record.outcome.max_global_floor)
+
+    assert [record.outcome.max_global_floor for record in ordered] == [17, 34, 51]
