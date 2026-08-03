@@ -123,6 +123,29 @@ def test_catalog_indexes_mixed_sources_without_normalizing_replays(tmp_path: Pat
     ))
 
 
+def test_malformed_jsonl_errors_are_bounded_with_exact_omitted_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_module, "ERROR_DETAIL_LIMIT", 4, raising=False)
+    path = tmp_path / "many-bad-lines.jsonl"
+    path.write_text("{bad\n" * 10_000, encoding="utf-8")
+
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    entry = catalog.list_sources()[0]
+    payload = catalog.get_source(entry["source_id"])
+
+    assert entry["error_count"] == 10_000
+    assert entry["errors_complete"] is False
+    assert entry["error_sample_limit"] == 4
+    assert entry["errors_omitted"] == 9_996
+    assert len(entry["errors"]) == 4
+    assert "many-bad-lines.jsonl:1" in entry["errors"][0]
+    assert "many-bad-lines.jsonl:4" in entry["errors"][-1]
+    assert payload["errors"] == entry["errors"]
+    assert payload["source"]["error_count"] == 10_000
+    assert payload["source"]["errors_omitted"] == 9_996
+
+
 def test_catalog_read_errors_keep_errno_but_never_expose_absolute_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1207,12 +1230,12 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
                 "ts": index,
                 "data": {
                     "run_id": "nested-run",
-                    "context": {"act": 1, "floor": 4, "room_type": "Map"},
+                    "context": {"act": 1, "floor": 7, "room_type": "Map"},
                 },
             }
             for index in range(2, count + 1)
         ]
-        result[-1].update({"status": "dead", "max_global_floor": 4})
+        result[-1].update({"status": "dead", "max_global_floor": 7})
         return result
 
     small_root = tmp_path / "small"
@@ -1234,6 +1257,10 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     assert small_cohort["run_ids"] == large_cohort["run_ids"] == ["nested-run"]
     assert large_cohort["filters"] == small_cohort["filters"]
     assert large_run.run_id == small_run.run_id == "nested-run"
+    assert large_run.coverage == small_run.coverage
+    assert large_run.coverage.complete_run is False
+    assert large_run.coverage.first_recorded_floor == 7
+    assert large_run.capabilities.visited_route is True
     expected_metadata = {
         "character": "Ironclad",
         "seed": "nested-seed",
@@ -1335,3 +1362,182 @@ def test_large_replay_caps_indexed_conflict_evidence_but_exact_run_is_full(
     assert "id-512" not in compact.warnings[0]
     assert "additional run_id values omitted" not in exact["warnings"][0]
     assert "id-512" in exact["warnings"][0]
+
+
+def test_large_replay_terminal_aggregation_is_row_order_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 1)
+    outcome = {
+        "event": "outcome",
+        "run_id": "ordered-run",
+        "status": "dead",
+        "ts": 3,
+    }
+    action = {
+        "type": "action",
+        "run_id": "ordered-run",
+        "ts": 2,
+        "data": {"cmd": "end_turn"},
+    }
+    state = {
+        "type": "state",
+        "run_id": "ordered-run",
+        "ts": 1,
+        "data": {"context": {"act": 1, "floor": 1}},
+    }
+    before_root = tmp_path / "before"
+    after_root = tmp_path / "after"
+    before_root.mkdir()
+    after_root.mkdir()
+    _write_jsonl(before_root / "replay.jsonl", [outcome, action, state])
+    _write_jsonl(after_root / "replay.jsonl", [action, state, outcome])
+
+    before = RunCatalog([before_root], replay_parser=parse_game_progress)
+    after = RunCatalog([after_root], replay_parser=parse_game_progress)
+    before_cohort = before.list_cohorts()[0]
+    after_cohort = after.list_cohorts()[0]
+    before_run = before.get_cohort_records(before_cohort["cohort_id"])[0]
+    after_run = after.get_cohort_records(after_cohort["cohort_id"])[0]
+    before_metrics = before.get_metrics(before_cohort["cohort_id"])["current"]
+    after_metrics = after.get_metrics(after_cohort["cohort_id"])["current"]
+
+    assert before_run.outcome.status is after_run.outcome.status is RunStatus.DEAD
+    assert before_run.coverage == after_run.coverage
+    assert before_run.outcome == after_run.outcome
+    for key in (
+        "all_n",
+        "valid_n",
+        "avg_global_floor",
+        "median_global_floor",
+        "max_global_floor",
+        "histogram",
+        "funnel",
+    ):
+        assert before_metrics[key] == after_metrics[key]
+
+
+def test_eval_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> None:
+    target = {
+        "event": "eval_result",
+        "run_id": "target",
+        "status": "dead",
+        "max_global_floor": 9,
+        "character": "Ironclad",
+        "started_at": 10,
+        "ended_at": 20,
+        "ts": 99,
+    }
+
+    def rows(count: int) -> list[dict]:
+        return [target] + [
+            {
+                "event": "eval_result",
+                "run_id": f"filler-{index:03d}",
+                "status": "dead",
+                "max_global_floor": 1,
+                "character": "Ironclad",
+            }
+            for index in range(1, count)
+        ]
+
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "eval.jsonl", rows(511))
+    _write_jsonl(large_root / "eval.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_cohort = small.list_cohorts()[0]
+    large_cohort = large.list_cohorts()[0]
+    small_run = next(
+        run
+        for run in small.get_cohort_records(small_cohort["cohort_id"])
+        if run.run_id == "target"
+    )
+    large_run = next(
+        run
+        for run in large.get_cohort_records(large_cohort["cohort_id"])
+        if run.run_id == "target"
+    )
+
+    assert large_run.metadata == small_run.metadata
+    assert large_run.metadata.started_at == 10
+    assert large_run.metadata.ended_at == 20
+    assert large_run.outcome == small_run.outcome
+    assert large_run.coverage == small_run.coverage
+    assert large_run.coverage.first_recorded_floor is None
+    assert large_run.coverage.last_recorded_floor == 9
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.capabilities.visited_route is False
+
+
+def test_deck_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> None:
+    core = [
+        {
+            "event": "milestone",
+            "run_id": "corrected",
+            "floor_crossed": 3,
+            "ts": 1,
+            "character": "Silent",
+        },
+        {
+            "event": "card_pick",
+            "run_id": "corrected",
+            "floor": 4,
+            "ts": 2,
+        },
+        {
+            "event": "outcome",
+            "run_id": "corrected",
+            "status": "win",
+            "max_floor": 12,
+            "max_floor_label": "stale",
+            "ts": 10,
+        },
+        {
+            "event": "outcome",
+            "run_id": "corrected",
+            "status": "dead",
+            "max_floor": 7,
+            "max_floor_label": "corrected",
+            "ts": 20,
+        },
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {
+                "event": "milestone",
+                "run_id": "corrected",
+                "floor_crossed": 5,
+            }
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_cohort = small.list_cohorts()[0]
+    large_cohort = large.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert large_run.metadata == small_run.metadata
+    assert large_run.outcome == small_run.outcome
+    assert large_run.outcome.status is RunStatus.DEAD
+    assert large_run.outcome.max_global_floor == 7
+    assert large_run.outcome.max_floor_label == "corrected"
+    assert large_run.coverage == small_run.coverage
+    assert large_run.coverage.first_recorded_floor == 3
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.capabilities.visited_route is True
+    assert large_run.capabilities.node_rewards is True

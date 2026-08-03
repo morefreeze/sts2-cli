@@ -236,6 +236,30 @@ def test_equal_provenance_keys_use_content_tiebreaker_for_metadata_conflicts() -
     assert any("conflicting metadata seed" in warning for warning in forward.warnings)
 
 
+def test_equal_scalar_keys_use_structural_tiebreaker_for_evidence_conflicts() -> None:
+    ten_gold = RunRecord(
+        run_id="same",
+        source_id="same-source",
+        source_kind=SourceKind.DECK_HISTORY,
+        nodes=[{"id": "shared", "gold": 10}],
+        replay_by_node={"shared": {"choice": "left"}},
+    )
+    twenty_gold = RunRecord(
+        run_id="same",
+        source_id="same-source",
+        source_kind=SourceKind.DECK_HISTORY,
+        nodes=[{"id": "shared", "gold": 20}],
+        replay_by_node={"shared": {"choice": "right"}},
+    )
+
+    forward = join_records([ten_gold, twenty_gold])[0]
+    reverse = join_records([twenty_gold, ten_gold])[0]
+
+    assert forward.to_dict() == reverse.to_dict()
+    assert any("conflicting node payload" in warning for warning in forward.warnings)
+    assert any("conflicting replay data" in warning for warning in forward.warnings)
+
+
 def test_conflicting_stable_evidence_is_deduplicated_with_provenance() -> None:
     native = RunRecord(
         run_id="same",

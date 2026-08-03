@@ -33,6 +33,7 @@ INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
 REPLAY_WARNING_ID_LIMIT = 16
+ERROR_DETAIL_LIMIT = 32
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
 _WORKBENCH_JSON_MARKERS = (
     b'"players"',
@@ -119,12 +120,30 @@ class _CompactRun:
     max_floor_label: str | None = None
     technical_failure_kind: str | None = None
     first_recorded_floor: int | None = None
+    observed_max_floor: int | None = None
+    outcome_max_floor: int | None = None
+    latest_timestamp: float | None = None
     has_outcome: bool = False
     has_floor: bool = False
     has_card_pick: bool = False
     warnings: tuple[str, ...] = ()
 
     def to_record(self) -> RunRecord:
+        if self.source_kind is SourceKind.EVAL_RESULTS:
+            complete_run = self.status not in {
+                RunStatus.UNKNOWN,
+                RunStatus.IN_PROGRESS,
+            }
+            first_recorded_floor = None
+            visited_route = False
+        elif self.source_kind is SourceKind.REPLAY_JSONL:
+            complete_run = self.has_outcome and self.first_recorded_floor == 1
+            first_recorded_floor = self.first_recorded_floor
+            visited_route = self.has_floor
+        else:
+            complete_run = self.has_outcome
+            first_recorded_floor = self.first_recorded_floor
+            visited_route = self.has_floor
         return RunRecord(
             run_id=self.run_id,
             source_id=self.source_id,
@@ -148,12 +167,12 @@ class _CompactRun:
                 technical_failure_kind=self.technical_failure_kind,
             ),
             coverage=Coverage(
-                complete_run=self.has_outcome,
-                first_recorded_floor=self.first_recorded_floor,
+                complete_run=complete_run,
+                first_recorded_floor=first_recorded_floor,
                 last_recorded_floor=self.max_global_floor,
             ),
             capabilities=Capabilities(
-                visited_route=self.has_floor,
+                visited_route=visited_route,
                 node_rewards=self.has_card_pick,
                 decisions=self.has_card_pick,
             ),
@@ -170,6 +189,7 @@ class _JsonlScan:
     metadata_completeness: dict[str, Any]
     deck_outcomes: tuple[_CompactRun, ...]
     errors: tuple[str, ...]
+    error_count: int
 
 
 _CohortItem = RunRecord | _CompactRun
@@ -492,6 +512,7 @@ class RunCatalog:
         if len(self.roots) > 1:
             display_name = f"{root.name}/{relative}"
         errors: list[str] = []
+        error_count = 0
         records: tuple[dict[str, Any], ...] | None
         records_complete = True
         deck_outcomes: tuple[_CompactRun, ...] = ()
@@ -501,6 +522,7 @@ class RunCatalog:
             records_complete = scan.records_complete
             descriptor = scan.descriptor
             errors.extend(scan.errors)
+            error_count = scan.error_count
             run_ids = scan.run_ids
             metadata = scan.metadata_completeness
             deck_outcomes = scan.deck_outcomes
@@ -515,6 +537,7 @@ class RunCatalog:
                 records = None
                 descriptor = SourceDescriptor(SourceKind.UNKNOWN, 0, str(error))
                 errors.append(str(error))
+                error_count = 1
             run_ids = tuple(sorted(_lightweight_run_ids(list(records or ()))))
             metadata = _metadata_completeness(list(records or ()))
         if descriptor.kind is SourceKind.SUMMARY:
@@ -523,6 +546,7 @@ class RunCatalog:
             open_mode = "error"
             if not errors:
                 errors.append(f"{path.name}: {descriptor.message}")
+                error_count += 1
         elif errors and records_complete:
             open_mode = "error"
         else:
@@ -541,6 +565,10 @@ class RunCatalog:
             "record_count": descriptor.record_count,
             "message": public_message,
             "errors": public_errors,
+            "error_count": error_count,
+            "errors_complete": error_count == len(errors),
+            "error_sample_limit": ERROR_DETAIL_LIMIT,
+            "errors_omitted": max(0, error_count - len(errors)),
             "metadata_completeness": metadata,
         }
         return _IndexedSource(
@@ -867,6 +895,17 @@ class _ScanConstantError(ValueError):
     pass
 
 
+@dataclass(slots=True)
+class _ErrorBudget:
+    details: list[str]
+    count: int = 0
+
+    def add(self, detail: str) -> None:
+        self.count += 1
+        if len(self.details) < ERROR_DETAIL_LIMIT:
+            self.details.append(detail)
+
+
 def _reject_scan_constant(value: str) -> None:
     raise _ScanConstantError(f"non-standard numeric constant {value}")
 
@@ -905,7 +944,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
 
     records: list[dict[str, Any]] = []
     record_count = 0
-    errors: list[str] = []
+    error_budget = _ErrorBudget([])
     run_ids: set[str] = set()
     present_metadata: set[str] = set()
     grouped_runs_by_id: dict[str, _CompactRun] = {}
@@ -930,17 +969,17 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                         line, parse_constant=_reject_scan_constant
                     )
                 except _ScanConstantError as error:
-                    errors.append(
+                    error_budget.add(
                         f"{path.name}:{line_number}: invalid JSON: {error}"
                     )
                     continue
                 except json.JSONDecodeError as error:
-                    errors.append(
+                    error_budget.add(
                         f"{path.name}:{line_number}: invalid JSON: {error.msg}"
                     )
                     continue
                 if not isinstance(record, dict):
-                    errors.append(
+                    error_budget.add(
                         f"{path.name}:{line_number}: expected an object record"
                     )
                     continue
@@ -948,9 +987,19 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 if len(records) < INDEX_RECORD_LIMIT:
                     records.append(record)
                 _collect_metadata_presence(record, present_metadata)
-                types.add(str(record.get("type", "")))
+                record_type = record.get("type")
+                if record_type in {"state", "action"}:
+                    types.add(record_type)
                 event = str(record.get("event", ""))
-                events.add(event)
+                if event in {
+                    "milestone",
+                    "card_pick",
+                    "outcome",
+                    "eval_result",
+                    "result",
+                    "summary",
+                }:
+                    events.add(event)
                 has_action_command = has_action_command or (
                     record.get("type") == "action"
                     and isinstance(record.get("data"), dict)
@@ -963,12 +1012,11 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 }.issubset(record)
                 record_run_ids = _lightweight_run_ids([record])
                 is_replay_row = record.get("type") in {"state", "action"}
-                if event == "eval_result":
-                    run_ids.update(record_run_ids)
-                    compact = _CompactRun(run_id=_record_run_id(record))
-                    _update_compact_run(compact, record)
-                    eval_runs.append(compact)
-                elif is_replay_row or (has_action_command and event == "outcome"):
+                is_replay_candidate = is_replay_row or event in {
+                    "outcome",
+                    "result",
+                }
+                if is_replay_candidate:
                     top_level_id = _first_scalar_text(record, "run_id")
                     if replay_top_level_id is None and top_level_id is not None:
                         replay_top_level_id = top_level_id
@@ -989,9 +1037,13 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                         )
                     if source_replay_run is None:
                         source_replay_run = _CompactRun(run_id="")
-                    _update_compact_run(source_replay_run, record)
-                    if is_replay_row:
-                        _update_compact_replay(source_replay_run, record)
+                    _update_compact_replay(source_replay_run, record)
+
+                if event == "eval_result":
+                    run_ids.update(record_run_ids)
+                    compact = _CompactRun(run_id=_record_run_id(record))
+                    _update_compact_eval(compact, record)
+                    eval_runs.append(compact)
                 elif event in {"milestone", "card_pick", "outcome"}:
                     run_ids.update(record_run_ids)
                     run_id = _record_run_id(record)
@@ -1002,17 +1054,19 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     else:
                         compact = _CompactRun(run_id="")
                         anonymous_deck_runs.append(compact)
-                    _update_compact_run(compact, record)
-                else:
+                    _update_compact_deck(compact, record)
+                elif not is_replay_candidate:
                     run_ids.update(record_run_ids)
     except UnicodeDecodeError as error:
-        errors.append(f"{path.name}: invalid UTF-8 at byte {error.start}")
+        error_budget.add(f"{path.name}: invalid UTF-8 at byte {error.start}")
     except OSError as error:
         detail = str(error.strerror or type(error).__name__).replace(
             str(path), path.name
         )
         errno_label = f"[Errno {error.errno}] " if error.errno is not None else ""
-        errors.append(f"{path.name}: could not read source: {errno_label}{detail}")
+        error_budget.add(
+            f"{path.name}: could not read source: {errno_label}{detail}"
+        )
 
     descriptor = _classify_jsonl_scan(
         record_count=record_count,
@@ -1044,6 +1098,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
         )
     for compact in compact_runs:
         compact.source_kind = descriptor.kind
+        _finalize_compact(compact)
     return _JsonlScan(
         records=tuple(records),
         records_complete=record_count <= INDEX_RECORD_LIMIT,
@@ -1051,7 +1106,8 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
         run_ids=tuple(sorted(run_ids)),
         metadata_completeness=_metadata_completeness_from_present(present_metadata),
         deck_outcomes=compact_runs,
-        errors=tuple(errors),
+        errors=tuple(error_budget.details),
+        error_count=error_budget.count,
     )
 
 
@@ -1059,7 +1115,7 @@ def _scan_jsonl_run(
     path: Path, run_id: str, *, include_all: bool = False
 ) -> tuple[list[dict[str, Any]], list[str]]:
     records: list[dict[str, Any]] = []
-    errors: list[str] = []
+    error_budget = _ErrorBudget([])
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -1073,20 +1129,20 @@ def _scan_jsonl_run(
                         if isinstance(error, _ScanConstantError)
                         else error.msg
                     )
-                    errors.append(
+                    error_budget.add(
                         f"{path.name}:{line_number}: invalid JSON: {detail}"
                     )
                     continue
                 if not isinstance(record, dict):
-                    errors.append(
+                    error_budget.add(
                         f"{path.name}:{line_number}: expected an object record"
                     )
                     continue
                 if include_all or run_id in _lightweight_run_ids([record]):
                     records.append(record)
     except (OSError, UnicodeDecodeError) as error:
-        errors.append(f"{path.name}: could not rescan source: {error}")
-    return records, errors
+        error_budget.add(f"{path.name}: could not rescan source: {error}")
+    return records, error_budget.details
 
 
 def _classify_jsonl_scan(
@@ -1118,7 +1174,9 @@ def _classify_jsonl_scan(
     )
 
 
-def _update_compact_run(compact: _CompactRun, record: dict[str, Any]) -> None:
+def _update_compact_metadata(
+    compact: _CompactRun, record: dict[str, Any]
+) -> None:
     for attribute, keys in (
         ("character", ("character",)),
         ("seed", ("seed",)),
@@ -1126,102 +1184,168 @@ def _update_compact_run(compact: _CompactRun, record: dict[str, Any]) -> None:
         ("checkpoint", ("checkpoint",)),
         ("evaluation_mode", ("evaluation_mode",)),
         ("scenario", ("scenario",)),
-        ("max_floor_label", ("max_floor_label",)),
     ):
         if getattr(compact, attribute) is None:
             setattr(compact, attribute, _first_scalar_text(record, *keys))
     if compact.ascension is None:
-        compact.ascension = _first_positive_or_zero_int(record, "ascension")
+        compact.ascension = _first_integral_int(record, "ascension")
 
-    timestamp = _first_finite_number(
-        record, "ts", "timestamp", "ended_at", "end_ts", "started_at", "start_ts"
+
+def _update_compact_timestamp_range(
+    compact: _CompactRun, record: dict[str, Any]
+) -> float | None:
+    timestamp = _first_finite_number(record, "ts")
+    if timestamp is None:
+        return None
+    compact.started_at = (
+        timestamp
+        if compact.started_at is None
+        else min(compact.started_at, timestamp)
     )
-    if timestamp is not None:
-        compact.started_at = (
-            timestamp
-            if compact.started_at is None
-            else min(compact.started_at, timestamp)
-        )
-
-    floor = _first_positive_int(
-        record,
-        "max_global_floor",
-        "max_floor",
-        "floor_crossed",
-        "global_floor",
-        "floor",
+    compact.latest_timestamp = (
+        timestamp
+        if compact.latest_timestamp is None
+        else max(compact.latest_timestamp, timestamp)
     )
-    if floor is not None:
-        compact.has_floor = True
-        compact.first_recorded_floor = (
-            floor
-            if compact.first_recorded_floor is None
-            else min(compact.first_recorded_floor, floor)
-        )
-        compact.max_global_floor = (
-            floor
-            if compact.max_global_floor is None
-            else max(compact.max_global_floor, floor)
-        )
+    return timestamp
 
+
+def _update_observed_floor(compact: _CompactRun, floor: int | None) -> None:
+    if floor is None:
+        return
+    compact.has_floor = True
+    compact.first_recorded_floor = (
+        floor
+        if compact.first_recorded_floor is None
+        else min(compact.first_recorded_floor, floor)
+    )
+    compact.observed_max_floor = (
+        floor
+        if compact.observed_max_floor is None
+        else max(compact.observed_max_floor, floor)
+    )
+
+
+def _update_compact_eval(compact: _CompactRun, record: dict[str, Any]) -> None:
+    _update_compact_metadata(compact, record)
+    compact.started_at = _first_finite_number(
+        record, "started_at", "start_ts"
+    )
+    compact.ended_at = _first_finite_number(record, "ended_at", "end_ts")
+    if compact.ended_at is None:
+        compact.ended_at = _first_finite_number(record, "ts", "timestamp")
+    compact.max_global_floor = _first_integral_int(
+        record, "max_global_floor", "max_floor", "floor"
+    )
+    compact.max_floor_label = _first_scalar_text(record, "max_floor_label")
+    status, victory, technical_kind = _compact_status(record)
+    compact.status = status
+    compact.victory = victory
+    compact.technical_failure_kind = technical_kind
+    compact.has_outcome = status not in {
+        RunStatus.UNKNOWN,
+        RunStatus.IN_PROGRESS,
+    }
+
+
+def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
+    _update_compact_metadata(compact, record)
+    timestamp = _update_compact_timestamp_range(compact, record)
+    _update_observed_floor(
+        compact, _first_integral_int(record, "floor_crossed", "floor")
+    )
     event = record.get("event")
     compact.has_card_pick = compact.has_card_pick or event == "card_pick"
-    if event in {"outcome", "eval_result"}:
-        compact.has_outcome = True
-        compact.ended_at = timestamp
-        status, victory, technical_kind = _compact_status(record)
-        compact.status = status
-        compact.victory = victory
-        compact.technical_failure_kind = technical_kind
+    if event != "outcome":
+        return
+    compact.has_outcome = True
+    compact.ended_at = timestamp
+    compact.outcome_max_floor = _first_integral_int(
+        record, "max_global_floor", "max_floor", "floor"
+    )
+    compact.max_floor_label = _first_scalar_text(record, "max_floor_label")
+    status, victory, technical_kind = _compact_status(record)
+    compact.status = status
+    compact.victory = victory
+    compact.technical_failure_kind = technical_kind
 
 
 def _update_compact_replay(
     compact: _CompactRun, record: dict[str, Any]
 ) -> None:
+    _update_compact_metadata(compact, record)
+    _update_compact_timestamp_range(compact, record)
+
+    explicit_floor = _first_integral_int(
+        record, "max_global_floor", "max_floor"
+    )
+    if explicit_floor is not None:
+        compact.outcome_max_floor = (
+            explicit_floor
+            if compact.outcome_max_floor is None
+            else max(compact.outcome_max_floor, explicit_floor)
+        )
+
     status, victory, technical_kind = _compact_status(record)
-    if status in {RunStatus.WIN, RunStatus.DEAD} or status.is_technical:
-        compact.has_outcome = True
+    if status is not RunStatus.UNKNOWN:
         compact.status = status
         compact.victory = victory
         compact.technical_failure_kind = technical_kind
-        compact.ended_at = _first_finite_number(record, "ts", "timestamp")
+    if record.get("event") in {"outcome", "result"} or status is not RunStatus.UNKNOWN:
+        compact.has_outcome = True
+
     data = record.get("data")
     if not isinstance(data, dict):
         return
     command = _first_scalar_text(data, "cmd", "decision")
     if command == "start_run":
-        _update_compact_run(compact, data)
+        _update_compact_metadata(compact, data)
     context = data.get("context")
+    floor = None
     if isinstance(context, dict):
-        floor = _first_positive_int(context, "global_floor")
+        floor = _first_integral_int(context, "global_floor")
         if floor is None:
-            local_floor = _first_positive_int(context, "floor")
-            act = _first_positive_int(context, "act")
+            local_floor = _first_integral_int(context, "floor")
+            act = _first_integral_int(context, "act")
             if local_floor is not None:
                 floor = (
                     (act - 1) * 17 + local_floor
                     if act is not None and act > 0
                     else local_floor
                 )
-        if floor is not None:
-            compact.has_floor = True
-            compact.first_recorded_floor = (
-                floor
-                if compact.first_recorded_floor is None
-                else min(compact.first_recorded_floor, floor)
-            )
-            compact.max_global_floor = (
-                floor
-                if compact.max_global_floor is None
-                else max(compact.max_global_floor, floor)
-            )
+    if floor is None:
+        floor = _first_integral_int(data, "global_floor", "floor")
+    _update_observed_floor(compact, floor)
+
     nested_status, nested_victory, nested_technical_kind = _compact_status(data)
-    if nested_status in {RunStatus.WIN, RunStatus.DEAD} or nested_status.is_technical:
-        compact.has_outcome = True
+    if nested_status is not RunStatus.UNKNOWN:
         compact.status = nested_status
         compact.victory = nested_victory
         compact.technical_failure_kind = nested_technical_kind
-        compact.ended_at = _first_finite_number(record, "ts", "timestamp")
+    if (
+        command == "game_over"
+        or nested_status is not RunStatus.UNKNOWN
+    ):
+        compact.has_outcome = True
+
+
+def _finalize_compact(compact: _CompactRun) -> None:
+    if compact.source_kind is SourceKind.DECK_HISTORY:
+        compact.max_global_floor = (
+            compact.outcome_max_floor
+            if compact.outcome_max_floor is not None
+            else compact.observed_max_floor
+        )
+        if not compact.has_outcome:
+            compact.ended_at = compact.latest_timestamp
+    elif compact.source_kind is SourceKind.REPLAY_JSONL:
+        floor_candidates = [
+            floor
+            for floor in (compact.observed_max_floor, compact.outcome_max_floor)
+            if floor is not None
+        ]
+        compact.max_global_floor = max(floor_candidates) if floor_candidates else None
+        compact.ended_at = compact.latest_timestamp
 
 
 def _compact_status(
@@ -1298,22 +1422,16 @@ def _first_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _first_positive_or_zero_int(
-    record: dict[str, Any], *keys: str
-) -> int | None:
+def _first_integral_int(record: dict[str, Any], *keys: str) -> int | None:
     for key in keys:
         value = record.get(key)
-        if type(value) is int and value >= 0:
+        if isinstance(value, int) and not isinstance(value, bool):
             return value
-    return None
-
-
-def _first_positive_int(record: dict[str, Any], *keys: str) -> int | None:
-    for key in keys:
-        value = record.get(key)
-        if type(value) is int and value > 0:
-            return value
-        if isinstance(value, float) and math.isfinite(value) and value.is_integer() and value > 0:
+        if (
+            isinstance(value, float)
+            and math.isfinite(value)
+            and value.is_integer()
+        ):
             return int(value)
     return None
 

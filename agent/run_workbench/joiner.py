@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import fields
-from itertools import combinations
+from hashlib import sha256
+from itertools import combinations, groupby
 import json
 from typing import Any, Iterable
 
@@ -52,7 +53,7 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
     source_kind = min((record.source_kind for record in records), key=lambda kind: _SOURCE_PRIORITY[kind])
 
     replay_by_node: dict[str, Any] = {}
-    for record in sorted(records, key=_evidence_record_key):
+    for record in _deterministic_evidence_records(records):
         for node_id, replay in sorted(record.replay_by_node.items()):
             if node_id in replay_by_node and replay_by_node[node_id] != replay:
                 warnings.append(f"conflicting replay data for node {node_id!r}")
@@ -185,7 +186,7 @@ def _merge_evidence(
     by_identity: dict[str, int] = {}
     warnings: list[str] = []
     attribute = "acts" if evidence_type == "act" else "nodes"
-    for record in sorted(records, key=_evidence_record_key):
+    for record in _deterministic_evidence_records(records):
         for item in getattr(record, attribute):
             evidence = _annotate_evidence(item, record, evidence_type)
             identity = _stable_evidence_identity(evidence, evidence_type)
@@ -309,6 +310,62 @@ def _primary_evidence_source(evidence: dict[str, Any]) -> str:
 
 def _evidence_record_key(record: RunRecord) -> tuple[Any, ...]:
     return (_SOURCE_PRIORITY[record.source_kind],) + _record_key(record)
+
+
+def _deterministic_evidence_records(
+    records: Iterable[RunRecord],
+) -> list[RunRecord]:
+    lightweight_order = sorted(records, key=_evidence_record_key)
+    ordered: list[RunRecord] = []
+    for _, group in groupby(lightweight_order, key=_evidence_record_key):
+        tied = list(group)
+        if len(tied) > 1:
+            tied.sort(key=_record_evidence_digest)
+        ordered.extend(tied)
+    return ordered
+
+
+def _record_evidence_digest(record: RunRecord) -> bytes:
+    digest = sha256()
+    _update_structural_digest(digest, record.acts)
+    _update_structural_digest(digest, record.nodes)
+    _update_structural_digest(digest, record.replay_by_node)
+    return digest.digest()
+
+
+def _update_structural_digest(digest: Any, value: Any) -> None:
+    if value is None:
+        digest.update(b"n;")
+        return
+    if isinstance(value, bool):
+        digest.update(b"b1;" if value else b"b0;")
+        return
+    if isinstance(value, int):
+        digest.update(f"i{value};".encode("ascii"))
+        return
+    if isinstance(value, float):
+        digest.update(f"f{value.hex()};".encode("ascii"))
+        return
+    if isinstance(value, str):
+        digest.update(f"s{len(value)}:".encode("ascii"))
+        for start in range(0, len(value), 8_192):
+            digest.update(value[start : start + 8_192].encode("utf-8"))
+        digest.update(b";")
+        return
+    if isinstance(value, (list, tuple)):
+        digest.update(f"l{len(value)}:[".encode("ascii"))
+        for item in value:
+            _update_structural_digest(digest, item)
+        digest.update(b"]")
+        return
+    if isinstance(value, dict):
+        digest.update(f"d{len(value)}:{{".encode("ascii"))
+        for key in sorted(value):
+            _update_structural_digest(digest, key)
+            _update_structural_digest(digest, value[key])
+        digest.update(b"}")
+        return
+    digest.update(f"x{type(value).__name__}:{repr(value)};".encode("utf-8"))
 
 
 def _stable_json(value: Any) -> str:
