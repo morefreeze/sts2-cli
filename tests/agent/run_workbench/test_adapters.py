@@ -73,6 +73,51 @@ def test_replay_nodes_are_exactly_the_injected_parser_rooms() -> None:
     assert adapted.runs[0].metadata.character == "Parser"
 
 
+def test_replay_top_level_run_id_wins_over_nested_conflict_with_warning(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "conflicting-id.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "action",
+                        "run_id": "top-level",
+                        "data": {"cmd": "start_run", "run_id": "nested"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "state",
+                        "data": {
+                            "run_id": "nested",
+                            "context": {"act": 1, "floor": 1},
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    run = adapt_path(
+        path,
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": [],
+        },
+    ).runs[0]
+
+    assert run.run_id == "top-level"
+    assert any(
+        "conflicting replay run_id" in warning
+        and "top-level" in warning
+        and "nested" in warning
+        for warning in run.warnings
+    )
+
+
 def test_partial_replay_reports_only_observed_coverage() -> None:
     adapted = adapt_path(
         FIXTURES / "partial_replay.jsonl",

@@ -1178,3 +1178,132 @@ def test_large_boss_summary_keeps_summary_view_with_bounded_records(
     assert payload["summary"]["record_sampling_method"] == "prefix"
     assert len(payload["summary"]["records"]) == 2
     assert "run_count" not in payload
+
+
+def test_nested_replay_identity_and_start_metadata_match_across_index_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rows = [
+        {
+            "type": "action",
+            "ts": 1,
+            "data": {
+                "cmd": "start_run",
+                "run_id": "nested-run",
+                "character": "Ironclad",
+                "seed": "nested-seed",
+                "game_version": "v1",
+                "checkpoint": "replay-model",
+                "evaluation_mode": "fixed",
+                "scenario": "standard",
+                "ascension": 0,
+            },
+        },
+        {
+            "type": "state",
+            "ts": 2,
+            "data": {
+                "run_id": "nested-run",
+                "context": {"act": 1, "floor": 4},
+            },
+        },
+        {
+            "type": "state",
+            "ts": 3,
+            "status": "dead",
+            "max_global_floor": 7,
+            "data": {"run_id": "nested-run"},
+        },
+    ]
+
+    def parser(entries: list[dict], source_name: str | None = None) -> dict:
+        start = entries[0]["data"]
+        return {
+            "summary": {
+                "game_version": start["game_version"],
+                "checkpoint": start["checkpoint"],
+                "evaluation_mode": start["evaluation_mode"],
+                "scenario": start["scenario"],
+                "ascension": start["ascension"],
+                "max_global_floor": 7,
+            },
+            "rooms": [
+                {"id": f"row-{index}", "global_floor": index}
+                for index, _ in enumerate(entries, start=1)
+            ],
+        }
+
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows)
+    _write_jsonl(large_root / "replay.jsonl", rows)
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 10)
+    small = RunCatalog([small_root], replay_parser=parser)
+    small_cohort = small.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 1)
+    large = RunCatalog([large_root], replay_parser=parser)
+    large_cohort = large.list_cohorts()[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+    exact = large.get_run("nested-run")["run"]
+
+    assert small_cohort["run_ids"] == large_cohort["run_ids"] == ["nested-run"]
+    assert large_cohort["filters"] == small_cohort["filters"]
+    assert large_run.run_id == small_run.run_id == "nested-run"
+    assert large_run.metadata == small_run.metadata
+    assert large_run.metadata.character == "Ironclad"
+    assert large_run.metadata.seed == "nested-seed"
+    assert exact["run_id"] == "nested-run"
+    assert exact["metadata"]["character"] == "Ironclad"
+    assert exact["metadata"]["seed"] == "nested-seed"
+    assert [node["id"] for node in exact["nodes"]] == ["row-1", "row-2", "row-3"]
+
+
+def test_large_replay_keeps_source_level_top_id_priority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rows = [
+        {
+            "type": "action",
+            "run_id": "top-level",
+            "ts": 1,
+            "data": {
+                "cmd": "start_run",
+                "run_id": "nested",
+                "character": "Ironclad",
+            },
+        },
+        {
+            "type": "state",
+            "ts": 2,
+            "status": "dead",
+            "data": {
+                "run_id": "nested",
+                "context": {"act": 1, "floor": 5},
+            },
+        },
+    ]
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows)
+    _write_jsonl(large_root / "replay.jsonl", rows)
+    parser = lambda entries, source_name=None: {"summary": {}, "rooms": []}
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 10)
+    small = RunCatalog([small_root], replay_parser=parser)
+    small_cohort = small.list_cohorts()[0]
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 1)
+    large = RunCatalog([large_root], replay_parser=parser)
+    large_cohort = large.list_cohorts()[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert small_cohort["run_count"] == large_cohort["run_count"] == 1
+    assert small_cohort["run_ids"] == large_cohort["run_ids"] == ["top-level"]
+    assert any("conflicting replay run_id" in warning for warning in large_run.warnings)

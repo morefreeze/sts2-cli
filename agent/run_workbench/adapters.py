@@ -221,7 +221,7 @@ def _adapt_replay(
         started_at=min(timestamps) if timestamps else None,
         ended_at=max(timestamps) if timestamps else None,
     )
-    run_id = _first_nonempty_record_value(records, "run_id") or _first_text(summary, "run_id") or ""
+    run_id, identity_warnings = _replay_run_identity(records, summary)
     max_floor = _first_int(summary, "max_global_floor")
     if max_floor is None and observed_floors:
         max_floor = max(observed_floors)
@@ -277,6 +277,7 @@ def _adapt_replay(
         ),
         nodes=nodes,
         replay_by_node=replay_by_node,
+        warnings=identity_warnings,
     )
     return AdaptedSource(descriptor, runs=(run,), errors=tuple(errors))
 
@@ -541,6 +542,43 @@ def _replay_action_value(records: list[dict[str, Any]], key: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _replay_run_identity(
+    records: list[dict[str, Any]], summary: dict[str, Any]
+) -> tuple[str, list[str]]:
+    top_level_ids: list[str] = []
+    nested_ids: list[str] = []
+    for record in records:
+        top_level = _first_text(record, "run_id")
+        if top_level is not None:
+            top_level_ids.append(top_level)
+        data = record.get("data")
+        if isinstance(data, dict):
+            nested = _first_text(data, "run_id")
+            if nested is not None:
+                nested_ids.append(nested)
+    summary_id = _first_text(summary, "run_id")
+    resolved = (
+        (top_level_ids[0] if top_level_ids else None)
+        or (nested_ids[0] if nested_ids else None)
+        or summary_id
+        or ""
+    )
+    observed = sorted(
+        {
+            *top_level_ids,
+            *nested_ids,
+            *([summary_id] if summary_id is not None else []),
+        }
+    )
+    warnings: list[str] = []
+    if len(observed) > 1:
+        warnings.append(
+            "conflicting replay run_id values: "
+            f"observed={', '.join(observed)}; using {resolved}"
+        )
+    return resolved, warnings
 
 
 def _first_nonempty_record_value(records: list[dict[str, Any]], key: str) -> str | None:

@@ -121,6 +121,7 @@ class _CompactRun:
     has_outcome: bool = False
     has_floor: bool = False
     has_card_pick: bool = False
+    warnings: tuple[str, ...] = ()
 
     def to_record(self) -> RunRecord:
         return RunRecord(
@@ -155,6 +156,7 @@ class _CompactRun:
                 node_rewards=self.has_card_pick,
                 decisions=self.has_card_pick,
             ),
+            warnings=list(self.warnings),
         )
 
 
@@ -272,7 +274,10 @@ class RunCatalog:
                     and not source.records_complete
                 ):
                     matching_records, scan_errors = _scan_jsonl_run(
-                        source.path, run_id
+                        source.path,
+                        run_id,
+                        include_all=source.descriptor.kind
+                        is SourceKind.REPLAY_JSONL,
                     )
                     errors.extend(source.entry["errors"])
                     errors.extend(scan_errors)
@@ -875,7 +880,9 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     present_metadata: set[str] = set()
     grouped_runs_by_id: dict[str, _CompactRun] = {}
     anonymous_deck_runs: list[_CompactRun] = []
-    anonymous_replay_run: _CompactRun | None = None
+    source_replay_run: _CompactRun | None = None
+    replay_top_level_id: str | None = None
+    replay_nested_id: str | None = None
     eval_runs: list[_CompactRun] = []
     types: set[str] = set()
     events: set[str] = set()
@@ -930,18 +937,16 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     _update_compact_run(compact, record)
                     eval_runs.append(compact)
                 elif is_replay_row or (has_action_command and event == "outcome"):
-                    run_id = _record_run_id(record)
-                    if run_id:
-                        compact = grouped_runs_by_id.setdefault(
-                            run_id, _CompactRun(run_id=run_id)
-                        )
-                    else:
-                        if anonymous_replay_run is None:
-                            anonymous_replay_run = _CompactRun(run_id="")
-                        compact = anonymous_replay_run
-                    _update_compact_run(compact, record)
+                    if replay_top_level_id is None:
+                        replay_top_level_id = _first_scalar_text(record, "run_id")
+                    data = record.get("data")
+                    if replay_nested_id is None and isinstance(data, dict):
+                        replay_nested_id = _first_scalar_text(data, "run_id")
+                    if source_replay_run is None:
+                        source_replay_run = _CompactRun(run_id="")
+                    _update_compact_run(source_replay_run, record)
                     if is_replay_row:
-                        _update_compact_replay(compact, record)
+                        _update_compact_replay(source_replay_run, record)
                 elif event in {"milestone", "card_pick", "outcome"}:
                     run_id = _record_run_id(record)
                     if run_id:
@@ -951,9 +956,6 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     else:
                         compact = _CompactRun(run_id="")
                         anonymous_deck_runs.append(compact)
-                        if anonymous_replay_run is None:
-                            anonymous_replay_run = _CompactRun(run_id="")
-                        _update_compact_run(anonymous_replay_run, record)
                     _update_compact_run(compact, record)
     except UnicodeDecodeError as error:
         errors.append(f"{path.name}: invalid UTF-8 at byte {error.start}")
@@ -974,9 +976,25 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     if descriptor.kind is SourceKind.EVAL_RESULTS:
         compact_runs = tuple(eval_runs)
     elif descriptor.kind is SourceKind.REPLAY_JSONL:
-        compact_runs = tuple(grouped_runs_by_id.values())
-        if anonymous_replay_run is not None:
-            compact_runs += (anonymous_replay_run,)
+        if source_replay_run is None:
+            compact_runs = ()
+            run_ids = set()
+        else:
+            source_replay_run.run_id = (
+                replay_top_level_id or replay_nested_id or ""
+            )
+            if (
+                replay_top_level_id is not None
+                and replay_nested_id is not None
+                and replay_top_level_id != replay_nested_id
+            ):
+                source_replay_run.warnings = (
+                    "conflicting replay run_id values: "
+                    f"observed={', '.join(sorted({replay_top_level_id, replay_nested_id}))}; "
+                    f"using {source_replay_run.run_id}",
+                )
+            compact_runs = (source_replay_run,)
+            run_ids = {source_replay_run.run_id} if source_replay_run.run_id else set()
     else:
         compact_runs = tuple(grouped_runs_by_id.values()) + tuple(
             anonymous_deck_runs
@@ -995,7 +1013,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
 
 
 def _scan_jsonl_run(
-    path: Path, run_id: str
+    path: Path, run_id: str, *, include_all: bool = False
 ) -> tuple[list[dict[str, Any]], list[str]]:
     records: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -1021,7 +1039,7 @@ def _scan_jsonl_run(
                         f"{path.name}:{line_number}: expected an object record"
                     )
                     continue
-                if run_id in _lightweight_run_ids([record]):
+                if include_all or run_id in _lightweight_run_ids([record]):
                     records.append(record)
     except (OSError, UnicodeDecodeError) as error:
         errors.append(f"{path.name}: could not rescan source: {error}")
@@ -1127,6 +1145,9 @@ def _update_compact_replay(
     data = record.get("data")
     if not isinstance(data, dict):
         return
+    command = _first_scalar_text(data, "cmd", "decision")
+    if command == "start_run":
+        _update_compact_run(compact, data)
     context = data.get("context")
     if isinstance(context, dict):
         floor = _first_positive_int(context, "global_floor")
