@@ -48,10 +48,21 @@ def _serialize(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         return _serialize(asdict(value))
     if isinstance(value, dict):
+        for key in value:
+            if not isinstance(key, str):
+                raise TypeError(
+                    "Run record serialization requires string dict keys; "
+                    f"got {type(key).__name__}"
+                )
         return {key: _serialize(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_serialize(item) for item in value]
-    return value
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(
+        "Run record serialization does not support "
+        f"{type(value).__name__} values"
+    )
 
 
 @dataclass(frozen=True)

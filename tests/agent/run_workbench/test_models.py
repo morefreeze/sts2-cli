@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from agent.run_workbench.models import (
     Capabilities,
     Coverage,
@@ -78,15 +82,50 @@ def test_model_output_is_json_safe_with_string_enum_values() -> None:
     assert payload["outcome"]["status"] == "in_progress"
     assert payload["acts"] == [{"kind": "summary"}]
     assert payload["nodes"] == [{"delta": {"value": ["card"], "quality": "derived"}}]
+    json.dumps(payload)
 
 
-def test_global_floors_order_numerically_across_acts() -> None:
+@pytest.mark.parametrize(
+    ("value", "type_name"),
+    [
+        ({"card"}, "set"),
+        (b"card", "bytes"),
+        (complex(1, 2), "complex"),
+    ],
+)
+def test_serialization_rejects_unsupported_nested_values(value: object, type_name: str) -> None:
+    record = RunRecord(
+        run_id="unsupported-value",
+        source_id="summary:unsupported",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{"delta": RunDelta(value=value)}],
+    )
+
+    with pytest.raises(TypeError, match=type_name):
+        record.to_dict()
+
+
+def test_serialization_rejects_non_string_mapping_keys() -> None:
+    record = RunRecord(
+        run_id="unsupported-key",
+        source_id="summary:unsupported",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{1: "not a public JSON key"}],
+    )
+
+    with pytest.raises(TypeError, match="dict key.*int"):
+        record.to_dict()
+
+
+def test_serialized_global_floors_order_numerically_across_acts() -> None:
     records = [
         RunRecord("act-3", "summary:3", SourceKind.SUMMARY, outcome=RunOutcome(max_global_floor=51)),
         RunRecord("act-1", "summary:1", SourceKind.SUMMARY, outcome=RunOutcome(max_global_floor=17)),
         RunRecord("act-2", "summary:2", SourceKind.SUMMARY, outcome=RunOutcome(max_global_floor=34)),
     ]
 
-    ordered = sorted(records, key=lambda record: record.outcome.max_global_floor)
+    payloads = [record.to_dict() for record in records]
+    ordered = sorted(payloads, key=lambda payload: payload["outcome"]["max_global_floor"])
 
-    assert [record.outcome.max_global_floor for record in ordered] == [17, 34, 51]
+    assert [payload["outcome"]["max_global_floor"] for payload in ordered] == [17, 34, 51]
+    assert all(isinstance(payload["outcome"]["max_global_floor"], int) for payload in ordered)
