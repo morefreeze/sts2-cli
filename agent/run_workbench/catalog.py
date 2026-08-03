@@ -212,6 +212,25 @@ class RunCatalog:
                     "source": deepcopy(source.entry),
                     "errors": list(source.entry["errors"]),
                 }
+            if (
+                source.descriptor.kind is SourceKind.SUMMARY
+                and not source.records_complete
+            ):
+                redactions = _source_redactions(source)
+                return {
+                    "view": "summary",
+                    "source": deepcopy(source.entry),
+                    "summary": {
+                        "record_count": source.descriptor.record_count,
+                        "records": _scrub_paths(
+                            deepcopy(list(source.records or ())), redactions
+                        ),
+                        "records_complete": False,
+                        "record_sample_limit": INDEX_RECORD_LIMIT,
+                        "record_sampling_method": "prefix",
+                    },
+                    "errors": list(source.entry["errors"]),
+                }
             if not source.records_complete:
                 return {
                     "view": "runs_summary",
@@ -854,8 +873,10 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     errors: list[str] = []
     run_ids: set[str] = set()
     present_metadata: set[str] = set()
-    compact_runs_by_id: dict[str, _CompactRun] = {}
-    anonymous: list[_CompactRun] = []
+    grouped_runs_by_id: dict[str, _CompactRun] = {}
+    anonymous_deck_runs: list[_CompactRun] = []
+    anonymous_replay_run: _CompactRun | None = None
+    eval_runs: list[_CompactRun] = []
     types: set[str] = set()
     events: set[str] = set()
     has_action_command = False
@@ -903,21 +924,37 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 }.issubset(record)
                 record_run_ids = _lightweight_run_ids([record])
                 run_ids.update(record_run_ids)
-                if (
-                    event in {"milestone", "card_pick", "outcome", "eval_result"}
-                    or record.get("type") in {"state", "action"}
-                ):
+                is_replay_row = record.get("type") in {"state", "action"}
+                if event == "eval_result":
+                    compact = _CompactRun(run_id=_record_run_id(record))
+                    _update_compact_run(compact, record)
+                    eval_runs.append(compact)
+                elif is_replay_row or (has_action_command and event == "outcome"):
                     run_id = _record_run_id(record)
                     if run_id:
-                        compact = compact_runs_by_id.setdefault(
+                        compact = grouped_runs_by_id.setdefault(
+                            run_id, _CompactRun(run_id=run_id)
+                        )
+                    else:
+                        if anonymous_replay_run is None:
+                            anonymous_replay_run = _CompactRun(run_id="")
+                        compact = anonymous_replay_run
+                    _update_compact_run(compact, record)
+                    if is_replay_row:
+                        _update_compact_replay(compact, record)
+                elif event in {"milestone", "card_pick", "outcome"}:
+                    run_id = _record_run_id(record)
+                    if run_id:
+                        compact = grouped_runs_by_id.setdefault(
                             run_id, _CompactRun(run_id=run_id)
                         )
                     else:
                         compact = _CompactRun(run_id="")
-                        anonymous.append(compact)
+                        anonymous_deck_runs.append(compact)
+                        if anonymous_replay_run is None:
+                            anonymous_replay_run = _CompactRun(run_id="")
+                        _update_compact_run(anonymous_replay_run, record)
                     _update_compact_run(compact, record)
-                    if record.get("type") in {"state", "action"}:
-                        _update_compact_replay(compact, record)
     except UnicodeDecodeError as error:
         errors.append(f"{path.name}: invalid UTF-8 at byte {error.start}")
     except OSError as error:
@@ -934,7 +971,16 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
         has_action_command=has_action_command,
         looks_like_boss_deck=looks_like_boss_deck,
     )
-    compact_runs = tuple(compact_runs_by_id.values()) + tuple(anonymous)
+    if descriptor.kind is SourceKind.EVAL_RESULTS:
+        compact_runs = tuple(eval_runs)
+    elif descriptor.kind is SourceKind.REPLAY_JSONL:
+        compact_runs = tuple(grouped_runs_by_id.values())
+        if anonymous_replay_run is not None:
+            compact_runs += (anonymous_replay_run,)
+    else:
+        compact_runs = tuple(grouped_runs_by_id.values()) + tuple(
+            anonymous_deck_runs
+        )
     for compact in compact_runs:
         compact.source_kind = descriptor.kind
     return _JsonlScan(

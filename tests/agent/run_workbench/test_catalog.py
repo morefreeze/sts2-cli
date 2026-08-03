@@ -14,6 +14,7 @@ from agent.run_workbench.catalog import (
     CatalogNotFoundError,
     RunCatalog,
 )
+from agent.run_workbench.models import RunStatus
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> Path:
@@ -985,3 +986,195 @@ def test_workbench_json_filter_keeps_boss_summary_and_likely_training_errors(
     assert entries["boss-decks.json"]["open_mode"] == "summary"
     assert entries["malformed-training.json"]["open_mode"] == "error"
     assert "invalid JSON" in entries["malformed-training.json"]["errors"][0]
+
+
+def test_large_eval_duplicate_ids_match_small_join_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    records = [
+        {
+            "event": "eval_result",
+            "run_id": "shared",
+            "status": "crash",
+            "max_global_floor": 3,
+            "checkpoint": "model-1",
+            "character": "Ironclad",
+            "seed": "same",
+        },
+        {
+            "event": "eval_result",
+            "run_id": "shared",
+            "status": "dead",
+            "max_global_floor": 9,
+            "checkpoint": "model-1",
+            "character": "Silent",
+            "seed": "same",
+        },
+        {
+            "event": "eval_result",
+            "run_id": "other",
+            "status": "dead",
+            "max_global_floor": 5,
+            "checkpoint": "model-1",
+            "character": "Ironclad",
+            "seed": "other",
+        },
+    ]
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "eval.jsonl", records)
+    _write_jsonl(large_root / "eval.jsonl", records)
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 10)
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    small_cohort = small.list_cohorts()[0]
+    small_runs = small.get_cohort_records(small_cohort["cohort_id"])
+    small_metrics = small.get_metrics(small_cohort["cohort_id"])["current"]
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 1)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    large_cohort = large.list_cohorts()[0]
+    large_runs = large.get_cohort_records(large_cohort["cohort_id"])
+    large_metrics = large.get_metrics(large_cohort["cohort_id"])["current"]
+
+    small_shared = next(run for run in small_runs if run.run_id == "shared")
+    large_shared = next(run for run in large_runs if run.run_id == "shared")
+    assert len(small_runs) == len(large_runs) == 2
+    assert large_shared.outcome == small_shared.outcome
+    assert large_shared.metadata == small_shared.metadata
+    assert large_shared.outcome.status is RunStatus.CRASH
+    assert large_shared.metadata.character == "Ironclad"
+    assert any("conflicting metadata character" in warning for warning in large_shared.warnings)
+    for field in (
+        "all_n",
+        "valid_n",
+        "technical_n",
+        "avg_global_floor",
+        "median_global_floor",
+        "max_global_floor",
+    ):
+        assert large_metrics[field] == small_metrics[field]
+
+
+def test_large_anonymous_replay_matches_small_single_run_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    records = [
+        {
+            "type": "state",
+            "ts": 1,
+            "character": "Ironclad",
+            "checkpoint": "replay-model",
+            "data": {"context": {"act": 1, "floor": 2}},
+        },
+        {
+            "type": "action",
+            "ts": 2,
+            "data": {"cmd": "end_turn"},
+        },
+        {
+            "type": "state",
+            "ts": 3,
+            "status": "dead",
+            "max_global_floor": 7,
+        },
+    ]
+
+    def parser(rows: list[dict], source_name: str | None = None) -> dict:
+        return {
+            "summary": {
+                "character": "Ironclad",
+                "checkpoint": "replay-model",
+                "max_global_floor": 7,
+            },
+            "rooms": [{"id": "room-7", "global_floor": 7}],
+        }
+
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", records)
+    _write_jsonl(large_root / "replay.jsonl", records)
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 10)
+    small = RunCatalog([small_root], replay_parser=parser)
+    small_cohort = small.list_cohorts()[0]
+    small_runs = small.get_cohort_records(small_cohort["cohort_id"])
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 1)
+    large = RunCatalog([large_root], replay_parser=parser)
+    large_cohort = large.list_cohorts()[0]
+    large_runs = large.get_cohort_records(large_cohort["cohort_id"])
+
+    assert small_cohort["run_count"] == large_cohort["run_count"] == 1
+    assert len(small_runs) == len(large_runs) == 1
+    assert large_runs[0].run_id == small_runs[0].run_id == ""
+    assert large_runs[0].metadata == small_runs[0].metadata
+    assert large_runs[0].outcome == small_runs[0].outcome
+    assert large_runs[0].metadata.started_at == 1.0
+    assert large_runs[0].metadata.ended_at == 3.0
+    assert large_runs[0].metadata.checkpoint == "replay-model"
+    assert large_runs[0].outcome.status is RunStatus.DEAD
+    assert large_runs[0].outcome.max_global_floor == 7
+
+
+def test_large_anonymous_deck_rows_remain_distinct_like_small_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    records = [
+        {"event": "outcome", "status": "dead", "max_floor": floor, "ts": floor}
+        for floor in (5, 9)
+    ]
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", records)
+    _write_jsonl(large_root / "deck.jsonl", records)
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 10)
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    small_cohort = small.list_cohorts()[0]
+
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 1)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    large_cohort = large.list_cohorts()[0]
+
+    assert small_cohort["run_count"] == large_cohort["run_count"] == 2
+    assert sorted(
+        run.outcome.max_global_floor
+        for run in large.get_cohort_records(large_cohort["cohort_id"])
+    ) == [5, 9]
+
+
+def test_large_boss_summary_keeps_summary_view_with_bounded_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rows = [
+        {
+            "checkpoint": f"model-{index}",
+            "cards": ["BASH"],
+            "enemies": ["SLIME_BOSS"],
+            "hp_at_entry": 70 - index,
+        }
+        for index in range(3)
+    ]
+    _write_jsonl(tmp_path / "boss-summary.jsonl", rows)
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    source = catalog.list_sources()[0]
+    payload = catalog.get_source(source["source_id"])
+
+    assert source["source_kind"] == "summary"
+    assert source["record_count"] == 3
+    assert payload["view"] == "summary"
+    assert payload["summary"]["record_count"] == 3
+    assert payload["summary"]["records_complete"] is False
+    assert payload["summary"]["record_sample_limit"] == 2
+    assert payload["summary"]["record_sampling_method"] == "prefix"
+    assert len(payload["summary"]["records"]) == 2
+    assert "run_count" not in payload
