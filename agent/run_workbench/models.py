@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
+import math
 from typing import Any
 
 
@@ -44,7 +45,7 @@ class DeltaQuality(str, Enum):
 
 def _serialize(value: Any) -> Any:
     if isinstance(value, Enum):
-        return value.value
+        return _serialize(value.value)
     if is_dataclass(value) and not isinstance(value, type):
         return _serialize(asdict(value))
     if isinstance(value, dict):
@@ -57,7 +58,11 @@ def _serialize(value: Any) -> Any:
         return {key: _serialize(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_serialize(item) for item in value]
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Run record serialization does not support non-finite float values")
         return value
     raise TypeError(
         "Run record serialization does not support "

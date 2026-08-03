@@ -1,4 +1,5 @@
 import json
+from enum import Enum
 
 import pytest
 
@@ -82,7 +83,7 @@ def test_model_output_is_json_safe_with_string_enum_values() -> None:
     assert payload["outcome"]["status"] == "in_progress"
     assert payload["acts"] == [{"kind": "summary"}]
     assert payload["nodes"] == [{"delta": {"value": ["card"], "quality": "derived"}}]
-    json.dumps(payload)
+    json.dumps(payload, allow_nan=False)
 
 
 @pytest.mark.parametrize(
@@ -114,6 +115,34 @@ def test_serialization_rejects_non_string_mapping_keys() -> None:
     )
 
     with pytest.raises(TypeError, match="dict key.*int"):
+        record.to_dict()
+
+
+def test_serialization_rejects_enum_with_unsupported_value() -> None:
+    class UnsafeValue(Enum):
+        BYTES = b"card"
+
+    record = RunRecord(
+        run_id="unsafe-enum",
+        source_id="summary:unsafe-enum",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{"delta": RunDelta(value=UnsafeValue.BYTES)}],
+    )
+
+    with pytest.raises(TypeError, match="bytes"):
+        record.to_dict()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_serialization_rejects_non_finite_floats(value: float) -> None:
+    record = RunRecord(
+        run_id="non-finite-float",
+        source_id="summary:non-finite-float",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{"delta": RunDelta(value=value)}],
+    )
+
+    with pytest.raises(ValueError, match="non-finite float"):
         record.to_dict()
 
 
