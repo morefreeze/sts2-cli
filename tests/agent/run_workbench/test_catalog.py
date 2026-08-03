@@ -1387,56 +1387,143 @@ def test_replay_row_top_level_status_precedes_nested_status_across_threshold(
     assert large_run.outcome.technical_failure_kind is None
 
 
-def test_state_only_parser_summary_metadata_and_identity_match_across_threshold(
+def test_state_only_late_parser_summary_metadata_matches_across_threshold(
     tmp_path: Path,
 ) -> None:
     def rows(count: int) -> list[dict]:
         records = [
             {
                 "type": "state",
+                "run_id": "late-player-run",
                 "status": "dead",
                 "data": {
-                    "context": {"act": 1, "floor": 1, "room_type": "Elite"},
-                    "player": {"name": "The Ironclad", "hp": 70},
+                    "context": {"act": 1, "floor": 1, "room_type": "Map"},
                 },
             }
         ]
         records.extend(
             {
                 "type": "state",
+                "run_id": "late-player-run",
                 "data": {
-                    "context": {"act": 1, "floor": 7, "room_type": "Map"},
+                    "context": {"act": 1, "floor": 1, "room_type": "Map"},
+                },
+            }
+            for _ in range(count - 2)
+        )
+        records.append(
+            {
+                "type": "state",
+                "run_id": "late-player-run",
+                "data": {
+                    "context": {"act": 1, "floor": 7, "room_type": "Elite"},
                     "player": {"name": "The Ironclad", "hp": 70},
                 },
             }
-            for _ in range(count - len(records))
         )
         return records
-
-    def parser(records: list[dict], source_name: str | None = None) -> dict:
-        parsed = parse_game_progress(records, source_name)
-        parsed["summary"]["run_id"] = "summary-only-run"
-        return parsed
 
     small_root = tmp_path / "small-summary"
     large_root = tmp_path / "large-summary"
     small_root.mkdir()
     large_root.mkdir()
-    _write_jsonl(small_root / "replay.jsonl", rows(511))
+    _write_jsonl(small_root / "replay.jsonl", rows(512))
     _write_jsonl(large_root / "replay.jsonl", rows(513))
 
-    small = RunCatalog([small_root], replay_parser=parser)
+    small = RunCatalog([small_root], replay_parser=parse_game_progress)
     small_cohort = small.list_cohorts()[0]
     small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
-    large = RunCatalog([large_root], replay_parser=parser)
+    large = RunCatalog([large_root], replay_parser=parse_game_progress)
     large_cohort = large.list_cohorts()[0]
     large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
 
     assert large_cohort["filters"] == small_cohort["filters"]
     assert large_run.metadata == small_run.metadata
     assert large_run.metadata.character == "Ironclad"
-    assert large_run.run_id == small_run.run_id == "summary-only-run"
-    assert large.get_run("summary-only-run")["run"]["run_id"] == "summary-only-run"
+    assert large_run.run_id == small_run.run_id == "late-player-run"
+
+
+def test_late_summary_identity_uses_bounded_chunks_and_cached_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        {
+            "type": "state",
+            "status": "dead",
+            "data": {"context": {"act": 1, "floor": 1, "room_type": "Map"}},
+        }
+    ]
+    records.extend(
+        {
+            "type": "state",
+            "data": {"context": {"act": 1, "floor": 1, "room_type": "Map"}},
+        }
+        for _ in range(511)
+    )
+    records.append(
+        {
+            "type": "state",
+            "data": {
+                "context": {"act": 1, "floor": 7, "room_type": "Elite"},
+                "summary_run_id": "late-summary-run",
+            },
+        }
+    )
+    source = tmp_path / "late-summary.jsonl"
+    source.write_text(
+        "".join(json.dumps(row) + "\n" for row in records[:200])
+        + "{malformed\n"
+        + "".join(json.dumps(row) + "\n" for row in records[200:]),
+        encoding="utf-8",
+    )
+
+    parser_chunk_sizes: list[int] = []
+
+    def parser(rows: list[dict], source_name: str | None = None) -> dict:
+        parser_chunk_sizes.append(len(rows))
+        parsed = parse_game_progress(rows, source_name)
+        summary_id = next(
+            (
+                row["data"]["summary_run_id"]
+                for row in rows
+                if isinstance(row.get("data"), dict)
+                and isinstance(row["data"].get("summary_run_id"), str)
+            ),
+            None,
+        )
+        if summary_id is not None:
+            parsed["summary"]["run_id"] = summary_id
+        return parsed
+
+    read_count = 0
+    original_open = Path.open
+
+    def counted_open(path: Path, *args, **kwargs):
+        nonlocal read_count
+        if path == source:
+            read_count += 1
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    catalog = RunCatalog([tmp_path], replay_parser=parser)
+
+    entry = catalog.list_sources()[0]
+    cohort = catalog.list_cohorts()[0]
+    catalog.list_sources()
+    catalog.get_metrics(cohort["cohort_id"])
+
+    assert entry["record_count"] == 513
+    assert entry["error_count"] == 1
+    assert len(entry["errors"]) == 1
+    assert parser_chunk_sizes == [512, 1]
+    assert read_count == 2
+    assert cohort["run_ids"] == ["late-summary-run"]
+
+    run = catalog.get_run("late-summary-run")["run"]
+
+    assert run["run_id"] == "late-summary-run"
+    assert parser_chunk_sizes == [512, 1, 513]
+    assert read_count == 3
 
 
 def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(
