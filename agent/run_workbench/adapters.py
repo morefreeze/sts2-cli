@@ -56,6 +56,13 @@ def adapt_path(
 
     descriptor = classify_records(records, suffix=path.suffix)
     if descriptor.kind is SourceKind.NATIVE_RUN:
+        if not _has_native_run_structure(records[0]):
+            return AdaptedSource(
+                descriptor,
+                errors=(
+                    f"{path.name}: native run is missing players and map_point_history lists",
+                ),
+            )
         return AdaptedSource(descriptor, runs=(_adapt_native(path, records[0]),))
     if descriptor.kind is SourceKind.REPLAY_JSONL:
         return _adapt_replay(path, descriptor, records, replay_parser)
@@ -121,6 +128,12 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
         ),
         acts=acts,
         nodes=nodes,
+    )
+
+
+def _has_native_run_structure(record: dict[str, Any]) -> bool:
+    return isinstance(record.get("players"), list) and isinstance(
+        record.get("map_point_history"), list
     )
 
 

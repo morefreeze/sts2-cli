@@ -95,6 +95,30 @@ def test_missing_run_ids_never_merge_on_matching_seed_and_timestamp() -> None:
     )
 
 
+def test_anonymous_and_identified_overlap_remain_separate_and_warned() -> None:
+    anonymous = RunRecord(
+        run_id="",
+        source_id="old-deck:1",
+        source_kind=SourceKind.DECK_HISTORY,
+        metadata=RunMetadata(seed="shared-seed", started_at=100.0, ended_at=120.0),
+    )
+    identified = RunRecord(
+        run_id="known-run",
+        source_id="eval:1",
+        source_kind=SourceKind.EVAL_RESULTS,
+        metadata=RunMetadata(seed="shared-seed", started_at=110.0, ended_at=130.0),
+    )
+
+    joined = join_records([anonymous, identified])
+
+    assert len(joined) == 2
+    assert {run.run_id for run in joined} == {"", "known-run"}
+    assert all(
+        any("ambiguous historical identity" in warning for warning in run.warnings)
+        for run in joined
+    )
+
+
 def test_missing_run_ids_without_seed_and_time_evidence_remain_unwarned() -> None:
     first = RunRecord("", "one", SourceKind.DECK_HISTORY)
     second = RunRecord("", "two", SourceKind.REPLAY_JSONL)
@@ -110,6 +134,28 @@ def test_distinct_nonempty_run_ids_remain_distinct() -> None:
     second = RunRecord("two", "eval:2", SourceKind.EVAL_RESULTS)
 
     assert [run.run_id for run in join_records([second, first])] == ["one", "two"]
+
+
+def test_equal_provenance_keys_use_content_tiebreaker_for_metadata_conflicts() -> None:
+    ironclad = RunRecord(
+        run_id="same",
+        source_id="same-source",
+        source_kind=SourceKind.EVAL_RESULTS,
+        metadata=RunMetadata(character="Ironclad", seed="seed-b"),
+    )
+    silent = RunRecord(
+        run_id="same",
+        source_id="same-source",
+        source_kind=SourceKind.EVAL_RESULTS,
+        metadata=RunMetadata(character="Silent", seed="seed-a"),
+    )
+
+    forward = join_records([ironclad, silent])[0]
+    reverse = join_records([silent, ironclad])[0]
+
+    assert forward.to_dict() == reverse.to_dict()
+    assert any("conflicting metadata character" in warning for warning in forward.warnings)
+    assert any("conflicting metadata seed" in warning for warning in forward.warnings)
 
 
 def test_join_does_not_mutate_input_records() -> None:

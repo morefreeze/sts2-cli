@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import fields
 from itertools import combinations
+import json
 from typing import Any, Iterable
 
 from .models import Capabilities, Coverage, RunMetadata, RunOutcome, RunRecord, RunStatus, SourceKind
@@ -32,7 +33,7 @@ def join_records(records: Iterable[RunRecord]) -> list[RunRecord]:
             historical.append(record)
 
     merged = [_merge_group(group) for _, group in sorted(identified.items())]
-    _warn_ambiguous_historical_records(historical)
+    _warn_ambiguous_historical_records(historical, merged)
     merged.extend(historical)
     return sorted(merged, key=lambda record: (not bool(record.run_id), record.run_id, record.source_id))
 
@@ -167,17 +168,28 @@ def _merge_outcome(records: list[RunRecord]) -> tuple[RunOutcome, list[str]]:
     )
 
 
-def _warn_ambiguous_historical_records(records: list[RunRecord]) -> None:
-    for left, right in combinations(records, 2):
+def _warn_ambiguous_historical_records(
+    historical: list[RunRecord],
+    identified: list[RunRecord],
+) -> None:
+    for left, right in combinations(historical, 2):
         if not _plausibly_overlap(left, right):
             continue
-        for record, counterpart in ((left, right), (right, left)):
-            message = (
-                "ambiguous historical identity: matching seed/timestamp with "
-                f"{counterpart.source_id}; not merged"
-            )
-            if message not in record.warnings:
-                record.warnings.append(message)
+        _warn_ambiguous_pair(left, right)
+    for anonymous in historical:
+        for known in identified:
+            if _plausibly_overlap(anonymous, known):
+                _warn_ambiguous_pair(anonymous, known)
+
+
+def _warn_ambiguous_pair(left: RunRecord, right: RunRecord) -> None:
+    for record, counterpart in ((left, right), (right, left)):
+        message = (
+            "ambiguous historical identity: matching seed/timestamp with "
+            f"{counterpart.source_id}; not merged"
+        )
+        if message not in record.warnings:
+            record.warnings.append(message)
 
 
 def _plausibly_overlap(left: RunRecord, right: RunRecord) -> bool:
@@ -197,8 +209,18 @@ def _timestamp_range(metadata: RunMetadata) -> tuple[float, float] | None:
     return min(timestamps), max(timestamps)
 
 
-def _record_key(record: RunRecord) -> tuple[str, str, str]:
-    return record.source_id, record.source_kind.value, record.run_id
+def _record_key(record: RunRecord) -> tuple[str, str, str, str]:
+    return (
+        record.source_id,
+        record.source_kind.value,
+        record.run_id,
+        json.dumps(
+            record.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def _status_key(status: RunStatus) -> tuple[int, str]:

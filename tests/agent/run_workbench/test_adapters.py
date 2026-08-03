@@ -26,6 +26,19 @@ def test_native_run_preserves_identity_and_format_capabilities() -> None:
     assert run.nodes == [{"floor": 1}]
 
 
+def test_invalid_run_suffix_does_not_fabricate_a_complete_capable_run(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid.run"
+    path.write_text("{}", encoding="utf-8")
+
+    adapted = adapt_path(path)
+
+    assert adapted.descriptor.kind is SourceKind.NATIVE_RUN
+    assert adapted.runs == ()
+    assert any("native run" in error for error in adapted.errors)
+
+
 def test_replay_uses_injected_legacy_parser_and_records_observed_floor_range() -> None:
     adapted = adapt_path(
         FIXTURES / "replay.jsonl",
