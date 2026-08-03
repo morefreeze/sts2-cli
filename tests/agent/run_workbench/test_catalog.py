@@ -1288,11 +1288,26 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     _write_jsonl(small_root / "replay.jsonl", rows(511))
     _write_jsonl(large_root / "replay.jsonl", rows(513))
 
-    small = RunCatalog([small_root], replay_parser=parse_game_progress)
+    def parser(records: list[dict], source_name: str | None = None) -> dict:
+        parsed = parse_game_progress(records, source_name)
+        parsed["summary"].update(
+            {
+                "character": "Silent",
+                "seed": [],
+                "game_version": "v2",
+                "checkpoint": "summary-model",
+                "evaluation_mode": {},
+                "scenario": "summary-scenario",
+                "ascension": 20,
+            }
+        )
+        return parsed
+
+    small = RunCatalog([small_root], replay_parser=parser)
     small_cohort = small.list_cohorts()[0]
     small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
 
-    large = RunCatalog([large_root], replay_parser=parse_game_progress)
+    large = RunCatalog([large_root], replay_parser=parser)
     large_cohort = large.list_cohorts()[0]
     large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
     exact = large.get_run("nested-run")["run"]
@@ -1309,13 +1324,13 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     assert large_run.capabilities.decisions is True
     assert large_run.capabilities.turn_replay is True
     expected_metadata = {
-        "character": "Ironclad",
+        "character": "Silent",
         "seed": "nested-seed",
-        "game_version": "v1",
-        "checkpoint": "replay-model",
+        "game_version": "v2",
+        "checkpoint": "summary-model",
         "evaluation_mode": "fixed",
-        "scenario": "standard",
-        "ascension": 0,
+        "scenario": "summary-scenario",
+        "ascension": 20,
     }
     for key, value in expected_metadata.items():
         assert getattr(small_run.metadata, key) == value
@@ -1324,6 +1339,104 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     for key, value in expected_metadata.items():
         assert exact["metadata"][key] == value
     assert len(exact["nodes"]) == 1
+
+
+def test_replay_row_top_level_status_precedes_nested_status_across_threshold(
+    tmp_path: Path,
+) -> None:
+    def rows(count: int) -> list[dict]:
+        records = [
+            {
+                "type": "state",
+                "run_id": "status-run",
+                "status": "dead",
+                "data": {
+                    "status": "crash",
+                    "context": {"act": 1, "floor": 1, "room_type": "Map"},
+                },
+            }
+        ]
+        records.extend(
+            {
+                "type": "state",
+                "run_id": "status-run",
+                "data": {
+                    "context": {"act": 1, "floor": 7, "room_type": "Map"}
+                },
+            }
+            for _ in range(count - len(records))
+        )
+        return records
+
+    small_root = tmp_path / "small-status"
+    large_root = tmp_path / "large-status"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(511))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=parse_game_progress)
+    small_cohort = small.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+    large = RunCatalog([large_root], replay_parser=parse_game_progress)
+    large_cohort = large.list_cohorts()[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert large_run.outcome == small_run.outcome
+    assert large_run.outcome.status is RunStatus.DEAD
+    assert large_run.outcome.technical_failure_kind is None
+
+
+def test_state_only_parser_summary_metadata_and_identity_match_across_threshold(
+    tmp_path: Path,
+) -> None:
+    def rows(count: int) -> list[dict]:
+        records = [
+            {
+                "type": "state",
+                "status": "dead",
+                "data": {
+                    "context": {"act": 1, "floor": 1, "room_type": "Elite"},
+                    "player": {"name": "The Ironclad", "hp": 70},
+                },
+            }
+        ]
+        records.extend(
+            {
+                "type": "state",
+                "data": {
+                    "context": {"act": 1, "floor": 7, "room_type": "Map"},
+                    "player": {"name": "The Ironclad", "hp": 70},
+                },
+            }
+            for _ in range(count - len(records))
+        )
+        return records
+
+    def parser(records: list[dict], source_name: str | None = None) -> dict:
+        parsed = parse_game_progress(records, source_name)
+        parsed["summary"]["run_id"] = "summary-only-run"
+        return parsed
+
+    small_root = tmp_path / "small-summary"
+    large_root = tmp_path / "large-summary"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(511))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=parser)
+    small_cohort = small.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+    large = RunCatalog([large_root], replay_parser=parser)
+    large_cohort = large.list_cohorts()[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert large_cohort["filters"] == small_cohort["filters"]
+    assert large_run.metadata == small_run.metadata
+    assert large_run.metadata.character == "Ironclad"
+    assert large_run.run_id == small_run.run_id == "summary-only-run"
+    assert large.get_run("summary-only-run")["run"]["run_id"] == "summary-only-run"
 
 
 def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(

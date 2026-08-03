@@ -133,6 +133,8 @@ class _CompactRun:
     has_replay_nodes: bool = False
     has_node_decisions: bool = False
     usable_per_node_replay: bool = False
+    replay_observed_ids: tuple[str, ...] = ()
+    replay_ids_omitted: bool = False
     warnings: tuple[str, ...] = ()
 
     def to_record(self) -> RunRecord:
@@ -564,6 +566,11 @@ class RunCatalog:
                     records,
                     self.replay_parser,
                     path.name,
+                )
+                run_ids = (
+                    (deck_outcomes[0].run_id,)
+                    if deck_outcomes[0].run_id
+                    else ()
                 )
             for outcome in deck_outcomes:
                 outcome.source_id = source_id
@@ -1128,6 +1135,10 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
             source_replay_run.run_id = (
                 replay_top_level_id or replay_nested_id or ""
             )
+            source_replay_run.replay_observed_ids = tuple(
+                sorted(replay_observed_ids)
+            )
+            source_replay_run.replay_ids_omitted = replay_ids_omitted
             source_replay_run.warnings = _compact_replay_identity_warnings(
                 source_replay_run.run_id,
                 replay_observed_ids,
@@ -1369,7 +1380,10 @@ def _update_compact_replay(
     _update_observed_floor(compact, floor, floor_label)
 
     nested_status, nested_victory, nested_technical_kind = _compact_status(data)
-    if nested_status is not RunStatus.UNKNOWN:
+    if (
+        status is RunStatus.UNKNOWN
+        and nested_status is not RunStatus.UNKNOWN
+    ):
         compact.status = nested_status
         compact.victory = nested_victory
         compact.technical_failure_kind = nested_technical_kind
@@ -1413,10 +1427,32 @@ def _probe_compact_replay_capabilities(
         return
 
     compact.replay_parser_succeeded = True
+    summary = candidate.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    _apply_compact_replay_summary_metadata(compact, summary)
+    summary_id = _first_scalar_text(summary, "run_id")
+    if summary_id is not None:
+        if not compact.run_id:
+            compact.run_id = summary_id
+        observed_ids = set(compact.replay_observed_ids)
+        compact.replay_ids_omitted = (
+            _add_bounded_replay_id(observed_ids, summary_id)
+            or compact.replay_ids_omitted
+        )
+        compact.replay_observed_ids = tuple(sorted(observed_ids))
+        compact.warnings = _compact_replay_identity_warnings(
+            compact.run_id,
+            observed_ids,
+            compact.replay_ids_omitted,
+        )
+
     rooms = candidate.get("rooms")
-    if not isinstance(rooms, list):
-        return
-    nodes = [node for node in rooms if isinstance(node, dict)]
+    nodes = (
+        [node for node in rooms if isinstance(node, dict)]
+        if isinstance(rooms, list)
+        else []
+    )
     compact.has_replay_nodes = bool(nodes)
     for node in nodes:
         _update_observed_floor(
@@ -1424,9 +1460,8 @@ def _probe_compact_replay_capabilities(
             _first_integral_int(node, "global_floor", "floor"),
             _first_scalar_text(node, "label"),
         )
-    summary = candidate.get("summary")
-    if not isinstance(summary, dict):
-        summary = {}
+    compact.max_global_floor = compact.observed_max_floor
+    compact.max_floor_label = compact.observed_max_floor_label
     parser_max_floor = _first_integral_int(summary, "max_global_floor")
     if (
         parser_max_floor is not None
@@ -1436,7 +1471,13 @@ def _probe_compact_replay_capabilities(
         )
     ):
         compact.max_global_floor = parser_max_floor
-        compact.max_floor_label = _first_scalar_text(summary, "max_floor_label")
+        parser_label = _first_scalar_text(summary, "max_floor_label")
+        if (
+            parser_label is not None
+            or compact.observed_max_floor is None
+            or parser_max_floor > compact.observed_max_floor
+        ):
+            compact.max_floor_label = parser_label
     else:
         compact.max_global_floor = compact.observed_max_floor
         compact.max_floor_label = compact.observed_max_floor_label
@@ -1448,6 +1489,26 @@ def _probe_compact_replay_capabilities(
         and _compact_node_has_decision_evidence(node)
         for node in nodes
     )
+
+
+def _apply_compact_replay_summary_metadata(
+    compact: _CompactRun,
+    summary: dict[str, Any],
+) -> None:
+    for attribute, keys in (
+        ("character", ("character",)),
+        ("seed", ("seed",)),
+        ("game_version", ("game_version", "build_id")),
+        ("checkpoint", ("checkpoint",)),
+        ("evaluation_mode", ("evaluation_mode",)),
+        ("scenario", ("scenario",)),
+    ):
+        value = _first_scalar_text(summary, *keys)
+        if value is not None:
+            setattr(compact, attribute, value)
+    ascension = summary.get("ascension")
+    if type(ascension) is int and ascension >= 0:
+        compact.ascension = ascension
 
 
 def _compact_node_has_decision_evidence(node: dict[str, Any]) -> bool:
