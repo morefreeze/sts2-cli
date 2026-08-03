@@ -6,6 +6,7 @@ import pytest
 from agent.eval_rl import (
     _VerboseCombatEnv,
     _build_parser,
+    _default_eval_batch_id,
     _resolve_combat_snapshot_config,
     _write_boss_deck_record,
     _write_combat_record,
@@ -36,6 +37,19 @@ def test_append_eval_result_row_writes_one_strict_json_object(tmp_path):
 def test_append_eval_result_row_rejects_nonstandard_json_numbers(tmp_path):
     with pytest.raises(ValueError):
         append_eval_result_row(tmp_path / "results.jsonl", {"score": float("nan")})
+
+
+def test_default_eval_batch_ids_do_not_collide_with_frozen_timestamp(monkeypatch):
+    import agent.eval_rl as eval_rl
+
+    monkeypatch.setattr(eval_rl.time, "strftime", lambda pattern: "20260803T120000")
+
+    first = _default_eval_batch_id("checkpoints/model_14000k.zip", "Ironclad")
+    second = _default_eval_batch_id("checkpoints/model_14000k.zip", "Ironclad")
+
+    assert first.startswith("eval-model_14000k-20260803T120000-")
+    assert second.startswith("eval-model_14000k-20260803T120000-")
+    assert first != second
 
 
 def test_format_floor_label_uses_act_relative_floor():
@@ -262,7 +276,10 @@ def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_p
     assert all(row["seed"] == "eval_fixed_0" for row in rows)
     assert [row["attempt_index"] for row in rows] == [1, 2, 3, 4]
     assert [context["run_id"] for context in contexts] == [row["run_id"] for row in rows]
-    assert stats["results"] == rows
+    assert stats["attempt_results"] == rows
+    assert len(stats["results"]) == 1
+    assert stats["results"][0]["status"] == "dead"
+    assert stats["results"][0]["attempts"] == 4
     assert stats["avg_floor"] == 11.0
     assert stats["floors"] == [11]
     assert stats["valid_n"] == 1
@@ -328,9 +345,75 @@ def test_run_eval_retries_invalid_attempt_with_the_same_fixed_seed(monkeypatch):
     assert stats["invalid_n"] == 0
     assert stats["invalid_attempts"] == 1
     assert stats["status_counts"] == {"crash": 1, "dead": 1}
-    assert [row["status"] for row in stats["results"]] == ["crash", "dead"]
-    assert stats["results"][0]["included_in_gameplay"] is False
-    assert stats["results"][1]["included_in_gameplay"] is True
+    assert [row["status"] for row in stats["results"]] == ["dead"]
+    assert stats["results"][0]["attempts"] == 2
+    assert [row["status"] for row in stats["attempt_results"]] == ["crash", "dead"]
+    assert stats["attempt_results"][0]["included_in_gameplay"] is False
+    assert stats["attempt_results"][1]["included_in_gameplay"] is True
+
+
+def test_result_log_failure_is_warned_and_does_not_stop_later_games(monkeypatch):
+    import agent.eval_rl as eval_rl
+
+    logged_run_ids = []
+    write_calls = 0
+
+    class FakeEnv:
+        def __init__(self, **kwargs):
+            self._current_floor = 7
+            self._current_state = {
+                "decision": "combat_play",
+                "context": {"floor": 7},
+                "player": {"hp": 1, "max_hp": 80},
+            }
+
+        def reset(self):
+            return [0.0] * 161, {}
+
+        def action_masks(self):
+            return [True]
+
+        def step(self, action):
+            return [0.0] * 161, 0.0, True, False, {"floor": 7}
+
+        def close(self):
+            pass
+
+    class FakeModel:
+        observation_space = SimpleNamespace(shape=(161,))
+
+        def predict(self, obs, **kwargs):
+            return 0, None
+
+    def flaky_append(path, row):
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            raise OSError("disk unavailable")
+        logged_run_ids.append(row["run_id"])
+
+    monkeypatch.setattr(eval_rl, "CombatEnv", FakeEnv)
+    monkeypatch.setattr(eval_rl, "ActionMasker", lambda env, mask_fn: env)
+    monkeypatch.setattr(eval_rl, "append_eval_result_row", flaky_append)
+    monkeypatch.setattr(eval_rl.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(eval_rl.signal, "alarm", lambda *args: None)
+
+    with pytest.warns(RuntimeWarning, match="disk unavailable"):
+        stats = run_eval_verbose(
+            FakeModel(),
+            "Ironclad",
+            n_games=2,
+            invalid_retries=0,
+            batch_id="eval-log-failure",
+            results_log_path="unused.jsonl",
+        )
+
+    assert stats["valid_n"] == 2
+    assert len(stats["results"]) == 2
+    assert len(stats["attempt_results"]) == 2
+    assert len(stats["result_log_errors"]) == 1
+    assert "disk unavailable" in stats["result_log_errors"][0]
+    assert logged_run_ids == ["eval-log-failure-001-a02"]
 
 
 def test_run_eval_marks_act1_boss_beaten_after_entering_act2(monkeypatch, tmp_path):

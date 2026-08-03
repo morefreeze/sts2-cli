@@ -6,7 +6,7 @@ Usage:
     python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --n-games 20
     python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --verbose
 """
-import argparse, json, os, random, signal, sys, time
+import argparse, json, os, random, signal, sys, time, uuid, warnings
 from collections import Counter
 
 import numpy as np
@@ -164,7 +164,7 @@ def append_eval_result_row(path, row: dict) -> None:
 def _default_eval_batch_id(checkpoint_name: str | None, character: str) -> str:
     checkpoint_stem = os.path.splitext(os.path.basename(str(checkpoint_name or "")))[0]
     label = checkpoint_stem or character.lower()
-    return f"eval-{label}-{time.strftime('%Y%m%dT%H%M%S')}"
+    return f"eval-{label}-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
 
 class _GameTimeout(Exception):
@@ -488,6 +488,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
 
     results: list[dict] = []
     attempt_results: list[dict] = []
+    result_log_errors: list[str] = []
     attempt_statuses: list[str] = []
     boss_records = []  # per-game: {"boss": id, "reached": bool, "won": bool}
     i = 0
@@ -754,8 +755,16 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         if results_log_path:
             try:
                 append_eval_result_row(results_log_path, attempt_row)
-            except Exception:
-                pass
+            except Exception as exc:
+                error = (
+                    f"evaluation result logging failed for {run_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                result_log_errors.append(error)
+                try:
+                    warnings.warn(error, RuntimeWarning, stacklevel=2)
+                except Warning:
+                    print(error, file=sys.stderr)
 
         if verbose:
             # Print per-room log
@@ -833,7 +842,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         total_attempts=total_attempts,
         attempt_statuses=attempt_statuses,
     )
-    stats["results"] = attempt_results
+    stats["attempt_results"] = attempt_results
+    stats["result_log_errors"] = result_log_errors
     stats["per_boss"] = per_boss
     return stats
 

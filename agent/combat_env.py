@@ -11,7 +11,7 @@ Design: simple 1:1 mapping — each env.step() = one game action (including
 end_turn). No auto-skip. Policy and value networks are separated in train.py
 to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import json, os, subprocess, random, time, select, sys
+import json, os, subprocess, random, time, select, sys, warnings
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -626,6 +626,7 @@ class CombatEnv(gym.Env):
             or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
         )
         self._run_outcome_emitted = False
+        self._run_logging_errors: list[str] = []
         self._run_milestone_records: list = []  # buffered rows until outcome known
         self._run_card_pick_records: list = []   # buffered card-reward decisions (per pick, see _buffer_card_pick)
 
@@ -882,8 +883,7 @@ class CombatEnv(gym.Env):
             }
 
         decision = state.get("decision", "")
-        if self._current_floor > self._run_max_floor:
-            self._run_max_floor = self._current_floor
+        self._track_run_floor(state)
         reward = self._shaping_reward(state)
 
         # B5: pay HP-at-boss-entry bonus on the first step of a Boss combat.
@@ -1038,6 +1038,7 @@ class CombatEnv(gym.Env):
         self._combat_start_player_max_hp = max(state.get("player", {}).get("max_hp", 1), 1)
         floor = state.get("floor") or state.get("context", {}).get("floor", 1)
         self._current_floor = int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1
+        self._track_run_floor(state)
         hp = state.get("player", {}).get("hp", self._combat_start_player_max_hp)
         self._combat_entry_hp_ratio = hp / self._combat_start_player_max_hp
         self._dealt_damage_this_turn = False  # fresh combat starts with no damage logged
@@ -1051,6 +1052,30 @@ class CombatEnv(gym.Env):
             self._pending_boss_entry_reward = (hp - BOSS_ENTRY_HP_FLOOR) * BOSS_ENTRY_HP_WEIGHT
         else:
             self._pending_boss_entry_reward = 0.0
+
+    @staticmethod
+    def _global_floor_from_state(state: dict | None, fallback: int = 1) -> int:
+        """Return absolute run floor without changing act-local reward state."""
+        if not isinstance(state, dict):
+            return int(fallback)
+        context = state.get("context") if isinstance(state.get("context"), dict) else {}
+        global_floor = state.get("global_floor") or context.get("global_floor")
+        if (isinstance(global_floor, (int, float)) and not isinstance(global_floor, bool)
+                and global_floor > 0):
+            return int(global_floor)
+        act = context.get("act", 1)
+        floor = state.get("floor") or context.get("floor")
+        if (isinstance(act, (int, float)) and not isinstance(act, bool) and act > 0
+                and isinstance(floor, (int, float)) and not isinstance(floor, bool)
+                and floor > 0):
+            return (int(act) - 1) * 17 + int(floor)
+        return int(fallback)
+
+    def _track_run_floor(self, state: dict | None) -> None:
+        self._run_max_floor = max(
+            int(self._run_max_floor),
+            self._global_floor_from_state(state, fallback=self._run_max_floor),
+        )
 
     def _shaping_reward(self, next_state: dict) -> float:
         cur_enemy_hp = _total_enemy_hp(next_state)
@@ -1338,9 +1363,9 @@ class CombatEnv(gym.Env):
         """Flush buffered milestone + card_pick records to disk with the final
         outcome appended. Called once per run from terminal paths (game_over,
         crash, etc.)."""
+        self._track_run_floor(state)
         if self._run_outcome_emitted:
             return
-        self._run_outcome_emitted = True
         technical_statuses = {"crash", "timeout", "stuck", "reset_failure", "invalid"}
         final_status = status or ("win" if victory else "dead")
         if final_status not in technical_statuses | {"win", "dead"}:
@@ -1364,18 +1389,28 @@ class CombatEnv(gym.Env):
             "technical_failure_kind": technical_failure_kind,
             "ts": time.time(),
         }
-        try:
-            if not self._deck_history_path:
+        if self._deck_history_path:
+            try:
+                rows = [*self._run_milestone_records, *self._run_card_pick_records, outcome]
+                payload = "".join(
+                    json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+                os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
+                with open(self._deck_history_path, "a", encoding="utf-8") as f:
+                    f.write(payload)
+            except Exception as exc:
+                error = (
+                    f"run outcome logging failed for {self._run_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._run_logging_errors.append(error)
+                try:
+                    warnings.warn(error, RuntimeWarning, stacklevel=2)
+                except Warning:
+                    print(error, file=sys.stderr)
                 return
-            os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
-            with open(self._deck_history_path, "a", encoding="utf-8") as f:
-                for rec in self._run_milestone_records:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                for rec in self._run_card_pick_records:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                f.write(json.dumps(outcome, ensure_ascii=False) + "\n")
-        except Exception:
-            pass  # never let logging break training
+        # Mark successful/disabled logging before downstream updates so a
+        # card-bandit failure cannot duplicate the JSON outcome.
+        self._run_outcome_emitted = True
         # Bandit Q update: for every card_pick this run, update Q value with
         # the run's max_floor outcome. Background-update; save periodically.
         try:
@@ -1582,10 +1617,11 @@ class CombatEnv(gym.Env):
 
         return state
 
-    def _advance_to_combat(self, state: dict) -> dict:
+    def _advance_to_combat(self, state: dict) -> dict | None:
         for _ in range(200):
             if state is None:
-                return {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
+                return None
+            self._track_run_floor(state)
             if state.get("decision") == "game_over":
                 return state
             if state.get("decision") == "combat_play":
@@ -1609,7 +1645,13 @@ class CombatEnv(gym.Env):
             if state.get("decision") == "card_reward":
                 self._buffer_card_pick(state, cmd)
             state = self._send(cmd)
-        return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
+            if state is None:
+                return None
+        return {
+            "decision": "stuck",
+            "technical_failure_kind": "stuck",
+            "player": {"hp": 0, "max_hp": 80},
+        }
 
     def _start_proc(self):
         crash_log = os.path.join(PROJECT_ROOT, "crash_stderr.log")

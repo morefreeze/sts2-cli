@@ -215,13 +215,109 @@ def test_failed_start_emits_reset_failure_outcome(monkeypatch, tmp_path):
     assert _read_history_rows(history_path)[-1]["status"] == "reset_failure"
 
 
-def test_run_outcome_logging_failure_does_not_escape(monkeypatch, tmp_path):
-    env, _ = _recording_env(monkeypatch, tmp_path)
-    env._deck_history_path = str(tmp_path)
+def test_run_outcome_logging_failure_is_visible_and_retryable(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    real_open = open
+    attempts = 0
+
+    def flaky_open(path, *args, **kwargs):
+        nonlocal attempts
+        if path == str(history_path):
+            attempts += 1
+            if attempts == 1:
+                raise OSError("disk unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(combat_env, "open", flaky_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="disk unavailable"):
+        env._emit_run_outcome({}, victory=False, status="crash")
+
+    assert env._run_outcome_emitted is False
+    assert len(env._run_logging_errors) == 1
+    assert "disk unavailable" in env._run_logging_errors[0]
 
     env._emit_run_outcome({}, victory=False, status="crash")
 
     assert env._run_outcome_emitted is True
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows].count("outcome") == 1
+
+
+def test_initial_auto_advance_transport_failure_is_crash(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+    monkeypatch.setattr(env, "_start_proc", lambda: None)
+    monkeypatch.setattr(combat_env, "greedy_action", lambda state: {"cmd": "action"})
+    replies = iter([
+        {"decision": "map_select", "context": {"act": 1, "floor": 7}},
+        None,
+    ])
+    monkeypatch.setattr(env, "_send", lambda command: next(replies))
+
+    _, info = env.reset()
+
+    assert info["crashed"] is True
+    assert info["game_over"] is False
+    assert _read_history_rows(history_path)[-1]["status"] == "crash"
+    from agent.eval_rl import classify_eval_result, summarize_eval_results
+    status = classify_eval_result(timed_out=False, run_won=False, info=info)
+    stats = summarize_eval_results(
+        [{"status": status, "floor": 7, "combat_wins": 0}],
+        requested_n=1,
+        total_attempts=1,
+    )
+    assert status == "crash"
+    assert stats["valid_n"] == 0
+
+
+def test_between_combat_auto_advance_transport_failure_is_crash(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    env._game_alive = True
+    env._current_state = {
+        "decision": "card_reward",
+        "context": {"act": 1, "floor": 7},
+        "player": {"hp": 40, "max_hp": 80},
+        "cards": [],
+    }
+    monkeypatch.setattr(combat_env, "greedy_action", lambda state: {"cmd": "action"})
+    monkeypatch.setattr(env, "_send", lambda command: None)
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+
+    _, info = env.reset()
+
+    assert info["crashed"] is True
+    assert _read_history_rows(history_path)[-1]["status"] == "crash"
+
+
+def test_auto_advance_iteration_exhaustion_is_stuck(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = {"decision": "map_select", "context": {"act": 1, "floor": 7}}
+    monkeypatch.setattr(combat_env, "greedy_action", lambda current: {"cmd": "action"})
+    monkeypatch.setattr(env, "_send", lambda command: state)
+
+    result = env._advance_to_combat(state)
+
+    assert result["decision"] == "stuck"
+
+
+@pytest.mark.parametrize(
+    ("act", "floor", "expected_global"),
+    [(1, 4, 4), (2, 4, 21)],
+)
+def test_run_outcome_uses_absolute_floor(monkeypatch, tmp_path, act, floor, expected_global):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    state = combat_env._dummy_combat_state()
+    state["floor"] = None
+    state["context"] = {"act": act, "floor": floor, "room_type": "Monster"}
+
+    env._init_combat_tracking(state)
+    env._emit_run_outcome(state, victory=False, status="dead")
+
+    assert env._current_floor == floor
+    assert _read_history_rows(history_path)[-1]["max_floor"] == expected_global
 
 
 def test_reset_uses_updated_state_after_hp_override(monkeypatch):
