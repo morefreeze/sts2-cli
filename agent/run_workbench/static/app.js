@@ -1,6 +1,8 @@
 'use strict';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const CLIENT_TREND_POINT_LIMIT = 256;
+const SOURCE_ERROR_EXAMPLE_LIMIT = 3;
 const TECHNICAL_STATUSES = new Set(['crash', 'timeout', 'stuck', 'reset_failure', 'invalid']);
 const SOURCE_LABELS = {
   native_run: '原生游戏记录',
@@ -44,6 +46,10 @@ const state = {
   sources: [],
   currentMetrics: null,
   busy: false,
+  detailRequestToken: 0,
+  detailAbortController: null,
+  detailOpener: null,
+  uploadRequestToken: 0,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -192,7 +198,7 @@ function updateCohortOptions({ chooseDefaults = false } = {}) {
   const candidates = filteredCohorts();
   const options = candidates.map((cohort) => ({
     value: cohort.cohort_id,
-    label: `${cohort.label} · ${cohort.run_count} 局`,
+    label: `${cohort.label} · ${cohort.run_count} 局 · ${Number.isFinite(cohort.latest_at) ? formatTime(cohort.latest_at) : '时间未知'}`,
   }));
   let current = previousCurrent;
   if (!candidates.some((cohort) => cohort.cohort_id === current)) {
@@ -201,6 +207,10 @@ function updateCohortOptions({ chooseDefaults = false } = {}) {
   if (chooseDefaults && candidates.length) current = candidates[0].cohort_id;
   setSelectOptions(currentSelect, options, candidates.length ? null : '没有匹配批次', current);
   currentSelect.value = current;
+  const selected = candidates.find((cohort) => cohort.cohort_id === current);
+  byId('currentHelp').textContent = selected && Number.isFinite(selected.latest_at)
+    ? `服务端按时间排序；此批次最近记录于 ${formatTime(selected.latest_at)}`
+    : '此批次时间未知；按服务端稳定顺序选择，不视为最新批次';
 
   let baseline = previousBaseline;
   if (!candidates.some((cohort) => cohort.cohort_id === baseline && baseline !== current)) {
@@ -248,19 +258,78 @@ function renderEmpty(container, message, className = 'empty-state') {
   container.append(element('div', { className, text: message }));
 }
 
+function boundedTimestampedTrend(points, limit = CLIENT_TREND_POINT_LIMIT) {
+  const boundedLimit = Math.max(1, Math.floor(limit) || 1);
+  let timestampedInputN = 0;
+  for (const point of points) {
+    if (point && Number.isFinite(point.timestamp)) timestampedInputN += 1;
+  }
+  if (timestampedInputN === 0) return { points: [], timestampedInputN: 0 };
+
+  const selectedN = Math.min(timestampedInputN, boundedLimit);
+  const targetIndexes = [];
+  for (let index = 0; index < selectedN; index += 1) {
+    const target = selectedN === 1
+      ? 0
+      : Math.round(index * (timestampedInputN - 1) / (selectedN - 1));
+    targetIndexes.push(target);
+  }
+  const selected = [];
+  let finiteIndex = 0;
+  let targetIndex = 0;
+  for (const point of points) {
+    if (!point || !Number.isFinite(point.timestamp)) continue;
+    if (finiteIndex === targetIndexes[targetIndex]) {
+      selected.push(point);
+      targetIndex += 1;
+    }
+    finiteIndex += 1;
+    if (targetIndex >= targetIndexes.length) break;
+  }
+  return { points: selected, timestampedInputN };
+}
+
+function renderTrendProvenance(container, summary, renderedN, timestampedInputN) {
+  const eligibleN = Number.isFinite(summary.trend_eligible_n) ? summary.trend_eligible_n : timestampedInputN;
+  const timestampedN = Number.isFinite(summary.trend_timestamped_n) ? summary.trend_timestamped_n : timestampedInputN;
+  const unknownTimeN = Number.isFinite(summary.trend_unknown_time_n) ? summary.trend_unknown_time_n : Math.max(0, eligibleN - timestampedN);
+  const serverSampledN = Number.isFinite(summary.trend_sampled_n) ? summary.trend_sampled_n : timestampedInputN;
+  const serverLimit = Number.isFinite(summary.trend_sample_limit) ? summary.trend_sample_limit : '—';
+  const methods = {
+    all_timestamped: '全部有时间记录',
+    deterministic_hash: '服务端确定性抽样',
+  };
+  const method = methods[summary.trend_sampling_method] || summary.trend_sampling_method || '未标注';
+  const legend = element('div', {
+    className: 'chart-legend',
+    attrs: { 'aria-label': '趋势抽样口径' },
+  });
+  legend.append(
+    element('span', { className: 'legend-key', text: `绘制 ${renderedN} 点（前端上限 ${CLIENT_TREND_POINT_LIMIT}）` }),
+    element('span', { className: 'legend-key missing', text: `服务端样本 ${serverSampledN} / ${timestampedN} 个有时间记录（上限 ${serverLimit}）` }),
+    element('span', { className: 'legend-key technical', text: `总趋势口径 ${eligibleN}；${unknownTimeN} 个时间未知未绘制` }),
+    element('span', { text: `抽样方式：${method}${timestampedInputN > renderedN ? `；前端等距再抽样 ${renderedN} / ${timestampedInputN}` : ''}` }),
+  );
+  container.append(legend);
+}
+
 function renderTrend(summary) {
   const container = byId('trendChart');
   clear(container);
-  const trend = Array.isArray(summary.trend) ? summary.trend : [];
+  const rawTrend = Array.isArray(summary.trend) ? summary.trend : [];
+  const bounded = boundedTimestampedTrend(rawTrend);
+  const trend = bounded.points;
   if (!trend.length) {
-    renderEmpty(container, '当前批次没有趋势点。');
+    renderEmpty(container, rawTrend.length ? '趋势点缺少有效时间，未绘制到时间轴。' : '当前批次没有有时间记录的趋势点。');
+    renderTrendProvenance(container, summary, 0, bounded.timestampedInputN);
     return;
   }
-  const available = trend.filter((point) => typeof point.global_floor === 'number');
-  const missing = trend.filter((point) => typeof point.global_floor !== 'number');
+  const available = trend.filter((point) => Number.isFinite(point.global_floor));
+  const missing = trend.filter((point) => !Number.isFinite(point.global_floor));
   const technical = trend.filter((point) => TECHNICAL_STATUSES.has(point.status));
   if (!available.length) {
-    renderEmpty(container, `共 ${trend.length} 条记录，但都缺少推进层数。`);
+    renderEmpty(container, `绘制样本共 ${trend.length} 条，但都缺少推进层数。`);
+    renderTrendProvenance(container, summary, trend.length, bounded.timestampedInputN);
     return;
   }
 
@@ -269,7 +338,10 @@ function renderTrend(summary) {
   const margin = { top: 20, right: 18, bottom: 34, left: 42 };
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
-  const maxFloor = Math.max(1, ...available.map((point) => point.global_floor));
+  let maxFloor = 1;
+  for (const point of available) {
+    if (point.global_floor > maxFloor) maxFloor = point.global_floor;
+  }
   const x = (index) => margin.left + (trend.length === 1 ? plotWidth / 2 : index * plotWidth / (trend.length - 1));
   const y = (value) => margin.top + plotHeight - (value / maxFloor) * plotHeight;
   const svg = svgElement('svg', {
@@ -277,9 +349,9 @@ function renderTrend(summary) {
     role: 'img', 'aria-labelledby': 'trendTitle trendDescription',
   });
   const title = svgElement('title', { id: 'trendTitle' });
-  title.textContent = '当前批次每局最远推进层数';
+  title.textContent = '当前批次有时间记录的最远推进层数样本';
   const description = svgElement('desc', { id: 'trendDescription' });
-  description.textContent = `${trend.length} 局中 ${available.length} 局有层数，${missing.length} 局缺失层数，${summary.technical_n} 局为技术失败。`;
+  description.textContent = `前端绘制 ${trend.length} 个有时间样本，其中 ${available.length} 个有层数、${missing.length} 个缺少层数。服务端有时间记录 ${summary.trend_timestamped_n} 个，时间未知 ${summary.trend_unknown_time_n} 个未绘制。`;
   svg.append(title, description);
 
   [0, 0.5, 1].forEach((ratio) => {
@@ -301,24 +373,31 @@ function renderTrend(summary) {
     segment = [];
   };
   trend.forEach((point, index) => {
-    if (typeof point.global_floor !== 'number') {
+    if (!Number.isFinite(point.global_floor)) {
       appendSegment();
       return;
     }
     const pointX = x(index);
     const pointY = y(point.global_floor);
     segment.push(`${pointX},${pointY}`);
-    const circle = svgElement('circle', {
-      cx: pointX, cy: pointY, r: 4.5, class: 'chart-point', tabindex: '0',
-      'aria-label': `${point.run_id}，推进到 ${point.global_floor} 层，${STATUS_LABELS[point.status] || point.status}`,
-    });
-    circle.addEventListener('click', () => openRun(point.run_id));
-    circle.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        openRun(point.run_id);
-      }
-    });
+    const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
+    const runLabel = runId || '未提供对局 ID';
+    const attributes = {
+      cx: pointX, cy: pointY, r: 4.5, class: 'chart-point',
+      role: runId ? 'button' : 'img',
+      'aria-label': `${runLabel}，推进到 ${point.global_floor} 层，${STATUS_LABELS[point.status] || point.status}`,
+    };
+    if (runId) attributes.tabindex = '0';
+    const circle = svgElement('circle', attributes);
+    if (runId) {
+      circle.addEventListener('click', (event) => openRun(runId, event.currentTarget));
+      circle.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openRun(runId, event.currentTarget);
+        }
+      });
+    }
     svg.append(circle);
   });
   appendSegment();
@@ -328,22 +407,15 @@ function renderTrend(summary) {
   lastLabel.textContent = '较新';
   svg.append(firstLabel, lastLabel);
   container.append(svg);
-
-  const legend = element('div', { className: 'chart-legend' });
-  legend.append(
-    element('span', { className: 'legend-key', text: `${available.length} 条有效层数` }),
-    element('span', { className: 'legend-key missing', text: `${missing.length} 条缺失层数` }),
-    element('span', { className: 'legend-key technical', text: `${summary.technical_n} 条技术失败` }),
-  );
-  container.append(legend);
+  renderTrendProvenance(container, summary, trend.length, bounded.timestampedInputN);
 
   if (missing.length || technical.length) {
     const notes = element('ul', { className: 'chart-notes' });
     missing.slice(0, 5).forEach((point) => {
-      notes.append(element('li', { text: `${point.run_id}：缺少推进层数（${STATUS_LABELS[point.status] || point.status}）` }));
+      notes.append(element('li', { text: `${point.run_id || '未提供对局 ID'}：缺少推进层数（${STATUS_LABELS[point.status] || point.status}）` }));
     });
     technical.slice(0, 5).forEach((point) => {
-      notes.append(element('li', { text: `${point.run_id}：技术失败 ${STATUS_LABELS[point.status] || point.status}` }));
+      notes.append(element('li', { text: `${point.run_id || '未提供对局 ID'}：技术失败 ${STATUS_LABELS[point.status] || point.status}` }));
     });
     container.append(notes);
   }
@@ -476,7 +548,7 @@ function anomalyRow(item) {
   row.append(main);
   if (item.sourceId) {
     const button = element('button', { text: '查看来源', attrs: { type: 'button' } });
-    button.addEventListener('click', () => openSource(item.sourceId));
+    button.addEventListener('click', (event) => openSource(item.sourceId, event.currentTarget));
     row.append(button);
   }
   return row;
@@ -497,15 +569,49 @@ function renderAnomalies(metrics) {
     }
     if (metrics.comparison && !metrics.comparison.comparable) {
       (metrics.comparison.mismatch_reasons || []).forEach((reason) => {
-        items.push({ priority: 1, title: '比较口径不一致', detail: reason });
+        items.push({ priority: 2, title: '比较口径不一致', detail: reason });
       });
     }
   }
+  const unknownSources = [];
+  const trainingSources = [];
   state.sources.forEach((source) => {
-    (source.errors || []).forEach((error) => {
-      items.push({ priority: 0, title: `来源读取失败：${source.display_name}`, detail: error, sourceId: source.source_id });
-    });
+    const errorCount = Number.isFinite(source.error_count)
+      ? source.error_count
+      : (Array.isArray(source.errors) ? source.errors.length : 0);
+    const isUnknown = source.source_kind === 'unknown' || source.open_mode === 'error';
+    if (errorCount > 0 || isUnknown) {
+      (isUnknown ? unknownSources : trainingSources).push(source);
+    }
   });
+  const appendSourceGroup = (sources, title) => {
+    if (!sources.length) return;
+    let errorCount = 0;
+    let errorsOmitted = 0;
+    const examples = [];
+    for (const source of sources) {
+      errorCount += Number.isFinite(source.error_count)
+        ? source.error_count
+        : (Array.isArray(source.errors) ? source.errors.length : 0);
+      errorsOmitted += Number.isFinite(source.errors_omitted) ? source.errors_omitted : 0;
+      for (const error of (source.errors || [])) {
+        if (examples.length >= SOURCE_ERROR_EXAMPLE_LIMIT) break;
+        examples.push(`${source.display_name}：${error}`);
+      }
+    }
+    const detailParts = [`${sources.length} 个来源，目录报告 ${errorCount} 个问题`];
+    if (examples.length) detailParts.push(`示例：${examples.join('；')}`);
+    const hiddenCount = Math.max(errorsOmitted, errorCount - examples.length);
+    if (hiddenCount > 0) detailParts.push(`其余 ${hiddenCount} 个未在异常列表展开`);
+    items.push({
+      priority: 3,
+      title,
+      detail: detailParts.join('。'),
+      sourceId: sources[0].source_id,
+    });
+  };
+  appendSourceGroup(unknownSources, '来源目录问题：未知或不可训练格式');
+  appendSourceGroup(trainingSources, '来源目录问题：训练记录读取提示');
   items.sort((a, b) => a.priority - b.priority || a.title.localeCompare(b.title, 'zh-CN') || a.detail.localeCompare(b.detail, 'zh-CN'));
   if (!items.length) {
     renderEmpty(container, '当前 API 摘要和来源目录没有报告异常。');
@@ -522,11 +628,17 @@ function currentCohortDescriptor() {
 function representativeCandidates(metrics, descriptor) {
   const trend = metrics && metrics.current && Array.isArray(metrics.current.trend) ? metrics.current.trend : [];
   const candidates = [];
+  const seen = new Set();
   const add = (point, reason) => {
-    if (!point || candidates.some((item) => item.point.run_id === point.run_id)) return;
+    if (!point) return;
+    const sourceId = typeof point.source_id === 'string' ? point.source_id.trim() : '';
+    const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
+    const key = sourceId || runId ? `${sourceId}\u0000${runId}` : '';
+    if (key && seen.has(key)) return;
+    if (key) seen.add(key);
     candidates.push({ point, reason });
   };
-  const floorPoints = trend.filter((point) => typeof point.global_floor === 'number');
+  const floorPoints = trend.filter((point) => Number.isFinite(point.global_floor));
   const timed = trend.filter((point) => Number.isFinite(point.timestamp));
   const latestTimed = [...timed].sort((a, b) =>
     b.timestamp - a.timestamp
@@ -535,13 +647,25 @@ function representativeCandidates(metrics, descriptor) {
   )[0];
   if (latestTimed) add(latestTimed, '最近有时间记录');
   else add(trend[0], '趋势样本');
-  add([...floorPoints].sort((a, b) => b.global_floor - a.global_floor || a.run_id.localeCompare(b.run_id))[0], '推进最远');
-  add([...floorPoints].sort((a, b) => a.global_floor - b.global_floor || a.run_id.localeCompare(b.run_id))[0], '推进最浅');
-  add(trend.find((point) => typeof point.global_floor !== 'number'), '层数缺失');
+  add([...floorPoints].sort((a, b) => b.global_floor - a.global_floor || String(a.run_id || '').localeCompare(String(b.run_id || '')))[0], '推进最远');
+  add([...floorPoints].sort((a, b) => a.global_floor - b.global_floor || String(a.run_id || '').localeCompare(String(b.run_id || '')))[0], '推进最浅');
+  add(trend.find((point) => !Number.isFinite(point.global_floor)), '层数缺失');
   if (!candidates.length && descriptor) {
-    (descriptor.run_ids || []).slice(0, 3).forEach((runId) => add({ run_id: runId, global_floor: null, status: 'unknown' }, '批次样本'));
+    const ids = Array.isArray(descriptor.representative_run_ids) && descriptor.representative_run_ids.length
+      ? descriptor.representative_run_ids
+      : (descriptor.run_ids || []);
+    const fallbackSource = (descriptor.source_refs || [])[0] || '';
+    ids.filter((runId) => typeof runId === 'string' && runId.trim()).slice(0, 3).forEach((runId) => {
+      add({ run_id: runId, source_id: fallbackSource, global_floor: null, status: 'unknown' }, '批次样本');
+    });
   }
   return candidates.slice(0, 5);
+}
+
+function resolvableSourceId(point) {
+  const raw = point && typeof point.source_id === 'string' ? point.source_id : '';
+  const candidates = raw.split(' | ').map((value) => value.trim()).filter(Boolean);
+  return candidates.find((sourceId) => state.sources.some((source) => source.source_id === sourceId)) || '';
 }
 
 function renderRepresentatives(metrics) {
@@ -555,13 +679,25 @@ function renderRepresentatives(metrics) {
   representativeCandidates(metrics, descriptor).forEach(({ point, reason }) => {
     const row = element('div', { className: 'list-row' });
     const content = element('div');
+    const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
+    const sourceId = resolvableSourceId(point);
+    const identity = runId || sourceId || '不可定位';
     content.append(
-      element('h3', { text: `${reason} · ${point.run_id}` }),
+      element('h3', { text: `${reason} · ${identity}` }),
       element('p', { text: `推进 ${formatMissing(point.global_floor)} · ${STATUS_LABELS[point.status] || point.status || '状态未知'}` }),
     );
-    const button = element('button', { text: '查看对局', attrs: { type: 'button' } });
-    button.addEventListener('click', () => openRun(point.run_id));
-    row.append(content, button);
+    row.append(content);
+    if (runId) {
+      const button = element('button', { text: '查看对局', attrs: { type: 'button' } });
+      button.addEventListener('click', (event) => openRun(runId, event.currentTarget));
+      row.append(button);
+    } else if (sourceId) {
+      const button = element('button', { text: '查看来源', attrs: { type: 'button' } });
+      button.addEventListener('click', (event) => openSource(sourceId, event.currentTarget));
+      row.append(button);
+    } else {
+      row.append(element('span', { className: 'badge', text: '不可定位：缺少对局与来源 ID' }));
+    }
     container.append(row);
   });
   (descriptor.source_refs || []).slice(0, 3).forEach((sourceId) => {
@@ -573,7 +709,7 @@ function renderRepresentatives(metrics) {
       element('p', { text: source ? `${SOURCE_LABELS[source.source_kind] || source.source_kind} · ${source.record_count} 条记录` : '批次来源' }),
     );
     const button = element('button', { text: '查看来源', attrs: { type: 'button' } });
-    button.addEventListener('click', () => openSource(sourceId));
+    button.addEventListener('click', (event) => openSource(sourceId, event.currentTarget));
     row.append(content, button);
     container.append(row);
   });
@@ -590,12 +726,16 @@ function renderCatalog() {
   state.sources.forEach((source) => {
     const row = element('article', { className: 'catalog-row' });
     const identity = element('div');
+    const errorCount = Number.isFinite(source.error_count)
+      ? source.error_count
+      : (Array.isArray(source.errors) ? source.errors.length : 0);
     identity.append(
       element('h3', { text: source.display_name }),
       element('p', { text: `${source.record_count} 条记录 · ${formatBytes(source.size)} · ${formatTime(source.mtime)}` }),
     );
     if (source.errors && source.errors.length) {
-      identity.append(element('p', { text: source.errors.join('；') }));
+      const omitted = Number.isFinite(source.errors_omitted) ? source.errors_omitted : Math.max(0, errorCount - source.errors.length);
+      identity.append(element('p', { text: `错误示例：${source.errors.join('；')}${omitted ? `；另有 ${omitted} 个未返回` : ''}` }));
     }
     const kind = element('span', {
       className: 'badge', text: SOURCE_LABELS[source.source_kind] || `未知类型（${source.source_kind || '未标注'}）`,
@@ -607,10 +747,10 @@ function renderCatalog() {
     metadata.append(
       element('span', { text: `打开方式：${source.open_mode || '未知'}` }),
       element('span', { text: `元数据：${score}` }),
-      element('span', { text: source.errors && source.errors.length ? `${source.errors.length} 个错误` : '无目录错误' }),
+      element('span', { text: errorCount ? `${errorCount} 个目录问题${source.errors_complete === false ? '（仅显示样本）' : ''}` : '无目录错误' }),
     );
     const button = element('button', { text: source.open_mode === 'error' ? '查看错误' : '查看', attrs: { type: 'button' } });
-    button.addEventListener('click', () => openSource(source.source_id));
+    button.addEventListener('click', (event) => openSource(source.source_id, event.currentTarget));
     row.append(identity, kind, metadata, button);
     container.append(row);
   });
@@ -624,10 +764,15 @@ function appendKeyValues(container, values) {
   container.append(list);
 }
 
-function appendErrors(container, errors) {
+function appendErrors(container, errors, source = null) {
   if (!Array.isArray(errors) || !errors.length) return;
   const section = element('section', { className: 'detail-section' });
   section.append(element('h3', { text: '来源提示与错误' }));
+  const errorCount = source && Number.isFinite(source.error_count) ? source.error_count : errors.length;
+  const omitted = source && Number.isFinite(source.errors_omitted) ? source.errors_omitted : Math.max(0, errorCount - errors.length);
+  section.append(element('p', {
+    text: `显示 ${errors.length} / ${errorCount} 个目录问题${omitted ? `，另有 ${omitted} 个未返回` : ''}。`,
+  }));
   appendList(section, errors);
   container.append(section);
 }
@@ -668,20 +813,26 @@ function renderCanonicalRun(container, run, index = null) {
   container.append(section);
 }
 
-function renderDetail(payload, fallbackTitle = '来源详情') {
+function renderDetail(payload, fallbackTitle = '来源详情', opener = null) {
   const panel = byId('detailPanel');
   const body = byId('detailBody');
   const title = byId('detailTitle');
   clear(body);
   title.textContent = (payload.source && payload.source.display_name) || payload.source_name || fallbackTitle;
-  appendErrors(body, payload.errors);
+  appendErrors(body, payload.errors, payload.source);
   if (payload.view === 'summary') {
     const section = element('section', { className: 'detail-section' });
+    const summary = payload.summary || {};
     section.append(
       element('h3', { text: '汇总记录' }),
       element('p', { text: '这是聚合结果，不具备可下钻的单局路线。' }),
     );
-    const pre = element('pre', { text: JSON.stringify(payload.summary || {}, null, 2) });
+    if (summary.records_complete === false) {
+      section.append(element('p', {
+        text: `大型汇总共 ${formatMissing(summary.record_count, 0)} 条；仅返回前 ${formatMissing(summary.record_sample_limit, 0)} 条样本，抽样方式 ${summary.record_sampling_method || '未标注'}。`,
+      }));
+    }
+    const pre = element('pre', { text: JSON.stringify(summary, null, 2) });
     section.append(pre);
     body.append(section);
   } else if (payload.view === 'run' || payload.view === 'runs') {
@@ -690,37 +841,113 @@ function renderDetail(payload, fallbackTitle = '来源详情') {
     if (payload.progress && Array.isArray(payload.progress.rooms)) {
       body.append(element('p', { className: 'section-note', text: `旧回放解析器识别到 ${payload.progress.rooms.length} 个已访问房间。` }));
     }
+  } else if (payload.view === 'runs_summary') {
+    const section = element('section', { className: 'detail-section' });
+    const representativeIds = Array.isArray(payload.representative_run_ids)
+      ? payload.representative_run_ids.filter((runId) => typeof runId === 'string' && runId.trim())
+      : [];
+    section.append(
+      element('h3', { text: '大型来源摘要' }),
+      element('p', { text: `该来源约含 ${formatMissing(payload.run_count, 0)} 局；完整对局列表状态：${payload.runs_complete === false ? '未展开' : '已返回'}。` }),
+      element('p', { text: `仅返回代表性对局 ID ${representativeIds.length} 个，避免在浏览器展开大型来源。` }),
+    );
+    representativeIds.forEach((runId) => {
+      const row = element('div', { className: 'list-row' });
+      row.append(element('span', { text: runId }));
+      const button = element('button', { text: '查看对局', attrs: { type: 'button' } });
+      button.addEventListener('click', (event) => openRun(runId, event.currentTarget));
+      row.append(button);
+      section.append(row);
+    });
+    if (!representativeIds.length) {
+      section.append(element('p', { text: 'API 未提供可定位的代表性对局 ID。' }));
+    }
+    body.append(section);
   } else {
     renderEmpty(body, (payload.errors || ['无法解析该来源。']).join('；'), 'error-state');
   }
+  showDetailPanel(opener);
+}
+
+function beginDetailRequest(opener = null) {
+  state.detailRequestToken += 1;
+  if (state.detailAbortController) state.detailAbortController.abort();
+  const controller = new AbortController();
+  state.detailAbortController = controller;
+  const panel = byId('detailPanel');
+  const candidate = opener && opener.isConnected ? opener : document.activeElement;
+  if (candidate && candidate.isConnected && !panel.contains(candidate)) {
+    state.detailOpener = candidate;
+  }
+  return { token: state.detailRequestToken, signal: controller.signal };
+}
+
+function isCurrentDetailRequest(token) {
+  return token === state.detailRequestToken;
+}
+
+function showDetailPanel(opener = null) {
+  const panel = byId('detailPanel');
+  if (opener && opener.isConnected && !panel.contains(opener)) state.detailOpener = opener;
+  panel.hidden = false;
+  panel.inert = false;
   panel.setAttribute('aria-hidden', 'false');
   byId('closeDetail').focus();
 }
 
 function closeDetail() {
-  byId('detailPanel').setAttribute('aria-hidden', 'true');
+  const panel = byId('detailPanel');
+  state.detailRequestToken += 1;
+  if (state.detailAbortController) state.detailAbortController.abort();
+  state.detailAbortController = null;
+  const opener = state.detailOpener;
+  state.detailOpener = null;
+  panel.setAttribute('aria-hidden', 'true');
+  panel.inert = true;
+  panel.hidden = true;
+  if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+  else byId('dashboardMain').focus();
 }
 
-async function openSource(sourceId) {
+async function openSource(sourceId, opener = null) {
+  if (!sourceId) {
+    setStatus('无法打开来源：缺少来源 ID', 'error');
+    return;
+  }
+  const { token, signal } = beginDetailRequest(opener);
   setStatus('正在读取来源…', 'busy');
   try {
-    const payload = await getJSON(`/api/source?id=${encodeURIComponent(sourceId)}`);
-    renderDetail(payload, '来源详情');
+    const payload = await getJSON(`/api/source?id=${encodeURIComponent(sourceId)}`, { signal });
+    if (!isCurrentDetailRequest(token)) return;
+    state.detailAbortController = null;
+    renderDetail(payload, '来源详情', opener);
     setStatus('已载入');
   } catch (error) {
-    renderDetail({ view: 'error', errors: [error.message] }, '来源读取失败');
+    if (!isCurrentDetailRequest(token) || error.name === 'AbortError') return;
+    state.detailAbortController = null;
+    renderDetail({ view: 'error', errors: [error.message] }, '来源读取失败', opener);
     setStatus(`来源读取失败：${error.message}`, 'error');
   }
 }
 
-async function openRun(runId) {
+async function openRun(runId, opener = null) {
+  runId = typeof runId === 'string' ? runId.trim() : '';
+  if (!runId) {
+    setStatus('无法打开对局：缺少对局 ID', 'error');
+    return;
+  }
+  const { token, signal } = beginDetailRequest(opener);
   setStatus('正在读取对局…', 'busy');
   try {
-    const payload = await getJSON(`/api/run?id=${encodeURIComponent(runId)}`);
-    renderDetail(payload, `对局 ${runId}`);
+    const payload = await getJSON(`/api/run?id=${encodeURIComponent(runId)}`, { signal });
+    if (!isCurrentDetailRequest(token)) return;
+    state.detailAbortController = null;
+    renderDetail(payload, `对局 ${runId}`, opener);
     setStatus('已载入');
   } catch (error) {
-    renderDetail({ view: 'error', errors: [error.message] }, `对局 ${runId}`);
+    if (!isCurrentDetailRequest(token) || error.name === 'AbortError') return;
+    state.detailAbortController = null;
+    renderDetail({ view: 'error', errors: [error.message] }, `对局 ${runId}`, opener);
     setStatus(`对局读取失败：${error.message}`, 'error');
   }
 }
@@ -760,28 +987,38 @@ async function refreshMetrics() {
 async function uploadSelectedFile(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
+  const opener = event.currentTarget || event.target;
+  state.uploadRequestToken += 1;
+  const uploadToken = state.uploadRequestToken;
+  const { token, signal } = beginDetailRequest(opener);
   setBusy(true);
   setStatus(`正在解析 ${file.name}…`, 'busy');
   try {
     const text = await file.text();
+    if (!isCurrentDetailRequest(token)) return;
     const payload = await getJSON('/api/parse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source_name: file.name, text }),
+      signal,
     });
-    if (payload.view === 'run' || payload.view === 'runs' || payload.view === 'summary') {
-      renderDetail(payload, file.name);
+    if (!isCurrentDetailRequest(token)) return;
+    state.detailAbortController = null;
+    if (payload.view === 'run' || payload.view === 'runs' || payload.view === 'summary' || payload.view === 'runs_summary') {
+      renderDetail(payload, file.name, opener);
     } else {
-      renderDetail({ ...payload, view: 'error' }, file.name);
+      renderDetail({ ...payload, view: 'error' }, file.name, opener);
     }
     setStatus(`已载入 ${file.name}`);
   } catch (error) {
+    if (!isCurrentDetailRequest(token) || error.name === 'AbortError') return;
+    state.detailAbortController = null;
     const result = error.payload && error.payload.result;
-    renderDetail(result || { view: 'error', source_name: file.name, errors: [error.message] }, file.name);
+    renderDetail(result || { view: 'error', source_name: file.name, errors: [error.message] }, file.name, opener);
     setStatus(`${file.name} 解析失败：${error.message}`, 'error');
   } finally {
     event.target.value = '';
-    setBusy(false);
+    if (uploadToken === state.uploadRequestToken) setBusy(false);
   }
 }
 

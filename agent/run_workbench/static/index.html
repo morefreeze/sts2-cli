@@ -18,8 +18,10 @@
     </div>
     <div class="topbar-actions">
       <p id="workbenchStatus" class="status" role="status" aria-live="polite">正在读取训练记录…</p>
-      <label class="upload-button" for="sourceFile">载入单个记录</label>
-      <input id="sourceFile" class="visually-hidden" type="file" accept=".run,.json,.jsonl,application/json">
+      <label id="sourceFileLabel" class="upload-button" for="sourceFile">
+        <span>载入单个记录</span>
+        <input id="sourceFile" class="visually-hidden" type="file" accept=".run,.json,.jsonl,application/json">
+      </label>
     </div>
   </header>
 
@@ -35,7 +37,7 @@
       <div class="filter-grid">
         <label>当前批次
           <select id="currentCohort" aria-describedby="currentHelp"></select>
-          <small id="currentHelp">默认选择列表中最新的可用批次</small>
+          <small id="currentHelp">默认采用服务端排序；缺少时间时不标为最新</small>
         </label>
         <label>基线批次
           <select id="baselineCohort" aria-describedby="baselineHelp"></select>
@@ -136,10 +138,10 @@
       <div id="sourceCatalog" class="catalog-table" aria-live="polite"></div>
     </section>
 
-    <aside id="detailPanel" class="detail-panel" aria-labelledby="detailTitle" aria-hidden="true">
+    <aside id="detailPanel" class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detailTitle" aria-hidden="true" hidden inert>
       <div class="detail-header">
         <div><p class="section-kicker">记录抽查</p><h2 id="detailTitle">来源详情</h2></div>
-        <button id="closeDetail" class="icon-button" type="button" aria-label="关闭详情">×</button>
+        <button id="closeDetail" class="icon-button" type="button" aria-label="关闭记录详情">×</button>
       </div>
       <div id="detailBody" class="detail-body"></div>
     </aside>

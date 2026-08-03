@@ -252,6 +252,121 @@ def test_representative_recency_requires_a_finite_timestamp():
     assert "趋势样本" in representatives
 
 
+def test_trend_rendering_is_bounded_timestamped_and_explains_sampling():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    bounding = _javascript_section(
+        script, "function boundedTimestampedTrend", "function renderTrendProvenance"
+    )
+    trend = _javascript_section(script, "function renderTrend", "function renderFunnel")
+
+    assert "CLIENT_TREND_POINT_LIMIT" in script
+    assert "Number.isFinite(point.timestamp)" in bounding
+    assert "for (const point of points)" in bounding
+    assert "points: selected" in bounding
+    assert "Math.max(1, ..." not in trend
+    assert "for (const point of available)" in trend
+    assert "trend_eligible_n" in script
+    assert "trend_timestamped_n" in script
+    assert "trend_unknown_time_n" in script
+    assert "trend_sampled_n" in script
+    assert "trend_sample_limit" in script
+    assert "trend_sampling_method" in script
+    assert "时间未知未绘制" in script
+    assert "较早" in trend and "较新" in trend
+
+
+def test_current_default_trusts_server_latest_order_without_inventing_time():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    cohorts = _javascript_section(script, "function updateCohortOptions", "function resetMetrics")
+
+    assert "candidates[0].cohort_id" in cohorts
+    assert "candidates[candidates.length - 1]" not in cohorts
+    assert "latest_at" in cohorts
+    assert "时间未知" in cohorts
+    assert "默认选择列表中最新的可用批次" not in html
+
+
+def test_representatives_never_request_an_empty_run_id():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    candidates = _javascript_section(
+        script, "function representativeCandidates", "function renderRepresentatives"
+    )
+    rows = _javascript_section(script, "function renderRepresentatives", "function renderCatalog")
+    open_run = _javascript_section(script, "async function openRun", "async function refreshMetrics")
+
+    assert "source_id" in candidates and "run_id" in candidates
+    assert "seen.add(key)" in candidates
+    assert "if (runId)" in rows
+    assert "不可定位" in rows
+    assert "openSource(sourceId, event.currentTarget)" in rows
+    assert "openRun(runId, event.currentTarget)" in rows
+    assert "if (!runId)" in open_run
+
+
+def test_detail_requests_are_latest_only_and_drawer_restores_focus():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    requests = _javascript_section(script, "function beginDetailRequest", "async function refreshMetrics")
+
+    assert 'role="dialog"' in html
+    assert 'aria-modal="true"' in html
+    assert 'aria-hidden="true"' in html
+    assert " hidden" in html and " inert" in html
+    assert ".detail-panel[hidden]" in css
+    assert "new AbortController" in requests
+    assert "detailRequestToken += 1" in requests
+    assert ".abort()" in requests
+    assert "isCurrentDetailRequest(token)" in requests
+    assert "signal" in requests
+    assert "panel.hidden = false" in requests
+    assert "panel.inert = false" in requests
+    assert "panel.hidden = true" in requests
+    assert "panel.inert = true" in requests
+    assert "state.detailOpener" in requests
+    assert ".focus()" in requests
+
+
+def test_catalog_anomalies_are_grouped_and_bounded():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    anomalies = _javascript_section(script, "function renderAnomalies", "function currentCohortDescriptor")
+
+    assert "SOURCE_ERROR_EXAMPLE_LIMIT" in script
+    assert "error_count" in anomalies
+    assert "errors_omitted" in anomalies
+    assert "unknownSources" in anomalies
+    assert "trainingSources" in anomalies
+    assert "来源目录问题" in anomalies
+    assert "(source.errors || []).forEach" not in anomalies
+
+
+def test_upload_focus_and_mobile_chart_overflow_are_visible():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    label_start = html.index('<label id="sourceFileLabel"')
+    label_end = html.index("</label>", label_start)
+
+    assert 'id="sourceFile"' in html[label_start:label_end]
+    assert ".upload-button:focus-within" in css
+    assert ".chart-stage," in css and ".funnel-list" in css
+    assert "overflow-x: auto" in css
+    assert ".chart-svg" in css and "min-width: 640px" in css
+    assert ".funnel-svg" in css and "min-width: 520px" in css
+
+
+def test_large_source_summary_has_an_honest_detail_view():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    detail = _javascript_section(script, "function renderDetail", "function beginDetailRequest")
+
+    assert "payload.view === 'runs_summary'" in detail
+    assert "payload.run_count" in detail
+    assert "payload.runs_complete" in detail
+    assert "payload.representative_run_ids" in detail
+    assert "大型来源摘要" in detail
+    assert "仅返回代表性对局 ID" in detail
+
+
 def test_app_does_not_reparse_sources_or_inject_untrusted_html():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     lowered = script.lower()

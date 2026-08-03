@@ -207,6 +207,11 @@ input:disabled {
   font-weight: 700;
 }
 
+.upload-button:has(input:disabled) {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .dashboard {
   position: relative;
   display: grid;
@@ -375,9 +380,16 @@ select {
   min-height: 285px;
 }
 
+.chart-stage,
+.funnel-list {
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
 .chart-svg {
   display: block;
   width: 100%;
+  min-width: 640px;
   height: 230px;
   overflow: visible;
 }
@@ -454,6 +466,7 @@ select {
 .funnel-svg {
   display: block;
   width: 100%;
+  min-width: 520px;
   height: auto;
 }
 
@@ -665,6 +678,10 @@ select {
   flex-direction: column;
   transform: translateX(105%);
   transition: transform 180ms ease;
+}
+
+.detail-panel[hidden] {
+  display: none;
 }
 
 .detail-panel[aria-hidden="false"] {
