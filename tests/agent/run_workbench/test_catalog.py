@@ -1443,7 +1443,70 @@ def test_state_only_late_parser_summary_metadata_matches_across_threshold(
     assert large_run.run_id == small_run.run_id == "late-player-run"
 
 
-def test_late_summary_identity_uses_bounded_chunks_and_cached_probe(
+def test_cross_boundary_parser_identity_matches_for_512_and_513_records(
+    tmp_path: Path,
+) -> None:
+    def rows(count: int) -> list[dict]:
+        records = [
+            {
+                "type": "state",
+                "status": "dead",
+                "data": {
+                    "boundary": "first",
+                    "context": {"act": 1, "floor": 1, "room_type": "Map"},
+                },
+            }
+        ]
+        records.extend(
+            {
+                "type": "state",
+                "data": {
+                    "context": {"act": 1, "floor": 1, "room_type": "Map"}
+                },
+            }
+            for _ in range(count - 2)
+        )
+        records.append(
+            {
+                "type": "state",
+                "data": {
+                    "boundary": "last",
+                    "context": {"act": 1, "floor": 7, "room_type": "Elite"},
+                },
+            }
+        )
+        return records
+
+    def parser(records: list[dict], source_name: str | None = None) -> dict:
+        parsed = parse_game_progress(records, source_name)
+        first_data = records[0].get("data")
+        last_data = records[-1].get("data")
+        if (
+            isinstance(first_data, dict)
+            and first_data.get("boundary") == "first"
+            and isinstance(last_data, dict)
+            and last_data.get("boundary") == "last"
+        ):
+            parsed["summary"]["run_id"] = "whole"
+        return parsed
+
+    small_root = tmp_path / "small-boundary"
+    large_root = tmp_path / "large-boundary"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(512))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=parser)
+    small_cohort = small.list_cohorts()[0]
+    large = RunCatalog([large_root], replay_parser=parser)
+    large_cohort = large.list_cohorts()[0]
+
+    assert small_cohort["run_ids"] == large_cohort["run_ids"] == ["whole"]
+    assert large.get_run("whole")["run"]["run_id"] == "whole"
+
+
+def test_late_summary_identity_uses_one_cached_whole_replay_parse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records = [
@@ -1477,10 +1540,10 @@ def test_late_summary_identity_uses_bounded_chunks_and_cached_probe(
         encoding="utf-8",
     )
 
-    parser_chunk_sizes: list[int] = []
+    parser_call_sizes: list[int] = []
 
     def parser(rows: list[dict], source_name: str | None = None) -> dict:
-        parser_chunk_sizes.append(len(rows))
+        parser_call_sizes.append(len(rows))
         parsed = parse_game_progress(rows, source_name)
         summary_id = next(
             (
@@ -1500,7 +1563,8 @@ def test_late_summary_identity_uses_bounded_chunks_and_cached_probe(
 
     def counted_open(path: Path, *args, **kwargs):
         nonlocal read_count
-        if path == source:
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path == source and "r" in mode:
             read_count += 1
         return original_open(path, *args, **kwargs)
 
@@ -1515,15 +1579,47 @@ def test_late_summary_identity_uses_bounded_chunks_and_cached_probe(
     assert entry["record_count"] == 513
     assert entry["error_count"] == 1
     assert len(entry["errors"]) == 1
-    assert parser_chunk_sizes == [512, 1]
+    indexed = catalog._sources[entry["source_id"]]
+    assert indexed.records_complete is False
+    assert indexed.records is not None
+    assert len(indexed.records) <= catalog_module.INDEX_RECORD_LIMIT
+    assert parser_call_sizes == [513]
     assert read_count == 2
     assert cohort["run_ids"] == ["late-summary-run"]
 
     run = catalog.get_run("late-summary-run")["run"]
 
     assert run["run_id"] == "late-summary-run"
-    assert parser_chunk_sizes == [512, 1, 513]
+    assert parser_call_sizes == [513, 513]
     assert read_count == 3
+
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "state",
+                    "data": {
+                        "context": {"act": 1, "floor": 8, "room_type": "Map"}
+                    },
+                }
+            )
+            + "\n"
+        )
+    source_stat = source.stat()
+    os.utime(
+        source,
+        ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1_000_000),
+    )
+
+    refreshed = catalog.list_sources()[0]
+    refreshed_index = catalog._sources[refreshed["source_id"]]
+
+    assert refreshed["record_count"] == 514
+    assert refreshed["error_count"] == 1
+    assert refreshed_index.records is not None
+    assert len(refreshed_index.records) <= catalog_module.INDEX_RECORD_LIMIT
+    assert parser_call_sizes == [513, 513, 514]
+    assert read_count == 5
 
 
 def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(

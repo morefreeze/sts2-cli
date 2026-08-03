@@ -33,7 +33,6 @@ INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
 REPLAY_WARNING_ID_LIMIT = 16
-REPLAY_PARSER_PROBE_CHUNK_SIZE = 512
 ERROR_DETAIL_LIMIT = 32
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
 _WORKBENCH_JSON_MARKERS = (
@@ -562,7 +561,7 @@ class RunCatalog:
                 and not records_complete
                 and deck_outcomes
             ):
-                _probe_incomplete_replay_chunks(
+                _normalize_incomplete_replay(
                     deck_outcomes[0],
                     path,
                     self.replay_parser,
@@ -1410,88 +1409,23 @@ def _finalize_compact(compact: _CompactRun) -> None:
         compact.ended_at = compact.latest_timestamp
 
 
-def _probe_incomplete_replay_chunks(
+def _normalize_incomplete_replay(
     compact: _CompactRun,
     path: Path,
     replay_parser: Callable[[list[dict], str | None], dict] | None,
     source_name: str,
 ) -> None:
-    """Probe an incomplete replay in bounded chunks without retaining the source."""
+    """Normalize a replay with one transient whole-list parser invocation.
+
+    Replay parsers have whole-list semantics, so incomplete replay indexing
+    deliberately trusts transient memory here. Only the compact result and the
+    scanner's bounded prefix survive this function; deck/eval sources never
+    enter this path.
+    """
 
     if replay_parser is None:
         return
-    aggregate_summary: dict[str, Any] = {}
-    summary_ids: set[str] = set()
-    summary_ids_omitted = False
-    first_summary_id: str | None = None
-    parser_max_floor: int | None = None
-    parser_max_floor_label: str | None = None
-
-    def probe_chunk(chunk: list[dict[str, Any]]) -> None:
-        nonlocal first_summary_id
-        nonlocal parser_max_floor
-        nonlocal parser_max_floor_label
-        nonlocal summary_ids_omitted
-        try:
-            candidate = replay_parser(deepcopy(chunk), source_name)
-        except Exception:
-            return
-        if not isinstance(candidate, dict):
-            return
-
-        compact.replay_parser_succeeded = True
-        summary = candidate.get("summary")
-        if not isinstance(summary, dict):
-            summary = {}
-        _merge_replay_probe_summary_metadata(aggregate_summary, summary)
-        summary_id = _first_scalar_text(summary, "run_id")
-        if summary_id is not None:
-            if first_summary_id is None:
-                first_summary_id = summary_id
-            summary_ids_omitted = (
-                _add_bounded_replay_id(summary_ids, summary_id)
-                or summary_ids_omitted
-            )
-        chunk_max_floor = _first_integral_int(summary, "max_global_floor")
-        chunk_max_label = _first_scalar_text(summary, "max_floor_label")
-        if chunk_max_floor is not None and (
-            parser_max_floor is None or chunk_max_floor > parser_max_floor
-        ):
-            parser_max_floor = chunk_max_floor
-            parser_max_floor_label = chunk_max_label
-        elif (
-            chunk_max_floor == parser_max_floor
-            and parser_max_floor_label is None
-            and chunk_max_label is not None
-        ):
-            parser_max_floor_label = chunk_max_label
-
-        rooms = candidate.get("rooms")
-        nodes = (
-            [node for node in rooms if isinstance(node, dict)]
-            if isinstance(rooms, list)
-            else []
-        )
-        compact.has_replay_nodes = compact.has_replay_nodes or bool(nodes)
-        for node in nodes:
-            _update_observed_floor(
-                compact,
-                _first_integral_int(node, "global_floor", "floor"),
-                _first_scalar_text(node, "label"),
-            )
-        compact.has_node_decisions = compact.has_node_decisions or any(
-            _compact_node_has_decision_evidence(node) for node in nodes
-        )
-        compact.usable_per_node_replay = (
-            compact.usable_per_node_replay
-            or any(
-                node.get("id") is not None
-                and _compact_node_has_decision_evidence(node)
-                for node in nodes
-            )
-        )
-
-    chunk: list[dict[str, Any]] = []
+    full_records: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -1505,36 +1439,65 @@ def _probe_incomplete_replay_chunks(
                     continue
                 if not isinstance(record, dict):
                     continue
-                chunk.append(record)
-                if len(chunk) == REPLAY_PARSER_PROBE_CHUNK_SIZE:
-                    probe_chunk(chunk)
-                    chunk = []
+                full_records.append(record)
     except (OSError, UnicodeDecodeError):
         return
-    if chunk:
-        probe_chunk(chunk)
+    try:
+        candidate = replay_parser(full_records, source_name)
+    except Exception:
+        return
+    finally:
+        del full_records
+    if not isinstance(candidate, dict):
+        return
 
-    _apply_compact_replay_summary_metadata(compact, aggregate_summary)
-    if first_summary_id is not None:
+    compact.replay_parser_succeeded = True
+    summary = candidate.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    _apply_compact_replay_summary_metadata(compact, summary)
+    summary_id = _first_scalar_text(summary, "run_id")
+    if summary_id is not None:
         if not compact.run_id:
-            compact.run_id = first_summary_id
+            compact.run_id = summary_id
         observed_ids = set(compact.replay_observed_ids)
-        ids_omitted = compact.replay_ids_omitted or summary_ids_omitted
-        for summary_id in sorted(summary_ids):
-            ids_omitted = (
-                _add_bounded_replay_id(observed_ids, summary_id)
-                or ids_omitted
-            )
+        compact.replay_ids_omitted = (
+            _add_bounded_replay_id(observed_ids, summary_id)
+            or compact.replay_ids_omitted
+        )
         compact.replay_observed_ids = tuple(sorted(observed_ids))
-        compact.replay_ids_omitted = ids_omitted
         compact.warnings = _compact_replay_identity_warnings(
             compact.run_id,
             observed_ids,
             compact.replay_ids_omitted,
         )
 
+    rooms = candidate.get("rooms")
+    nodes = (
+        [node for node in rooms if isinstance(node, dict)]
+        if isinstance(rooms, list)
+        else []
+    )
+    compact.has_replay_nodes = bool(nodes)
+    for node in nodes:
+        _update_observed_floor(
+            compact,
+            _first_integral_int(node, "global_floor", "floor"),
+            _first_scalar_text(node, "label"),
+        )
+    compact.has_node_decisions = any(
+        _compact_node_has_decision_evidence(node) for node in nodes
+    )
+    compact.usable_per_node_replay = any(
+        node.get("id") is not None
+        and _compact_node_has_decision_evidence(node)
+        for node in nodes
+    )
+
     compact.max_global_floor = compact.observed_max_floor
     compact.max_floor_label = compact.observed_max_floor_label
+    parser_max_floor = _first_integral_int(summary, "max_global_floor")
+    parser_max_floor_label = _first_scalar_text(summary, "max_floor_label")
     if (
         parser_max_floor is not None
         and (
@@ -1572,29 +1535,6 @@ def _apply_compact_replay_summary_metadata(
     ascension = summary.get("ascension")
     if type(ascension) is int and ascension >= 0:
         compact.ascension = ascension
-
-
-def _merge_replay_probe_summary_metadata(
-    aggregate: dict[str, Any],
-    summary: dict[str, Any],
-) -> None:
-    for attribute, keys in (
-        ("character", ("character",)),
-        ("seed", ("seed",)),
-        ("game_version", ("game_version", "build_id")),
-        ("checkpoint", ("checkpoint",)),
-        ("evaluation_mode", ("evaluation_mode",)),
-        ("scenario", ("scenario",)),
-    ):
-        if attribute in aggregate:
-            continue
-        value = _first_scalar_text(summary, *keys)
-        if value is not None:
-            aggregate[attribute] = value
-    if "ascension" not in aggregate:
-        ascension = summary.get("ascension")
-        if type(ascension) is int and ascension >= 0:
-            aggregate["ascension"] = ascension
 
 
 def _compact_node_has_decision_evidence(node: dict[str, Any]) -> bool:
