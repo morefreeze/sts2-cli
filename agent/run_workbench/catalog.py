@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
+import re
 import stat as stat_module
 from threading import RLock
 from typing import Any, Callable, Iterable
@@ -39,6 +40,28 @@ _WORKBENCH_JSON_MARKERS = (
     b'"type"',
     b'"run_id"',
     b'"rooms"',
+)
+_BOSS_DECK_JSON_MARKERS = (
+    b'"checkpoint"',
+    b'"cards"',
+    b'"enemies"',
+    b'"hp_at_entry"',
+)
+_WORKBENCH_FILENAME_TOKENS = frozenset(
+    {
+        "boss",
+        "checkpoint",
+        "cohort",
+        "deck",
+        "eval",
+        "evaluation",
+        "history",
+        "replay",
+        "run",
+        "runs",
+        "summary",
+        "training",
+    }
 )
 _METADATA_FIELDS = (
     "character",
@@ -79,6 +102,7 @@ class _CompactRun:
 
     run_id: str
     source_id: str = ""
+    source_kind: SourceKind = SourceKind.DECK_HISTORY
     character: str | None = None
     seed: str | None = None
     game_version: str | None = None
@@ -102,7 +126,7 @@ class _CompactRun:
         return RunRecord(
             run_id=self.run_id,
             source_id=self.source_id,
-            source_kind=SourceKind.DECK_HISTORY,
+            source_kind=self.source_kind,
             metadata=RunMetadata(
                 character=self.character,
                 seed=self.seed,
@@ -220,7 +244,12 @@ class RunCatalog:
                 sources.append(deepcopy(source.entry))
                 path_ids.update(_source_redactions(source))
                 if (
-                    source.descriptor.kind is SourceKind.DECK_HISTORY
+                    source.descriptor.kind
+                    in {
+                        SourceKind.DECK_HISTORY,
+                        SourceKind.EVAL_RESULTS,
+                        SourceKind.REPLAY_JSONL,
+                    }
                     and not source.records_complete
                 ):
                     matching_records, scan_errors = _scan_jsonl_run(
@@ -232,7 +261,7 @@ class RunCatalog:
                         source.path.name,
                         matching_records,
                         descriptor=SourceDescriptor(
-                            SourceKind.DECK_HISTORY,
+                            source.descriptor.kind,
                             len(matching_records),
                             source.descriptor.message,
                         ),
@@ -410,12 +439,6 @@ class RunCatalog:
             for candidate in sorted(root.rglob("*"), key=lambda path: path.as_posix()):
                 if candidate.suffix.lower() not in SUPPORTED_SUFFIXES:
                     continue
-                if (
-                    self.include_policy == "workbench"
-                    and candidate.suffix.lower() == ".json"
-                    and not _looks_like_workbench_json(candidate)
-                ):
-                    continue
                 if candidate.is_symlink() or _has_symlink_component(candidate, root):
                     continue
                 try:
@@ -424,6 +447,12 @@ class RunCatalog:
                 except (OSError, ValueError):
                     continue
                 if not resolved.is_file() or resolved in seen:
+                    continue
+                if (
+                    self.include_policy == "workbench"
+                    and resolved.suffix.lower() == ".json"
+                    and not _looks_like_workbench_json(resolved)
+                ):
                     continue
                 seen.add(resolved)
                 discovered.append((root, resolved))
@@ -578,26 +607,18 @@ class RunCatalog:
         for source in self._ordered_sources():
             if source.entry["open_mode"] != "run":
                 continue
-            if (
-                source.descriptor.kind is SourceKind.DECK_HISTORY
-                and not source.records_complete
-            ):
+            if not source.records_complete and source.deck_outcomes:
                 compact_records.extend(source.deck_outcomes)
             else:
                 records.extend(self._public_records(source, self._adapt(source)))
         joined = join_records(records)
+        merged = _merge_compact_records(joined, compact_records)
         eligible: list[_CohortItem] = [
             record
-            for record in joined
-            if record.outcome.status in {RunStatus.WIN, RunStatus.DEAD}
-            or record.outcome.status.is_technical
+            for record in merged
+            if _item_status(record) in {RunStatus.WIN, RunStatus.DEAD}
+            or _item_status(record).is_technical
         ]
-        eligible.extend(
-            record
-            for record in compact_records
-            if record.status in {RunStatus.WIN, RunStatus.DEAD}
-            or record.status.is_technical
-        )
         grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
         for record in eligible:
             metadata = _item_metadata(record)
@@ -709,6 +730,80 @@ def _source_id(root: Path, relative: str) -> str:
     return f"src_{digest}"
 
 
+def _merge_compact_records(
+    ordinary: list[RunRecord], compact: list[_CompactRun]
+) -> list[_CohortItem]:
+    """Merge exact IDs while expanding only IDs that occur in multiple sources."""
+
+    ordinary_identified = sorted(
+        (record for record in ordinary if record.run_id),
+        key=lambda record: record.run_id,
+    )
+    compact_identified = sorted(
+        (record for record in compact if record.run_id),
+        key=lambda record: (record.run_id, record.source_id),
+    )
+    merged: list[_CohortItem] = []
+    ordinary_index = 0
+    compact_index = 0
+    while (
+        ordinary_index < len(ordinary_identified)
+        or compact_index < len(compact_identified)
+    ):
+        ordinary_run_id = (
+            ordinary_identified[ordinary_index].run_id
+            if ordinary_index < len(ordinary_identified)
+            else None
+        )
+        compact_run_id = (
+            compact_identified[compact_index].run_id
+            if compact_index < len(compact_identified)
+            else None
+        )
+        if compact_run_id is None or (
+            ordinary_run_id is not None and ordinary_run_id < compact_run_id
+        ):
+            merged.append(ordinary_identified[ordinary_index])
+            ordinary_index += 1
+            continue
+
+        compact_end = compact_index + 1
+        while (
+            compact_end < len(compact_identified)
+            and compact_identified[compact_end].run_id == compact_run_id
+        ):
+            compact_end += 1
+        compact_group = compact_identified[compact_index:compact_end]
+        if ordinary_run_id == compact_run_id:
+            merged.extend(
+                join_records(
+                    [
+                        ordinary_identified[ordinary_index],
+                        *(record.to_record() for record in compact_group),
+                    ]
+                )
+            )
+            ordinary_index += 1
+        elif len(compact_group) == 1:
+            merged.append(compact_group[0])
+        else:
+            merged.extend(join_records(record.to_record() for record in compact_group))
+        compact_index = compact_end
+
+    merged.extend(record for record in ordinary if not record.run_id)
+    merged.extend(record for record in compact if not record.run_id)
+    return merged
+
+
+def _record_run_id(record: dict[str, Any]) -> str:
+    value = record.get("run_id")
+    if isinstance(value, str) and value:
+        return value
+    data = record.get("data")
+    nested = data.get("run_id") if isinstance(data, dict) else None
+    return nested if isinstance(nested, str) and nested else ""
+
+
 def _item_metadata(record: _CohortItem) -> RunMetadata:
     if isinstance(record, RunRecord):
         return record.metadata
@@ -759,7 +854,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     errors: list[str] = []
     run_ids: set[str] = set()
     present_metadata: set[str] = set()
-    deck_runs: dict[str, _CompactRun] = {}
+    compact_runs_by_id: dict[str, _CompactRun] = {}
     anonymous: list[_CompactRun] = []
     types: set[str] = set()
     events: set[str] = set()
@@ -808,16 +903,21 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 }.issubset(record)
                 record_run_ids = _lightweight_run_ids([record])
                 run_ids.update(record_run_ids)
-                if event in {"milestone", "card_pick", "outcome"}:
-                    run_id = next(iter(record_run_ids), "")
+                if (
+                    event in {"milestone", "card_pick", "outcome", "eval_result"}
+                    or record.get("type") in {"state", "action"}
+                ):
+                    run_id = _record_run_id(record)
                     if run_id:
-                        compact = deck_runs.setdefault(
+                        compact = compact_runs_by_id.setdefault(
                             run_id, _CompactRun(run_id=run_id)
                         )
                     else:
                         compact = _CompactRun(run_id="")
                         anonymous.append(compact)
                     _update_compact_run(compact, record)
+                    if record.get("type") in {"state", "action"}:
+                        _update_compact_replay(compact, record)
     except UnicodeDecodeError as error:
         errors.append(f"{path.name}: invalid UTF-8 at byte {error.start}")
     except OSError as error:
@@ -834,7 +934,9 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
         has_action_command=has_action_command,
         looks_like_boss_deck=looks_like_boss_deck,
     )
-    compact_runs = tuple(deck_runs.values()) + tuple(anonymous)
+    compact_runs = tuple(compact_runs_by_id.values()) + tuple(anonymous)
+    for compact in compact_runs:
+        compact.source_kind = descriptor.kind
     return _JsonlScan(
         records=tuple(records),
         records_complete=record_count <= INDEX_RECORD_LIMIT,
@@ -957,13 +1059,59 @@ def _update_compact_run(compact: _CompactRun, record: dict[str, Any]) -> None:
 
     event = record.get("event")
     compact.has_card_pick = compact.has_card_pick or event == "card_pick"
-    if event == "outcome":
+    if event in {"outcome", "eval_result"}:
         compact.has_outcome = True
         compact.ended_at = timestamp
         status, victory, technical_kind = _compact_status(record)
         compact.status = status
         compact.victory = victory
         compact.technical_failure_kind = technical_kind
+
+
+def _update_compact_replay(
+    compact: _CompactRun, record: dict[str, Any]
+) -> None:
+    status, victory, technical_kind = _compact_status(record)
+    if status in {RunStatus.WIN, RunStatus.DEAD} or status.is_technical:
+        compact.has_outcome = True
+        compact.status = status
+        compact.victory = victory
+        compact.technical_failure_kind = technical_kind
+        compact.ended_at = _first_finite_number(record, "ts", "timestamp")
+    data = record.get("data")
+    if not isinstance(data, dict):
+        return
+    context = data.get("context")
+    if isinstance(context, dict):
+        floor = _first_positive_int(context, "global_floor")
+        if floor is None:
+            local_floor = _first_positive_int(context, "floor")
+            act = _first_positive_int(context, "act")
+            if local_floor is not None:
+                floor = (
+                    (act - 1) * 17 + local_floor
+                    if act is not None and act > 0
+                    else local_floor
+                )
+        if floor is not None:
+            compact.has_floor = True
+            compact.first_recorded_floor = (
+                floor
+                if compact.first_recorded_floor is None
+                else min(compact.first_recorded_floor, floor)
+            )
+            compact.max_global_floor = (
+                floor
+                if compact.max_global_floor is None
+                else max(compact.max_global_floor, floor)
+            )
+    nested_status, nested_victory, nested_technical_kind = _compact_status(data)
+    if nested_status in {RunStatus.WIN, RunStatus.DEAD} or nested_status.is_technical:
+        compact.has_outcome = True
+        compact.status = nested_status
+        compact.victory = nested_victory
+        compact.technical_failure_kind = nested_technical_kind
+        compact.ended_at = _first_finite_number(record, "ts", "timestamp")
 
 
 def _compact_status(
@@ -1075,12 +1223,23 @@ def _first_finite_number(record: dict[str, Any], *keys: str) -> float | None:
 
 
 def _looks_like_workbench_json(path: Path) -> bool:
+    if path.name.lower().endswith(".meta.json"):
+        return False
     try:
         with path.open("rb") as handle:
             prefix = handle.read(_WORKBENCH_JSON_PROBE_BYTES)
     except OSError:
         return True
-    return any(marker in prefix for marker in _WORKBENCH_JSON_MARKERS)
+    if any(marker in prefix for marker in _WORKBENCH_JSON_MARKERS) or all(
+        marker in prefix for marker in _BOSS_DECK_JSON_MARKERS
+    ):
+        return True
+    filename_tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", path.stem.lower())
+        if token
+    }
+    return bool(filename_tokens & _WORKBENCH_FILENAME_TOKENS)
 
 
 def _path_redactions(path: Path, root: Path, source_id: str) -> dict[str, str]:

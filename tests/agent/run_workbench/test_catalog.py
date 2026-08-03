@@ -760,3 +760,228 @@ def test_workbench_discovery_ignores_unrelated_json_but_accepts_schema_markers(
 
     assert [entry["display_name"] for entry in entries] == ["future-training.json"]
     assert reads == ["future-training.json"]
+
+
+def test_large_compact_deck_merges_with_ordinary_eval_by_exact_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    _write_jsonl(
+        tmp_path / "deck.jsonl",
+        [
+            {
+                "event": "milestone",
+                "run_id": "shared",
+                "floor_crossed": 5,
+                "seed": "fixed-seed",
+            },
+            {
+                "event": "card_pick",
+                "run_id": "shared",
+                "floor": 6,
+                "picked": "BASH",
+            },
+            {
+                "event": "outcome",
+                "run_id": "shared",
+                "max_floor": 9,
+                "won": True,
+                "ts": 10,
+            },
+        ],
+    )
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                "event": "eval_result",
+                "run_id": "shared",
+                "status": "win",
+                "max_global_floor": 9,
+                "checkpoint": "model-42",
+                "character": "Ironclad",
+            }
+        ],
+    )
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    cohort = catalog.list_cohorts()[0]
+    records = catalog.get_cohort_records(cohort["cohort_id"])
+    metrics = catalog.get_metrics(cohort["cohort_id"])["current"]
+
+    assert cohort["run_count"] == 1
+    assert metrics["all_n"] == metrics["valid_n"] == 1
+    assert len(records) == 1
+    assert records[0].run_id == "shared"
+    assert records[0].metadata.checkpoint == "model-42"
+    assert records[0].metadata.seed == "fixed-seed"
+    assert records[0].capabilities.decisions is True
+    assert records[0].outcome.max_global_floor == 9
+    assert " | " in records[0].source_id
+
+
+def test_large_eval_streams_all_outcomes_and_exact_run_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                "event": "eval_result",
+                "run_id": f"eval-{index}",
+                "status": "win" if index == 4 else "dead",
+                "max_global_floor": index + 3,
+                "checkpoint": "model-large",
+                "character": "Ironclad",
+                "game_version": "v1",
+                "evaluation_mode": "fixed",
+                "scenario": "standard",
+                "ascension": 0,
+                "ts": index + 1,
+            }
+            for index in range(5)
+        ],
+    )
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    source = catalog.list_sources()[0]
+    cohort = catalog.list_cohorts()[0]
+    metrics = catalog.get_metrics(cohort["cohort_id"])["current"]
+    run = catalog.get_run("eval-4")["run"]
+
+    assert source["source_kind"] == "eval_results"
+    assert source["open_mode"] == "run"
+    assert source["record_count"] == 5
+    assert cohort["run_count"] == 5
+    assert metrics["valid_n"] == 5
+    assert metrics["win_n"] == 1
+    assert metrics["max_global_floor"] == 7
+    assert run["run_id"] == "eval-4"
+    assert run["metadata"]["checkpoint"] == "model-large"
+    assert run["outcome"]["status"] == "win"
+
+
+def test_large_replay_is_exactly_openable_and_only_terminal_run_joins_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    terminal = [
+        {
+            "run_id": "terminal",
+            "type": "state",
+            "ts": 1,
+            "checkpoint": "replay-model",
+            "data": {"context": {"act": 1, "floor": 4}},
+        },
+        {
+            "run_id": "terminal",
+            "type": "action",
+            "ts": 2,
+            "data": {"cmd": "end_turn"},
+        },
+        {
+            "run_id": "terminal",
+            "type": "state",
+            "status": "dead",
+            "max_global_floor": 7,
+            "ts": 3,
+        },
+    ]
+    in_progress = [
+        {
+            "run_id": "progress",
+            "type": "state",
+            "ts": index + 1,
+            "data": {"context": {"act": 1, "floor": index + 1}},
+        }
+        for index in range(3)
+    ]
+    _write_jsonl(tmp_path / "terminal.jsonl", terminal)
+    _write_jsonl(tmp_path / "progress.jsonl", in_progress)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    sources = catalog.list_sources()
+    cohorts = catalog.list_cohorts()
+    terminal_run = catalog.get_run("terminal")["run"]
+    progress_run = catalog.get_run("progress")["run"]
+
+    assert {source["source_kind"] for source in sources} == {"replay_jsonl"}
+    assert all(source["open_mode"] == "run" for source in sources)
+    assert len(cohorts) == 1
+    assert cohorts[0]["run_count"] == 1
+    assert terminal_run["run_id"] == "terminal"
+    assert terminal_run["outcome"]["status"] == "dead"
+    assert progress_run["run_id"] == "progress"
+    assert progress_run["outcome"]["status"] == "in_progress"
+
+
+def test_workbench_discovery_rejects_symlink_before_json_content_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    target = outside / "training.json"
+    target.write_text(json.dumps({"event": "eval_result"}), encoding="utf-8")
+    link = root / "training.json"
+    link.symlink_to(target)
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args, **kwargs):
+        if path == link:
+            opened.append(path)
+            raise AssertionError("content probe followed a symlink")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    catalog = RunCatalog(
+        [root], replay_parser=_replay_parser, include_policy="workbench"
+    )
+
+    assert catalog.list_sources() == []
+    assert opened == []
+
+
+def test_workbench_json_filter_keeps_boss_summary_and_likely_training_errors(
+    tmp_path: Path,
+):
+    (tmp_path / "boss-decks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "checkpoint": "model-1",
+                    "cards": ["BASH"],
+                    "enemies": ["SLIME_BOSS"],
+                    "hp_at_entry": 70,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "malformed-training.json").write_text(
+        "{not-json", encoding="utf-8"
+    )
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "irrelevant"}), encoding="utf-8"
+    )
+    (tmp_path / "eval_1.save.meta.json").write_text(
+        json.dumps({"checkpoint": "model-1", "save_path": "state.save"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "card_metadata.json").write_text(
+        json.dumps({"cards": [{"id": "BASH"}]}), encoding="utf-8"
+    )
+    catalog = RunCatalog(
+        [tmp_path], replay_parser=_replay_parser, include_policy="workbench"
+    )
+
+    entries = {entry["display_name"]: entry for entry in catalog.list_sources()}
+
+    assert set(entries) == {"boss-decks.json", "malformed-training.json"}
+    assert entries["boss-decks.json"]["source_kind"] == "summary"
+    assert entries["boss-decks.json"]["open_mode"] == "summary"
+    assert entries["malformed-training.json"]["open_mode"] == "error"
+    assert "invalid JSON" in entries["malformed-training.json"]["errors"][0]
