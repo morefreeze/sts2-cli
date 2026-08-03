@@ -727,37 +727,29 @@ def _native_act_index(node: dict[str, Any]) -> int:
 
 
 def _annotate_replay_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    previous_snapshot: dict[str, Any] | None = None
     annotated: list[dict[str, Any]] = []
     for node in nodes:
-        snapshot = _replay_room_snapshot(node)
+        start_snapshot = _replay_room_snapshot(node, phase="start")
+        end_snapshot = _replay_room_snapshot(node, phase="end")
         enriched = deepcopy(node)
         enriched["deltas"] = derive_snapshot_deltas(
-            snapshot, previous_snapshot
+            end_snapshot or {}, start_snapshot
         ).to_dict()
         annotated.append(enriched)
-        previous_snapshot = snapshot
     return annotated
 
 
-def _replay_room_snapshot(node: dict[str, Any]) -> dict[str, Any]:
-    end_player = node.get("end_player")
-    if isinstance(end_player, dict):
-        return deepcopy(end_player)
+def _replay_room_snapshot(
+    node: dict[str, Any], *, phase: str
+) -> dict[str, Any] | None:
+    player = node.get(f"{phase}_player")
+    if isinstance(player, dict):
+        return deepcopy(player)
     snapshot: dict[str, Any] = {}
-    aliases = {
-        "hp": "end_hp",
-        "max_hp": "max_hp",
-        "gold": "gold",
-        "deck": "deck",
-        "relic_items": "relic_items",
-        "potions": "potions",
-        "potion_items": "potion_items",
-    }
-    for target, source in aliases.items():
-        if source in node:
-            snapshot[target] = deepcopy(node[source])
-    return snapshot
+    hp_key = f"{phase}_hp"
+    if hp_key in node:
+        snapshot["hp"] = deepcopy(node[hp_key])
+    return snapshot or None
 
 
 def _node_has_decision_evidence(node: dict[str, Any]) -> bool:

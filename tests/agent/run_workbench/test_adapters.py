@@ -198,11 +198,19 @@ def test_native_nested_act_history_uses_act_local_stable_node_ids(
     }
 
 
-def test_replay_room_deltas_are_derived_from_adjacent_end_snapshots() -> None:
+def test_replay_room_deltas_are_derived_within_each_room() -> None:
     rooms = [
         {
             "id": "legacy-room-1",
             "global_floor": 1,
+            "start_player": {
+                "hp": 80,
+                "max_hp": 80,
+                "gold": 0,
+                "deck": [{"id": "STRIKE"}],
+                "relic_items": [],
+                "potion_items": [],
+            },
             "end_player": {
                 "hp": 70,
                 "max_hp": 80,
@@ -215,8 +223,16 @@ def test_replay_room_deltas_are_derived_from_adjacent_end_snapshots() -> None:
         {
             "id": "legacy-room-2",
             "global_floor": 2,
+            "start_player": {
+                "hp": 60,
+                "max_hp": 80,
+                "gold": 10,
+                "deck": [{"id": "STRIKE"}],
+                "relic_items": [],
+                "potion_items": [],
+            },
             "end_player": {
-                "hp": 65,
+                "hp": 55,
                 "max_hp": 80,
                 "gold": 22,
                 "deck": [{"id": "STRIKE"}, {"id": "BASH"}],
@@ -238,6 +254,10 @@ def test_replay_room_deltas_are_derived_from_adjacent_end_snapshots() -> None:
         "legacy-room-1",
         "legacy-room-2",
     ]
+    assert run.nodes[0]["deltas"]["hp_change"] == {
+        "value": -10,
+        "quality": "derived",
+    }
     assert run.nodes[1]["deltas"]["hp_change"] == {
         "value": -5,
         "quality": "derived",
@@ -247,6 +267,36 @@ def test_replay_room_deltas_are_derived_from_adjacent_end_snapshots() -> None:
         "quality": "derived",
     }
     assert run.replay_by_node["legacy-room-2"]["deltas"] == run.nodes[1]["deltas"]
+
+
+def test_replay_room_with_missing_start_snapshot_has_unknown_changes() -> None:
+    rooms = [
+        {
+            "id": "legacy-room-1",
+            "end_player": {"hp": 70, "gold": 10},
+        },
+        {
+            "id": "legacy-room-2",
+            "end_player": {"hp": 65, "gold": 20},
+        },
+    ]
+
+    run = adapt_path(
+        FIXTURES / "replay.jsonl",
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {},
+            "rooms": rooms,
+        },
+    ).runs[0]
+
+    assert run.nodes[1]["deltas"]["hp_change"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert run.nodes[1]["deltas"]["gold_change"] == {
+        "value": None,
+        "quality": "unknown",
+    }
 
 
 def test_replay_top_level_run_id_wins_over_nested_conflict_with_warning(

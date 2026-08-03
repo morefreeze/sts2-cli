@@ -108,8 +108,49 @@ def test_native_node_deltas_do_not_fabricate_first_node_or_absent_lists() -> Non
     assert result["gold_change"] == {"value": None, "quality": "unknown"}
     assert result["cards_gained"] == {"value": [], "quality": "exact"}
     assert result["cards_removed"] == {"value": None, "quality": "unknown"}
-    assert result["potions_gained"] == {"value": [], "quality": "exact"}
+    assert result["potions_gained"] == {"value": None, "quality": "unknown"}
     assert result["potions_used"] == {"value": None, "quality": "unknown"}
+
+
+def test_native_unmarked_choices_are_unknown_but_explicit_gains_are_exact() -> None:
+    ambiguous = {
+        "player_stats": [
+            {
+                "relic_choices": [{"choice": "RELIC.ANCHOR"}],
+                "potion_choices": [],
+            }
+        ]
+    }
+    explicit = {
+        "player_stats": [
+            {
+                "relic_choices": [{"choice": "RELIC.BAG_OF_MARBLES"}],
+                "relics_gained": [],
+                "potion_choices": [{"choice": "POTION.BLOCK_POTION"}],
+                "potions_gained": [{"id": "POTION.FIRE_POTION"}],
+            }
+        ]
+    }
+
+    ambiguous_result = _as_dict(native_node_deltas(ambiguous, None))
+    explicit_result = _as_dict(native_node_deltas(explicit, None))
+
+    assert ambiguous_result["relics_gained"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert ambiguous_result["potions_gained"] == {
+        "value": None,
+        "quality": "unknown",
+    }
+    assert explicit_result["relics_gained"] == {
+        "value": [],
+        "quality": "exact",
+    }
+    assert explicit_result["potions_gained"] == {
+        "value": [{"id": "POTION.FIRE_POTION"}],
+        "quality": "exact",
+    }
 
 
 def test_snapshot_deltas_derive_inventory_multiset_differences() -> None:

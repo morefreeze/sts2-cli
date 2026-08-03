@@ -92,11 +92,17 @@ def native_node_deltas(
         cards_upgraded=_native_event_list(
             node, stats, "upgraded_cards", "cards_upgraded"
         ),
-        relics_gained=_native_choice_list(
-            node, stats, "relic_choices", "relics_gained"
+        relics_gained=_native_gain_list(
+            node,
+            stats,
+            explicit_key="relics_gained",
+            choice_key="relic_choices",
         ),
-        potions_gained=_native_choice_list(
-            node, stats, "potion_choices", "potions_gained"
+        potions_gained=_native_gain_list(
+            node,
+            stats,
+            explicit_key="potions_gained",
+            choice_key="potion_choices",
         ),
         potions_used=_native_event_list(node, stats, "potions_used"),
         potions_discarded=_native_event_list(node, stats, "potions_discarded"),
@@ -238,16 +244,29 @@ def _native_event_list(
     return RunDelta(value=deepcopy(value), quality=DeltaQuality.EXACT)
 
 
-def _native_choice_list(
-    node: dict[str, Any], stats: dict[str, Any], *keys: str
+def _native_gain_list(
+    node: dict[str, Any],
+    stats: dict[str, Any],
+    *,
+    explicit_key: str,
+    choice_key: str,
 ) -> RunDelta:
-    value = _first_present(stats, node, keys=keys)
-    if value is _MISSING or not isinstance(value, list):
+    explicit = _first_present(stats, node, keys=(explicit_key,))
+    if explicit is not _MISSING:
+        if not isinstance(explicit, list):
+            return _unknown()
+        return RunDelta(value=deepcopy(explicit), quality=DeltaQuality.EXACT)
+
+    choices = _first_present(stats, node, keys=(choice_key,))
+    if choices is _MISSING or not isinstance(choices, list):
         return _unknown()
-    return RunDelta(value=_picked_choices(value), quality=DeltaQuality.EXACT)
+    picked = _picked_choices(choices)
+    if picked is None:
+        return _unknown()
+    return RunDelta(value=picked, quality=DeltaQuality.EXACT)
 
 
-def _picked_choices(choices: list[Any]) -> list[Any]:
+def _picked_choices(choices: list[Any]) -> list[Any] | None:
     selection_keys = (
         "picked",
         "selected",
@@ -261,7 +280,7 @@ def _picked_choices(choices: list[Any]) -> list[Any]:
         for choice in choices
     )
     if not has_selection_markers:
-        return deepcopy(choices)
+        return None
     return [
         deepcopy(choice)
         for choice in choices
