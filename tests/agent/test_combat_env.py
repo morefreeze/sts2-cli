@@ -493,20 +493,18 @@ def test_card_quality_gate_falls_back_for_forced_reward(monkeypatch):
     assert action["args"]["card_index"] == 0
 
 
-def test_card_quality_gate_is_disabled_by_default_after_failed_promotion(monkeypatch):
+def test_card_quality_gate_is_enabled_by_default_after_promotion(monkeypatch):
     state = _late_card_reward_state()
     monkeypatch.delenv("STS2_CARD_QUALITY_GATE", raising=False)
     monkeypatch.setattr(
         combat_env,
         "is_act1_card_reward_eligible",
-        lambda *args: (_ for _ in ()).throw(
-            AssertionError("unpromoted gate should require explicit opt-in")
-        ),
+        lambda *args: False,
     )
     monkeypatch.setattr(
         combat_env, "pick_best_card", lambda cards, *, threshold, deck: 0
     )
-    assert greedy_action(state)["args"]["card_index"] == 0
+    assert greedy_action(state)["action"] == "skip_card_reward"
 
 
 @pytest.mark.parametrize("flag", ["", "garbage"])

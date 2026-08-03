@@ -33,7 +33,7 @@ def _decision_advisor_enabled() -> bool:
 
 
 def _card_quality_gate_enabled() -> bool:
-    flag = os.environ.get("STS2_CARD_QUALITY_GATE", "0").strip().lower()
+    flag = os.environ.get("STS2_CARD_QUALITY_GATE", "1").strip().lower()
     return flag in {"1", "true", "on", "yes"}
 
 

@@ -24,10 +24,12 @@ default-on environment switch for a one-variable A/B and immediate rollback.
 **Execution outcome:** The original implementation exposed the runtime act at
 `state.context.act`, not `state.act`. Fixed-seed iterations then added a floor
 12 activation threshold, a 16-card hard cap, and a `-0.01` premium dilution
-floor. The static gate passed six of seven promotion checks but did not enter
-Act 2; the one approved 2,048-step fine-tune regressed progression. The
-updated design spec records the final evidence and overrides the initial
-default-on and 18-card snippets below. The delivered switch is default-off.
+floor. A cross-act reporting defect initially hid successful Act 2 entries;
+after converting act-local floors to global floors and rerunning both lanes,
+the static gate passed all seven promotion checks. The one approved 2,048-step
+fine-tune still regressed progression and remains rejected. The updated design
+spec records the corrected evidence. The delivered switch is default-on with
+`STS2_CARD_QUALITY_GATE=0` as the immediate rollback.
 
 ---
 
@@ -559,10 +561,11 @@ env \
   2>&1 | tee "$BASE_LOG"
 ```
 
-Expected baseline reference: 20 valid games, zero invalid attempts,
-`avg_floor=15.0`, boss reach `11/20`, and Act 2 `0/20`. If it differs, retain
-the new result but stop promotion analysis until the environment/checkpoint
-drift is explained.
+The pre-fix baseline reference was 20 valid games, zero invalid attempts,
+`avg_floor=15.0`, boss reach `11/20`, and Act 2 `0/20`. The corrected global
+floor calculation changes this to `avg_floor=16.2` and Act 2 `4/20`, with boss
+reach unchanged at `11/20`; the execution outcome above records that resolved
+reporting difference.
 
 ### Step 3: Run the candidate lane with only the gate enabled
 

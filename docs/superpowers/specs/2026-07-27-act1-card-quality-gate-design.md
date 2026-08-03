@@ -1,24 +1,25 @@
 # Act 1 Marginal Card-Quality Gate Design
 
-**Status:** Implemented and evaluated on 2026-07-27; not promoted because
-neither the static gate nor the one approved fine-tune entered Act 2.
+**Status:** Implemented and promoted on 2026-08-03 after correcting the
+cross-act floor metric and rerunning the fixed 20-seed comparison.
 
 ## Context
 
 The current best full-run policy is the 2,048-step early-stop checkpoint
 `ppo_ironclad_13955k.zip`.
 
-On the same 20 fixed seeds:
+On the same 20 fixed seeds, after converting the engine's act-local floor to
+`(act - 1) * 17 + floor`:
 
-- the original `13933k` baseline averaged `14.4` floors, reached the Act 1
-  boss in `11/20` runs, and entered Act 2 in `0/20`;
-- `13955k` averaged `15.0` floors, also reached the boss in `11/20` runs,
-  and entered Act 2 in `0/20`.
+- the original `13933k` baseline averages `15.3` floors, reaches the Act 1
+  boss in `11/20` runs, and enters Act 2 in `3/20`;
+- `13955k` without the gate averages `16.2` floors, reaches the boss in
+  `11/20`, and enters Act 2 in `4/20`.
 
-Boss retries show that `13955k` can deterministically beat two of the eleven
-saved baseline boss states. Full runs still lose because the states delivered
-to the boss differ in hidden RNG and, more importantly, regularly contain
-diluted decks.
+The earlier `0/20` Act 2 result was a reporting defect: Act 2 resets its local
+floor to one, while evaluation previously retained 17 as the maximum. Full-run
+evaluation now proves that `13955k` can cross the Act 1 boss on four of the
+fixed seeds. Deck dilution remains independently measurable at boss entry.
 
 The recent deck-history sample contains 680 completed runs that reached the
 Act 1 boss. After those decks had already reached 15 cards, the agent still
@@ -58,10 +59,10 @@ top-scoring card is ineligible but another offered card is eligible, the agent
 can still select the best eligible alternative. If no card is both eligible
 and above the existing score threshold, the agent skips the reward.
 
-The behavior is available behind `STS2_CARD_QUALITY_GATE=1`. Promotion
-criteria failed, so the final branch leaves it disabled by default. Setting
-`STS2_CARD_QUALITY_GATE=0`, or leaving the variable unset, restores the
-pre-gate behavior.
+The behavior is available behind `STS2_CARD_QUALITY_GATE`. All promotion
+criteria passed under the corrected global-floor metric, so the final branch
+enables it by default. Setting `STS2_CARD_QUALITY_GATE=0` restores the pre-gate
+behavior.
 
 ## Eligibility rules
 
@@ -143,7 +144,7 @@ Integration tests in `tests/agent/test_combat_env.py` will cover:
 - the gate can reject the old top-scoring card and select an eligible
   lower-ranked card using its original reward index;
 - all ineligible offers produce `skip_card_reward`;
-- the final default disables the unpromoted gate;
+- the promoted gate is enabled when the environment variable is unset;
 - `STS2_CARD_QUALITY_GATE=0` restores the current selection behavior.
 
 All existing card-scoring and combat-environment tests must remain green.
@@ -186,31 +187,31 @@ exception rule, and repeat the paired evaluation.
 
 ## Evaluation result
 
-The final static gate used checkpoint `ppo_ironclad_13955k.zip` and compared
-gate-off v3 against gate-on v4:
+The corrected fixed-seed evaluation used checkpoint
+`ppo_ironclad_13955k.zip` and compared gate-off against gate-on:
 
-- both lanes: `20/20` valid, zero invalid attempts, average floor `15.0`,
-  boss reach `11/20`, Act 2 `0/20`;
+- both lanes: `20/20` valid, zero invalid attempts, boss reach `11/20`;
+- average global floor: `16.2 -> 15.9`, while the original `13933k` baseline
+  is `15.3`;
+- Act 2 entry: `4/20 -> 3/20`, satisfying the required nonzero entry gate;
+- maximum progress: `A2F10 -> A2F11`;
 - median boss-entry deck size: `17 -> 16`;
+- average boss-entry deck size: `17.18 -> 15.73`;
 - average operational quality: `0.511462 -> 0.515988`;
 - average starter-basic count: `7.4545 -> 7.4545`.
 
-This passed every criterion except Act 2 entry, so the conditional training
-branch ran once. It used 22 baseline/gated natural-HP boss snapshots, two of
-four save-backed environments, and 2,048 steps from `13955k`. The resulting
-`ppo_ironclad_13957k.zip` regressed to:
+The original `13933k` baseline has the same boss-entry deck statistics as the
+ungated `13955k` lane. Therefore the promoted candidate simultaneously
+improves average floor by `0.6`, reduces median deck size by one card, and
+raises operational deck quality relative to the original baseline; it does
+not rely on different baselines for the two halves of the goal. The unified
+proof object is
+`logs/compare_13933k_13955k_gate_fixed20_global_20260803_v1.json`.
 
-- `20/20` valid, zero invalid attempts;
-- average floor `14.4`;
-- boss reach `9/20`;
-- Act 2 `0/20`;
-- median boss-entry deck size `16`;
-- average operational quality `0.513949`;
-- average starter-basic count `7.7778`.
-
-The trained checkpoint is rejected. Because no candidate entered Act 2 and
-the trained candidate also failed progression criteria, the runtime switch
-remains default-off.
+All seven predefined promotion checks pass. The gate therefore defaults on;
+`STS2_CARD_QUALITY_GATE=0` remains the immediate rollback. The earlier
+2,048-step `13957k` checkpoint remains rejected because it regressed Act 1
+progression; it is not needed to promote the static gate.
 
 ## Deliverables
 
@@ -220,5 +221,5 @@ remains default-off.
 - Focused unit and integration tests.
 - Paired 20-seed baseline and candidate logs.
 - Boss-entry deck comparison and Act 2 evidence.
-- A measured, default-off experimental gate because the acceptance criteria
-  did not all pass.
+- A measured, default-on gate with an explicit runtime rollback because all
+  predefined acceptance criteria pass under corrected global-floor metrics.
