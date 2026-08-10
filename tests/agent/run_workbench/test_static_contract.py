@@ -484,18 +484,353 @@ def test_app_bootstraps_apis_and_renders_server_owned_comparison():
     assert "createElementNS" in script
 
 
-def test_baseline_default_is_distinct_without_client_comparability_logic():
+def test_baseline_default_uses_server_descriptor_without_client_axis_logic():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    selector = _javascript_section(
-        script, "function nearestDistinctCohortId", "function updateCohortOptions"
+    helper = _javascript_section(
+        script, "function defaultBaselineCohortId", "function comparisonAxisLabel"
     )
 
+    assert "default_baseline_cohort_id" in helper
+    assert "comparison_readiness" in helper
     assert "comparisonCompatible" not in script
-    assert ".filters" not in selector
-    assert "currentIndex - 1" in selector
-    assert "currentIndex + 1" in selector
-    assert "cohort_id" in selector
-    assert "nearestDistinctCohortId(candidates, current)" in script
+    assert "nearestDistinctCohortId" not in script
+    assert ".filters" not in helper
+    assert "currentIndex" not in helper
+
+
+def test_default_baseline_helper_is_pure_and_fails_closed_on_bad_descriptors():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    helper = _javascript_section(
+        script, "function defaultBaselineCohortId", "function comparisonAxisLabel"
+    )
+
+    payload = _run_node_json(
+        f"""
+        {helper}
+        const ready = {{
+          cohort_id: 'a',
+          comparison_readiness: {{ ready: true }},
+          default_baseline_cohort_id: 'b',
+        }};
+        const candidateB = {{ cohort_id: 'b' }};
+        const throwingCurrent = new Proxy({{}}, {{
+          get() {{ throw new Error('untrusted current'); }},
+        }});
+        const throwingCandidate = new Proxy({{}}, {{
+          get() {{ throw new Error('untrusted candidate'); }},
+        }});
+        console.log(JSON.stringify({{
+          ready: defaultBaselineCohortId(ready, [ready, candidateB]),
+          filtered: defaultBaselineCohortId(ready, [ready]),
+          missing: defaultBaselineCohortId({{
+            cohort_id: 'a', comparison_readiness: {{ ready: true }},
+            default_baseline_cohort_id: null,
+          }}, [candidateB]),
+          blank: defaultBaselineCohortId({{
+            cohort_id: 'a', comparison_readiness: {{ ready: true }},
+            default_baseline_cohort_id: '   ',
+          }}, [candidateB]),
+          nonString: defaultBaselineCohortId({{
+            cohort_id: 'a', comparison_readiness: {{ ready: true }},
+            default_baseline_cohort_id: 7,
+          }}, [candidateB]),
+          self: defaultBaselineCohortId({{
+            cohort_id: ' a ', comparison_readiness: {{ ready: true }},
+            default_baseline_cohort_id: 'a',
+          }}, [{{ cohort_id: 'a' }}]),
+          duplicate: defaultBaselineCohortId(ready, [
+            ready, candidateB, {{ cohort_id: ' b ' }},
+          ]),
+          notReady: defaultBaselineCohortId({{
+            ...ready, comparison_readiness: {{ ready: false }},
+          }}, [ready, candidateB]),
+          whitespace: defaultBaselineCohortId({{
+            ...ready, default_baseline_cohort_id: ' b ',
+          }}, [ready, candidateB]),
+          malformedCandidates: defaultBaselineCohortId(
+            ready, [null, 42, Object.create(null), throwingCandidate, candidateB]
+          ),
+          throwingCurrent: defaultBaselineCohortId(throwingCurrent, [candidateB]),
+        }}));
+        """
+    )
+
+    assert payload == {
+        "ready": "b",
+        "filtered": "",
+        "missing": "",
+        "blank": "",
+        "nonString": "",
+        "self": "",
+        "duplicate": "",
+        "notReady": "",
+        "whitespace": "b",
+        "malformedCandidates": "b",
+        "throwingCurrent": "",
+    }
+
+
+def test_comparison_help_is_neutral_complete_and_redrawn_without_duplication():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    help_section = _javascript_section(
+        script, "function comparisonAxisLabel", "function updateCohortOptions"
+    )
+
+    for wording in (
+        "元数据不完整，仅展示本批次",
+        "当前批次可查看，但暂无可直接比较的基线",
+        "当前与基线不可直接比较",
+        "missing_axes",
+        "mixed_axes",
+        "invalid_axes",
+        "版本来源：${sourceLabel}",
+        "命令行",
+        "环境变量",
+    ):
+        assert wording in script
+    for axis, label in (
+        ("character", "角色"),
+        ("game_version", "游戏版本"),
+        ("evaluation_mode", "评测模式"),
+        ("scenario", "场景"),
+        ("ascension", "进阶"),
+        ("seed", "种子"),
+        ("valid_results", "有效结果"),
+    ):
+        assert f"{axis}: '{label}'" in help_section
+    assert "currentHelp.textContent}" not in help_section
+    assert 'select id="currentCohort" aria-describedby="currentHelp"' in html
+    assert 'select id="baselineCohort" aria-describedby="baselineHelp"' in html
+    assert 'id="currentHelp"' in html and 'id="baselineHelp"' in html
+    assert html.count('aria-live="polite"') >= 5
+    assert "当前批次可查看，但暂无可直接比较的基线" in html
+
+
+def test_cohort_options_preserve_manual_choice_and_only_default_on_current_change():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    selector = _javascript_section(
+        script, "function defaultBaselineCohortId", "function resetMetrics"
+    )
+    listener = _javascript_section(script, "function filterChanged", "bootstrap();")
+
+    assert (
+        "function updateCohortOptions({ chooseDefaults = false, currentChanged = false } = {})"
+        in selector
+    )
+    assert "updateCohortOptions({ currentChanged: true })" in listener
+    assert (
+        "updateCohortHelp(currentCohortDescriptor(), byId('baselineCohort').value)"
+        in listener
+    )
+    assert "nearestDistinctCohortId" not in selector
+
+    payload = _run_node_json(
+        f"""
+        const nodes = {{
+          currentCohort: {{ value: '', optionValues: [] }},
+          baselineCohort: {{ value: '', optionValues: [] }},
+          currentHelp: {{ textContent: '' }},
+          baselineHelp: {{ textContent: '' }},
+        }};
+        const byId = (id) => nodes[id];
+        const formatTime = (value) => `time-${{value}}`;
+        let candidates = [];
+        const filteredCohorts = () => candidates;
+        function setSelectOptions(select, options, emptyLabel, preferred) {{
+          select.optionValues = options.map((option) => option.value);
+          select.emptyLabel = emptyLabel;
+          select.value = '';
+          if (preferred && options.some((option) => option.value === preferred)) {{
+            select.value = preferred;
+          }}
+        }}
+        {selector}
+        const ready = {{ ready: true, missing_axes: [], mixed_axes: [], invalid_axes: [] }};
+        const cohort = (id, defaultId, extra = {{}}) => ({{
+          cohort_id: id,
+          label: `cohort-${{id}}`,
+          run_count: 2,
+          latest_at: id.charCodeAt(0),
+          filters: {{ game_version_source: 'cli' }},
+          comparison_readiness: ready,
+          default_baseline_cohort_id: defaultId,
+          ...extra,
+        }});
+        const a = cohort('a', 'b');
+        const b = cohort('b', 'a');
+        const c = cohort('c', null);
+        candidates = [a, b, c];
+
+        updateCohortOptions({{ chooseDefaults: true }});
+        const initial = {{
+          current: nodes.currentCohort.value,
+          baseline: nodes.baselineCohort.value,
+          currentOptions: [...nodes.currentCohort.optionValues],
+          baselineOptions: [...nodes.baselineCohort.optionValues],
+        }};
+
+        nodes.baselineCohort.value = 'c';
+        updateCohortOptions();
+        const manual = nodes.baselineCohort.value;
+        const manualHelp = nodes.baselineHelp.textContent;
+
+        nodes.baselineCohort.value = '';
+        updateCohortOptions();
+        const blank = nodes.baselineCohort.value;
+        const helpOnce = nodes.currentHelp.textContent;
+        updateCohortOptions();
+        const helpTwice = nodes.currentHelp.textContent;
+
+        nodes.baselineCohort.value = 'c';
+        candidates = [a, b];
+        updateCohortOptions();
+        const staleManual = nodes.baselineCohort.value;
+
+        candidates = [a, b, c];
+        nodes.currentCohort.value = 'b';
+        nodes.baselineCohort.value = 'c';
+        updateCohortOptions({{ currentChanged: true }});
+        const explicitCurrentChange = {{
+          current: nodes.currentCohort.value,
+          baseline: nodes.baselineCohort.value,
+        }};
+
+        nodes.currentCohort.value = 'missing';
+        nodes.baselineCohort.value = 'c';
+        updateCohortOptions();
+        const implicitCurrentChange = {{
+          current: nodes.currentCohort.value,
+          baseline: nodes.baselineCohort.value,
+        }};
+
+        candidates = [a, c];
+        nodes.currentCohort.value = 'a';
+        nodes.baselineCohort.value = '';
+        updateCohortOptions({{ chooseDefaults: true }});
+        const filteredServerDefault = nodes.baselineCohort.value;
+
+        console.log(JSON.stringify({{
+          initial,
+          manual,
+          manualHelp,
+          blank,
+          helpStable: helpOnce === helpTwice,
+          helpOnce,
+          staleManual,
+          explicitCurrentChange,
+          implicitCurrentChange,
+          filteredServerDefault,
+        }}));
+        """
+    )
+
+    assert payload["initial"] == {
+        "current": "a",
+        "baseline": "b",
+        "currentOptions": ["a", "b", "c"],
+        "baselineOptions": ["b", "c"],
+    }
+    assert payload["manual"] == "c"
+    assert payload["manualHelp"] == "已选择基线；服务端将校验口径并提供精确原因"
+    assert payload["blank"] == ""
+    assert payload["helpStable"] is True
+    assert payload["helpOnce"].count("版本来源：命令行") == 1
+    assert payload["staleManual"] == ""
+    assert payload["explicitCurrentChange"] == {"current": "b", "baseline": "a"}
+    assert payload["implicitCurrentChange"] == {"current": "a", "baseline": "b"}
+    assert payload["filteredServerDefault"] == ""
+
+
+def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    comparison = _javascript_section(
+        script, "function renderComparison", "function anomalyRow"
+    )
+    current_descriptor = _javascript_section(
+        script, "function currentCohortDescriptor", "function stablePointKey"
+    )
+
+    payload = _run_node_json(
+        f"""
+        function makeNode() {{
+          return {{
+            textContent: '', dataset: {{}}, children: [],
+            append(...children) {{ this.children.push(...children); }},
+          }};
+        }}
+        const body = makeNode();
+        const banner = makeNode();
+        banner.querySelector = () => body;
+        const title = makeNode();
+        const currentSelect = {{ value: 'incomplete' }};
+        const nodes = {{
+          comparisonBanner: banner,
+          comparisonTitle: title,
+          currentCohort: currentSelect,
+        }};
+        const byId = (id) => nodes[id];
+        const clear = (node) => {{ node.children = []; }};
+        const element = (tag, options = {{}}) => ({{
+          tag,
+          textContent: options.text === undefined ? '' : String(options.text),
+          dataset: {{}},
+          children: [],
+          append(...children) {{ this.children.push(...children); }},
+        }});
+        const appendList = (container, values) => container.append({{
+          tag: 'ul', values: [...values], textContent: values.join('|'),
+        }});
+        const formatMissing = String;
+        function deltaText(value) {{
+          return {{ text: String(value), direction: 'flat' }};
+        }}
+        const state = {{ cohorts: [
+          {{ cohort_id: 'incomplete', comparison_readiness: {{ ready: false }} }},
+          {{ cohort_id: 'ready', comparison_readiness: {{ ready: true }} }},
+        ] }};
+        {current_descriptor}
+        {comparison}
+
+        renderComparison(null);
+        const incomplete = {{
+          title: title.textContent,
+          body: body.children.map((child) => child.textContent),
+        }};
+        currentSelect.value = 'ready';
+        renderComparison(null);
+        const ready = {{
+          title: title.textContent,
+          body: body.children.map((child) => child.textContent),
+        }};
+        renderComparison({{
+          comparable: false,
+          mismatch_reasons: ['服务端精确原因 A', '服务端精确原因 B'],
+          notes: ['服务端说明'],
+        }});
+        const incompatible = {{
+          title: title.textContent,
+          lists: body.children.map((child) => child.values),
+        }};
+        console.log(JSON.stringify({{ incomplete, ready, incompatible }}));
+        """
+    )
+
+    assert payload["incomplete"] == {
+        "title": "元数据不完整",
+        "body": ["历史记录仍可查看，但不会用于训练提升比较。"],
+    }
+    assert payload["ready"] == {
+        "title": "未选择基线",
+        "body": ["当前批次可查看，但暂无可直接比较的基线。"],
+    }
+    assert payload["incompatible"] == {
+        "title": "当前与基线不可直接比较",
+        "lists": [
+            ["服务端精确原因 A", "服务端精确原因 B"],
+            ["服务端说明"],
+        ],
+    }
 
 
 def test_current_default_uses_server_latest_order_instead_of_label_order():

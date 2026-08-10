@@ -66,11 +66,11 @@
       <div class="filter-grid">
         <label>当前批次
           <select id="currentCohort" aria-describedby="currentHelp"></select>
-          <small id="currentHelp">默认采用服务端排序；缺少时间时不标为最新</small>
+          <small id="currentHelp" aria-live="polite">服务端排序选择当前批次；版本来源将在载入后显示</small>
         </label>
         <label>基线批次
           <select id="baselineCohort" aria-describedby="baselineHelp"></select>
-          <small id="baselineHelp">可留空；是否可比由服务端判定</small>
+          <small id="baselineHelp" aria-live="polite">当前批次可查看，但暂无可直接比较的基线</small>
         </label>
         <label>角色
           <select id="characterFilter"><option value="">全部角色</option></select>

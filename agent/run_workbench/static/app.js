@@ -185,14 +185,119 @@ function filteredCohorts() {
   });
 }
 
-function nearestDistinctCohortId(candidates, currentId) {
-  const currentIndex = candidates.findIndex((cohort) => cohort.cohort_id === currentId);
-  if (currentIndex < 0 || candidates.length < 2) return '';
-  if (currentIndex > 0) return candidates[currentIndex - 1].cohort_id;
-  return candidates[currentIndex + 1].cohort_id;
+function defaultBaselineCohortId(current, candidates) {
+  let currentId;
+  let baselineId;
+  try {
+    if (!current || typeof current !== 'object') return '';
+    const readiness = current.comparison_readiness;
+    if (!readiness || typeof readiness !== 'object' || readiness.ready !== true) return '';
+    if (typeof current.cohort_id !== 'string'
+      || typeof current.default_baseline_cohort_id !== 'string') return '';
+    currentId = current.cohort_id.trim();
+    baselineId = current.default_baseline_cohort_id.trim();
+  } catch (error) {
+    return '';
+  }
+  if (!currentId || !baselineId || baselineId === currentId || !Array.isArray(candidates)) return '';
+
+  let matches = 0;
+  try {
+    for (const candidate of candidates) {
+      try {
+        if (!candidate || typeof candidate !== 'object') continue;
+        const candidateId = candidate.cohort_id;
+        if (typeof candidateId === 'string' && candidateId.trim() === baselineId) matches += 1;
+      } catch (error) {
+        // Ignore malformed candidate descriptors and fail closed on ambiguity below.
+      }
+      if (matches > 1) return '';
+    }
+  } catch (error) {
+    return '';
+  }
+  return matches === 1 ? baselineId : '';
 }
 
-function updateCohortOptions({ chooseDefaults = false } = {}) {
+function comparisonAxisLabel(axis) {
+  const labels = {
+    character: '角色',
+    game_version: '游戏版本',
+    evaluation_mode: '评测模式',
+    scenario: '场景',
+    ascension: '进阶',
+    seed: '种子',
+    valid_results: '有效结果',
+  };
+  if (typeof axis !== 'string') return '未知轴';
+  return Object.prototype.hasOwnProperty.call(labels, axis) ? labels[axis] : axis;
+}
+
+function updateCohortHelp(current, baselineId) {
+  const currentHelp = byId('currentHelp');
+  const baselineHelp = byId('baselineHelp');
+  if (!current) {
+    currentHelp.textContent = '当前筛选没有匹配批次；版本来源：记录未提供';
+    baselineHelp.textContent = '当前没有可查看的训练批次';
+    return;
+  }
+
+  let readiness = null;
+  let source = null;
+  let serverDefaultId = '';
+  try {
+    readiness = current.comparison_readiness;
+    source = current.filters && current.filters.game_version_source;
+    serverDefaultId = typeof current.default_baseline_cohort_id === 'string'
+      ? current.default_baseline_cohort_id.trim()
+      : '';
+  } catch (error) {
+    readiness = null;
+    source = null;
+    serverDefaultId = '';
+  }
+  const labels = (key) => {
+    let axes;
+    try {
+      axes = readiness && readiness[key];
+    } catch (error) {
+      return [];
+    }
+    if (!Array.isArray(axes)) return [];
+    return Array.from(new Set(
+      axes.filter((axis) => typeof axis === 'string').map(comparisonAxisLabel),
+    ));
+  };
+  const missing = labels('missing_axes');
+  const mixed = labels('mixed_axes');
+  const invalid = labels('invalid_axes');
+  const issues = [
+    missing.length ? `缺少${missing.join('、')}` : '',
+    mixed.length ? `混合${mixed.join('、')}` : '',
+    invalid.length ? `无效${invalid.join('、')}` : '',
+  ].filter(Boolean);
+  const sourceLabel = source === 'cli'
+    ? '命令行'
+    : source === 'environment' ? '环境变量' : '记录未提供';
+  const orderingHelp = Number.isFinite(current.latest_at)
+    ? `服务端按时间排序；此批次最近记录于 ${formatTime(current.latest_at)}`
+    : '此批次时间未知；按服务端稳定顺序选择，不视为最新批次';
+  const sourceHelp = `版本来源：${sourceLabel}`;
+  currentHelp.textContent = `${orderingHelp}；${sourceHelp}`;
+
+  if (!readiness || readiness.ready !== true) {
+    const detail = issues.length ? `：${issues.join('；')}` : '';
+    baselineHelp.textContent = `元数据不完整，仅展示本批次${detail}`;
+  } else if (!baselineId) {
+    baselineHelp.textContent = '当前批次可查看，但暂无可直接比较的基线';
+  } else if (baselineId === serverDefaultId) {
+    baselineHelp.textContent = '已采用服务端验证的兼容基线；手动选择后仍会再次校验';
+  } else {
+    baselineHelp.textContent = '已选择基线；服务端将校验口径并提供精确原因';
+  }
+}
+
+function updateCohortOptions({ chooseDefaults = false, currentChanged = false } = {}) {
   const currentSelect = byId('currentCohort');
   const baselineSelect = byId('baselineCohort');
   const previousCurrent = currentSelect.value;
@@ -210,20 +315,17 @@ function updateCohortOptions({ chooseDefaults = false } = {}) {
   setSelectOptions(currentSelect, options, candidates.length ? null : '没有匹配批次', current);
   currentSelect.value = current;
   const selected = candidates.find((cohort) => cohort.cohort_id === current);
-  byId('currentHelp').textContent = selected && Number.isFinite(selected.latest_at)
-    ? `服务端按时间排序；此批次最近记录于 ${formatTime(selected.latest_at)}`
-    : '此批次时间未知；按服务端稳定顺序选择，不视为最新批次';
 
   let baseline = previousBaseline;
-  if (!candidates.some((cohort) => cohort.cohort_id === baseline && baseline !== current)) {
-    baseline = nearestDistinctCohortId(candidates, current);
-  }
-  if (chooseDefaults) {
-    baseline = nearestDistinctCohortId(candidates, current);
-  }
   const baselineOptions = options.filter((option) => option.value !== current);
+  if (chooseDefaults || currentChanged || current !== previousCurrent) {
+    baseline = defaultBaselineCohortId(selected, candidates);
+  } else if (baseline && !baselineOptions.some((option) => option.value === baseline)) {
+    baseline = '';
+  }
   setSelectOptions(baselineSelect, baselineOptions, '不比较基线', baseline);
   baselineSelect.value = baseline;
+  updateCohortHelp(selected, baseline);
 }
 
 function resetMetrics() {
@@ -498,8 +600,15 @@ function renderComparison(comparison) {
   clear(body);
   banner.dataset.tone = 'neutral';
   if (!comparison) {
-    title.textContent = '未选择基线';
-    body.append(element('p', { text: '当前只展示本批次结果；选择基线后由服务端检查口径并计算差异。' }));
+    const current = currentCohortDescriptor();
+    const readiness = current && current.comparison_readiness;
+    if (readiness && readiness.ready === false) {
+      title.textContent = '元数据不完整';
+      body.append(element('p', { text: '历史记录仍可查看，但不会用于训练提升比较。' }));
+    } else {
+      title.textContent = '未选择基线';
+      body.append(element('p', { text: '当前批次可查看，但暂无可直接比较的基线。' }));
+    }
     return;
   }
   const reasons = Array.isArray(comparison.mismatch_reasons) ? comparison.mismatch_reasons : [];
@@ -1166,10 +1275,13 @@ byId('characterFilter').addEventListener('change', filterChanged);
 byId('versionFilter').addEventListener('change', filterChanged);
 byId('validityFilter').addEventListener('change', filterChanged);
 byId('currentCohort').addEventListener('change', () => {
-  updateCohortOptions();
+  updateCohortOptions({ currentChanged: true });
   refreshMetrics();
 });
-byId('baselineCohort').addEventListener('change', refreshMetrics);
+byId('baselineCohort').addEventListener('change', () => {
+  updateCohortHelp(currentCohortDescriptor(), byId('baselineCohort').value);
+  refreshMetrics();
+});
 byId('sourceFile').addEventListener('change', uploadSelectedFile);
 byId('reloadButton').addEventListener('click', bootstrap);
 byId('closeDetail').addEventListener('click', closeDetail);
