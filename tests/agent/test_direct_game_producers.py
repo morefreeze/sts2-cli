@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -84,17 +86,50 @@ def test_agent_readme_training_examples_are_directly_executable_with_metadata():
 
     assert "CLI" in readme and "STS2_GAME_VERSION" in readme and "优先" in readme
     assert (
-        "python agent/train.py --character Ironclad --steps 100000 --n-envs 4 "
+        "python -m agent.train --character Ironclad --steps 100000 --n-envs 4 "
         "--game-version v0.103.2 --ascension 0"
     ) in readme
     assert (
-        "python agent/train.py --character Ironclad --steps 100000 "
+        "python -m agent.train --character Ironclad --steps 100000 "
         "--game-version v0.103.2 --ascension 1"
     ) in readme
     assert (
         "--checkpoint checkpoints/ppo_ironclad_100k.zip "
         "--game-version v0.103.2 --ascension 0"
     ) in readme
+
+
+def test_current_training_docs_only_use_the_module_entrypoint():
+    root = Path(__file__).parents[2]
+    current_docs = (
+        (root / "agent" / "README.md").read_text(encoding="utf-8"),
+        (root / "agent" / "train.py").read_text(encoding="utf-8"),
+    )
+
+    for text in current_docs:
+        assert "python agent/train.py" not in text
+        assert "python3 agent/train.py" not in text
+        assert "-m agent.train" in text
+
+
+def test_train_module_help_runs_from_repo_root_with_metadata_contract():
+    root = Path(__file__).parents[2]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "agent.train", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--game-version" in result.stdout
+    assert "STS2_GAME_VERSION" in result.stdout
+    assert "takes precedence" in result.stdout
+    assert "--ascension" in result.stdout
+    assert "Ascension level" in result.stdout
 
 
 @pytest.mark.parametrize(

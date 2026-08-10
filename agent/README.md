@@ -123,13 +123,13 @@ python python/play_full_run.py 5 Ironclad
 
 ```bash
 # 100k steps，4 并行环境，约 1-2 小时（Apple Silicon）
-python agent/train.py --character Ironclad --steps 100000 --n-envs 4 --game-version v0.103.2 --ascension 0
+python -m agent.train --character Ironclad --steps 100000 --n-envs 4 --game-version v0.103.2 --ascension 0
 
 # 指定 ascension 等级
-python agent/train.py --character Ironclad --steps 100000 --game-version v0.103.2 --ascension 1
+python -m agent.train --character Ironclad --steps 100000 --game-version v0.103.2 --ascension 1
 
 # 从 checkpoint 继续训练
-python agent/train.py --character Ironclad --steps 200000 \
+python -m agent.train --character Ironclad --steps 200000 \
     --checkpoint checkpoints/ppo_ironclad_100k.zip --game-version v0.103.2 --ascension 0
 ```
 

@@ -34,6 +34,37 @@ def test_native_run_preserves_identity_and_format_capabilities() -> None:
 
 
 @pytest.mark.parametrize(
+    ("source_name", "record"),
+    [
+        (
+            "native.run",
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "map_point_history": [],
+            },
+        ),
+        ("deck.jsonl", {"event": "outcome", "status": "dead"}),
+        ("eval.jsonl", {"event": "eval_result", "status": "dead"}),
+    ],
+    ids=["native", "deck", "eval"],
+)
+def test_adapters_skip_unsafe_primary_run_id_and_use_safe_nested_candidate(
+    source_name: str,
+    record: dict,
+) -> None:
+    record.update(
+        {
+            "run_id": json.loads('"\\ud800"'),
+            "data": {"run_id": "valid-nested"},
+        }
+    )
+
+    adapted = adapt_records(source_name, [record])
+
+    assert adapted.runs[0].run_id == "valid-nested"
+
+
+@pytest.mark.parametrize(
     ("raw_source", "expected"),
     [("environment", "environment"), (" \t", None), (7, None)],
 )

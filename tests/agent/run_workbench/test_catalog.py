@@ -1836,6 +1836,59 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
 
 
 @pytest.mark.parametrize(
+    "unsafe_run_id",
+    [json.loads('"\\ud800"'), "x" * 257],
+    ids=["surrogate", "overlong"],
+)
+def test_replay_identity_falls_back_to_safe_nested_id_for_small_and_compact_paths(
+    tmp_path: Path,
+    unsafe_run_id: str,
+) -> None:
+    def rows(count: int) -> list[dict]:
+        result = [
+            {
+                "type": "state",
+                "run_id": unsafe_run_id,
+                "ts": index,
+                "data": {
+                    "run_id": "valid-nested",
+                    "context": {
+                        "act": 1,
+                        "floor": 7,
+                        "room_type": "Map",
+                    },
+                },
+            }
+            for index in range(1, count + 1)
+        ]
+        result[-1]["status"] = "dead"
+        return result
+
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(511))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small = RunCatalog([small_root], replay_parser=parse_game_progress)
+    large = RunCatalog([large_root], replay_parser=parse_game_progress)
+    small_cohort = small.list_cohorts()[0]
+    large_cohort = large.list_cohorts()[0]
+    small_run = small.get_cohort_records(small_cohort["cohort_id"])[0]
+    large_run = large.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert small_run.run_id == large_run.run_id == "valid-nested"
+    for descriptor in (small_cohort, large_cohort):
+        assert descriptor["run_ids"] == ["valid-nested"]
+        assert descriptor["representative_run_ids"] == ["valid-nested"]
+    assert small_cohort["filters"] == large_cohort["filters"]
+    assert small_cohort["comparison_readiness"] == large_cohort[
+        "comparison_readiness"
+    ]
+
+
+@pytest.mark.parametrize(
     ("raw_modifiers", "expected_modifiers"),
     [
         (["TEST_MODIFIER"], ("TEST_MODIFIER",)),

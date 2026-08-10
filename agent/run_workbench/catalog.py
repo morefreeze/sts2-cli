@@ -13,7 +13,12 @@ import stat as stat_module
 from threading import RLock
 from typing import Any, Callable, Iterable
 
-from agent.run_metadata import is_unicode_scalar_text
+from agent.run_metadata import (
+    MAX_RUN_ID_LENGTH,
+    is_unicode_scalar_text,
+    record_run_id,
+    safe_run_id as _safe_run_id,
+)
 
 from .adapters import AdaptedSource, adapt_records
 from .joiner import join_records
@@ -40,7 +45,7 @@ INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
 REPLAY_WARNING_ID_LIMIT = 16
-RUN_ID_LENGTH_LIMIT = 256
+RUN_ID_LENGTH_LIMIT = MAX_RUN_ID_LENGTH
 ERROR_DETAIL_LIMIT = 32
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
 _WORKBENCH_JSON_MARKERS = (
@@ -1014,12 +1019,7 @@ def _merge_compact_records(
 
 
 def _record_run_id(record: dict[str, Any]) -> str:
-    value = _safe_run_id(record.get("run_id"))
-    if value is not None:
-        return value
-    data = record.get("data")
-    nested = _safe_run_id(data.get("run_id")) if isinstance(data, dict) else None
-    return nested or ""
+    return record_run_id(record) or ""
 
 
 def _item_metadata(record: _CohortItem) -> RunMetadata:
@@ -1919,17 +1919,6 @@ def _cohort_id(key: tuple[Any, ...]) -> str:
 
 def _safe_catalog_scalar(value: Any) -> Any:
     if type(value) is str and not is_unicode_scalar_text(value):
-        return None
-    return value
-
-
-def _safe_run_id(value: object) -> str | None:
-    if (
-        type(value) is not str
-        or not value.strip()
-        or len(value) > RUN_ID_LENGTH_LIMIT
-        or not is_unicode_scalar_text(value)
-    ):
         return None
     return value
 

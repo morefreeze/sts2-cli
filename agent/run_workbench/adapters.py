@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 from typing import Any, Callable
 
+from agent.run_metadata import record_run_id, safe_run_id
+
 from .deltas import derive_snapshot_deltas, native_node_deltas
 from .models import (
     Capabilities,
@@ -156,7 +158,7 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
     )
 
     return RunRecord(
-        run_id=_first_text(record, "run_id") or "",
+        run_id=record_run_id(record) or "",
         source_id=str(path),
         source_kind=SourceKind.NATIVE_RUN,
         metadata=RunMetadata(
@@ -415,7 +417,7 @@ def _adapt_deck_history(
     historical: list[tuple[int, dict[str, Any]]] = []
     errors: list[str] = []
     for index, row in enumerate(records, start=1):
-        run_id = _first_text(row, "run_id")
+        run_id = record_run_id(row)
         if not run_id:
             errors.append(f"{path.name}:{index}: deck-history record missing run_id")
             historical.append((index, row))
@@ -522,7 +524,7 @@ def _adapt_eval_results(
         timestamp = _first_number(row, "ts", "timestamp")
         runs.append(
             RunRecord(
-                run_id=_first_text(row, "run_id") or "",
+                run_id=record_run_id(row) or "",
                 source_id=f"{path}:{index}",
                 source_kind=SourceKind.EVAL_RESULTS,
                 metadata=_metadata_from_records(
@@ -723,15 +725,15 @@ def _replay_run_identity(
     top_level_ids: list[str] = []
     nested_ids: list[str] = []
     for record in records:
-        top_level = _replay_text(record, "run_id")
+        top_level = safe_run_id(record.get("run_id"))
         if top_level is not None:
             top_level_ids.append(top_level)
         data = record.get("data")
         if isinstance(data, dict):
-            nested = _replay_text(data, "run_id")
+            nested = safe_run_id(data.get("run_id"))
             if nested is not None:
                 nested_ids.append(nested)
-    summary_id = _replay_text(summary, "run_id")
+    summary_id = safe_run_id(summary.get("run_id"))
     resolved = (
         summary_id
         or (top_level_ids[0] if top_level_ids else None)

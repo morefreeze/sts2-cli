@@ -12,6 +12,7 @@ from typing import Literal
 
 MAX_GAME_VERSION_LENGTH = 128
 MAX_NATIVE_SAVE_METADATA_BYTES = 64 * 1024
+MAX_RUN_ID_LENGTH = 256
 MAX_SEED_LENGTH = 256
 GameVersionSource = Literal["cli", "environment"]
 _SEED_UNSET = object()
@@ -27,6 +28,31 @@ def is_unicode_scalar_text(value: object) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+def safe_run_id(value: object) -> str | None:
+    """Return a bounded, nonempty run identifier safe for public JSON."""
+
+    if (
+        type(value) is not str
+        or not value.strip()
+        or len(value) > MAX_RUN_ID_LENGTH
+        or not is_unicode_scalar_text(value)
+    ):
+        return None
+    return value
+
+
+def record_run_id(record: Mapping[str, object]) -> str | None:
+    """Choose the first safe run identifier from canonical record locations."""
+
+    top_level = safe_run_id(record.get("run_id"))
+    if top_level is not None:
+        return top_level
+    data = record.get("data")
+    if isinstance(data, Mapping):
+        return safe_run_id(data.get("run_id"))
+    return None
 
 
 @dataclass(frozen=True)

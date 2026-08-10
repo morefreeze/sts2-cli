@@ -10,8 +10,8 @@ Key design decisions vs previous version:
   - Periodic eval every 25k steps: report avg_floor, win_rate, combat_win_rate
 
 Usage:
-    python3 agent/train.py --steps 500000 --curriculum --game-version v0.103.2 --ascension 0
-    python3 agent/train.py --steps 500000 --checkpoint checkpoints/ppo_ironclad_75k.zip \
+    python -m agent.train --steps 500000 --curriculum --game-version v0.103.2 --ascension 0
+    python -m agent.train --steps 500000 --checkpoint checkpoints/ppo_ironclad_75k.zip \
         --curriculum --game-version v0.103.2 --ascension 0
 
 The game version is required via --game-version or STS2_GAME_VERSION; an
