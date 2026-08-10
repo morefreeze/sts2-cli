@@ -800,13 +800,27 @@ class RunCatalog:
                 else None
             )
             game_version_sources: set[str] = set()
+            invalid_game_version_source = False
             for record in ordered:
                 source = _item_metadata(record).game_version_source
-                if type(source) is str and source:
-                    game_version_sources.add(source)
+                if source is None:
+                    continue
+                if type(source) is not str:
+                    invalid_game_version_source = True
+                    continue
+                source = source.strip()
+                if not source:
+                    continue
+                try:
+                    source.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    invalid_game_version_source = True
+                    continue
+                game_version_sources.add(source)
             game_version_source = (
                 next(iter(game_version_sources))
-                if len(game_version_sources) == 1
+                if not invalid_game_version_source
+                and len(game_version_sources) == 1
                 else None
             )
             filters = {

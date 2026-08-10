@@ -191,6 +191,36 @@ def test_cohort_http_contract_provides_a_strictly_compatible_baseline(
     assert metrics_payload["comparison"]["paired"] is True
 
 
+def test_cohorts_http_omits_unencodable_game_version_source(
+    tmp_path: Path,
+) -> None:
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                "event": "eval_result",
+                "run_id": "invalid-source",
+                "status": "dead",
+                "max_global_floor": 8,
+                "character": "Ironclad",
+                "game_version": "v1",
+                "game_version_source": json.loads('"\\ud800"'),
+                "checkpoint": "current",
+                "evaluation_mode": "fixed",
+                "scenario": "full_run",
+                "ascension": 0,
+                "seed": "a",
+            }
+        ],
+    )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(base, "/api/cohorts")
+
+    assert status == 200
+    assert payload["cohorts"][0]["filters"]["game_version_source"] is None
+
+
 def test_supported_native_run_map_returns_full_graph_route_art_and_visited_deltas(
     tmp_path: Path,
 ) -> None:

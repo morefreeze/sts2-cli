@@ -588,6 +588,50 @@ def test_game_version_source_is_display_only_and_never_splits_a_cohort(
     assert cohorts[0]["filters"]["game_version_source"] is None
 
 
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [
+        ([json.loads('"\\ud800"')], None),
+        (["cli", json.loads('"\\ud800"')], None),
+        (["  来源-实验  "], "来源-实验"),
+        (["cli", "environment"], None),
+        ([" \t\n "], None),
+    ],
+    ids=[
+        "lone-surrogate",
+        "safe-plus-invalid",
+        "ordinary-unicode",
+        "multiple-safe-values",
+        "whitespace-only",
+    ],
+)
+def test_game_version_source_filter_requires_one_utf8_safe_canonical_value(
+    tmp_path: Path, sources: list[str], expected: str | None
+) -> None:
+    records = [
+        {
+            "event": "eval_result",
+            "run_id": f"source-{index}",
+            "status": "dead",
+            "max_global_floor": 8,
+            "character": "Ironclad",
+            "game_version": "v1",
+            "game_version_source": source,
+            "checkpoint": "same",
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+            "ascension": 0,
+            "seed": f"seed-{index}",
+        }
+        for index, source in enumerate(sources)
+    ]
+    _write_jsonl(tmp_path / "eval.jsonl", records)
+
+    cohort = RunCatalog([tmp_path], replay_parser=_replay_parser).list_cohorts()[0]
+
+    assert cohort["filters"]["game_version_source"] == expected
+
+
 def test_ascension_levels_form_distinct_stable_catalog_cohorts(tmp_path: Path):
     records = [
         {
