@@ -202,6 +202,7 @@ def _adapt_replay(
     errors: list[str] = []
     parsed: dict[str, Any] = {}
     parser_succeeded = False
+    parser_rejected = False
     if replay_parser is None:
         errors.append(f"{path.name}: no replay parser was provided")
     else:
@@ -211,8 +212,10 @@ def _adapt_replay(
                 parsed = candidate
                 parser_succeeded = True
             else:
+                parser_rejected = True
                 errors.append(f"{path.name}: replay parser returned a non-object result")
         except Exception as error:  # adapter errors must not make the catalog unreadable
+            parser_rejected = True
             errors.append(f"{path.name}: replay parser failed: {error}")
 
     summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
@@ -257,7 +260,12 @@ def _adapt_replay(
     )
     run_id, identity_warnings = _replay_run_identity(records, summary)
     max_floor = _first_int(summary, "max_global_floor")
-    if max_floor is None and observed_floors and not has_parser_coverage:
+    if (
+        max_floor is None
+        and observed_floors
+        and not has_parser_coverage
+        and not parser_rejected
+    ):
         max_floor = max(observed_floors)
     raw_actions = [
         deepcopy(row["data"])
@@ -298,19 +306,35 @@ def _adapt_replay(
         for node in nodes
     )
     first_recorded_floor = (
-        _first_int(summary, "first_recorded_floor")
-        if has_parser_coverage
-        else (min(observed_floors) if observed_floors else None)
+        None
+        if parser_rejected
+        else (
+            _first_int(summary, "first_recorded_floor")
+            if has_parser_coverage
+            else (min(observed_floors) if observed_floors else None)
+        )
     )
     last_recorded_floor = (
-        _first_int(summary, "last_recorded_floor")
-        if has_parser_coverage
-        else (max(observed_floors) if observed_floors else None)
+        None
+        if parser_rejected
+        else (
+            _first_int(summary, "last_recorded_floor")
+            if has_parser_coverage
+            else (max(observed_floors) if observed_floors else None)
+        )
     )
     complete_run = (
-        summary.get("complete_run") is True
-        if has_parser_coverage
-        else bool(observed_floors and min(observed_floors) == 1 and has_terminal)
+        False
+        if parser_rejected
+        else (
+            summary.get("complete_run") is True
+            if has_parser_coverage
+            else bool(
+                observed_floors
+                and min(observed_floors) == 1
+                and has_terminal
+            )
+        )
     )
     run = RunRecord(
         run_id=run_id,

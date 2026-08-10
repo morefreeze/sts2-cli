@@ -588,6 +588,75 @@ def test_parse_game_progress_skips_non_object_items_in_mapping_lists():
     ]
 
 
+def test_parse_game_progress_preserves_sparse_empty_player_payload():
+    entry = {
+        "type": "state",
+        "data": {
+            "decision": "combat_play",
+            "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+            "player": {},
+        },
+    }
+
+    room = parse_game_progress([entry])["rooms"][0]
+
+    assert room["start_player"] == {}
+    assert room["end_player"] == {}
+
+
+def test_parse_game_progress_preserves_complete_nonempty_player_payload():
+    entry = {
+        "type": "state",
+        "data": {
+            "decision": "combat_play",
+            "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+            "player": {
+                "name": "Test Warrior",
+                "hp": 50,
+                "max_hp": 60,
+                "block": 4,
+                "gold": 25,
+                "deck_size": 1,
+                "relics": [{"id": "TEST_RELIC", "name": "Test Relic"}],
+                "potions": [{"id": "TEST_POTION", "name": "Test Potion"}],
+                "deck": [
+                    {
+                        "id": "TEST_CARD",
+                        "name": "Test Card",
+                        "type": "Attack",
+                        "upgraded": True,
+                    }
+                ],
+            },
+        },
+    }
+    expected = {
+        "name": "Test Warrior",
+        "hp": 50,
+        "max_hp": 60,
+        "block": 4,
+        "gold": 25,
+        "deck_size": 1,
+        "relics": ["Test Relic"],
+        "relic_items": [{"id": "TEST_RELIC", "name": "Test Relic"}],
+        "potions": ["Test Potion"],
+        "potion_items": [{"id": "TEST_POTION", "name": "Test Potion"}],
+        "deck": [
+            {
+                "id": "TEST_CARD",
+                "name": "Test Card",
+                "type": "Attack",
+                "upgraded": True,
+            }
+        ],
+    }
+
+    room = parse_game_progress([entry])["rooms"][0]
+
+    assert room["start_player"] == expected
+    assert room["end_player"] == expected
+
+
 def test_parse_game_progress_normalizes_nonfinite_numbers_and_metadata():
     state = _state(
         1,

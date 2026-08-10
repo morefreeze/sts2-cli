@@ -755,6 +755,71 @@ def test_failed_replay_parser_does_not_claim_turn_replay(parser) -> None:
     assert adapted.errors
 
 
+@pytest.mark.parametrize(
+    ("records", "message"),
+    [
+        (
+            [
+                {
+                    "type": "action",
+                    "data": {"cmd": "start_run", "run_id": "run-a"},
+                },
+                {
+                    "type": "state",
+                    "data": {
+                        "decision": "combat_play",
+                        "context": {"act": 1, "floor": 1},
+                        "player": {},
+                    },
+                },
+                {
+                    "type": "action",
+                    "data": {"cmd": "start_run", "run_id": "run-b"},
+                },
+                {
+                    "type": "state",
+                    "data": {
+                        "decision": "game_over",
+                        "context": {"act": 1, "floor": 2},
+                        "player": {},
+                    },
+                },
+            ],
+            "multiple start_run records",
+        ),
+        (
+            [
+                {"type": "action", "data": {"cmd": "start_run"}},
+                {
+                    "type": "state",
+                    "data": {
+                        "decision": "game_over",
+                        "context": {"act": 1, "floor": 1},
+                        "player": "invalid",
+                    },
+                },
+            ],
+            "state player must be an object",
+        ),
+    ],
+    ids=["duplicate-start-run", "malformed-player"],
+)
+def test_rejected_replay_parser_keeps_raw_coverage_incomplete(records, message):
+    adapted = adapt_records(
+        "rejected.jsonl",
+        records,
+        replay_parser=parse_game_progress,
+    )
+
+    run = adapted.runs[0]
+    assert run.coverage.complete_run is False
+    assert run.coverage.first_recorded_floor is None
+    assert run.coverage.last_recorded_floor is None
+    assert run.outcome.max_global_floor is None
+    assert run.capabilities.turn_replay is False
+    assert any(message in error for error in adapted.errors)
+
+
 def test_action_only_replay_has_decision_evidence_but_no_turn_replay(
     tmp_path: Path,
 ) -> None:

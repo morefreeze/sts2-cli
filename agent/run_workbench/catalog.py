@@ -130,6 +130,7 @@ class _CompactRun:
     has_replay_action: bool = False
     has_replay_state: bool = False
     replay_parser_succeeded: bool = False
+    replay_parser_rejected: bool = False
     replay_parser_complete_run: bool | None = None
     has_replay_nodes: bool = False
     has_node_decisions: bool = False
@@ -148,11 +149,17 @@ class _CompactRun:
             visited_route = False
         elif self.source_kind is SourceKind.REPLAY_JSONL:
             complete_run = (
-                self.replay_parser_complete_run
-                if self.replay_parser_complete_run is not None
-                else self.has_outcome and self.first_recorded_floor == 1
+                False
+                if self.replay_parser_rejected
+                else (
+                    self.replay_parser_complete_run
+                    if self.replay_parser_complete_run is not None
+                    else self.has_outcome and self.first_recorded_floor == 1
+                )
             )
-            first_recorded_floor = self.first_recorded_floor
+            first_recorded_floor = (
+                None if self.replay_parser_rejected else self.first_recorded_floor
+            )
             visited_route = self.has_floor or self.has_replay_nodes
         else:
             complete_run = self.has_outcome
@@ -184,7 +191,10 @@ class _CompactRun:
                 complete_run=complete_run,
                 first_recorded_floor=first_recorded_floor,
                 last_recorded_floor=(
-                    self.observed_max_floor
+                    None
+                    if self.source_kind is SourceKind.REPLAY_JSONL
+                    and self.replay_parser_rejected
+                    else self.observed_max_floor
                     if self.source_kind is SourceKind.REPLAY_JSONL
                     else self.max_global_floor
                 ),
@@ -566,12 +576,15 @@ class RunCatalog:
                 and not records_complete
                 and deck_outcomes
             ):
-                _normalize_incomplete_replay(
+                parser_error = _normalize_incomplete_replay(
                     deck_outcomes[0],
                     path,
                     self.replay_parser,
                     path.name,
                 )
+                if parser_error is not None:
+                    errors.append(parser_error)
+                    error_count += 1
                 run_ids = (
                     (deck_outcomes[0].run_id,)
                     if deck_outcomes[0].run_id
@@ -1419,7 +1432,7 @@ def _normalize_incomplete_replay(
     path: Path,
     replay_parser: Callable[[list[dict], str | None], dict] | None,
     source_name: str,
-) -> None:
+) -> str | None:
     """Normalize a replay with one transient whole-list parser invocation.
 
     Replay parsers have whole-list semantics, so incomplete replay indexing
@@ -1429,7 +1442,7 @@ def _normalize_incomplete_replay(
     """
 
     if replay_parser is None:
-        return
+        return None
     full_records: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -1446,15 +1459,27 @@ def _normalize_incomplete_replay(
                     continue
                 full_records.append(record)
     except (OSError, UnicodeDecodeError):
-        return
+        return None
     try:
         candidate = replay_parser(full_records, source_name)
-    except Exception:
-        return
+    except Exception as error:
+        compact.replay_parser_rejected = True
+        compact.first_recorded_floor = None
+        compact.observed_max_floor = None
+        compact.observed_max_floor_label = None
+        compact.max_global_floor = None
+        compact.max_floor_label = None
+        return f"{source_name}: replay parser failed: {error}"
     finally:
         del full_records
     if not isinstance(candidate, dict):
-        return
+        compact.replay_parser_rejected = True
+        compact.first_recorded_floor = None
+        compact.observed_max_floor = None
+        compact.observed_max_floor_label = None
+        compact.max_global_floor = None
+        compact.max_floor_label = None
+        return f"{source_name}: replay parser returned a non-object result"
 
     compact.replay_parser_succeeded = True
     summary = candidate.get("summary")
@@ -1535,6 +1560,7 @@ def _normalize_incomplete_replay(
         else:
             compact.max_global_floor = compact.observed_max_floor
             compact.max_floor_label = compact.observed_max_floor_label
+    return None
 
 
 def _apply_compact_replay_summary_metadata(

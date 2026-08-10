@@ -1788,6 +1788,66 @@ def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(
     assert large_metrics == small_metrics
 
 
+def test_large_rejected_replay_parser_keeps_raw_coverage_incomplete(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "duplicate-start.jsonl"
+    records = [
+        {
+            "type": "action",
+            "data": {"cmd": "start_run", "run_id": "run-a"},
+        },
+        {
+            "type": "state",
+            "data": {
+                "decision": "combat_play",
+                "context": {"act": 1, "floor": 1},
+                "player": {},
+            },
+        },
+        {
+            "type": "action",
+            "data": {"cmd": "start_run", "run_id": "run-b"},
+        },
+    ]
+    records.extend(
+        {
+            "type": "state",
+            "data": {
+                "decision": "combat_play",
+                "context": {"act": 1, "floor": 2},
+                "player": {},
+            },
+        }
+        for _ in range(509)
+    )
+    records.append(
+        {
+            "type": "state",
+            "status": "dead",
+            "data": {
+                "decision": "game_over",
+                "context": {"act": 1, "floor": 2},
+                "player": {},
+            },
+        }
+    )
+    assert len(records) == 513
+    _write_jsonl(path, records)
+    catalog = RunCatalog([tmp_path], replay_parser=parse_game_progress)
+
+    cohort = catalog.list_cohorts()[0]
+    run = catalog.get_cohort_records(cohort["cohort_id"])[0]
+    source = catalog.get_source(catalog.list_sources()[0]["source_id"])
+
+    assert run.coverage.complete_run is False
+    assert run.coverage.first_recorded_floor is None
+    assert run.coverage.last_recorded_floor is None
+    assert run.outcome.max_global_floor is None
+    assert run.capabilities.turn_replay is False
+    assert any("multiple start_run records" in error for error in source["errors"])
+
+
 def test_late_replay_id_conflict_matches_for_511_and_513_records(
     tmp_path: Path,
 ):

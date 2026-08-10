@@ -121,12 +121,14 @@ def _normalize_state(raw_state: Any) -> dict[str, Any]:
     for key in ("name",):
         _normalize_text_field(player, key)
     _normalize_numeric_fields(player, "hp", "max_hp", "block", "gold", "deck_size")
+    raw_player = raw_state.get("player")
     for key in ("deck", "relics", "potions"):
-        player[key] = _mapping_list(raw_state.get("player") or {}, key, f"state player {key}")
+        if isinstance(raw_player, Mapping) and key in raw_player:
+            player[key] = _mapping_list(raw_player, key, f"state player {key}")
 
-    for card in player["deck"]:
+    for card in player.get("deck") or []:
         _normalize_numeric_fields(card, "index", "cost")
-    for potion in player["potions"]:
+    for potion in player.get("potions") or []:
         _normalize_numeric_fields(potion, "index")
 
     state["context"] = context
