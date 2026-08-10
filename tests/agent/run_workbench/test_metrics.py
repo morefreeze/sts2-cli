@@ -5,7 +5,11 @@ import weakref
 
 import pytest
 
-from agent.run_workbench.metrics import compare_cohorts, summarize_cohort
+from agent.run_workbench.metrics import (
+    compare_cohorts,
+    describe_comparison_readiness,
+    summarize_cohort,
+)
 from agent.run_workbench.models import (
     RunMetadata,
     RunOutcome,
@@ -50,6 +54,205 @@ def _run(
             max_global_floor=floor,
         ),
     )
+
+
+def test_comparison_readiness_is_complete_and_order_independent():
+    records = [
+        _run("seed-a", seed="seed-a"),
+        _run("seed-b", seed="seed-b", status=RunStatus.WIN),
+    ]
+
+    forward = describe_comparison_readiness(records)
+    reverse = describe_comparison_readiness(reversed(records))
+
+    assert forward.ready is True
+    assert forward.seed_complete is True
+    assert forward.seed_count == 2
+    assert forward.comparison_signature == reverse.comparison_signature
+    assert forward.comparison_signature is not None
+    assert forward.missing_axes == ()
+    assert forward.mixed_axes == ()
+    assert forward.invalid_axes == ()
+    with pytest.raises(AttributeError):
+        setattr(forward, "ready", False)
+
+
+@pytest.mark.parametrize(
+    ("records", "missing_axes", "mixed_axes", "invalid_axes"),
+    [
+        ([_run("missing-version", version=None)], ("game_version",), (), ()),
+        ([_run("missing-seed", seed=None)], ("seed",), (), ()),
+        (
+            [
+                _run("version-a", version="2026.08", seed="seed-a"),
+                _run("version-b", version="2026.09", seed="seed-b"),
+            ],
+            (),
+            ("game_version",),
+            (),
+        ),
+        ([_run("bool-ascension", ascension=True)], (), (), ("ascension",)),
+        (
+            [_run("in-progress", status=RunStatus.IN_PROGRESS)],
+            (),
+            (),
+            ("valid_results",),
+        ),
+    ],
+)
+def test_comparison_readiness_rejects_missing_mixed_and_invalid_cohorts(
+    records, missing_axes, mixed_axes, invalid_axes
+):
+    readiness = describe_comparison_readiness(records)
+
+    assert readiness.ready is False
+    assert readiness.comparison_signature is None
+    assert readiness.missing_axes == missing_axes
+    assert readiness.mixed_axes == mixed_axes
+    assert readiness.invalid_axes == invalid_axes
+    json.dumps(readiness.to_dict(), allow_nan=False)
+
+
+def test_comparison_readiness_axis_diagnostics_have_stable_order():
+    records = [
+        _run(
+            "first",
+            character=None,
+            version="2026.08",
+            mode=7,
+            ascension=True,
+            seed=None,
+        ),
+        _run(
+            "second",
+            character=None,
+            version="2026.09",
+            mode=7,
+            ascension=True,
+            seed=None,
+        ),
+    ]
+
+    readiness = describe_comparison_readiness(records)
+
+    assert readiness.missing_axes == ("character", "seed")
+    assert readiness.mixed_axes == ("game_version",)
+    assert readiness.invalid_axes == ("evaluation_mode", "ascension")
+
+
+def test_empty_comparison_readiness_reports_no_valid_results():
+    readiness = describe_comparison_readiness([])
+
+    assert readiness.ready is False
+    assert readiness.missing_axes == ()
+    assert readiness.mixed_axes == ()
+    assert readiness.invalid_axes == ("valid_results",)
+    assert readiness.seed_count == 0
+    assert readiness.seed_complete is False
+    assert readiness.comparison_signature is None
+
+
+def test_comparison_signature_handles_unicode_long_values_and_hides_seed_list():
+    long_version = "版本-🐉-" + "x" * 10_000
+    record = _run("unicode", version=long_version, seed="private-seed-🌱")
+
+    single = describe_comparison_readiness([record])
+    duplicate = describe_comparison_readiness(
+        [
+            record,
+            _run("duplicate", version=long_version, seed="private-seed-🌱"),
+        ]
+    )
+    payload = single.to_dict()
+
+    assert single.ready is True
+    assert single.seed_count == 1
+    assert single.comparison_signature == duplicate.comparison_signature
+    assert "seeds" not in payload
+    assert "private-seed" not in json.dumps(payload, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    ("varying_field", "expected_axis"),
+    [("version", "game_version"), ("seed", "seed")],
+)
+def test_comparison_readiness_rejects_bounded_distinct_overflow(
+    monkeypatch: pytest.MonkeyPatch, varying_field: str, expected_axis: str
+):
+    monkeypatch.setattr("agent.run_workbench.metrics.COMPARISON_DISTINCT_LIMIT", 2)
+    records = [
+        _run(
+            f"run-{index}",
+            version=f"version-{index}" if varying_field == "version" else "2026.08",
+            seed=f"seed-{index}" if varying_field == "seed" else "same-seed",
+        )
+        for index in range(3)
+    ]
+
+    readiness = describe_comparison_readiness(records)
+
+    assert readiness.ready is False
+    assert readiness.invalid_axes == (expected_axis,)
+    assert readiness.comparison_signature is None
+    json.dumps(readiness.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_axis"),
+    [({"version": 7}, "game_version"), ({"seed": 7}, "seed")],
+)
+def test_comparison_readiness_rejects_nonstring_version_and_seed(
+    override, expected_axis
+):
+    readiness = describe_comparison_readiness([_run("invalid", **override)])
+
+    assert readiness.ready is False
+    assert readiness.invalid_axes == (expected_axis,)
+    assert readiness.comparison_signature is None
+
+
+def test_comparison_readiness_consumes_input_iterable_once():
+    class SinglePassRecords:
+        def __init__(self):
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("records iterated more than once")
+            yield _run("first", seed="seed-a")
+            yield _run("second", seed="seed-b")
+
+    records = SinglePassRecords()
+
+    readiness = describe_comparison_readiness(records)
+
+    assert readiness.ready is True
+    assert records.iterations == 1
+
+
+def test_comparison_readiness_uses_valid_results_and_ignores_technical_noise():
+    readiness = describe_comparison_readiness(
+        [
+            _run("valid", seed="valid-seed"),
+            _run(
+                "progress",
+                status=RunStatus.IN_PROGRESS,
+                character=None,
+                version=None,
+                mode=7,
+                scenario=True,
+                ascension=True,
+                seed=None,
+            ),
+        ]
+    )
+
+    assert readiness.ready is True
+    assert readiness.seed_count == 1
+    assert readiness.missing_axes == ()
+    assert readiness.mixed_axes == ()
+    assert readiness.invalid_axes == ()
 
 
 def test_summary_excludes_technical_failures_from_gameplay_aggregates():

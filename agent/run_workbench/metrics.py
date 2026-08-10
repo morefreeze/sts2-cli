@@ -14,6 +14,7 @@ from collections import Counter
 from dataclasses import dataclass, field, fields, is_dataclass
 from hashlib import sha256
 import heapq
+import json
 import math
 from typing import Any, Iterable
 
@@ -126,6 +127,20 @@ class ComparisonResult:
         return _to_json_value(self)
 
 
+@dataclass(frozen=True)
+class ComparisonReadiness:
+    ready: bool
+    missing_axes: tuple[str, ...]
+    mixed_axes: tuple[str, ...]
+    invalid_axes: tuple[str, ...]
+    seed_count: int
+    seed_complete: bool
+    comparison_signature: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_json_value(self)
+
+
 @dataclass(frozen=True, order=True)
 class _TrendSeed:
     timestamp: float
@@ -215,6 +230,94 @@ class _ComparisonAccumulator:
             missing=self.ascension_missing,
             invalid=tuple(sorted(self.ascension_invalid)),
         )
+
+
+def describe_comparison_readiness(
+    records: Iterable[RunRecord],
+) -> ComparisonReadiness:
+    """Describe whether valid cohort results have a stable comparison key."""
+
+    accumulator = _ComparisonAccumulator()
+    for record in records:
+        accumulator.observe(record)
+
+    missing_axes: list[str] = []
+    mixed_axes: list[str] = []
+    invalid_axes: list[str] = []
+    resolved: dict[str, str | int] = {}
+
+    for axis in (
+        "character",
+        "game_version",
+        "evaluation_mode",
+        "scenario",
+    ):
+        details = accumulator.axes[axis].details()
+        if details.missing:
+            missing_axes.append(axis)
+        if len(details.values) > 1 or (details.missing and details.values):
+            mixed_axes.append(axis)
+        if details.invalid_types or details.overflow:
+            invalid_axes.append(axis)
+        if (
+            len(details.values) == 1
+            and not details.missing
+            and not details.invalid_types
+            and not details.overflow
+        ):
+            resolved[axis] = next(iter(details.values))
+
+    ascension = accumulator.ascension_details()
+    if ascension.missing:
+        missing_axes.append("ascension")
+    if len(ascension.values) > 1 or (ascension.missing and ascension.values):
+        mixed_axes.append("ascension")
+    if ascension.invalid:
+        invalid_axes.append("ascension")
+    if len(ascension.values) == 1 and not ascension.missing and not ascension.invalid:
+        resolved["ascension"] = next(iter(ascension.values))
+
+    seeds = accumulator.seeds.details()
+    if seeds.missing:
+        missing_axes.append("seed")
+    if seeds.invalid_types or seeds.overflow:
+        invalid_axes.append("seed")
+    seed_complete = bool(seeds.values) and not (
+        seeds.missing or seeds.invalid_types or seeds.overflow
+    )
+
+    if not accumulator.valid_n:
+        invalid_axes.append("valid_results")
+
+    ready = (
+        accumulator.valid_n > 0
+        and not missing_axes
+        and not mixed_axes
+        and not invalid_axes
+        and seed_complete
+        and len(resolved) == 5
+    )
+    comparison_signature = None
+    if ready:
+        signature_payload = {**resolved, "seeds": sorted(seeds.values)}
+        comparison_signature = sha256(
+            json.dumps(
+                signature_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    return ComparisonReadiness(
+        ready=ready,
+        missing_axes=tuple(missing_axes),
+        mixed_axes=tuple(mixed_axes),
+        invalid_axes=tuple(invalid_axes),
+        seed_count=len(seeds.values),
+        seed_complete=seed_complete,
+        comparison_signature=comparison_signature,
+    )
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
