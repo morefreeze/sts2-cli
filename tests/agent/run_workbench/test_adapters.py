@@ -225,6 +225,70 @@ def test_native_nodes_receive_stable_ids_retain_details_and_exact_deltas(
     }
 
 
+def test_native_final_node_retains_bounded_final_inventory_evidence() -> None:
+    adapted = adapt_records(
+        "opaque-native-source",
+        [
+            {
+                "players": [
+                    {
+                        "character": "IRONCLAD",
+                        "current_hp": 63,
+                        "max_hp": 80,
+                        "current_gold": 120,
+                        "deck": [{"id": "CARD.BASH"}],
+                        "relics": [{"id": "RELIC.BURNING_BLOOD"}],
+                        "potions": [],
+                    }
+                ],
+                "map_point_history": [
+                    {
+                        "act": 1,
+                        "floor": 1,
+                        "global_floor": 1,
+                        "player_stats": [
+                            {
+                                "current_hp": 63,
+                                "max_hp": 80,
+                                "current_gold": 120,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+
+    node = adapted.runs[0].nodes[0]
+
+    assert node["final_player"] == {
+        "current_hp": 63,
+        "max_hp": 80,
+        "current_gold": 120,
+        "deck": [{"id": "CARD.BASH"}],
+        "relics": [{"id": "RELIC.BURNING_BLOOD"}],
+        "potions": [],
+    }
+
+
+def test_replay_nodes_retain_only_their_own_detail_evidence() -> None:
+    run = adapt_path(
+        FIXTURES / "replay_a2f4_excerpt.jsonl",
+        replay_parser=parse_game_progress,
+    ).runs[0]
+    event, combat = run.nodes
+
+    assert event["start_player"]["hp"] == 80
+    assert event["end_player"]["hp"] == 80
+    assert event["options"][0]["selected"] is True
+    assert combat["start_player"]["hp"] == 70
+    assert combat["end_player"]["hp"] == 64
+    assert combat["actions"][0]["card"]["name"] == "Training Strike"
+    assert len(combat["combat"]["rounds"]) == 2
+    assert "raw_source" not in event
+    assert "raw_source" not in combat
+
+
 def test_native_nested_act_history_uses_act_local_stable_node_ids(
     tmp_path: Path,
 ) -> None:

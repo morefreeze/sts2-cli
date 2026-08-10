@@ -128,6 +128,13 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
     players = record.get("players")
     player = players[0] if isinstance(players, list) and players and isinstance(players[0], dict) else {}
     nodes = _adapt_native_history(record.get("map_point_history"))
+    if nodes:
+        final_player = _native_final_player_evidence(player)
+        if final_player:
+            # Final inventory is run-level evidence. Attach it once, to the
+            # terminal canonical node, rather than duplicating the raw run on
+            # every node.
+            nodes[-1]["final_player"] = final_player
     acts = _dict_list(record.get("acts"))
     floors = _node_floors(nodes)
     status, victory, technical_kind = _status_from_record(record)
@@ -790,6 +797,49 @@ def _adapt_native_history(value: Any) -> list[dict[str, Any]]:
             )
             previous_node = node
     return annotated
+
+
+_DETAIL_EVIDENCE_LIMIT = 256
+
+
+def _native_final_player_evidence(player: dict[str, Any]) -> dict[str, Any]:
+    """Keep only bounded inventory evidence needed by the final floor."""
+
+    evidence: dict[str, Any] = {}
+    for key in ("current_hp", "hp", "max_hp", "current_gold", "gold"):
+        if key not in player:
+            continue
+        value = player[key]
+        evidence[key] = value if _is_finite_number(value) else None
+    for key in ("deck", "relic_items", "relics", "potion_items", "potions"):
+        value = player.get(key)
+        if isinstance(value, list):
+            evidence[key] = [
+                _sanitize_detail_evidence(item)
+                for item in value[:_DETAIL_EVIDENCE_LIMIT]
+            ]
+    return evidence
+
+
+def _sanitize_detail_evidence(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 16:
+        return None
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_detail_evidence(item, depth=depth + 1)
+            for key, item in list(value.items())[:_DETAIL_EVIDENCE_LIMIT]
+            if isinstance(key, str)
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _sanitize_detail_evidence(item, depth=depth + 1)
+            for item in value[:_DETAIL_EVIDENCE_LIMIT]
+        ]
+    return None
 
 
 def _annotate_native_node(
