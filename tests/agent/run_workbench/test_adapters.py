@@ -6,7 +6,7 @@ import pytest
 
 from agent.run_progress_viewer import parse_game_progress
 from agent.run_workbench.adapters import adapt_path, adapt_records
-from agent.run_workbench.models import RunStatus, SourceKind
+from agent.run_workbench.models import NodeOrigin, RunStatus, SourceKind
 
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "run_workbench"
@@ -268,6 +268,9 @@ def test_native_final_node_retains_bounded_final_inventory_evidence() -> None:
             "source_kind": "native_run",
         }
     ]
+    assert adapted.runs[0].node_origins(0) == (
+        NodeOrigin(SourceKind.NATIVE_RUN, "opaque-native-source"),
+    )
     assert node["final_player"] == {
         "current_hp": 63,
         "max_hp": 80,
@@ -312,6 +315,9 @@ def test_native_adapter_overwrites_raw_detail_markers_and_provenance() -> None:
             "source_kind": "native_run",
         }
     ]
+    assert adapted.runs[0].node_origins(0) == (
+        NodeOrigin(SourceKind.NATIVE_RUN, "controlled-native-source"),
+    )
 
 
 def test_replay_nodes_retain_only_their_own_detail_evidence() -> None:
@@ -329,6 +335,11 @@ def test_replay_nodes_retain_only_their_own_detail_evidence() -> None:
         node["_workbench_provenance"]
         and node["_workbench_provenance"][0]["source_kind"] == "replay_jsonl"
         for node in (event, combat)
+    )
+    assert all(
+        run.node_origins(index)
+        == (NodeOrigin(SourceKind.REPLAY_JSONL, run.source_id),)
+        for index in range(len(run.nodes))
     )
     assert event["start_player"]["hp"] == 80
     assert event["end_player"]["hp"] == 80

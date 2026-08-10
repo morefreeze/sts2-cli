@@ -190,6 +190,75 @@ class SourceKind(str, Enum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class NodeOrigin:
+    """Typed internal provenance established by canonicalization boundaries."""
+
+    source_kind: SourceKind
+    source_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_kind, SourceKind):
+            raise TypeError("NodeOrigin source_kind must be a SourceKind")
+        if not isinstance(self.source_id, str) or not self.source_id:
+            raise ValueError("NodeOrigin source_id must be a non-empty string")
+
+
+def node_evidence_key(nodes: Sequence[Any], index: int) -> str:
+    """Return a stable key for one node, including duplicate occurrence order."""
+
+    if not 0 <= index < len(nodes):
+        raise IndexError(index)
+    node = nodes[index]
+    identity = "anonymous"
+    if isinstance(node, Mapping):
+        for field_name in ("id", "node_id"):
+            candidate = node.get(field_name)
+            if isinstance(candidate, str) and candidate:
+                identity = f"{field_name}:{candidate}"
+                break
+    occurrence = 0
+    for candidate in nodes[:index]:
+        candidate_identity = "anonymous"
+        if isinstance(candidate, Mapping):
+            for field_name in ("id", "node_id"):
+                candidate_value = candidate.get(field_name)
+                if isinstance(candidate_value, str) and candidate_value:
+                    candidate_identity = f"{field_name}:{candidate_value}"
+                    break
+        if candidate_identity == identity:
+            occurrence += 1
+    return f"{len(identity)}:{identity}:{occurrence}"
+
+
+def _snapshot_node_provenance_index(
+    value: Any,
+) -> Mapping[str, tuple[NodeOrigin, ...]]:
+    if not isinstance(value, Mapping):
+        return _FrozenMapping({})
+    snapshot: dict[str, tuple[NodeOrigin, ...]] = {}
+    for key, raw_origins in list(value.items())[:_CANONICAL_NODE_COLLECTION_LIMIT]:
+        if (
+            not isinstance(key, str)
+            or not isinstance(raw_origins, Sequence)
+            or isinstance(raw_origins, (str, bytes))
+        ):
+            continue
+        origins: list[NodeOrigin] = []
+        for origin in raw_origins[:_CANONICAL_NODE_COLLECTION_LIMIT]:
+            if (
+                type(origin) is NodeOrigin
+                and isinstance(origin.source_kind, SourceKind)
+                and isinstance(origin.source_id, str)
+                and origin.source_id
+                and origin not in origins
+            ):
+                origins.append(origin)
+        if origins:
+            snapshot[key] = tuple(origins)
+    return _FrozenMapping(snapshot)
+
+
 class RunStatus(str, Enum):
     WIN = "win"
     DEAD = "dead"
@@ -225,6 +294,7 @@ def _serialize(value: Any) -> Any:
         return {
             item.name: _serialize(getattr(value, item.name))
             for item in fields(value)
+            if item.metadata.get("serialize", True)
         }
     if isinstance(value, Mapping):
         for key in value:
@@ -455,6 +525,21 @@ class RunRecord:
     nodes: list[dict[str, Any]] = field(default_factory=list)
     replay_by_node: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    _node_provenance_index: Mapping[str, tuple[NodeOrigin, ...]] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+        metadata={"serialize": False},
+    )
+
+    def __post_init__(self) -> None:
+        self._node_provenance_index = _snapshot_node_provenance_index(
+            self._node_provenance_index
+        )
+
+    def node_origins(self, index: int) -> tuple[NodeOrigin, ...]:
+        key = node_evidence_key(self.nodes, index)
+        return self._node_provenance_index.get(key, ())
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)

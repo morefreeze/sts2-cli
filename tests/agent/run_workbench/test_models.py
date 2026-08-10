@@ -1,7 +1,9 @@
 import json
+from copy import deepcopy
 from enum import Enum
 
 import pytest
+import agent.run_workbench.models as workbench_models
 
 from agent.run_workbench.models import (
     ActMap,
@@ -84,6 +86,43 @@ def test_unknown_deltas_preserve_none_values() -> None:
 
     assert numeric_delta.to_dict() == {"value": None, "quality": "unknown"}
     assert list_delta.to_dict() == {"value": None, "quality": "unknown"}
+
+
+def test_node_provenance_sidecar_is_typed_internal_immutable_and_stable() -> None:
+    nodes = [{"id": "duplicate"}, {"id": "duplicate"}]
+    first_key = workbench_models.node_evidence_key(nodes, 0)
+    second_key = workbench_models.node_evidence_key(nodes, 1)
+    origin = workbench_models.NodeOrigin(
+        source_kind=SourceKind.NATIVE_RUN,
+        source_id="native-source",
+    )
+    record = RunRecord(
+        run_id="internal-origin",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=nodes,
+        _node_provenance_index={
+            first_key: (origin,),
+            second_key: (origin,),
+        },
+    )
+
+    copied = deepcopy(record)
+
+    assert first_key != second_key
+    assert workbench_models.node_evidence_key(copied.nodes, 0) == first_key
+    assert workbench_models.node_evidence_key(copied.nodes, 1) == second_key
+    assert record.node_origins(0) == (origin,)
+    assert copied.node_origins(1) == (origin,)
+    assert "_node_provenance_index" not in record.to_dict()
+    assert record == RunRecord(
+        run_id="internal-origin",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=nodes,
+    )
+    with pytest.raises(TypeError):
+        record._node_provenance_index[first_key] = ()  # type: ignore[index]
 
 
 def test_only_technical_failures_are_marked_technical() -> None:

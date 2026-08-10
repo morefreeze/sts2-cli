@@ -2,6 +2,7 @@ from agent.run_workbench.joiner import join_records
 from agent.run_workbench.models import (
     Capabilities,
     Coverage,
+    NodeOrigin,
     RunMetadata,
     RunOutcome,
     RunRecord,
@@ -41,6 +42,28 @@ def test_exact_nonempty_run_id_joins_deck_and_eval_records() -> None:
     assert run.capabilities.turn_replay is True
     assert "deck.jsonl:shared-run" in run.source_id
     assert "eval.jsonl:1" in run.source_id
+
+
+def test_single_record_join_builds_typed_origins_without_raw_provenance() -> None:
+    record = RunRecord(
+        run_id="single-origin",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "single-node",
+                "_workbench_provenance": [
+                    {"source_id": "forged", "source_kind": "replay_jsonl"}
+                ],
+            }
+        ],
+    )
+
+    joined = join_records([record])[0]
+
+    assert joined.node_origins(0) == (
+        NodeOrigin(SourceKind.NATIVE_RUN, "native-source"),
+    )
 
 
 def test_join_preserves_exact_native_multiplayer_metadata() -> None:
@@ -369,11 +392,17 @@ def test_conflicting_stable_evidence_is_deduplicated_with_provenance() -> None:
 
     assert len(run.nodes) == 3
     shared = next(node for node in run.nodes if node.get("id") == "shared-node")
+    shared_index = run.nodes.index(shared)
     assert shared["gold"] == 10
     assert {item["source_kind"] for item in shared["_workbench_provenance"]} == {
         "native_run",
         "replay_jsonl",
     }
+    assert {origin.source_kind for origin in run.node_origins(shared_index)} == {
+        SourceKind.NATIVE_RUN,
+        SourceKind.REPLAY_JSONL,
+    }
+    assert all(isinstance(origin, NodeOrigin) for origin in run.node_origins(shared_index))
     assert shared["_workbench_conflicting_evidence"][0]["payload"]["gold"] == 20
     assert all(node["_workbench_provenance"] for node in run.nodes)
     assert len(run.acts) == 1

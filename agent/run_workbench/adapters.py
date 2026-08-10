@@ -13,12 +13,14 @@ from .deltas import derive_snapshot_deltas, native_node_deltas
 from .models import (
     Capabilities,
     Coverage,
+    NodeOrigin,
     RunMetadata,
     RunOutcome,
     RunDelta,
     RunRecord,
     RunStatus,
     SourceKind,
+    node_evidence_key,
 )
 from .sources import (
     SourceDescriptor,
@@ -194,6 +196,11 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
         ),
         acts=acts,
         nodes=nodes,
+        _node_provenance_index=_single_source_node_provenance(
+            nodes,
+            source_kind=SourceKind.NATIVE_RUN,
+            source_id=str(path),
+        ),
     )
 
 
@@ -383,6 +390,11 @@ def _adapt_replay(
         nodes=nodes,
         replay_by_node=replay_by_node,
         warnings=identity_warnings,
+        _node_provenance_index=_single_source_node_provenance(
+            nodes,
+            source_kind=SourceKind.REPLAY_JSONL,
+            source_id=str(path),
+        ),
     )
     return AdaptedSource(descriptor, runs=(run,), errors=tuple(errors))
 
@@ -452,6 +464,10 @@ def _adapt_deck_run(
         if outcome_row
         else (max(timestamps) if timestamps else None),
     )
+    nodes = [
+        _annotate_deck_history_evidence(row, resolved_source_id)
+        for row in records
+    ]
     return RunRecord(
         run_id=run_id,
         source_id=resolved_source_id,
@@ -474,11 +490,13 @@ def _adapt_deck_run(
             node_rewards=any(row.get("event") == "card_pick" for row in records),
             decisions=any(row.get("event") == "card_pick" for row in records),
         ),
-        nodes=[
-            _annotate_deck_history_evidence(row, resolved_source_id)
-            for row in records
-        ],
+        nodes=nodes,
         warnings=list(warnings or ()),
+        _node_provenance_index=_single_source_node_provenance(
+            nodes,
+            source_kind=SourceKind.DECK_HISTORY,
+            source_id=resolved_source_id,
+        ),
     )
 
 
@@ -811,6 +829,19 @@ def _adapt_native_history(
 
 
 _DETAIL_EVIDENCE_LIMIT = 256
+
+
+def _single_source_node_provenance(
+    nodes: list[dict[str, Any]],
+    *,
+    source_kind: SourceKind,
+    source_id: str,
+) -> dict[str, tuple[NodeOrigin, ...]]:
+    origin = NodeOrigin(source_kind=source_kind, source_id=source_id)
+    return {
+        node_evidence_key(nodes, index): (origin,)
+        for index in range(len(nodes))
+    }
 
 
 def _native_final_player_evidence(player: dict[str, Any]) -> dict[str, Any]:

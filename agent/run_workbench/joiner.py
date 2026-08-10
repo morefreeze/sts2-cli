@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import fields
+from dataclasses import fields, replace
 from hashlib import sha256
 from itertools import combinations, groupby
 import json
 from typing import Any, Iterable
 
-from .models import Capabilities, Coverage, RunMetadata, RunOutcome, RunRecord, RunStatus, SourceKind
+from .models import (
+    Capabilities,
+    Coverage,
+    NodeOrigin,
+    RunMetadata,
+    RunOutcome,
+    RunRecord,
+    RunStatus,
+    SourceKind,
+    node_evidence_key,
+)
 
 
 _SOURCE_PRIORITY = {
@@ -42,7 +52,7 @@ def join_records(records: Iterable[RunRecord]) -> list[RunRecord]:
 def _merge_group(records: list[RunRecord]) -> RunRecord:
     records = _deterministic_tie_records(records)
     if len(records) == 1:
-        return records[0]
+        return _ensure_node_origins(records[0])
 
     warnings = _unique(warning for record in records for warning in record.warnings)
     metadata, metadata_warnings = _merge_metadata(records)
@@ -76,8 +86,10 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
             for field in fields(Capabilities)
         }
     )
-    merged_acts, act_warnings = _merge_evidence(records, evidence_type="act")
-    merged_nodes, node_warnings = _merge_evidence(records, evidence_type="node")
+    merged_acts, act_warnings, _ = _merge_evidence(records, evidence_type="act")
+    merged_nodes, node_warnings, node_origins = _merge_evidence(
+        records, evidence_type="node"
+    )
     warnings.extend(act_warnings)
     warnings.extend(node_warnings)
     return RunRecord(
@@ -96,6 +108,40 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
         nodes=merged_nodes,
         replay_by_node=replay_by_node,
         warnings=_unique(warnings),
+        _node_provenance_index={
+            node_evidence_key(merged_nodes, index): origins
+            for index, origins in enumerate(node_origins)
+            if origins
+        },
+    )
+
+
+def _ensure_node_origins(record: RunRecord) -> RunRecord:
+    index = {
+        node_evidence_key(record.nodes, item_index): origins
+        for item_index in range(len(record.nodes))
+        if (origins := _record_node_origins(record, item_index))
+    }
+    return replace(record, _node_provenance_index=index)
+
+
+def _record_node_origins(
+    record: RunRecord, index: int
+) -> tuple[NodeOrigin, ...]:
+    origins = record.node_origins(index)
+    if origins:
+        return origins
+    if not isinstance(record.source_id, str) or not record.source_id:
+        return ()
+    return (NodeOrigin(record.source_kind, record.source_id),)
+
+
+def _merge_typed_origins(
+    *groups: tuple[NodeOrigin, ...],
+) -> tuple[NodeOrigin, ...]:
+    unique = {origin for group in groups for origin in group}
+    return tuple(
+        sorted(unique, key=lambda origin: (origin.source_kind.value, origin.source_id))
     )
 
 
@@ -182,25 +228,40 @@ def _merge_evidence(
     records: list[RunRecord],
     *,
     evidence_type: str,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+    list[tuple[NodeOrigin, ...]],
+]:
     merged: list[dict[str, Any]] = []
     by_identity: dict[str, int] = {}
     warnings: list[str] = []
+    merged_origins: list[tuple[NodeOrigin, ...]] = []
     attribute = "acts" if evidence_type == "act" else "nodes"
     for record in _deterministic_evidence_records(records):
-        for item in getattr(record, attribute):
+        for item_index, item in enumerate(getattr(record, attribute)):
             evidence = _annotate_evidence(item, record, evidence_type)
+            origins = (
+                _record_node_origins(record, item_index)
+                if evidence_type == "node"
+                else ()
+            )
             identity = _stable_evidence_identity(evidence, evidence_type)
             if identity is None:
                 merged.append(evidence)
+                merged_origins.append(origins)
                 continue
             existing_index = by_identity.get(identity)
             if existing_index is None:
                 by_identity[identity] = len(merged)
                 merged.append(evidence)
+                merged_origins.append(origins)
                 continue
 
             existing = merged[existing_index]
+            merged_origins[existing_index] = _merge_typed_origins(
+                merged_origins[existing_index], origins
+            )
             if _evidence_payload(existing) == _evidence_payload(evidence):
                 existing["_workbench_provenance"] = _merge_provenance(
                     existing.get("_workbench_provenance"),
@@ -225,7 +286,7 @@ def _merge_evidence(
             )
             if warning not in warnings:
                 warnings.append(warning)
-    return merged, warnings
+    return merged, warnings, merged_origins
 
 
 def _annotate_evidence(

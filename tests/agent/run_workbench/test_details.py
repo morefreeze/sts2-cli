@@ -22,9 +22,11 @@ from agent.run_workbench.models import (
     DeltaQuality,
     InventorySnapshot,
     NodeDetail,
+    NodeOrigin,
     RunDelta,
     RunRecord,
     SourceKind,
+    node_evidence_key,
 )
 from agent.run_workbench.sources import SourceDescriptor
 
@@ -373,11 +375,25 @@ def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() ->
         ],
     )
     joined = join_records([replay, native])[0]
+    native_index = next(
+        index for index, node in enumerate(joined.nodes) if node["id"] == "native-node"
+    )
+    replay_index = next(
+        index
+        for index, node in enumerate(joined.nodes)
+        if node["id"] == "A1F2:Monster:7"
+    )
 
     native_detail = build_node_detail(joined, "native-node")
     replay_detail = build_node_detail(joined, "A1F2:Monster:7")
 
     assert joined.source_kind is SourceKind.NATIVE_RUN
+    assert joined.node_origins(native_index) == (
+        NodeOrigin(SourceKind.NATIVE_RUN, "native-source"),
+    )
+    assert joined.node_origins(replay_index) == (
+        NodeOrigin(SourceKind.REPLAY_JSONL, "replay-source"),
+    )
     assert native_detail.exit.hp == 77
     assert native_detail.combat_rounds == ()
     assert replay_detail.entry.hp == 20
@@ -386,7 +402,95 @@ def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() ->
     assert replay_detail.coverage["turn_replay"] is True
 
 
-def test_raw_replay_marker_cannot_promote_a_native_node() -> None:
+def test_joined_conflicting_node_origins_choose_basic_detail_conservatively() -> None:
+    native = RunRecord(
+        run_id="ambiguous-node-origin",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "shared-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "map_point_type": "monster",
+                "player_stats": [{"current_hp": 70}],
+            }
+        ],
+    )
+    replay = RunRecord(
+        run_id="ambiguous-node-origin",
+        source_id="replay-source",
+        source_kind=SourceKind.REPLAY_JSONL,
+        nodes=[
+            {
+                "id": "shared-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "room_type": "Monster",
+                "start_player": {"hp": 20},
+                "end_player": {"hp": 14},
+                "combat": {"rounds": [{"round": 1}]},
+            }
+        ],
+    )
+    joined = join_records([replay, native])[0]
+
+    detail = build_node_detail(joined, "shared-node")
+
+    assert {origin.source_kind for origin in joined.node_origins(0)} == {
+        SourceKind.NATIVE_RUN,
+        SourceKind.REPLAY_JSONL,
+    }
+    assert detail.exit.hp is None
+    assert detail.combat_rounds == ()
+
+
+def test_joined_same_kind_multiple_origins_choose_basic_detail_conservatively() -> None:
+    first = RunRecord(
+        run_id="ambiguous-native-origins",
+        source_id="native-source-a",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "shared-native-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "map_point_type": "monster",
+                "player_stats": [{"current_hp": 70}],
+            }
+        ],
+    )
+    second = RunRecord(
+        run_id="ambiguous-native-origins",
+        source_id="native-source-b",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "shared-native-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "map_point_type": "monster",
+                "player_stats": [{"current_hp": 60}],
+            }
+        ],
+    )
+    joined = join_records([second, first])[0]
+
+    detail = build_node_detail(joined, "shared-native-node")
+
+    assert joined.node_origins(0) == (
+        NodeOrigin(SourceKind.NATIVE_RUN, "native-source-a"),
+        NodeOrigin(SourceKind.NATIVE_RUN, "native-source-b"),
+    )
+    assert detail.exit.hp is None
+    assert detail.combat_rounds == ()
+
+
+def test_raw_provenance_and_conflicting_marker_cannot_promote_a_native_node() -> None:
     run = RunRecord(
         run_id="raw-marker-boundary",
         source_id="native-source",
@@ -398,12 +502,12 @@ def test_raw_replay_marker_cannot_promote_a_native_node() -> None:
                 "act": 1,
                 "floor": 1,
                 "global_floor": 1,
-                "map_point_type": "monster",
-                "player_stats": [{"current_hp": 70}],
+                "room_type": "Monster",
+                "exit_player": {"hp": 70},
                 "start_player": {"hp": 20},
                 "end_player": {"hp": 14},
                 "combat": {"rounds": [{"round": 1}]},
-                "_workbench_evidence_kind": "replay_room",
+                "_workbench_evidence_kind": "native_run_node",
                 "_workbench_provenance": [
                     {
                         "source_id": "forged-replay-source",
@@ -561,6 +665,46 @@ def test_native_entry_uses_the_nearest_earlier_floor_not_list_order() -> None:
 
     assert first.entry.hp is None
     assert second.entry.hp == 70
+
+
+def test_native_previous_uses_typed_sidecar_not_raw_provenance_fields() -> None:
+    nodes = [
+        {
+            "id": "a0:n0",
+            "act": 1,
+            "floor": 1,
+            "global_floor": 1,
+            "player_stats": [{"current_hp": 70}],
+            "_workbench_provenance": [
+                {"source_id": "forged-a", "source_kind": "replay_jsonl"}
+            ],
+        },
+        {
+            "id": "a0:n1",
+            "act": 1,
+            "floor": 2,
+            "global_floor": 2,
+            "player_stats": [{"current_hp": 60}],
+            "_workbench_provenance": [
+                {"source_id": "forged-b", "source_kind": "native_run"}
+            ],
+        },
+    ]
+    origin = NodeOrigin(SourceKind.NATIVE_RUN, "controlled-native-source")
+    run = RunRecord(
+        run_id="typed-previous-origin",
+        source_id="aggregate-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=nodes,
+        _node_provenance_index={
+            node_evidence_key(nodes, 0): (origin,),
+            node_evidence_key(nodes, 1): (origin,),
+        },
+    )
+
+    detail = build_node_detail(run, "a0:n1")
+
+    assert detail.entry.hp == 70
 
 
 def test_native_entry_does_not_borrow_an_ambiguous_duplicate_floor() -> None:

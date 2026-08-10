@@ -33,13 +33,6 @@ _REPLAY_ID_PATTERN = re.compile(
 _NATIVE_ID_PATTERN = re.compile(
     r"^a(?P<act_index>\d+):n(?P<node_index>\d+)$"
 )
-_EVIDENCE_SOURCE_KINDS = {
-    "native_run_node": SourceKind.NATIVE_RUN,
-    "replay_room": SourceKind.REPLAY_JSONL,
-    "deck_history_event": SourceKind.DECK_HISTORY,
-}
-
-
 class NodeNotFoundError(LookupError):
     """A stable public error that deliberately omits source paths."""
 
@@ -63,19 +56,20 @@ class InvalidNodeDetailError(ValueError):
 def build_node_detail(record: RunRecord, node_id: str) -> NodeDetail:
     """Build one canonical floor detail without inspecting source filenames."""
 
-    node = next(
+    selected = next(
         (
-            item
-            for item in record.nodes
+            (index, item)
+            for index, item in enumerate(record.nodes)
             if isinstance(item, dict) and item.get("id") == node_id
         ),
         None,
     )
-    if node is None:
+    if selected is None:
         raise NodeNotFoundError(record.run_id, node_id)
-    node_source_kind = _node_source_kind(record, node)
+    node_index, node = selected
+    node_source_kind = _node_source_kind(record, node, node_index)
     if node_source_kind is SourceKind.NATIVE_RUN:
-        return native_node_detail(record, node)
+        return native_node_detail(record, node, node_index=node_index)
     if (
         node_source_kind is SourceKind.REPLAY_JSONL
         and (
@@ -87,9 +81,14 @@ def build_node_detail(record: RunRecord, node_id: str) -> NodeDetail:
     return basic_node_detail(record, node)
 
 
-def native_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
-    index = _node_index(record, node)
-    previous = _native_previous_node(record, node)
+def native_node_detail(
+    record: RunRecord,
+    node: dict[str, Any],
+    *,
+    node_index: int | None = None,
+) -> NodeDetail:
+    index = _node_index(record, node) if node_index is None else node_index
+    previous = _native_previous_node(record, node, index)
     entry_sources: list[dict[str, Any]] = []
     explicit_entry = node.get("entry_player")
     if isinstance(explicit_entry, dict):
@@ -229,9 +228,6 @@ def _detail(
 
 
 def _node_index(record: RunRecord, selected: dict[str, Any]) -> int:
-    for index, node in enumerate(record.nodes):
-        if node is selected:
-            return index
     selected_id = selected.get("id")
     for index, node in enumerate(record.nodes):
         if isinstance(node, dict) and node.get("id") == selected_id:
@@ -240,47 +236,29 @@ def _node_index(record: RunRecord, selected: dict[str, Any]) -> int:
 
 
 def _node_source_kind(
-    record: RunRecord, node: dict[str, Any]
+    record: RunRecord, node: dict[str, Any], node_index: int
 ) -> SourceKind:
-    marker = node.get("_workbench_evidence_kind")
-    marker_kind = (
-        _EVIDENCE_SOURCE_KINDS.get(marker)
-        if isinstance(marker, str)
-        else None
-    )
-    provenance_kind = _controlled_provenance_source_kind(node)
+    origins = record.node_origins(node_index)
+    if origins:
+        if len(origins) != 1:
+            return SourceKind.UNKNOWN
+        source_kind = origins[0].source_kind
+        return (
+            source_kind
+            if _node_structure_supports(node, source_kind)
+            else SourceKind.UNKNOWN
+        )
     if (
-        provenance_kind is not None
-        and (marker_kind is None or marker_kind is provenance_kind)
-        and _node_structure_supports(node, provenance_kind)
+        record.source_kind is SourceKind.NATIVE_RUN
+        and _REPLAY_ID_PATTERN.match(_text(node.get("id")) or "") is not None
     ):
-        return provenance_kind
+        return SourceKind.UNKNOWN
     if (
-        provenance_kind is not None
-        and _node_structure_supports(node, provenance_kind)
+        record.source_kind is SourceKind.REPLAY_JSONL
+        and _NATIVE_ID_PATTERN.fullmatch(_text(node.get("id")) or "") is not None
     ):
-        return provenance_kind
+        return SourceKind.UNKNOWN
     return record.source_kind
-
-
-def _controlled_provenance_source_kind(
-    node: dict[str, Any],
-) -> SourceKind | None:
-    provenance = node.get("_workbench_provenance")
-    source_kinds: set[SourceKind] = set()
-    if isinstance(provenance, list):
-        for item in provenance:
-            if not isinstance(item, dict):
-                continue
-            if not isinstance(item.get("source_id"), str) or not item["source_id"]:
-                continue
-            try:
-                source_kinds.add(SourceKind(item.get("source_kind")))
-            except (TypeError, ValueError):
-                continue
-    if len(source_kinds) == 1:
-        return next(iter(source_kinds))
-    return None
 
 
 def _node_structure_supports(
@@ -325,38 +303,43 @@ def _node_has_replay_rounds(node: dict[str, Any]) -> bool:
 
 
 def _node_provenance_identity(
-    record: RunRecord, node: dict[str, Any]
+    record: RunRecord, node_index: int
 ) -> tuple[tuple[str, str], ...]:
-    provenance = node.get("_workbench_provenance")
-    identities: set[tuple[str, str]] = set()
-    if isinstance(provenance, list):
-        for item in provenance:
-            if not isinstance(item, dict):
-                continue
-            source_id = item.get("source_id")
-            source_kind = item.get("source_kind")
-            if isinstance(source_id, str) and isinstance(source_kind, str):
-                identities.add((source_kind, source_id))
-    if identities:
-        return tuple(sorted(identities))
+    origins = record.node_origins(node_index)
+    if origins:
+        return tuple(
+            sorted(
+                (
+                    (origin.source_kind.value, origin.source_id)
+                    for origin in origins
+                )
+            )
+        )
     return ((record.source_kind.value, record.source_id),)
 
 
 def _native_previous_node(
     record: RunRecord,
     node: dict[str, Any],
+    node_index: int,
 ) -> dict[str, Any] | None:
     current_act, _, current_global_floor, _ = _coordinates(node)
     if current_act is None or current_global_floor is None:
         return None
-    provenance_identity = _node_provenance_identity(record, node)
+    provenance_identity = _node_provenance_identity(record, node_index)
     candidates: dict[int, list[dict[str, Any]]] = {}
-    for candidate in record.nodes:
-        if not isinstance(candidate, dict) or candidate is node:
+    for candidate_index, candidate in enumerate(record.nodes):
+        if not isinstance(candidate, dict) or candidate_index == node_index:
             continue
-        if _node_source_kind(record, candidate) is not SourceKind.NATIVE_RUN:
+        if (
+            _node_source_kind(record, candidate, candidate_index)
+            is not SourceKind.NATIVE_RUN
+        ):
             continue
-        if _node_provenance_identity(record, candidate) != provenance_identity:
+        if (
+            _node_provenance_identity(record, candidate_index)
+            != provenance_identity
+        ):
             continue
         candidate_act, _, candidate_global_floor, _ = _coordinates(candidate)
         if (

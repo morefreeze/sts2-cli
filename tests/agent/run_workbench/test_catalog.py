@@ -15,7 +15,7 @@ from agent.run_workbench.catalog import (
     CatalogNotFoundError,
     RunCatalog,
 )
-from agent.run_workbench.models import RunStatus
+from agent.run_workbench.models import NodeOrigin, RunStatus, SourceKind
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> Path:
@@ -293,6 +293,24 @@ def test_source_adaptation_is_lazy_cached_and_invalidated_by_file_change(tmp_pat
     os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
     catalog.get_source(source_id)
     assert calls == 2
+
+
+def test_cached_and_public_record_copies_preserve_typed_node_origins(
+    tmp_path: Path,
+) -> None:
+    _write_jsonl(tmp_path / "replay.jsonl", _replay("origin-cache"))
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    source_id = catalog.list_sources()[0]["source_id"]
+    indexed = catalog._sources[source_id]
+
+    first = catalog._adapt(indexed)
+    cached = catalog._adapt(indexed)
+    public = catalog._public_records(indexed, cached)[0]
+    origin = NodeOrigin(SourceKind.REPLAY_JSONL, first.runs[0].source_id)
+
+    assert cached is first
+    assert first.runs[0].node_origins(0) == (origin,)
+    assert public.node_origins(0) == (origin,)
 
 
 def test_refresh_reuses_unchanged_index_records_without_rereading(
