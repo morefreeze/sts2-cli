@@ -680,6 +680,43 @@ def test_uploads_are_parsed_and_adapted_in_memory(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_replay_upload_preserves_parser_validated_coverage(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "action",
+            "data": {"cmd": "start_run", "run_id": "upload-invalid-act"},
+        },
+        {
+            "type": "state",
+            "run_id": "upload-invalid-act",
+            "data": {
+                "decision": "game_over",
+                "context": {
+                    "act": "1",
+                    "floor": 1,
+                    "room_type": "Monster",
+                },
+                "player": {},
+            },
+        },
+    ]
+    catalog = RunCatalog([tmp_path], replay_parser=parse_game_progress)
+
+    payload = catalog.parse_upload(
+        "invalid-act.jsonl",
+        "".join(json.dumps(record) + "\n" for record in records),
+    )
+
+    summary = payload["progress"]["summary"]
+    coverage = payload["runs"][0]["coverage"]
+    assert coverage == {
+        "complete_run": summary["complete_run"],
+        "first_recorded_floor": summary["first_recorded_floor"],
+        "last_recorded_floor": summary["last_recorded_floor"],
+    }
+    assert payload["runs"][0]["outcome"]["max_global_floor"] is None
+
+
 @pytest.mark.parametrize(
     ("source_name", "text", "message"),
     [
@@ -1741,7 +1778,7 @@ def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(
     assert large_run.capabilities == small_run.capabilities
     assert large_run.outcome.status is RunStatus.DEAD
     assert large_run.outcome.max_global_floor == 7
-    assert large_run.coverage.complete_run is True
+    assert large_run.coverage.complete_run is False
     assert large_run.coverage.first_recorded_floor == 1
     assert large_run.capabilities.decisions is True
     assert large_run.capabilities.turn_replay is True

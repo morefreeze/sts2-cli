@@ -4,17 +4,195 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from typing import Any
 
 
-def _display_coordinate(value: Any, default: int) -> int:
+MIN_ACT = 1
+MAX_ACT = 4
+MIN_FLOOR = 0
+MAX_FLOOR = 17
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {
+            key: _json_safe_value(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+        }
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    return None
+
+
+def _require_mapping(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    return _json_safe_value(value)
+
+
+def _optional_mapping(
+    record: Mapping[str, Any], key: str, label: str
+) -> dict[str, Any]:
+    value = record.get(key)
+    if value is None:
+        return {}
+    return _require_mapping(value, label)
+
+
+def _mapping_list(record: Mapping[str, Any], key: str, label: str) -> list[dict[str, Any]]:
+    value = record.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    return [
+        _json_safe_value(item)
+        for item in value
+        if isinstance(item, Mapping)
+    ]
+
+
+def _finite_number(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _timestamp(value: Any) -> str | int | float | None:
+    if isinstance(value, str):
+        return value or None
+    return _finite_number(value)
+
+
+def _normalize_numeric_fields(record: dict[str, Any], *keys: str) -> None:
+    for key in keys:
+        if key in record:
+            record[key] = _finite_number(record[key])
+
+
+def _normalize_text_field(record: dict[str, Any], key: str) -> None:
+    if key in record and not isinstance(record[key], str):
+        record[key] = None
+
+
+def _normalize_action(raw_action: Any) -> dict[str, Any]:
+    action = _require_mapping(raw_action, "action data")
+    _normalize_text_field(action, "cmd")
+    _normalize_text_field(action, "action")
+    raw_args = raw_action.get("args")
+    if raw_args is not None or "args" in raw_action:
+        args = _optional_mapping(raw_action, "args", "action args")
+        _normalize_numeric_fields(
+            args,
+            "option_index",
+            "card_index",
+            "target_index",
+            "potion_index",
+            "col",
+            "row",
+        )
+        action["args"] = args
+    return action
+
+
+def _normalize_state(raw_state: Any) -> dict[str, Any]:
+    state = _require_mapping(raw_state, "state data")
+    context = _optional_mapping(raw_state, "context", "state context")
+    player = _optional_mapping(raw_state, "player", "state player")
+
+    for key in ("room_type", "act_name", "run_id", "character", "seed"):
+        _normalize_text_field(context, key)
+    for key in ("game_version", "build_id"):
+        _normalize_text_field(context, key)
+    if "boss" in context:
+        boss = _optional_mapping(context, "boss", "state context boss")
+        for key in ("id", "name"):
+            _normalize_text_field(boss, key)
+        context["boss"] = boss
+
+    for key in ("name",):
+        _normalize_text_field(player, key)
+    _normalize_numeric_fields(player, "hp", "max_hp", "block", "gold", "deck_size")
+    for key in ("deck", "relics", "potions"):
+        player[key] = _mapping_list(raw_state.get("player") or {}, key, f"state player {key}")
+
+    for card in player["deck"]:
+        _normalize_numeric_fields(card, "index", "cost")
+    for potion in player["potions"]:
+        _normalize_numeric_fields(potion, "index")
+
+    state["context"] = context
+    state["player"] = player
+    _normalize_text_field(state, "decision")
+    _normalize_text_field(state, "event_name")
+    _normalize_text_field(state, "description")
+    _normalize_numeric_fields(
+        state,
+        "round",
+        "energy",
+        "max_energy",
+        "draw_pile_count",
+        "discard_pile_count",
+    )
+
+    for key in ("options", "choices", "cards", "hand", "enemies"):
+        state[key] = _mapping_list(raw_state, key, f"state {key}")
+    for option in state["options"]:
+        _normalize_numeric_fields(option, "index")
+    for choice in state["choices"]:
+        _normalize_numeric_fields(choice, "col", "row")
+    for card in [*state["cards"], *state["hand"]]:
+        _normalize_numeric_fields(card, "index", "cost")
+    for enemy in state["enemies"]:
+        _normalize_numeric_fields(enemy, "index", "hp", "max_hp", "block")
+        enemy["intents"] = _mapping_list(enemy, "intents", "state enemy intents")
+        enemy["powers"] = _mapping_list(enemy, "powers", "state enemy powers")
+        for intent in enemy["intents"]:
+            _normalize_numeric_fields(intent, "damage", "hits")
+        for power in enemy["powers"]:
+            _normalize_numeric_fields(power, "amount")
+    return state
+
+
+def _metadata_text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _metadata_ascension(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10:
+        return value
+    return None
+
+
+def _metadata_modifiers(value: Any) -> list[str] | None:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _display_coordinate(
+    value: Any, default: int, minimum: int, maximum: int
+) -> int:
     """Preserve legacy room-display fallbacks without creating evidence."""
-    if not value:
+    if isinstance(value, bool) or not value:
+        return default
+    if isinstance(value, float) and (
+        not math.isfinite(value) or not value.is_integer()
+    ):
         return default
     try:
-        return int(value)
+        coordinate = int(value)
     except (OverflowError, TypeError, ValueError):
         return default
+    return coordinate if minimum <= coordinate <= maximum else default
 
 
 def _observed_coordinate(value: Any) -> int | None:
@@ -31,8 +209,8 @@ def _observed_coordinate(value: Any) -> int | None:
 
 def _display_act_and_floor(context: dict[str, Any]) -> tuple[int, int]:
     return (
-        _display_coordinate(context.get("act"), 1),
-        _display_coordinate(context.get("floor"), 0),
+        _display_coordinate(context.get("act"), 1, MIN_ACT, MAX_ACT),
+        _display_coordinate(context.get("floor"), 0, MIN_FLOOR, MAX_FLOOR),
     )
 
 
@@ -45,7 +223,12 @@ def format_room_label(context: dict[str, Any]) -> str:
 def _global_floor(context: dict[str, Any]) -> int | None:
     act = _observed_coordinate(context.get("act"))
     floor = _observed_coordinate(context.get("floor"))
-    if act is None or act < 1 or floor is None or floor < 0:
+    if (
+        act is None
+        or not MIN_ACT <= act <= MAX_ACT
+        or floor is None
+        or not MIN_FLOOR <= floor <= MAX_FLOOR
+    ):
         return None
     return (act - 1) * 17 + floor
 
@@ -57,8 +240,8 @@ def _display_global_floor(context: dict[str, Any]) -> int:
 
 def _player_hp(state: dict[str, Any]) -> int | None:
     player = state.get("player") or {}
-    hp = player.get("hp")
-    return int(hp) if isinstance(hp, (int, float)) else None
+    hp = _finite_number(player.get("hp"))
+    return int(hp) if hp is not None else None
 
 
 def _compact_player(player: dict[str, Any] | None) -> dict[str, Any]:
@@ -456,16 +639,17 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
     character: str | None = None
     seed: str | None = None
     game_version: str | None = None
-    ascension: Any = None
-    modifiers: Any = None
-    started_at: str | None = None
-    ended_at: str | None = None
+    ascension: int | None = None
+    modifiers: list[str] | None = None
+    started_at: Any = None
+    ended_at: Any = None
     victory = False
     last_state_data: dict[str, Any] | None = None
     observed_global_floors: list[int] = []
     observed_floor_labels: dict[int, str] = {}
     has_state_records = False
     has_action_records = False
+    seen_start_run = False
     first_evidence: tuple[str, dict[str, Any]] | None = None
     last_evidence: tuple[str, dict[str, Any]] | None = None
 
@@ -489,37 +673,53 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
             active_room = room
         return room
 
-    for source_index, entry in enumerate(entries):
+    for source_index, raw_entry in enumerate(entries):
+        entry = _require_mapping(raw_entry, "entry")
+        _normalize_numeric_fields(entry, "step")
         entry_type = entry.get("type")
         raw_data = entry.get("data")
-        data = raw_data if isinstance(raw_data, dict) else {}
-        if entry_type in {"action", "state"} and isinstance(raw_data, dict):
+        if entry_type == "action":
+            data = _normalize_action(raw_data)
             evidence = (entry_type, data)
             if first_evidence is None:
                 first_evidence = evidence
             last_evidence = evidence
-        ended_at = entry.get("ts") or ended_at
-        if started_at is None:
-            started_at = entry.get("ts")
+        elif entry_type == "state":
+            data = _normalize_state(raw_data)
+            if first_evidence is None:
+                first_evidence = (entry_type, data)
+            # A state is terminal evidence only after its room coordinates and
+            # decision have been accepted below.
+            last_evidence = None
+        else:
+            data = {}
+        timestamp = _timestamp(entry.get("ts"))
+        if timestamp is not None:
+            ended_at = timestamp
+            if started_at is None:
+                started_at = timestamp
 
         if entry_type == "action":
-            has_action_records = has_action_records or isinstance(raw_data, dict)
+            has_action_records = True
             action = data
             if action.get("cmd") == "start_run":
-                run_id = action.get("run_id") or run_id
-                character = action.get("character") or character
-                seed = action.get("seed") or seed
+                if seen_start_run:
+                    raise ValueError("multiple start_run records")
+                seen_start_run = True
+                run_id = _metadata_text(action.get("run_id")) or run_id
+                character = _metadata_text(action.get("character")) or character
+                seed = _metadata_text(action.get("seed")) or seed
                 game_version = (
-                    action.get("game_version")
-                    or action.get("build_id")
+                    _metadata_text(action.get("game_version"))
+                    or _metadata_text(action.get("build_id"))
                     or game_version
                 )
-                ascension = (
-                    action.get("ascension")
-                    if action.get("ascension") is not None
-                    else ascension
-                )
-                modifiers = action.get("modifiers") or modifiers
+                normalized_ascension = _metadata_ascension(action.get("ascension"))
+                if normalized_ascension is not None:
+                    ascension = normalized_ascension
+                normalized_modifiers = _metadata_modifiers(action.get("modifiers"))
+                if normalized_modifiers is not None:
+                    modifiers = normalized_modifiers
                 continue
             if last_state_room is not None:
                 action_row = _combat_action_row(action, last_state_data, entry.get("step"))
@@ -530,24 +730,24 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
 
         if entry_type != "state":
             continue
-        has_state_records = has_state_records or isinstance(raw_data, dict)
+        has_state_records = True
         state = data
-        raw_context = state.get("context")
-        context = raw_context if isinstance(raw_context, dict) else {}
+        context = state.get("context") or {}
         if not context:
             continue
 
-        run_id = run_id or context.get("run_id")
-        character = character or context.get("character")
-        seed = seed or context.get("seed")
+        run_id = run_id or _metadata_text(context.get("run_id"))
+        character = character or _metadata_text(context.get("character"))
+        seed = seed or _metadata_text(context.get("seed"))
         game_version = (
             game_version
-            or context.get("game_version")
-            or context.get("build_id")
+            or _metadata_text(context.get("game_version"))
+            or _metadata_text(context.get("build_id"))
         )
-        if ascension is None and context.get("ascension") is not None:
-            ascension = context.get("ascension")
-        modifiers = modifiers or context.get("modifiers")
+        if ascension is None:
+            ascension = _metadata_ascension(context.get("ascension"))
+        if modifiers is None:
+            modifiers = _metadata_modifiers(context.get("modifiers"))
         observed_global_floor = _global_floor(context)
         if observed_global_floor is not None:
             observed_global_floors.append(observed_global_floor)
@@ -575,6 +775,8 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
         if decision == "game_over":
             victory = bool(state.get("victory"))
             room["status"] = "won" if victory else "dead"
+        if observed_global_floor is not None:
+            last_evidence = (entry_type, state)
         last_state_room = room
         last_state_data = state
 
@@ -612,7 +814,7 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
     )
 
     summary = {
-        "source": source_name,
+        "source": _metadata_text(source_name),
         "run_id": run_id,
         "character": character,
         "seed": seed,

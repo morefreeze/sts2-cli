@@ -124,8 +124,8 @@ def test_replay_uses_injected_legacy_parser_and_records_observed_floor_range() -
     assert run.capabilities.turn_replay is True
     assert run.capabilities.visited_route is True
     assert run.capabilities.decisions is True
-    assert run.coverage.first_recorded_floor == 1
-    assert run.coverage.last_recorded_floor == 1
+    assert run.coverage.first_recorded_floor is None
+    assert run.coverage.last_recorded_floor is None
 
 
 def test_replay_nodes_preserve_injected_parser_room_ids_and_add_deltas() -> None:
@@ -655,8 +655,80 @@ def test_partial_replay_reports_only_observed_coverage() -> None:
 
     run = adapted.runs[0]
     assert run.coverage.complete_run is False
-    assert run.coverage.first_recorded_floor == 12
-    assert run.coverage.last_recorded_floor == 12
+    assert run.coverage.first_recorded_floor is None
+    assert run.coverage.last_recorded_floor is None
+
+
+@pytest.mark.parametrize(
+    ("records", "expected_first", "expected_last"),
+    [
+        (
+            [
+                {
+                    "type": "action",
+                    "data": {"cmd": "start_run", "run_id": "string-act"},
+                },
+                {
+                    "type": "state",
+                    "run_id": "string-act",
+                    "data": {
+                        "decision": "game_over",
+                        "context": {
+                            "act": "1",
+                            "floor": 1,
+                            "room_type": "Monster",
+                        },
+                        "player": {},
+                    },
+                },
+            ],
+            None,
+            None,
+        ),
+        (
+            [
+                {
+                    "type": "state",
+                    "run_id": "no-start",
+                    "data": {
+                        "decision": "game_over",
+                        "context": {
+                            "act": 1,
+                            "floor": 1,
+                            "room_type": "Monster",
+                        },
+                        "player": {},
+                    },
+                }
+            ],
+            1,
+            1,
+        ),
+    ],
+    ids=["invalid-act", "missing-start-run"],
+)
+def test_successful_replay_parser_summary_is_authoritative_for_coverage(
+    tmp_path: Path,
+    records: list[dict],
+    expected_first: int | None,
+    expected_last: int | None,
+) -> None:
+    path = tmp_path / "authoritative.jsonl"
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    parser_summary = parse_game_progress(records)["summary"]
+
+    run = adapt_path(path, replay_parser=parse_game_progress).runs[0]
+
+    assert parser_summary["complete_run"] is False
+    assert parser_summary["first_recorded_floor"] == expected_first
+    assert parser_summary["last_recorded_floor"] == expected_last
+    assert run.coverage.complete_run is parser_summary["complete_run"]
+    assert run.coverage.first_recorded_floor == expected_first
+    assert run.coverage.last_recorded_floor == expected_last
+    assert run.outcome.max_global_floor == parser_summary["max_global_floor"]
 
 
 def test_replay_parser_is_a_dependency_and_is_not_required_for_safe_adaptation() -> None:

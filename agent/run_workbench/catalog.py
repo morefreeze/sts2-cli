@@ -130,6 +130,7 @@ class _CompactRun:
     has_replay_action: bool = False
     has_replay_state: bool = False
     replay_parser_succeeded: bool = False
+    replay_parser_complete_run: bool | None = None
     has_replay_nodes: bool = False
     has_node_decisions: bool = False
     usable_per_node_replay: bool = False
@@ -146,7 +147,11 @@ class _CompactRun:
             first_recorded_floor = None
             visited_route = False
         elif self.source_kind is SourceKind.REPLAY_JSONL:
-            complete_run = self.has_outcome and self.first_recorded_floor == 1
+            complete_run = (
+                self.replay_parser_complete_run
+                if self.replay_parser_complete_run is not None
+                else self.has_outcome and self.first_recorded_floor == 1
+            )
             first_recorded_floor = self.first_recorded_floor
             visited_route = self.has_floor or self.has_replay_nodes
         else:
@@ -1456,6 +1461,10 @@ def _normalize_incomplete_replay(
     if not isinstance(summary, dict):
         summary = {}
     _apply_compact_replay_summary_metadata(compact, summary)
+    if type(summary.get("has_state_records")) is bool:
+        compact.has_replay_state = summary["has_state_records"]
+    if type(summary.get("has_action_records")) is bool:
+        compact.has_replay_action = summary["has_action_records"]
     summary_id = _first_scalar_text(summary, "run_id")
     if summary_id is not None:
         if not compact.run_id:
@@ -1494,13 +1503,38 @@ def _normalize_incomplete_replay(
         for node in nodes
     )
 
-    parser_max_floor = _first_integral_int(summary, "max_global_floor")
-    if parser_max_floor is not None:
-        compact.max_global_floor = parser_max_floor
+    has_parser_coverage = all(
+        key in summary
+        for key in (
+            "complete_run",
+            "first_recorded_floor",
+            "last_recorded_floor",
+            "max_global_floor",
+        )
+    )
+    if has_parser_coverage:
+        compact.replay_parser_complete_run = summary.get("complete_run") is True
+        compact.first_recorded_floor = _first_integral_int(
+            summary, "first_recorded_floor"
+        )
+        compact.observed_max_floor = _first_integral_int(
+            summary, "last_recorded_floor"
+        )
+        compact.observed_max_floor_label = _first_scalar_text(
+            summary, "max_floor_label"
+        )
+        compact.max_global_floor = _first_integral_int(
+            summary, "max_global_floor"
+        )
         compact.max_floor_label = _first_scalar_text(summary, "max_floor_label")
     else:
-        compact.max_global_floor = compact.observed_max_floor
-        compact.max_floor_label = compact.observed_max_floor_label
+        parser_max_floor = _first_integral_int(summary, "max_global_floor")
+        if parser_max_floor is not None:
+            compact.max_global_floor = parser_max_floor
+            compact.max_floor_label = _first_scalar_text(summary, "max_floor_label")
+        else:
+            compact.max_global_floor = compact.observed_max_floor
+            compact.max_floor_label = compact.observed_max_floor_label
 
 
 def _apply_compact_replay_summary_metadata(

@@ -219,6 +219,15 @@ def _adapt_replay(
     nodes = _annotate_replay_nodes(_dict_list(parsed.get("rooms")))
     observed_floors = _observed_replay_floors(records)
     observed_floors.extend(_node_floors(nodes))
+    has_parser_coverage = parser_succeeded and all(
+        key in summary
+        for key in (
+            "complete_run",
+            "first_recorded_floor",
+            "last_recorded_floor",
+            "max_global_floor",
+        )
+    )
     status, victory, technical_kind = _status_from_records(records)
     has_terminal = any(_is_terminal_replay_entry(row) for row in records)
     if status is RunStatus.UNKNOWN and records:
@@ -248,16 +257,27 @@ def _adapt_replay(
     )
     run_id, identity_warnings = _replay_run_identity(records, summary)
     max_floor = _first_int(summary, "max_global_floor")
-    if max_floor is None and observed_floors:
+    if max_floor is None and observed_floors and not has_parser_coverage:
         max_floor = max(observed_floors)
     raw_actions = [
         deepcopy(row["data"])
         for row in records
         if row.get("type") == "action" and isinstance(row.get("data"), dict)
     ]
-    has_state = any(
+    raw_has_state = any(
         row.get("type") == "state" and isinstance(row.get("data"), dict)
         for row in records
+    )
+    raw_has_actions = bool(raw_actions)
+    has_state = (
+        summary["has_state_records"]
+        if parser_succeeded and type(summary.get("has_state_records")) is bool
+        else raw_has_state
+    )
+    has_actions = (
+        summary["has_action_records"]
+        if parser_succeeded and type(summary.get("has_action_records")) is bool
+        else raw_has_actions
     )
     replay_by_node = {
         str(node["id"]): deepcopy(node)
@@ -277,6 +297,21 @@ def _adapt_replay(
         node.get("id") is not None and _node_has_decision_evidence(node)
         for node in nodes
     )
+    first_recorded_floor = (
+        _first_int(summary, "first_recorded_floor")
+        if has_parser_coverage
+        else (min(observed_floors) if observed_floors else None)
+    )
+    last_recorded_floor = (
+        _first_int(summary, "last_recorded_floor")
+        if has_parser_coverage
+        else (max(observed_floors) if observed_floors else None)
+    )
+    complete_run = (
+        summary.get("complete_run") is True
+        if has_parser_coverage
+        else bool(observed_floors and min(observed_floors) == 1 and has_terminal)
+    )
     run = RunRecord(
         run_id=run_id,
         source_id=str(path),
@@ -290,15 +325,18 @@ def _adapt_replay(
             technical_failure_kind=technical_kind,
         ),
         coverage=Coverage(
-            complete_run=bool(observed_floors and min(observed_floors) == 1 and has_terminal),
-            first_recorded_floor=min(observed_floors) if observed_floors else None,
-            last_recorded_floor=max(observed_floors) if observed_floors else None,
+            complete_run=complete_run,
+            first_recorded_floor=first_recorded_floor,
+            last_recorded_floor=last_recorded_floor,
         ),
         capabilities=Capabilities(
             visited_route=bool(observed_floors or nodes),
-            decisions=bool(raw_actions or has_node_decisions),
+            decisions=bool((has_actions and raw_actions) or has_node_decisions),
             turn_replay=parser_succeeded
-            and ((has_state and bool(raw_actions)) or usable_per_node_replay),
+            and bool(
+                (has_state and has_actions and raw_actions)
+                or usable_per_node_replay
+            ),
         ),
         nodes=nodes,
         replay_by_node=replay_by_node,
