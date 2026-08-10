@@ -731,6 +731,61 @@ def test_successful_replay_parser_summary_is_authoritative_for_coverage(
     assert run.outcome.max_global_floor == parser_summary["max_global_floor"]
 
 
+@pytest.mark.parametrize(
+    ("raw_modifiers", "expected_summary_modifiers", "expected_modifiers"),
+    [
+        (["TEST_MODIFIER"], ["TEST_MODIFIER"], ("TEST_MODIFIER",)),
+        (["TEST_MODIFIER", 7], None, ()),
+    ],
+    ids=["valid-modifiers", "mixed-modifiers"],
+)
+def test_public_replay_parser_metadata_prevents_raw_numeric_pollution(
+    raw_modifiers, expected_summary_modifiers, expected_modifiers
+):
+    records = [
+        {
+            "type": "action",
+            "data": {
+                "cmd": "start_run",
+                "run_id": 123,
+                "character": 234,
+                "seed": 456,
+                "game_version": 789,
+                "ascension": 999,
+                "modifiers": raw_modifiers,
+            },
+        },
+        {
+            "type": "state",
+            "data": {
+                "decision": "combat_play",
+                "context": {"act": 1, "floor": 1},
+                "player": {},
+            },
+        },
+    ]
+    summary = parse_game_progress(records)["summary"]
+
+    run = adapt_records(
+        "numeric-metadata.jsonl",
+        records,
+        replay_parser=parse_game_progress,
+    ).runs[0]
+
+    assert summary["run_id"] is None
+    assert summary["character"] is None
+    assert summary["seed"] is None
+    assert summary["game_version"] is None
+    assert summary["ascension"] is None
+    assert summary["modifiers"] == expected_summary_modifiers
+    assert run.run_id == ""
+    assert run.metadata.character is None
+    assert run.metadata.seed is None
+    assert run.metadata.game_version is None
+    assert run.metadata.ascension is None
+    assert run.metadata.modifiers == expected_modifiers
+
+
 def test_replay_parser_is_a_dependency_and_is_not_required_for_safe_adaptation() -> None:
     adapted = adapt_path(FIXTURES / "replay.jsonl")
 

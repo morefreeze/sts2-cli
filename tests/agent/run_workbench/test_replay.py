@@ -420,6 +420,40 @@ def test_parse_game_progress_accepts_glory_floor_boundary():
     assert progress["rooms"][0]["label"] == "A4F17"
 
 
+@pytest.mark.parametrize(
+    ("raw_victory", "expected_victory", "expected_status"),
+    [
+        (True, True, "won"),
+        (False, False, "dead"),
+        ("false", None, "completed"),
+        (1, None, "completed"),
+        (None, None, "completed"),
+    ],
+    ids=["true", "false", "string", "integer", "none"],
+)
+def test_parse_game_progress_requires_exact_boolean_victory(
+    raw_victory, expected_victory, expected_status
+):
+    entries = [
+        {"type": "action", "data": {"cmd": "start_run"}},
+        _state(
+            1,
+            "game_over",
+            1,
+            1,
+            "Boss",
+            1,
+            victory=raw_victory,
+        ),
+    ]
+
+    progress = parse_game_progress(entries)
+
+    assert progress["summary"]["complete_run"] is True
+    assert progress["summary"]["victory"] is expected_victory
+    assert progress["rooms"][0]["status"] == expected_status
+
+
 def test_parse_game_progress_does_not_complete_on_unprocessed_terminal_state():
     entries = [
         {

@@ -112,6 +112,7 @@ class _CompactRun:
     evaluation_mode: str | None = None
     scenario: str | None = None
     ascension: int | None = None
+    modifiers: tuple[str, ...] = ()
     started_at: float | None = None
     ended_at: float | None = None
     status: RunStatus = RunStatus.UNKNOWN
@@ -177,6 +178,7 @@ class _CompactRun:
                 evaluation_mode=self.evaluation_mode,
                 scenario=self.scenario,
                 ascension=self.ascension,
+                modifiers=self.modifiers,
                 started_at=self.started_at,
                 ended_at=self.ended_at,
             ),
@@ -932,6 +934,7 @@ def _item_metadata(record: _CohortItem) -> RunMetadata:
         evaluation_mode=record.evaluation_mode,
         scenario=record.scenario,
         ascension=record.ascension,
+        modifiers=record.modifiers,
         started_at=record.started_at,
         ended_at=record.ended_at,
     )
@@ -1085,12 +1088,12 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     "eval_result",
                 }
                 if is_replay_candidate:
-                    top_level_id = _first_scalar_text(record, "run_id")
+                    top_level_id = _replay_scalar_text(record, "run_id")
                     if replay_top_level_id is None and top_level_id is not None:
                         replay_top_level_id = top_level_id
                     data = record.get("data")
                     nested_id = (
-                        _first_scalar_text(data, "run_id")
+                        _replay_scalar_text(data, "run_id")
                         if isinstance(data, dict)
                         else None
                     )
@@ -1263,6 +1266,51 @@ def _update_compact_metadata(
         compact.ascension = _first_integral_int(record, "ascension")
 
 
+def _replay_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _replay_ascension(record: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = record.get(key)
+        if type(value) is int and 0 <= value <= 10:
+            return value
+    return None
+
+
+def _replay_modifiers(record: dict[str, Any]) -> tuple[str, ...] | None:
+    value = record.get("modifiers")
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    return None
+
+
+def _update_compact_replay_metadata(
+    compact: _CompactRun, record: dict[str, Any]
+) -> None:
+    for attribute, keys in (
+        ("character", ("character",)),
+        ("seed", ("seed",)),
+        ("game_version", ("game_version", "build_id")),
+        ("checkpoint", ("checkpoint",)),
+        ("evaluation_mode", ("evaluation_mode",)),
+        ("scenario", ("scenario",)),
+    ):
+        if getattr(compact, attribute) is None:
+            value = _replay_scalar_text(record, *keys)
+            if value is not None:
+                setattr(compact, attribute, value)
+    if compact.ascension is None:
+        compact.ascension = _replay_ascension(record, "ascension")
+    modifiers = _replay_modifiers(record)
+    if modifiers is not None:
+        compact.modifiers = modifiers
+
+
 def _update_compact_timestamp_range(
     compact: _CompactRun, record: dict[str, Any]
 ) -> float | None:
@@ -1347,7 +1395,7 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
 def _update_compact_replay(
     compact: _CompactRun, record: dict[str, Any]
 ) -> None:
-    _update_compact_metadata(compact, record)
+    _update_compact_replay_metadata(compact, record)
     _update_compact_timestamp_range(compact, record)
 
     record_type = record.get("type")
@@ -1379,7 +1427,7 @@ def _update_compact_replay(
         return
     command = _first_scalar_text(data, "cmd", "decision")
     if command == "start_run":
-        _update_compact_metadata(compact, data)
+        _update_compact_replay_metadata(compact, data)
     context = data.get("context")
     floor = None
     floor_label = None
@@ -1490,10 +1538,9 @@ def _normalize_incomplete_replay(
         compact.has_replay_state = summary["has_state_records"]
     if type(summary.get("has_action_records")) is bool:
         compact.has_replay_action = summary["has_action_records"]
-    summary_id = _first_scalar_text(summary, "run_id")
+    summary_id = _replay_scalar_text(summary, "run_id")
     if summary_id is not None:
-        if not compact.run_id:
-            compact.run_id = summary_id
+        compact.run_id = summary_id
         observed_ids = set(compact.replay_observed_ids)
         compact.replay_ids_omitted = (
             _add_bounded_replay_id(observed_ids, summary_id)
@@ -1575,12 +1622,15 @@ def _apply_compact_replay_summary_metadata(
         ("evaluation_mode", ("evaluation_mode",)),
         ("scenario", ("scenario",)),
     ):
-        value = _first_scalar_text(summary, *keys)
+        value = _replay_scalar_text(summary, *keys)
         if value is not None:
             setattr(compact, attribute, value)
-    ascension = summary.get("ascension")
-    if type(ascension) is int and ascension >= 0:
+    ascension = _replay_ascension(summary, "ascension")
+    if ascension is not None:
         compact.ascension = ascension
+    modifiers = _replay_modifiers(summary)
+    if modifiers is not None:
+        compact.modifiers = modifiers
 
 
 def _compact_node_has_decision_evidence(node: dict[str, Any]) -> bool:

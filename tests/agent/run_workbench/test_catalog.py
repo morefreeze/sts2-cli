@@ -717,6 +717,79 @@ def test_replay_upload_preserves_parser_validated_coverage(tmp_path: Path) -> No
     assert payload["runs"][0]["outcome"]["max_global_floor"] is None
 
 
+def test_replay_upload_matches_parser_for_nonboolean_terminal_victory(
+    tmp_path: Path,
+) -> None:
+    records = [
+        {"type": "action", "data": {"cmd": "start_run"}},
+        {
+            "type": "state",
+            "data": {
+                "decision": "game_over",
+                "victory": "false",
+                "context": {"act": 1, "floor": 1, "room_type": "Boss"},
+                "player": {},
+            },
+        },
+    ]
+    catalog = RunCatalog([tmp_path], replay_parser=parse_game_progress)
+
+    payload = catalog.parse_upload(
+        "invalid-victory.jsonl",
+        "".join(json.dumps(record) + "\n" for record in records),
+    )
+
+    progress = payload["progress"]
+    run = payload["runs"][0]
+    assert progress["summary"]["complete_run"] is True
+    assert progress["summary"]["victory"] is None
+    assert progress["rooms"][0]["status"] == "completed"
+    assert run["coverage"]["complete_run"] is True
+    assert run["outcome"]["victory"] is progress["summary"]["victory"]
+    assert run["outcome"]["status"] == "in_progress"
+
+
+def test_replay_upload_uses_parser_validated_metadata(tmp_path: Path) -> None:
+    records = [
+        {
+            "type": "action",
+            "data": {
+                "cmd": "start_run",
+                "run_id": 123,
+                "character": 234,
+                "seed": 456,
+                "game_version": 789,
+                "ascension": 999,
+                "modifiers": ["TEST_MODIFIER"],
+            },
+        },
+        {
+            "type": "state",
+            "data": {
+                "decision": "combat_play",
+                "context": {"act": 1, "floor": 1},
+                "player": {},
+            },
+        },
+    ]
+    catalog = RunCatalog([tmp_path], replay_parser=parse_game_progress)
+
+    payload = catalog.parse_upload(
+        "numeric-metadata.jsonl",
+        "".join(json.dumps(record) + "\n" for record in records),
+    )
+
+    summary = payload["progress"]["summary"]
+    run = payload["runs"][0]
+    assert summary["run_id"] is None
+    assert run["run_id"] == ""
+    assert run["metadata"]["character"] is None
+    assert run["metadata"]["seed"] is None
+    assert run["metadata"]["game_version"] is None
+    assert run["metadata"]["ascension"] is None
+    assert run["metadata"]["modifiers"] == ["TEST_MODIFIER"]
+
+
 @pytest.mark.parametrize(
     ("source_name", "text", "message"),
     [
@@ -1300,6 +1373,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
             "evaluation_mode": "fixed",
             "scenario": "standard",
             "ascension": 0,
+            "modifiers": ["TEST_MODIFIER"],
         },
     }
 
@@ -1367,15 +1441,83 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
         "checkpoint": "summary-model",
         "evaluation_mode": "fixed",
         "scenario": "summary-scenario",
-        "ascension": 20,
+        "ascension": 0,
     }
     for key, value in expected_metadata.items():
         assert getattr(small_run.metadata, key) == value
         assert getattr(large_run.metadata, key) == value
+    assert small_run.metadata.modifiers == ("TEST_MODIFIER",)
+    assert large_run.metadata.modifiers == ("TEST_MODIFIER",)
     assert exact["run_id"] == "nested-run"
     for key, value in expected_metadata.items():
         assert exact["metadata"][key] == value
+    assert exact["metadata"]["modifiers"] == ["TEST_MODIFIER"]
     assert len(exact["nodes"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_modifiers", "expected_modifiers"),
+    [
+        (["TEST_MODIFIER"], ("TEST_MODIFIER",)),
+        (["TEST_MODIFIER", 7], ()),
+    ],
+    ids=["valid-modifiers", "mixed-modifiers"],
+)
+def test_numeric_replay_metadata_matches_for_511_and_513_records(
+    tmp_path: Path, raw_modifiers, expected_modifiers
+) -> None:
+    def rows(count: int) -> list[dict]:
+        records = [
+            {
+                "type": "action",
+                "ts": 1,
+                "data": {
+                    "cmd": "start_run",
+                    "run_id": 123,
+                    "character": 234,
+                    "seed": 456,
+                    "game_version": 789,
+                    "ascension": 999,
+                    "modifiers": raw_modifiers,
+                },
+            }
+        ]
+        records.extend(
+            {
+                "type": "state",
+                "ts": index,
+                "data": {
+                    "decision": "combat_play",
+                    "context": {"act": 1, "floor": 1},
+                    "player": {},
+                },
+            }
+            for index in range(2, count + 1)
+        )
+        records[-1]["status"] = "dead"
+        return records
+
+    small_root = tmp_path / "small"
+    large_root = tmp_path / "large"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "replay.jsonl", rows(511))
+    _write_jsonl(large_root / "replay.jsonl", rows(513))
+
+    small_catalog = RunCatalog([small_root], replay_parser=parse_game_progress)
+    large_catalog = RunCatalog([large_root], replay_parser=parse_game_progress)
+    small_cohort = small_catalog.list_cohorts()[0]
+    large_cohort = large_catalog.list_cohorts()[0]
+    small_run = small_catalog.get_cohort_records(small_cohort["cohort_id"])[0]
+    large_run = large_catalog.get_cohort_records(large_cohort["cohort_id"])[0]
+
+    assert small_run.run_id == large_run.run_id == ""
+    for metadata in (small_run.metadata, large_run.metadata):
+        assert metadata.character is None
+        assert metadata.seed is None
+        assert metadata.game_version is None
+        assert metadata.ascension is None
+        assert metadata.modifiers == expected_modifiers
 
 
 def test_replay_row_top_level_status_precedes_nested_status_across_threshold(

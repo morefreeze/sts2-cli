@@ -645,7 +645,7 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
     modifiers: list[str] | None = None
     started_at: Any = None
     ended_at: Any = None
-    victory = False
+    victory: bool | None = None
     last_state_data: dict[str, Any] | None = None
     observed_global_floors: list[int] = []
     observed_floor_labels: dict[int, str] = {}
@@ -775,8 +775,10 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
 
         decision = state.get("decision")
         if decision == "game_over":
-            victory = bool(state.get("victory"))
-            room["status"] = "won" if victory else "dead"
+            raw_victory = state.get("victory")
+            victory = raw_victory if type(raw_victory) is bool else None
+            if victory is not None:
+                room["status"] = "won" if victory else "dead"
         if observed_global_floor is not None:
             last_evidence = (entry_type, state)
         last_state_room = room

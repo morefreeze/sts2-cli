@@ -239,15 +239,19 @@ def _adapt_replay(
     starts = [_first_number(row, "ts") for row in records]
     timestamps = [value for value in starts if value is not None]
     start_action = _replay_start_action(records)
-    ascension = _first_nonnegative_int(summary, "ascension")
+    ascension = _replay_ascension(summary, "ascension")
     if ascension is None:
-        ascension = _first_nonnegative_int(start_action, "ascension")
+        ascension = _replay_ascension(start_action, "ascension")
+    modifiers = _replay_modifiers(summary)
+    if modifiers is None:
+        modifiers = _replay_modifiers(start_action)
     metadata = RunMetadata(
-        character=_first_text(summary, "character")
-        or _first_text(start_action, "character"),
-        seed=_first_text(summary, "seed") or _first_text(start_action, "seed"),
-        game_version=_first_text(summary, "game_version", "build_id")
-        or _first_text(start_action, "game_version", "build_id"),
+        character=_replay_text(summary, "character")
+        or _replay_text(start_action, "character"),
+        seed=_replay_text(summary, "seed")
+        or _replay_text(start_action, "seed"),
+        game_version=_replay_text(summary, "game_version", "build_id")
+        or _replay_text(start_action, "game_version", "build_id"),
         checkpoint=_first_text(summary, "checkpoint")
         or _first_text(start_action, "checkpoint"),
         evaluation_mode=_first_text(summary, "evaluation_mode")
@@ -255,6 +259,7 @@ def _adapt_replay(
         scenario=_first_text(summary, "scenario")
         or _first_text(start_action, "scenario"),
         ascension=ascension,
+        modifiers=modifiers or (),
         started_at=min(timestamps) if timestamps else None,
         ended_at=max(timestamps) if timestamps else None,
     )
@@ -640,19 +645,19 @@ def _replay_run_identity(
     top_level_ids: list[str] = []
     nested_ids: list[str] = []
     for record in records:
-        top_level = _first_text(record, "run_id")
+        top_level = _replay_text(record, "run_id")
         if top_level is not None:
             top_level_ids.append(top_level)
         data = record.get("data")
         if isinstance(data, dict):
-            nested = _first_text(data, "run_id")
+            nested = _replay_text(data, "run_id")
             if nested is not None:
                 nested_ids.append(nested)
-    summary_id = _first_text(summary, "run_id")
+    summary_id = _replay_text(summary, "run_id")
     resolved = (
-        (top_level_ids[0] if top_level_ids else None)
+        summary_id
+        or (top_level_ids[0] if top_level_ids else None)
         or (nested_ids[0] if nested_ids else None)
-        or summary_id
         or ""
     )
     observed = sorted(
@@ -694,6 +699,29 @@ def _first_text(record: dict[str, Any], *keys: str) -> str | None:
             return value.strip()
         if isinstance(value, int) and not isinstance(value, bool):
             return str(value)
+    return None
+
+
+def _replay_text(record: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _replay_ascension(record: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = record.get(key)
+        if type(value) is int and 0 <= value <= 10:
+            return value
+    return None
+
+
+def _replay_modifiers(record: dict[str, Any]) -> tuple[str, ...] | None:
+    value = record.get("modifiers")
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
     return None
 
 
