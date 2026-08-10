@@ -21,6 +21,7 @@ from .models import (
 # This matches the canonical visited-node bound used by the map service. A
 # single floor must not smuggle an unbounded raw replay into a detail response.
 DETAIL_COLLECTION_LIMIT = 256
+_FLOORS_PER_ACT = 17
 _LABEL_PATTERN = re.compile(r"^A(?P<act>\d+)F(?P<floor>\d+)$", re.IGNORECASE)
 _REPLAY_ID_PATTERN = re.compile(
     r"^A(?P<act>\d+)F(?P<floor>\d+)(?::|$)",
@@ -522,45 +523,86 @@ def _coordinates(
 def _coordinate_parts(
     node: dict[str, Any],
 ) -> tuple[int | None, int | None, int | None, str | None]:
-    act = _int(node.get("act"))
-    floor = _int(node.get("floor"))
+    explicit_act = _int(node.get("act"))
+    explicit_floor = _int(node.get("floor"))
     global_floor = _int(node.get("global_floor"))
     label = _text(node.get("label"))
     label_match = _LABEL_PATTERN.fullmatch(label) if label else None
-    if label_match is not None:
-        act = act if act is not None else int(label_match.group("act"))
-        floor = floor if floor is not None else int(label_match.group("floor"))
+    label_act = int(label_match.group("act")) if label_match else None
+    label_floor = int(label_match.group("floor")) if label_match else None
     node_id = _text(node.get("id")) or ""
     replay_match = _REPLAY_ID_PATTERN.match(node_id)
-    if replay_match is not None:
-        act = act if act is not None else int(replay_match.group("act"))
-        floor = floor if floor is not None else int(replay_match.group("floor"))
+    replay_act = int(replay_match.group("act")) if replay_match else None
+    replay_floor = int(replay_match.group("floor")) if replay_match else None
     native_match = _NATIVE_ID_PATTERN.fullmatch(node_id)
-    if native_match is not None:
-        act = (
-            act
-            if act is not None
-            else int(native_match.group("act_index")) + 1
+    native_act = (
+        int(native_match.group("act_index")) + 1
+        if native_match is not None
+        else None
+    )
+    native_ordinal = (
+        int(native_match.group("node_index"))
+        if native_match is not None
+        else None
+    )
+
+    if global_floor is not None:
+        if global_floor < 1:
+            return None, None, None, label
+        global_act = (global_floor - 1) // _FLOORS_PER_ACT + 1
+        global_local_floor = (global_floor - 1) % _FLOORS_PER_ACT + 1
+        if any(
+            candidate is not None and candidate != global_act
+            for candidate in (explicit_act, label_act, replay_act)
+        ) or any(
+            candidate is not None and candidate != global_local_floor
+            for candidate in (explicit_floor, label_floor, replay_floor)
+        ):
+            return None, None, None, label
+        return (
+            global_act,
+            global_local_floor,
+            global_floor,
+            label if label_match is not None else f"A{global_act}F{global_local_floor}",
         )
-        floor = (
-            floor
-            if floor is not None
-            else int(native_match.group("node_index")) + 1
-        )
+
+    act_candidates = tuple(
+        candidate
+        for candidate in (explicit_act, label_act, replay_act)
+        if candidate is not None
+    )
+    floor_candidates = tuple(
+        candidate
+        for candidate in (explicit_floor, label_floor, replay_floor)
+        if candidate is not None
+    )
+    if len(set(act_candidates)) > 1 or len(set(floor_candidates)) > 1:
+        return None, None, None, label
+
+    act = act_candidates[0] if act_candidates else None
+    floor = floor_candidates[0] if floor_candidates else None
+    act_index = _int(node.get("act_index"))
+    if act is None and act_index is not None and act_index >= 0:
+        act = act_index + 1
     if act is None:
-        act_index = _int(node.get("act_index"))
-        if act_index is not None and act_index >= 0:
-            act = act_index + 1
-    if global_floor is not None and global_floor > 0:
-        if act is None:
-            act = (global_floor - 1) // 17 + 1
-        if floor is None:
-            floor = (global_floor - 1) % 17 + 1
-    if global_floor is None and act is not None and floor is not None:
-        global_floor = (act - 1) * 17 + floor
-    if label is None and act is not None and floor is not None:
-        label = f"A{act}F{floor}"
-    return act, floor, global_floor, label
+        act = native_act
+    if (
+        floor is None
+        and native_ordinal is not None
+        and 0 <= native_ordinal < _FLOORS_PER_ACT
+    ):
+        floor = native_ordinal + 1
+    if act is None or floor is None:
+        return act, floor, None, label
+    if act < 1 or not 1 <= floor <= _FLOORS_PER_ACT:
+        return None, None, None, label
+    derived_global_floor = (act - 1) * _FLOORS_PER_ACT + floor
+    return (
+        act,
+        floor,
+        derived_global_floor,
+        label if label_match is not None else f"A{act}F{floor}",
+    )
 
 
 def _room_type(node: dict[str, Any]) -> str:

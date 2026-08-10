@@ -477,12 +477,12 @@ def test_floor_coordinates_derive_from_a_canonical_replay_node_id_as_ints() -> N
     )
 
 
-def test_floor_coordinates_complete_explicit_act_from_a_native_node_id() -> None:
+def test_floor_coordinates_derive_from_a_native_node_id_only() -> None:
     run = RunRecord(
         run_id="native-coordinate-derivation",
         source_id="native-source",
         source_kind=SourceKind.NATIVE_RUN,
-        nodes=[{"id": "a1:n2", "act": 2, "map_point_type": "monster"}],
+        nodes=[{"id": "a1:n2", "map_point_type": "monster"}],
     )
 
     detail = build_node_detail(run, "a1:n2")
@@ -492,6 +492,145 @@ def test_floor_coordinates_complete_explicit_act_from_a_native_node_id() -> None
         isinstance(value, int)
         for value in (detail.act, detail.floor, detail.global_floor)
     )
+
+
+def test_out_of_range_native_ordinal_does_not_fabricate_a_floor() -> None:
+    run = RunRecord(
+        run_id="native-ordinal-bound",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[{"id": "a1:n17", "map_point_type": "monster"}],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, "a1:n17")
+
+
+def test_global_floor_precedes_a_native_node_ordinal() -> None:
+    run = RunRecord(
+        run_id="global-over-native-ordinal",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "a1:n0",
+                "global_floor": 21,
+                "map_point_type": "monster",
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "a1:n0")
+
+    assert (detail.act, detail.floor, detail.global_floor, detail.label) == (
+        2,
+        4,
+        21,
+        "A2F4",
+    )
+
+
+def test_explicit_act_and_global_floor_derive_the_local_floor() -> None:
+    run = RunRecord(
+        run_id="act-global-derivation",
+        source_id="opaque-source",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[
+            {
+                "id": "act-global-node",
+                "act": 2,
+                "global_floor": 21,
+                "room_type": "Monster",
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "act-global-node")
+
+    assert (detail.act, detail.floor, detail.global_floor, detail.label) == (
+        2,
+        4,
+        21,
+        "A2F4",
+    )
+
+
+def test_explicit_local_floor_conflicting_with_global_floor_is_rejected() -> None:
+    run = RunRecord(
+        run_id="floor-global-conflict",
+        source_id="/private/secret/source.run",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[
+            {
+                "id": "floor-global-node",
+                "floor": 3,
+                "global_floor": 21,
+                "room_type": "Monster",
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, "floor-global-node")
+
+
+def test_explicit_local_floor_outside_an_act_is_rejected() -> None:
+    run = RunRecord(
+        run_id="local-floor-bound",
+        source_id="opaque-source",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[
+            {
+                "id": "out-of-range-local-floor",
+                "act": 1,
+                "floor": 18,
+                "room_type": "Monster",
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, "out-of-range-local-floor")
+
+
+def test_explicit_act_conflicting_with_global_floor_is_rejected() -> None:
+    run = RunRecord(
+        run_id="act-global-conflict",
+        source_id="/private/secret/source.run",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[
+            {
+                "id": "act-global-conflict-node",
+                "act": 1,
+                "global_floor": 21,
+                "room_type": "Monster",
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, "act-global-conflict-node")
+
+
+def test_label_conflicting_with_global_floor_is_rejected() -> None:
+    run = RunRecord(
+        run_id="label-global-conflict",
+        source_id="/private/secret/source.run",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[
+            {
+                "id": "label-global-node",
+                "label": "A2F3",
+                "global_floor": 21,
+                "room_type": "Monster",
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidNodeDetailError) as caught:
+        build_node_detail(run, "label-global-node")
+
+    assert "/private/secret" not in str(caught.value)
 
 
 def test_missing_floor_coordinates_raise_a_stable_path_free_error() -> None:
