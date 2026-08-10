@@ -1,5 +1,9 @@
+import json
+import os
+
 import pytest
 import eval_and_report
+from agent.run_metadata import resolve_game_version
 
 from eval_and_report import (
     _build_parser,
@@ -152,11 +156,172 @@ def test_evaluation_key_distinguishes_path_and_seed_configuration(tmp_path):
     second = tmp_path / "second" / "ppo_ironclad_100k.zip"
 
     fixed_key = _evaluation_key(
-        str(first), n_games=10, fixed_seeds=True, invalid_retries=1)
+        str(first), n_games=10, fixed_seeds=True, invalid_retries=1,
+        game_version="v0.103.2", ascension=0)
 
     assert fixed_key != _evaluation_key(
-        str(second), n_games=10, fixed_seeds=True, invalid_retries=1)
+        str(second), n_games=10, fixed_seeds=True, invalid_retries=1,
+        game_version="v0.103.2", ascension=0)
     assert fixed_key != _evaluation_key(
-        str(first), n_games=10, fixed_seeds=False, invalid_retries=1)
+        str(first), n_games=10, fixed_seeds=False, invalid_retries=1,
+        game_version="v0.103.2", ascension=0)
     assert fixed_key != _evaluation_key(
-        str(first), n_games=20, fixed_seeds=True, invalid_retries=1)
+        str(first), n_games=20, fixed_seeds=True, invalid_retries=1,
+        game_version="v0.103.2", ascension=0)
+
+
+def test_evaluation_key_distinguishes_game_version_and_ascension(tmp_path):
+    checkpoint = str(tmp_path / "ppo_ironclad_100k.zip")
+    base = _evaluation_key(
+        checkpoint,
+        n_games=10,
+        fixed_seeds=True,
+        invalid_retries=1,
+        game_version="v0.103.2",
+        ascension=0,
+    )
+
+    assert base != _evaluation_key(
+        checkpoint,
+        n_games=10,
+        fixed_seeds=True,
+        invalid_retries=1,
+        game_version="v0.104.0",
+        ascension=0,
+    )
+    assert base != _evaluation_key(
+        checkpoint,
+        n_games=10,
+        fixed_seeds=True,
+        invalid_retries=1,
+        game_version="v0.103.2",
+        ascension=10,
+    )
+
+
+def test_evaluation_key_ignores_source_when_version_value_and_ascension_match(
+    tmp_path,
+):
+    checkpoint = str(tmp_path / "ppo_ironclad_100k.zip")
+    cli = resolve_game_version("v0.103.2", {})
+    environment = resolve_game_version(
+        None, {"STS2_GAME_VERSION": "v0.103.2"}
+    )
+
+    cli_key = _evaluation_key(
+        checkpoint,
+        n_games=10,
+        fixed_seeds=True,
+        invalid_retries=1,
+        game_version=cli.value,
+        ascension=0,
+    )
+    environment_key = _evaluation_key(
+        checkpoint,
+        n_games=10,
+        fixed_seeds=True,
+        invalid_retries=1,
+        game_version=environment.value,
+        ascension=0,
+    )
+
+    assert cli.source == "cli"
+    assert environment.source == "environment"
+    assert cli_key == environment_key
+    assert "game_version_source" not in json.loads(cli_key)
+
+
+@pytest.mark.parametrize(
+    ("cached_version", "cached_ascension", "launch_version", "launch_ascension"),
+    [
+        ("v0.102.0", 0, "v0.103.2", 0),
+        ("v0.103.2", 0, "v0.103.2", 10),
+    ],
+)
+def test_report_main_runs_evaluation_when_cached_game_semantics_change(
+    monkeypatch,
+    cached_version,
+    cached_ascension,
+    launch_version,
+    launch_ascension,
+):
+    calls = []
+    checkpoint = "checkpoints/model.zip"
+
+    def semantic_key(
+        checkpoint,
+        *,
+        n_games,
+        fixed_seeds,
+        invalid_retries,
+        game_version,
+        ascension,
+    ):
+        return json.dumps(
+            {
+                "checkpoint": os.path.abspath(checkpoint),
+                "n_games": n_games,
+                "fixed_seeds": fixed_seeds,
+                "invalid_retries": invalid_retries,
+                "game_version": game_version,
+                "ascension": ascension,
+            },
+            sort_keys=True,
+        )
+
+    cached_key = semantic_key(
+        checkpoint,
+        n_games=10,
+        fixed_seeds=True,
+        invalid_retries=1,
+        game_version=cached_version,
+        ascension=cached_ascension,
+    )
+
+    class CachedFile:
+        def __init__(self, value=""):
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return self.value
+
+        def write(self, value):
+            self.value = value
+            return len(value)
+
+    def fake_open(path, mode="r"):
+        return CachedFile(cached_key if "r" in mode else "")
+
+    monkeypatch.setattr(
+        eval_and_report.sys,
+        "argv",
+        [
+            "eval_and_report.py",
+            checkpoint,
+            "--game-version",
+            launch_version,
+            "--ascension",
+            str(launch_ascension),
+        ],
+    )
+    monkeypatch.setattr(eval_and_report, "open", fake_open, raising=False)
+    monkeypatch.setattr(eval_and_report.os, "makedirs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(eval_and_report, "_evaluation_key", semantic_key)
+    monkeypatch.setattr(
+        eval_and_report,
+        "run_eval",
+        lambda checkpoint, **kwargs: calls.append((checkpoint, kwargs)) or {},
+    )
+    monkeypatch.setattr(eval_and_report, "format_report", lambda stats, checkpoint: "report")
+
+    eval_and_report.main()
+
+    assert len(calls) == 1
+    assert calls[0][1]["game_version"] == launch_version
+    assert calls[0][1]["ascension"] == launch_ascension

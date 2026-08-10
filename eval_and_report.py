@@ -116,12 +116,15 @@ def format_report(stats: dict, checkpoint: str) -> str:
 
 
 def _evaluation_key(checkpoint: str, *, n_games: int, fixed_seeds: bool,
-                    invalid_retries: int) -> str:
+                    invalid_retries: int, game_version: str,
+                    ascension: int) -> str:
     return json.dumps({
         "checkpoint": os.path.abspath(checkpoint),
         "n_games": n_games,
         "fixed_seeds": fixed_seeds,
         "invalid_retries": invalid_retries,
+        "game_version": game_version,
+        "ascension": ascension,
     }, sort_keys=True)
 
 
@@ -155,6 +158,8 @@ def main():
         n_games=args.n_games,
         fixed_seeds=args.fixed_seeds,
         invalid_retries=args.invalid_retries,
+        game_version=resolved_game_version.value,
+        ascension=ascension,
     )
 
     # Check if we should skip (same checkpoint as last run)
