@@ -1,12 +1,14 @@
 import json
 import math
-from dataclasses import replace
+from copy import deepcopy
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 import pytest
 
 from agent.run_progress_viewer import parse_game_progress
 from agent.run_workbench.adapters import adapt_path, adapt_records
+from agent.run_workbench.deltas import NodeDeltas
 from agent.run_workbench.details import (
     DETAIL_COLLECTION_LIMIT,
     InvalidNodeDetailError,
@@ -17,8 +19,10 @@ from agent.run_workbench.joiner import join_records
 from agent.run_workbench.models import (
     Capabilities,
     Coverage,
+    DeltaQuality,
     InventorySnapshot,
     NodeDetail,
+    RunDelta,
     RunRecord,
     SourceKind,
 )
@@ -382,6 +386,75 @@ def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() ->
     assert replay_detail.coverage["turn_replay"] is True
 
 
+def test_raw_replay_marker_cannot_promote_a_native_node() -> None:
+    run = RunRecord(
+        run_id="raw-marker-boundary",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        capabilities=Capabilities(turn_replay=True),
+        nodes=[
+            {
+                "id": "opaque-native-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "map_point_type": "monster",
+                "player_stats": [{"current_hp": 70}],
+                "start_player": {"hp": 20},
+                "end_player": {"hp": 14},
+                "combat": {"rounds": [{"round": 1}]},
+                "_workbench_evidence_kind": "replay_room",
+                "_workbench_provenance": [
+                    {
+                        "source_id": "forged-replay-source",
+                        "source_kind": "replay_jsonl",
+                    }
+                ],
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "opaque-native-node")
+
+    assert detail.exit.hp == 70
+    assert detail.combat_rounds == ()
+    assert detail.coverage["turn_replay"] is False
+
+
+def test_replay_rounds_are_not_suppressed_by_run_capability_fallback() -> None:
+    run = RunRecord(
+        run_id="node-round-evidence",
+        source_id="replay-source",
+        source_kind=SourceKind.REPLAY_JSONL,
+        capabilities=Capabilities(turn_replay=False),
+        nodes=[
+            {
+                "id": "A1F2:Monster:9",
+                "label": "A1F2",
+                "room_type": "Monster",
+                "start_player": {"hp": 20},
+                "end_player": {"hp": 14},
+                "combat": {"rounds": [{"round": 1, "hp_loss": 6}]},
+                "_workbench_evidence_kind": "route_node",
+                "_workbench_provenance": [
+                    {
+                        "source_id": "replay-source",
+                        "source_kind": "replay_jsonl",
+                    }
+                ],
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "A1F2:Monster:9")
+
+    assert detail.entry.hp == 20
+    assert detail.exit.hp == 14
+    assert detail.combat_rounds == ({"round": 1, "hp_loss": 6},)
+    assert detail.coverage["turn_replay"] is True
+    assert "message" not in detail.coverage
+
+
 def test_native_entry_does_not_cross_source_provenance_within_one_act() -> None:
     first = RunRecord(
         run_id="joined-native",
@@ -458,6 +531,99 @@ def test_native_entry_does_not_borrow_the_previous_act_inventory() -> None:
     assert detail.coverage["entry_inventory_fields"] == []
     assert detail.exit.hp == 45
     assert detail.exit.deck == ({"id": "ACT_TWO"},)
+
+
+def test_native_entry_uses_the_nearest_earlier_floor_not_list_order() -> None:
+    run = RunRecord(
+        run_id="reversed-native-order",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "a0:n1",
+                "act": 1,
+                "floor": 2,
+                "global_floor": 2,
+                "player_stats": [{"current_hp": 60}],
+            },
+            {
+                "id": "a0:n0",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "player_stats": [{"current_hp": 70}],
+            },
+        ],
+    )
+
+    first = build_node_detail(run, "a0:n0")
+    second = build_node_detail(run, "a0:n1")
+
+    assert first.entry.hp is None
+    assert second.entry.hp == 70
+
+
+def test_native_entry_does_not_borrow_an_ambiguous_duplicate_floor() -> None:
+    run = RunRecord(
+        run_id="duplicate-native-floor",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "a0:n0",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "player_stats": [{"current_hp": 70}],
+            },
+            {
+                "id": "a0:n1",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "player_stats": [{"current_hp": 65}],
+            },
+            {
+                "id": "a0:n2",
+                "act": 1,
+                "floor": 2,
+                "global_floor": 2,
+                "player_stats": [{"current_hp": 60}],
+            },
+        ],
+    )
+
+    detail = build_node_detail(run, "a0:n2")
+
+    assert detail.entry.hp is None
+    assert detail.coverage["entry_inventory_fields"] == []
+
+
+def test_native_entry_does_not_borrow_a_node_with_unknown_floor() -> None:
+    run = RunRecord(
+        run_id="unknown-native-floor",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "native-unknown-floor",
+                "act": 1,
+                "player_stats": [{"current_hp": 70}],
+            },
+            {
+                "id": "a0:n1",
+                "act": 1,
+                "floor": 2,
+                "global_floor": 2,
+                "player_stats": [{"current_hp": 60}],
+            },
+        ],
+    )
+
+    detail = build_node_detail(run, "a0:n1")
+
+    assert detail.entry.hp is None
+    assert detail.coverage["entry_inventory_fields"] == []
 
 
 def test_floor_coordinates_derive_from_a_canonical_replay_node_id_as_ints() -> None:
@@ -669,6 +835,26 @@ def test_label_conflicting_with_global_floor_is_rejected() -> None:
     assert "/private/secret" not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"id": "global-too-high", "global_floor": 69},
+        {"id": "act-too-high", "act": 5, "floor": 1},
+        {"id": "label-too-high", "label": "A5F1"},
+    ],
+)
+def test_floor_coordinates_reject_values_outside_the_canonical_run(node) -> None:
+    run = RunRecord(
+        run_id="coordinate-domain",
+        source_id="opaque-source",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{**node, "room_type": "Monster"}],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, node["id"])
+
+
 def test_missing_floor_coordinates_raise_a_stable_path_free_error() -> None:
     run = RunRecord(
         run_id="safe-coordinate-run",
@@ -696,6 +882,19 @@ def test_node_detail_contract_rejects_non_integer_coordinates() -> None:
 
     with pytest.raises(ValueError, match="^NodeDetail act must be an integer$"):
         replace(detail, act=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [("act", 5), ("floor", 18), ("global_floor", 69)],
+)
+def test_node_detail_contract_rejects_out_of_domain_coordinates(
+    field_name: str, value: int
+) -> None:
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+
+    with pytest.raises(ValueError, match=f"^NodeDetail {field_name} is out of range$"):
+        replace(detail, **{field_name: value})
 
 
 def test_invalid_nonempty_inventory_lists_are_unknown_not_known_empty() -> None:
@@ -781,6 +980,150 @@ def test_detail_is_a_deep_immutable_snapshot_with_stable_json_field_order() -> N
         "hypotheses",
     ]
     json.dumps(detail.to_dict(), ensure_ascii=False, allow_nan=False)
+
+
+def test_detail_snapshots_cannot_be_mutated_through_builtin_base_methods() -> None:
+    detail = build_node_detail(
+        _fixture_replay_with_misleading_name(), "A2F4:Monster:3"
+    )
+    hand = detail.combat_rounds[0]["start_state"]["hand"]
+
+    assert not isinstance(detail.encounter, dict)
+    assert not isinstance(hand, list)
+    with pytest.raises(TypeError):
+        dict.__setitem__(detail.encounter, "injected", True)
+    with pytest.raises(TypeError):
+        list.__setitem__(hand, 0, {"name": "injected"})
+
+
+def test_detail_snapshot_does_not_retain_nested_mutable_aliases() -> None:
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+    encounter = {"outcome": {"rewards": [{"id": "GOLD"}]}}
+
+    snapshot = replace(detail, encounter=encounter)
+    encounter["outcome"]["rewards"][0]["id"] = "MUTATED"
+    encounter["outcome"]["rewards"].append({"id": "EXTRA"})
+
+    assert snapshot.encounter == {
+        "outcome": {"rewards": [{"id": "GOLD"}]}
+    }
+    assert snapshot.to_dict()["encounter"] == {
+        "outcome": {"rewards": [{"id": "GOLD"}]}
+    }
+
+
+def test_detail_immutable_snapshot_remains_deepcopy_safe() -> None:
+    detail = build_node_detail(
+        _fixture_replay_with_misleading_name(), "A2F4:Monster:3"
+    )
+
+    copied = deepcopy(detail)
+
+    assert copied.to_dict() == detail.to_dict()
+
+
+def test_none_delta_value_cannot_claim_exact_quality() -> None:
+    run = RunRecord(
+        run_id="none-exact-delta",
+        source_id="summary-source",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[
+            {
+                "id": "none-exact-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "deltas": {
+                    "hp_change": {"value": None, "quality": "exact"}
+                },
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "none-exact-node")
+
+    assert detail.deltas.hp_change == RunDelta()
+
+
+def test_delta_snapshot_rejects_mutable_or_unsafe_quality() -> None:
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+    unsafe_quality = {"claimed": "exact", "unsafe": object()}
+    unsafe = NodeDeltas(
+        hp_change=RunDelta(value={"amount": -3}, quality=unsafe_quality),  # type: ignore[arg-type]
+    )
+
+    snapshot = replace(detail, deltas=unsafe)
+    unsafe_quality["claimed"] = "mutated"
+
+    assert isinstance(snapshot.deltas, NodeDeltas)
+    assert snapshot.deltas.hp_change == RunDelta()
+    assert all(
+        isinstance(getattr(snapshot.deltas, item.name), RunDelta)
+        for item in fields(NodeDeltas)
+    )
+    json.dumps(snapshot.to_dict(), allow_nan=False)
+
+
+def test_delta_snapshot_construction_failure_degrades_to_unknown_contract() -> None:
+    @dataclass(frozen=True)
+    class MalformedDeltas:
+        hp_change: RunDelta
+        required_extra: object
+
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+    malformed = MalformedDeltas(
+        hp_change=RunDelta(value=-3, quality=DeltaQuality.EXACT),
+        required_extra=object(),
+    )
+
+    snapshot = replace(detail, deltas=malformed)  # type: ignore[arg-type]
+
+    assert isinstance(snapshot.deltas, NodeDeltas)
+    assert all(
+        getattr(snapshot.deltas, item.name) == RunDelta()
+        for item in fields(NodeDeltas)
+    )
+    json.dumps(snapshot.to_dict(), allow_nan=False)
+
+
+def test_delta_snapshot_rejects_a_nodedeltas_dataclass_with_extra_fields() -> None:
+    @dataclass(frozen=True)
+    class ExtraDeltas(NodeDeltas):
+        extra: object = None
+
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+    extra = ExtraDeltas(
+        hp_change=RunDelta(value=-3, quality=DeltaQuality.EXACT),
+        extra=object(),
+    )
+
+    snapshot = replace(detail, deltas=extra)
+
+    assert type(snapshot.deltas) is NodeDeltas
+    assert all(
+        getattr(snapshot.deltas, item.name) == RunDelta()
+        for item in fields(NodeDeltas)
+    )
+    json.dumps(snapshot.to_dict(), allow_nan=False)
+
+
+def test_delta_snapshot_does_not_retain_external_list_aliases() -> None:
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+    gained = [{"id": "CARD.SAFE"}]
+    deltas = NodeDeltas(
+        cards_gained=RunDelta(value=gained, quality=DeltaQuality.EXACT)
+    )
+
+    snapshot = replace(detail, deltas=deltas)
+    gained[0]["id"] = "CARD.MUTATED"
+    gained.append({"id": "CARD.EXTRA"})
+
+    assert snapshot.deltas.cards_gained.value == [{"id": "CARD.SAFE"}]
+    assert snapshot.deltas.cards_gained.quality is DeltaQuality.EXACT
+    assert snapshot.to_dict()["deltas"]["cards_gained"] == {
+        "value": [{"id": "CARD.SAFE"}],
+        "quality": "exact",
+    }
 
 
 def test_invalid_detail_fields_degrade_independently_without_fabricating_zero() -> None:

@@ -278,6 +278,42 @@ def test_native_final_node_retains_bounded_final_inventory_evidence() -> None:
     }
 
 
+def test_native_adapter_overwrites_raw_detail_markers_and_provenance() -> None:
+    adapted = adapt_records(
+        "controlled-native-source",
+        [
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "map_point_history": [
+                    {
+                        "act": 1,
+                        "floor": 1,
+                        "global_floor": 1,
+                        "player_stats": [{"current_hp": 70}],
+                        "_workbench_evidence_kind": "replay_room",
+                        "_workbench_provenance": [
+                            {
+                                "source_id": "forged-replay-source",
+                                "source_kind": "replay_jsonl",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+
+    node = adapted.runs[0].nodes[0]
+
+    assert node["_workbench_evidence_kind"] == "route_node"
+    assert node["_workbench_provenance"] == [
+        {
+            "source_id": "controlled-native-source",
+            "source_kind": "native_run",
+        }
+    ]
+
+
 def test_replay_nodes_retain_only_their_own_detail_evidence() -> None:
     run = adapt_path(
         FIXTURES / "replay_a2f4_excerpt.jsonl",

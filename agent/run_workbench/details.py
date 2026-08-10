@@ -23,6 +23,8 @@ from .models import (
 DETAIL_COLLECTION_LIMIT = 256
 _FLOORS_PER_ACT = 17
 _MAX_NATIVE_ACT_INDEX = 3
+_MAX_ACT = _MAX_NATIVE_ACT_INDEX + 1
+_MAX_GLOBAL_FLOOR = _MAX_ACT * _FLOORS_PER_ACT
 _LABEL_PATTERN = re.compile(r"^A(?P<act>\d+)F(?P<floor>\d+)$", re.IGNORECASE)
 _REPLAY_ID_PATTERN = re.compile(
     r"^A(?P<act>\d+)F(?P<floor>\d+)(?::|$)",
@@ -76,7 +78,10 @@ def build_node_detail(record: RunRecord, node_id: str) -> NodeDetail:
         return native_node_detail(record, node)
     if (
         node_source_kind is SourceKind.REPLAY_JSONL
-        and record.capabilities.turn_replay
+        and (
+            _node_has_replay_rounds(node)
+            or record.capabilities.turn_replay
+        )
     ):
         return replay_node_detail(record, node)
     return basic_node_detail(record, node)
@@ -84,7 +89,7 @@ def build_node_detail(record: RunRecord, node_id: str) -> NodeDetail:
 
 def native_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
     index = _node_index(record, node)
-    previous = _native_previous_node(record, node, index)
+    previous = _native_previous_node(record, node)
     entry_sources: list[dict[str, Any]] = []
     explicit_entry = node.get("entry_player")
     if isinstance(explicit_entry, dict):
@@ -238,13 +243,36 @@ def _node_source_kind(
     record: RunRecord, node: dict[str, Any]
 ) -> SourceKind:
     marker = node.get("_workbench_evidence_kind")
-    if isinstance(marker, str) and marker in _EVIDENCE_SOURCE_KINDS:
-        return _EVIDENCE_SOURCE_KINDS[marker]
+    marker_kind = (
+        _EVIDENCE_SOURCE_KINDS.get(marker)
+        if isinstance(marker, str)
+        else None
+    )
+    provenance_kind = _controlled_provenance_source_kind(node)
+    if (
+        provenance_kind is not None
+        and (marker_kind is None or marker_kind is provenance_kind)
+        and _node_structure_supports(node, provenance_kind)
+    ):
+        return provenance_kind
+    if (
+        provenance_kind is not None
+        and _node_structure_supports(node, provenance_kind)
+    ):
+        return provenance_kind
+    return record.source_kind
+
+
+def _controlled_provenance_source_kind(
+    node: dict[str, Any],
+) -> SourceKind | None:
     provenance = node.get("_workbench_provenance")
     source_kinds: set[SourceKind] = set()
     if isinstance(provenance, list):
         for item in provenance:
             if not isinstance(item, dict):
+                continue
+            if not isinstance(item.get("source_id"), str) or not item["source_id"]:
                 continue
             try:
                 source_kinds.add(SourceKind(item.get("source_kind")))
@@ -252,7 +280,48 @@ def _node_source_kind(
                 continue
     if len(source_kinds) == 1:
         return next(iter(source_kinds))
-    return record.source_kind
+    return None
+
+
+def _node_structure_supports(
+    node: dict[str, Any], source_kind: SourceKind
+) -> bool:
+    node_id = _text(node.get("id")) or ""
+    native_id = _NATIVE_ID_PATTERN.fullmatch(node_id) is not None
+    replay_id = _REPLAY_ID_PATTERN.match(node_id) is not None
+    native_shape = any(
+        (
+            isinstance(node.get("player_stats"), list),
+            isinstance(node.get("rooms"), list),
+            isinstance(node.get("map_point_type"), str),
+        )
+    )
+    replay_shape = any(
+        (
+            isinstance(node.get("start_player"), dict),
+            isinstance(node.get("end_player"), dict),
+            isinstance(node.get("combat"), dict),
+        )
+    )
+    if source_kind is SourceKind.NATIVE_RUN:
+        if replay_id:
+            return False
+        return native_id or (native_shape and not replay_shape)
+    if source_kind is SourceKind.REPLAY_JSONL:
+        if native_id:
+            return False
+        return replay_id or (replay_shape and not native_shape)
+    return True
+
+
+def _node_has_replay_rounds(node: dict[str, Any]) -> bool:
+    combat = node.get("combat")
+    if not isinstance(combat, dict):
+        return False
+    rounds = combat.get("rounds")
+    return isinstance(rounds, (list, tuple)) and any(
+        isinstance(item, dict) for item in rounds[:DETAIL_COLLECTION_LIMIT]
+    )
 
 
 def _node_provenance_identity(
@@ -276,24 +345,31 @@ def _node_provenance_identity(
 def _native_previous_node(
     record: RunRecord,
     node: dict[str, Any],
-    index: int,
 ) -> dict[str, Any] | None:
-    if index <= 0:
+    current_act, _, current_global_floor, _ = _coordinates(node)
+    if current_act is None or current_global_floor is None:
         return None
-    previous = record.nodes[index - 1]
-    if not isinstance(previous, dict):
+    provenance_identity = _node_provenance_identity(record, node)
+    candidates: dict[int, list[dict[str, Any]]] = {}
+    for candidate in record.nodes:
+        if not isinstance(candidate, dict) or candidate is node:
+            continue
+        if _node_source_kind(record, candidate) is not SourceKind.NATIVE_RUN:
+            continue
+        if _node_provenance_identity(record, candidate) != provenance_identity:
+            continue
+        candidate_act, _, candidate_global_floor, _ = _coordinates(candidate)
+        if (
+            candidate_act != current_act
+            or candidate_global_floor is None
+            or candidate_global_floor >= current_global_floor
+        ):
+            continue
+        candidates.setdefault(candidate_global_floor, []).append(candidate)
+    if not candidates:
         return None
-    if _node_source_kind(record, previous) is not SourceKind.NATIVE_RUN:
-        return None
-    if _node_provenance_identity(record, previous) != _node_provenance_identity(
-        record, node
-    ):
-        return None
-    current_act = _coordinate_parts(node)[0]
-    previous_act = _coordinate_parts(previous)[0]
-    if current_act is None or current_act != previous_act:
-        return None
-    return previous
+    nearest = candidates[max(candidates)]
+    return nearest[0] if len(nearest) == 1 else None
 
 
 def _native_player_stats(node: Any) -> dict[str, Any]:
@@ -486,9 +562,7 @@ def _node_deltas(value: Any) -> NodeDeltas:
             quality = DeltaQuality.UNKNOWN
         raw_value = raw.get("value")
         cleaned = _clean_value(raw_value)
-        if _contains_invalid_number(raw_value) or (
-            cleaned is None and raw_value is not None
-        ):
+        if cleaned is None or _contains_invalid_number(raw_value):
             resolved[item.name] = RunDelta()
         else:
             resolved[item.name] = RunDelta(value=cleaned, quality=quality)
@@ -513,9 +587,9 @@ def _coordinates(
         act is None
         or floor is None
         or global_floor is None
-        or act < 1
-        or floor < 1
-        or global_floor < 1
+        or not 1 <= act <= _MAX_ACT
+        or not 1 <= floor <= _FLOORS_PER_ACT
+        or not 1 <= global_floor <= _MAX_GLOBAL_FLOOR
     ):
         return None, None, None, label or "unknown"
     return act, floor, global_floor, label or f"A{act}F{floor}"
