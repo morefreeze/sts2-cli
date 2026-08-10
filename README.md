@@ -107,14 +107,20 @@ sts2.dll (game engine, IL patched)
 ## RL Training
 
 Train a combat agent with MaskablePPO (requires `requirements-agent.txt`):
+Every training, evaluation, and diagnostic run must be tied to the exact game
+version. Pass `--game-version` explicitly or set `STS2_GAME_VERSION`; the CLI
+value takes precedence. Always select an ascension level as well.
 
 ```bash
+# Or pass --game-version v0.103.2 to each command below.
+export STS2_GAME_VERSION=v0.103.2
+
 # Single training run
-python3 agent/train.py --character Ironclad --steps 100000
+python3 -m agent.train --character Ironclad --steps 100000 --ascension 0
 
 # Resume from a checkpoint with curriculum schedule
-python3 agent/train.py --character Ironclad --steps 200000 \
-    --checkpoint checkpoints/ppo_ironclad_100k.zip --curriculum
+python3 -m agent.train --character Ironclad --steps 200000 \
+    --checkpoint checkpoints/ppo_ironclad_100k.zip --curriculum --ascension 0
 ```
 
 `agent/train.py` saves a checkpoint every 10k steps and tags the run-best model;
@@ -123,10 +129,23 @@ re-launch with `--checkpoint` to resume after interruption.
 ### Evaluate a Trained Model
 
 ```bash
-# Run 30 games with verbose output
-python3 agent/coordinator.py --character Ironclad \
-    --checkpoint checkpoints/ppo_ironclad_100k.zip \
-    --n-games 30 --verbose
+# Run 30 fixed-seed games with verbose output
+python3 -m agent.eval_rl checkpoints/ppo_ironclad_100k.zip \
+    --n-games 30 --verbose --game-version v0.103.2 --ascension 0
+
+# Evolution loop (the version and ascension propagate to every child producer)
+python3 -m agent.evolve_loop --rounds 12 \
+    --game-version v0.103.2 --ascension 0
+
+# Direct diagnostics and snapshot generation
+python3 -m agent.collect_deck_stats checkpoints/model.zip --n-games 30 \
+    --game-version v0.103.2 --ascension 0
+python3 -m agent.boss_retry checkpoints/model.zip saves/boss \
+    --game-version v0.103.2 --ascension 0
+python3 -m agent.mc_rollout saves/boss/example.save --n-sims 50 \
+    --game-version v0.103.2 --ascension 0
+python3 -m agent.gen_boss_saves checkpoints/model.zip --n-saves 5 \
+    --game-version v0.103.2 --ascension 0
 
 # Quick results summary
 python3 -c "
@@ -263,14 +282,19 @@ sts2.dll (游戏引擎, IL patched)
 ## RL 训练
 
 使用 MaskablePPO 训练战斗 AI（需要 `requirements-agent.txt`）：
+每次训练、评测和诊断都必须标注准确游戏版本：显式传
+`--game-version`，或设置 `STS2_GAME_VERSION`；CLI 参数优先。同时必须选择
+`--ascension`。
 
 ```bash
+export STS2_GAME_VERSION=v0.103.2
+
 # 单次训练
-python3 agent/train.py --character Ironclad --steps 100000
+python3 -m agent.train --character Ironclad --steps 100000 --ascension 0
 
 # 从 checkpoint 恢复，启用课程式难度调度
-python3 agent/train.py --character Ironclad --steps 200000 \
-    --checkpoint checkpoints/ppo_ironclad_100k.zip --curriculum
+python3 -m agent.train --character Ironclad --steps 200000 \
+    --checkpoint checkpoints/ppo_ironclad_100k.zip --curriculum --ascension 0
 ```
 
 `agent/train.py` 每 10k 步保存 checkpoint 并标记 run-best 模型；中断后用 `--checkpoint` 重启即可恢复。
@@ -278,10 +302,9 @@ python3 agent/train.py --character Ironclad --steps 200000 \
 ### 评估训练好的模型
 
 ```bash
-# 运行 30 局并显示详细输出
-python3 agent/coordinator.py --character Ironclad \
-    --checkpoint checkpoints/ppo_ironclad_100k.zip \
-    --n-games 30 --verbose
+# 运行 30 局并显示详细输出（也可用 STS2_GAME_VERSION）
+python3 -m agent.eval_rl checkpoints/ppo_ironclad_100k.zip \
+    --n-games 30 --verbose --game-version v0.103.2 --ascension 0
 
 # 快速查看训练日志摘要
 python3 -c "

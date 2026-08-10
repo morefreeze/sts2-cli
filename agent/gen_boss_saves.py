@@ -7,14 +7,20 @@ N usable saves are collected.
 
 Usage:
     python agent/gen_boss_saves.py checkpoints/ppo_ironclad_3200k.zip \
-           --target-floor 16 --n-saves 5 --out-dir saves/boss
+           --target-floor 16 --n-saves 5 --out-dir saves/boss \
+           --game-version v0.103.2 --ascension 0
 """
-import argparse, os, random, sys, time
+import argparse, json, os, random, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv, greedy_action
+from agent.run_metadata import (
+    build_run_context,
+    resolve_game_version,
+    validate_ascension,
+)
 from agent.train import mask_fn
 
 
@@ -81,7 +87,23 @@ def main():
     p.add_argument("--n-saves", type=int, default=5)
     p.add_argument("--out-dir", default="saves/boss")
     p.add_argument("--max-attempts", type=int, default=40)
+    p.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
+    p.add_argument("--ascension", type=int, default=0,
+                   help="Ascension level (0..10; default: 0)")
     args = p.parse_args()
+
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        ascension = validate_ascension(args.ascension)
+    except ValueError as exc:
+        p.error(str(exc))
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -95,8 +117,16 @@ def main():
         if saves_made >= args.n_saves:
             break
         seed = f"genboss_{random.randint(0, 0xFFFFFF):06x}"
+        run_context = build_run_context(
+            resolved_game_version,
+            character=args.character,
+            checkpoint=os.path.basename(args.checkpoint),
+            evaluation_mode="snapshot_generation",
+            scenario="full_run",
+        )
         env = CombatEnv(character=args.character, seed=seed,
-                        seed_prefix=f"gen_{attempt}", extra_obs=extra_obs)
+                        seed_prefix=f"gen_{attempt}", extra_obs=extra_obs,
+                        ascension=ascension, run_context=run_context)
         env_wrapped = ActionMasker(env, mask_fn)
         try:
             reached, max_floor = _play_until_floor(env, env_wrapped, model,
@@ -120,6 +150,18 @@ def main():
         result = env._send({"cmd": "write_continue_save", "path": save_path})
         ok = result and result.get("success")
         if ok:
+            sidecar = {
+                **run_context,
+                "ascension": ascension,
+                "seed": seed,
+            }
+            try:
+                with open(f"{save_path}.meta.json", "w", encoding="utf-8") as handle:
+                    json.dump(sidecar, handle, indent=2, ensure_ascii=False)
+            except (OSError, TypeError, ValueError) as exc:
+                print(f"  attempt {attempt:2d}: SIDECAR FAILED: {exc}")
+                env_wrapped.close()
+                continue
             saves_made += 1
             print(f"  attempt {attempt:2d}: SAVED fl={_state_floor(reached)} "
                   f"hp={hp}/{mhp} → {save_name}")

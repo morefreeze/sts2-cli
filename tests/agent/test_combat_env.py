@@ -150,6 +150,21 @@ def test_run_start_and_outcome_share_authoritative_metadata(monkeypatch, tmp_pat
         assert math.isfinite(row["ts"])
 
 
+def test_native_save_context_can_authoritatively_override_generated_seed(
+    monkeypatch, tmp_path
+):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"seed": None}
+    )
+    env._run_seed = "fake-generated-seed"
+
+    env._emit_run_start()
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    rows = _read_history_rows(history_path)
+    assert [row["seed"] for row in rows] == [None, None]
+
+
 def test_failed_run_start_is_retried_with_terminal_outcome(monkeypatch, tmp_path):
     env, history_path = _recording_env(monkeypatch, tmp_path)
     real_open = open

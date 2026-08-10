@@ -14,7 +14,8 @@ For each snapshot file (`<dir>/*.save`):
 
 Usage:
   python agent/boss_retry.py checkpoints/ppo_ironclad_11150k.zip \\
-      data/boss_snapshots/ --n-deterministic 30 --n-stochastic 30
+      data/boss_snapshots/ --n-deterministic 30 --n-stochastic 30 \\
+      --game-version v0.103.2 --ascension 0
 """
 import argparse
 import glob
@@ -31,6 +32,13 @@ from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 
 from agent.combat_env import CombatEnv
+from agent.run_metadata import (
+    ResolvedGameVersion,
+    build_run_context,
+    load_native_save_seed,
+    resolve_game_version,
+    validate_ascension,
+)
 from agent.train import mask_fn
 
 
@@ -41,17 +49,31 @@ def _player_hp(env: CombatEnv) -> int:
 
 def _play_one(model, save_path: str, deterministic: bool, extra_obs: bool,
               relic_obs: bool = False,
-              max_steps: int = 2000, set_hp: int = None) -> dict:
+              max_steps: int = 2000, set_hp: int = None, *,
+              game_version: ResolvedGameVersion | None = None,
+              ascension: int = 0, character: str = "Ironclad",
+              checkpoint: str | None = None) -> dict:
     """Load snapshot, play until the (boss) episode ends, return outcome dict.
 
     If set_hp is given, player HP is forced to that value after the save loads
     but before combat starts — used to sweep "how much HP suffices to win"."""
-    env = CombatEnv(character="Ironclad",
-                    seed=f"boss_retry_{int(time.time()*1e6) % 10**9}",
+    ascension = validate_ascension(ascension)
+    run_context = build_run_context(
+        game_version,
+        character=character,
+        checkpoint=os.path.basename(checkpoint) if checkpoint else None,
+        evaluation_mode="boss_retry",
+        scenario="native_save",
+        seed=load_native_save_seed(save_path),
+    )
+    env = CombatEnv(character=character,
+                    seed=None,
                     native_save_path=save_path,
                     extra_obs=extra_obs,
                     relic_obs=relic_obs,
-                    set_hp_after_load=set_hp)
+                    set_hp_after_load=set_hp,
+                    ascension=ascension,
+                    run_context=run_context)
     env_w = ActionMasker(env, mask_fn)
     won = False
     victory = False
@@ -120,7 +142,23 @@ def main():
                         "Use to find the HP threshold where the boss becomes winnable.")
     p.add_argument("--report-json", default=None,
                    help="Optional path to write per-snapshot results as JSON.")
+    p.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
+    p.add_argument("--ascension", type=int, default=0,
+                   help="Ascension level (0..10; default: 0)")
     args = p.parse_args()
+
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        ascension = validate_ascension(args.ascension)
+    except ValueError as exc:
+        p.error(str(exc))
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = MaskablePPO.load(args.checkpoint, device=device)
@@ -163,7 +201,20 @@ def main():
                  f"seed={meta.get('seed','?')}")
         print(f"=== {os.path.basename(snap)} ({label}) ===")
 
-        snap_report = {"snapshot": os.path.basename(snap), "meta": meta, "modes": {}}
+        snap_report = {
+            "snapshot": os.path.basename(snap),
+            "meta": meta,
+            "modes": {},
+            "run_context": build_run_context(
+                resolved_game_version,
+                character=args.character,
+                checkpoint=os.path.basename(args.checkpoint),
+                evaluation_mode="boss_retry",
+                scenario="native_save",
+                ascension=ascension,
+                seed=load_native_save_seed(snap),
+            ),
+        }
         if hp_sweep:
             for hp in hp_sweep:
                 for mode, n_runs, det in [
@@ -175,7 +226,10 @@ def main():
                     t0 = time.time()
                     results = [
                         _play_one(model, snap, deterministic=det, extra_obs=extra_obs,
-                                  relic_obs=relic_obs, set_hp=hp)
+                                  relic_obs=relic_obs, set_hp=hp,
+                                  game_version=resolved_game_version,
+                                  ascension=ascension, character=args.character,
+                                  checkpoint=args.checkpoint)
                         for _ in range(n_runs)
                     ]
                     summ = _summarize(results)
@@ -197,7 +251,12 @@ def main():
                 t0 = time.time()
                 results = []
                 for i in range(n_runs):
-                    r = _play_one(model, snap, det, extra_obs, relic_obs=relic_obs)
+                    r = _play_one(
+                        model, snap, det, extra_obs, relic_obs=relic_obs,
+                        game_version=resolved_game_version,
+                        ascension=ascension, character=args.character,
+                        checkpoint=args.checkpoint,
+                    )
                     results.append(r)
                     if r.get("error"):
                         print(f"  {mode} {i+1:>2}: ERROR {r['error']}")

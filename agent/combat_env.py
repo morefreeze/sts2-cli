@@ -1367,7 +1367,11 @@ class CombatEnv(gym.Env):
         return {
             "event": event,
             "run_id": self._run_id,
-            "seed": self._run_seed,
+            "seed": (
+                self._run_context["seed"]
+                if "seed" in self._run_context
+                else self._run_seed
+            ),
             "character": self.character,
             "ascension": self.ascension,
             "checkpoint": self._run_context.get("checkpoint"),

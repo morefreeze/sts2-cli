@@ -1,6 +1,8 @@
 from dataclasses import FrozenInstanceError
+import json
 
 import pytest
+import agent.run_metadata as run_metadata
 
 from agent.run_metadata import (
     MAX_GAME_VERSION_LENGTH,
@@ -75,6 +77,65 @@ def test_game_version_accepts_the_named_length_limit() -> None:
 def test_game_version_rejects_text_beyond_the_named_length_limit() -> None:
     with pytest.raises(ValueError, match=str(MAX_GAME_VERSION_LENGTH)):
         resolve_game_version("v" * (MAX_GAME_VERSION_LENGTH + 1), {})
+
+
+def test_game_version_rejects_non_unicode_scalar_text() -> None:
+    with pytest.raises(ValueError, match="Unicode scalar"):
+        resolve_game_version(json.loads('"\\ud800"'), {})
+
+
+def test_build_run_context_validates_and_returns_fresh_snapshots() -> None:
+    version = ResolvedGameVersion("v0.103.2", "environment")
+
+    first = run_metadata.build_run_context(
+        version,
+        character="Ironclad",
+        checkpoint="model.zip",
+        evaluation_mode="boss_retry",
+        scenario="native_save",
+        seed=None,
+    )
+    second = run_metadata.build_run_context(
+        version,
+        character="Ironclad",
+        checkpoint="model.zip",
+        evaluation_mode="boss_retry",
+        scenario="native_save",
+        seed=None,
+    )
+
+    assert first == {
+        "game_version": "v0.103.2",
+        "game_version_source": "environment",
+        "character": "Ironclad",
+        "checkpoint": "model.zip",
+        "evaluation_mode": "boss_retry",
+        "scenario": "native_save",
+        "seed": None,
+    }
+    assert first is not second
+    with pytest.raises(ValueError, match="ResolvedGameVersion"):
+        run_metadata.build_run_context(
+            None,
+            character="Ironclad",
+            evaluation_mode="boss_retry",
+            scenario="native_save",
+        )
+
+
+def test_load_native_save_seed_reads_only_bounded_safe_exact_sidecar(tmp_path) -> None:
+    save = tmp_path / "boss.save"
+    save.write_text("save", encoding="utf-8")
+    sidecar = tmp_path / "boss.save.meta.json"
+    sidecar.write_text(json.dumps({"seed": "seed-exact"}), encoding="utf-8")
+
+    assert run_metadata.load_native_save_seed(str(save)) == "seed-exact"
+
+    sidecar.write_text(json.dumps({"seed": json.loads('"\\ud800"')}), encoding="utf-8")
+    assert run_metadata.load_native_save_seed(str(save)) is None
+
+    sidecar.write_text('{"seed":"' + ("x" * 70_000) + '"}', encoding="utf-8")
+    assert run_metadata.load_native_save_seed(str(save)) is None
 
 
 def test_resolved_game_version_exposes_serializable_fields_and_is_frozen() -> None:

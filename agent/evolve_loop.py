@@ -13,7 +13,8 @@ intact). So: evolutionary hill climbing —
       4. survivor (clutch pass + reach ≥ best) → promote to best
       5. repeat
 
-Run:  .venv/bin/python -m agent.evolve_loop --rounds 12
+Run:  .venv/bin/python -m agent.evolve_loop --rounds 12 \\
+        --game-version v0.103.2 --ascension 0
 Stop: touch /tmp/sts2-cli/evolve_stop
 """
 from __future__ import annotations
@@ -114,12 +115,21 @@ def train_chunk(base_ckpt: str, out_dir: str, steps: int, ent: float,
     return latest_ckpt(out_dir)
 
 
-def sentinel_clutch(ckpt: str, round_idx: int, threshold: int = 12) -> bool:
+def sentinel_clutch(
+    ckpt: str,
+    round_idx: int,
+    threshold: int = 12,
+    *,
+    game_version: ResolvedGameVersion,
+    ascension: int,
+) -> bool:
     """HP=72 deterministic sweep; must win ≥ threshold of 15."""
     log_path = f"/tmp/sts2-cli/evolve_r{round_idx}_sentinel.log"
-    rc = run([PY, "-m", "agent.boss_retry", ckpt, SNAPSHOT,
-              "--hp-sweep", "72", "--n-deterministic", "15",
-              "--n-stochastic", "0"],
+    command = [PY, "-m", "agent.boss_retry", ckpt, SNAPSHOT,
+               "--hp-sweep", "72", "--n-deterministic", "15",
+               "--n-stochastic", "0"]
+    command.extend(_child_metadata_args(game_version, ascension))
+    rc = run(command,
              timeout=1800, log_path=log_path)
     kill_orphans()
     if rc != 0:
@@ -198,8 +208,16 @@ def main():
     p.add_argument("--chunk-steps", type=int, default=15000)
     p.add_argument("--ent", type=float, default=0.08)
     p.add_argument("--n-eval", type=int, default=15)
-    p.add_argument("--game-version", default=None)
-    p.add_argument("--ascension", type=int, default=0)
+    p.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
+    p.add_argument("--ascension", type=int, default=0,
+                   help="Ascension level (0..10; default: 0)")
     p.add_argument("--best", default=os.path.join(
         REPO, "checkpoints_best", "ppo_ironclad_13308k_RETRAIN_23pct.zip"))
     p.add_argument("--best-reach", type=int, default=2,
@@ -238,7 +256,12 @@ def main():
         if ck is None:
             history.append({"round": r, "result": "train_failed"})
             continue
-        if not sentinel_clutch(ck, r):
+        if not sentinel_clutch(
+            ck,
+            r,
+            game_version=resolved_game_version,
+            ascension=ascension,
+        ):
             history.append({"round": r, "ckpt": ck, "result": "clutch_fail"})
             continue
         avg_floor, reach = eval_reach(

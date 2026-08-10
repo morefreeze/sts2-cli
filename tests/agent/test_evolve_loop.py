@@ -177,7 +177,39 @@ def test_evolve_sentinel_nonzero_exit_rejects_partial_passing_log(monkeypatch):
         raising=False,
     )
 
-    assert evolve_loop.sentinel_clutch("partial.zip", 1) is False
+    assert evolve_loop.sentinel_clutch(
+        "partial.zip",
+        1,
+        game_version=ResolvedGameVersion("v0.103.2", "cli"),
+        ascension=10,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("source", "expects_version_flag"),
+    [("cli", True), ("environment", False)],
+)
+def test_evolve_sentinel_preserves_parent_metadata(
+    monkeypatch, source, expects_version_flag
+):
+    commands = []
+    monkeypatch.setattr(
+        evolve_loop,
+        "run",
+        lambda cmd, timeout, log_path: commands.append(cmd) or 2,
+    )
+    monkeypatch.setattr(evolve_loop, "kill_orphans", lambda: None)
+
+    assert evolve_loop.sentinel_clutch(
+        "model.zip",
+        1,
+        game_version=ResolvedGameVersion("v0.103.2", source),
+        ascension=7,
+    ) is False
+
+    command = commands[0]
+    assert command[command.index("--ascension") + 1] == "7"
+    assert ("--game-version" in command) is expects_version_flag
 
 
 @pytest.mark.parametrize(
@@ -213,7 +245,9 @@ def test_evolve_main_passes_resolved_metadata_to_train_and_eval(
         "train_chunk",
         lambda *args, **kwargs: calls.append(("train", kwargs)) or "trained.zip",
     )
-    monkeypatch.setattr(evolve_loop, "sentinel_clutch", lambda *args: True)
+    monkeypatch.setattr(
+        evolve_loop, "sentinel_clutch", lambda *args, **kwargs: True
+    )
     monkeypatch.setattr(
         evolve_loop,
         "eval_reach",

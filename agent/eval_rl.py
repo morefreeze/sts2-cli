@@ -2,9 +2,10 @@
 """eval_rl.py — Standalone evaluation for a saved MaskablePPO checkpoint.
 
 Usage:
-    python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip
-    python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --n-games 20
-    python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip --verbose
+    python agent/eval_rl.py checkpoints/ppo_ironclad_1448k.zip \
+        --game-version v0.103.2 --ascension 0
+    STS2_GAME_VERSION=v0.103.2 python agent/eval_rl.py \
+        checkpoints/ppo_ironclad_1448k.zip --n-games 20 --ascension 0
 """
 import argparse, json, os, random, signal, sys, time, uuid, warnings
 from collections import Counter
@@ -18,7 +19,11 @@ from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv, greedy_action
 from agent.train import mask_fn
 from agent.card_scoring import score_card_in_deck, deck_quality_score
-from agent.run_metadata import resolve_game_version, validate_ascension
+from agent.run_metadata import (
+    load_native_save_seed,
+    resolve_game_version,
+    validate_ascension,
+)
 
 
 _GAME_TIMEOUT_SEC = 300  # 5 min per game — kills deadlocked C# processes
@@ -512,10 +517,15 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
     checkpoint = (os.path.basename(str(checkpoint_name)) if checkpoint_name else None)
     evaluation_mode = "fixed" if fixed_seeds else "random"
     effective_scenario = scenario or ("native_save" if native_save_path else "full_run")
+    native_save_seed = (
+        load_native_save_seed(native_save_path) if native_save_path else None
+    )
     while i < n_games:
         total_attempts += 1
         if retries_used == 0:
-            if load_seed:
+            if native_save_path:
+                game_seed = native_save_seed
+            elif load_seed:
                 game_seed = load_seed
             elif fixed_seeds:
                 game_seed = f"eval_fixed_{i + seed_offset}"
@@ -531,6 +541,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             "game_version": game_version,
             "game_version_source": game_version_source,
         }
+        if native_save_path:
+            run_context["seed"] = game_seed
         env_kwargs = dict(character=character, seed=game_seed,
                           seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs,
                           relic_obs=relic_obs, ascension=ascension,
@@ -882,12 +894,24 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Retry crash/timeout/stuck attempts on the same seed (default: 1)")
     p.add_argument("--results-log", default="data/eval_results.jsonl",
                    help="JSONL file for every evaluation attempt. Pass 'none' to disable.")
-    p.add_argument("--game-version", default=None,
-                   help="Explicit STS2 game version stored with evaluation results")
+    p.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
     p.add_argument("--ascension", type=int, default=0,
-                   help="Ascension level for evaluation (0..10)")
-    p.add_argument("--scenario", default="full_run",
-                   help="Evaluation scenario label stored with evaluation results")
+                   help="Ascension level for evaluation (0..10; default: 0)")
+    p.add_argument(
+        "--scenario",
+        default=None,
+        help=(
+            "Evaluation scenario label (default: native_save with --load *.save, "
+            "otherwise full_run)"
+        ),
+    )
     p.add_argument("--verbose", action="store_true", default=False,
                    help="Per-room summaries + detailed last-combat trace on wins")
     p.add_argument("--load", default=None,
@@ -976,6 +1000,9 @@ def main():
         print(f"  actions     : {len(replay_actions)}")
     print(f"Running {n_games} games ({seed_mode} seeds, max_floor=unlimited)...")
 
+    effective_scenario = args.scenario or (
+        "native_save" if native_save_path else "full_run"
+    )
     stats = run_eval_verbose(model, character, n_games=n_games,
                              fixed_seeds=args.fixed_seeds, seed_offset=args.seed_offset,
                              invalid_retries=args.invalid_retries,
@@ -991,7 +1018,7 @@ def main():
                              ascension=ascension,
                              game_version=resolved_game_version.value,
                              game_version_source=resolved_game_version.source,
-                             scenario=args.scenario,
+                             scenario=effective_scenario,
                              results_log_path=results_log_path)
     print(f"---")
     print(f"valid games    : {stats['valid_n']}/{stats['requested_n']} "

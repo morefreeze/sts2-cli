@@ -9,13 +9,15 @@ Two main use cases:
 
   1. Ad-hoc diagnostic:
        .venv/bin/python -m agent.mc_rollout <save_path> \
-           --n-sims 50 --policy heuristic
+           --n-sims 50 --game-version v0.103.2 --ascension 0
 
   2. Programmatic data generation (e.g. labels for v3 predictor training):
        from agent.mc_rollout import rollout
+       from agent.run_metadata import resolve_game_version
+       version = resolve_game_version(None)  # reads STS2_GAME_VERSION
        outcomes = rollout(save_path="data/snapshots/X.save", n_sims=100,
                           ckpt_path="checkpoints/ppo_ironclad_13219k.zip",
-                          deterministic=False)
+                          deterministic=False, game_version=version, ascension=0)
        # outcomes is list[{"max_floor", "won", "steps", "final_hp", "combat_wins"}]
 
 Policy options:
@@ -39,6 +41,13 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.combat_env import CombatEnv
+from agent.run_metadata import (
+    ResolvedGameVersion,
+    build_run_context,
+    load_native_save_seed,
+    resolve_game_version,
+    validate_ascension,
+)
 
 
 def _maybe_load_model(ckpt_path: Optional[str]):
@@ -54,7 +63,10 @@ def _maybe_load_model(ckpt_path: Optional[str]):
 
 def _one_rollout(model, save_path: str, deterministic: bool, extra_obs: bool,
                  set_hp: Optional[int] = None, max_floor: int = 0,
-                 max_steps: int = 5000) -> dict:
+                 max_steps: int = 5000, *,
+                 game_version: ResolvedGameVersion | None = None,
+                 ascension: int = 0, character: str = "Ironclad",
+                 checkpoint: str | None = None) -> dict:
     """Run a single rollout from `save_path`. Stops at game_over OR when the
     player crosses max_floor (0 = no limit) OR after max_steps env steps.
 
@@ -64,12 +76,23 @@ def _one_rollout(model, save_path: str, deterministic: bool, extra_obs: bool,
     Use this mode only for end-to-end smoke checks — the random-combat policy
     is much weaker than even the heuristic baseline.
     """
-    env = CombatEnv(character="Ironclad",
-                    seed=f"mc_{int(time.time()*1e6) % 10**9}",
+    ascension = validate_ascension(ascension)
+    run_context = build_run_context(
+        game_version,
+        character=character,
+        checkpoint=os.path.basename(checkpoint) if checkpoint else None,
+        evaluation_mode="mc_rollout",
+        scenario="native_save",
+        seed=load_native_save_seed(save_path),
+    )
+    env = CombatEnv(character=character,
+                    seed=None,
                     native_save_path=save_path,
                     extra_obs=extra_obs,
                     set_hp_after_load=set_hp,
-                    max_floor=max_floor)
+                    max_floor=max_floor,
+                    ascension=ascension,
+                    run_context=run_context)
     from sb3_contrib.common.wrappers import ActionMasker
     from agent.train import mask_fn
     env_w = ActionMasker(env, mask_fn)
@@ -137,13 +160,27 @@ def _one_rollout(model, save_path: str, deterministic: bool, extra_obs: bool,
 
 def rollout(save_path: str, n_sims: int = 30,
             ckpt_path: Optional[str] = None, deterministic: bool = False,
-            set_hp: Optional[int] = None, max_floor: int = 0) -> list[dict]:
+            set_hp: Optional[int] = None, max_floor: int = 0, *,
+            game_version: ResolvedGameVersion | None = None,
+            ascension: int = 0, character: str = "Ironclad") -> list[dict]:
     """Public API: run n_sims rollouts from save_path, return list of outcomes."""
+    ascension = validate_ascension(ascension)
+    build_run_context(
+        game_version,
+        character=character,
+        checkpoint=os.path.basename(ckpt_path) if ckpt_path else None,
+        evaluation_mode="mc_rollout",
+        scenario="native_save",
+        seed=load_native_save_seed(save_path),
+    )
     model, extra_obs = _maybe_load_model(ckpt_path)
     out = []
     for _ in range(n_sims):
         out.append(_one_rollout(model, save_path, deterministic, extra_obs,
-                                set_hp=set_hp, max_floor=max_floor))
+                                set_hp=set_hp, max_floor=max_floor,
+                                game_version=game_version,
+                                ascension=ascension, character=character,
+                                checkpoint=ckpt_path))
     return out
 
 
@@ -179,7 +216,33 @@ def main():
     p.add_argument("--max-floor", type=int, default=0,
                    help="Stop rollout when player crosses this floor (0 = no limit)")
     p.add_argument("--report-json", default=None)
+    p.add_argument("--character", default="Ironclad")
+    p.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
+    p.add_argument("--ascension", type=int, default=0,
+                   help="Ascension level (0..10; default: 0)")
     args = p.parse_args()
+
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        ascension = validate_ascension(args.ascension)
+    except ValueError as exc:
+        p.error(str(exc))
+    report_context = build_run_context(
+        resolved_game_version,
+        character=args.character,
+        checkpoint=os.path.basename(args.ckpt) if args.ckpt else None,
+        evaluation_mode="mc_rollout",
+        scenario="native_save",
+        ascension=ascension,
+        seed=load_native_save_seed(args.save_path),
+    )
 
     if not os.path.exists(args.save_path):
         print(f"No save at {args.save_path}")
@@ -199,7 +262,9 @@ def main():
 
     t0 = time.time()
     results = rollout(args.save_path, args.n_sims, args.ckpt,
-                      args.deterministic, args.set_hp, args.max_floor)
+                      args.deterministic, args.set_hp, args.max_floor,
+                      game_version=resolved_game_version,
+                      ascension=ascension, character=args.character)
     elapsed = time.time() - t0
     summ = _summarize(results)
     print(f"--- summary ({elapsed:.1f}s, {elapsed/max(args.n_sims,1):.1f}s/sim) ---")
@@ -214,7 +279,8 @@ def main():
     if args.report_json:
         os.makedirs(os.path.dirname(args.report_json) or ".", exist_ok=True)
         with open(args.report_json, "w") as f:
-            json.dump({"summary": summ, "results": results}, f, indent=2)
+            json.dump({"summary": summ, "results": results,
+                       "run_context": report_context}, f, indent=2)
         print(f"\nWrote {args.report_json}")
     return 0
 

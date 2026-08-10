@@ -190,7 +190,7 @@ def test_eval_cli_requires_checkpoint_and_defaults_to_fixed_seeds():
     assert parser.parse_args(["checkpoints/model.zip", "--random-seeds"]).fixed_seeds is False
     assert args.invalid_retries == 1
     assert args.results_log == "data/eval_results.jsonl"
-    assert args.scenario == "full_run"
+    assert args.scenario is None
     assert args.game_version is None
     assert args.ascension == 0
     assert parser.parse_args(
@@ -315,6 +315,108 @@ def test_eval_launch_rejects_out_of_range_ascension_before_checkpoint_load(
         eval_rl.main()
 
     assert "ascension must be an integer in the range 0..10" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("load_arg", "scenario_args", "expected"),
+    [
+        (None, [], "full_run"),
+        ("snapshot.save", [], "native_save"),
+        ("snapshot.save", ["--scenario", "manual"], "manual"),
+    ],
+)
+def test_eval_main_resolves_scenario_before_run_kwargs(
+    monkeypatch, load_arg, scenario_args, expected
+):
+    import agent.eval_rl as eval_rl
+
+    class Captured(Exception):
+        pass
+
+    captured = {}
+    argv = ["eval_rl.py", "model.zip", "--game-version", "v0.103.2"]
+    if load_arg is not None:
+        argv.extend(["--load", load_arg])
+    argv.extend(scenario_args)
+    monkeypatch.setattr(eval_rl.sys, "argv", argv)
+    monkeypatch.setattr(eval_rl.MaskablePPO, "load", lambda *args, **kwargs: object())
+
+    def capture(*args, **kwargs):
+        captured.update(kwargs)
+        raise Captured
+
+    monkeypatch.setattr(eval_rl, "run_eval_verbose", capture)
+
+    with pytest.raises(Captured):
+        eval_rl.main()
+
+    assert captured["scenario"] == expected
+
+
+@pytest.mark.parametrize("with_sidecar", [False, True])
+def test_native_save_eval_uses_authoritative_sidecar_seed_or_none(
+    monkeypatch, tmp_path, with_sidecar
+):
+    import agent.eval_rl as eval_rl
+
+    save = tmp_path / "snapshot.save"
+    save.write_text("save", encoding="utf-8")
+    if with_sidecar:
+        (tmp_path / "snapshot.save.meta.json").write_text(
+            json.dumps({"seed": "native-seed"}), encoding="utf-8"
+        )
+    contexts = []
+    env_seeds = []
+
+    class FakeEnv:
+        def __init__(self, **kwargs):
+            contexts.append(kwargs["run_context"])
+            env_seeds.append(kwargs["seed"])
+            self._current_floor = 7
+            self._current_state = {
+                "decision": "combat_play",
+                "context": {"floor": 7},
+                "player": {"hp": 0, "max_hp": 80},
+            }
+
+        def reset(self):
+            return [0.0] * 161, {}
+
+        def action_masks(self):
+            return [True]
+
+        def step(self, action):
+            return [0.0] * 161, 0.0, True, False, {"floor": 7}
+
+        def close(self):
+            pass
+
+    class FakeModel:
+        observation_space = SimpleNamespace(shape=(161,))
+
+        def predict(self, obs, **kwargs):
+            return 0, None
+
+    monkeypatch.setattr(eval_rl, "CombatEnv", FakeEnv)
+    monkeypatch.setattr(eval_rl, "ActionMasker", lambda env, mask_fn: env)
+    monkeypatch.setattr(eval_rl.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(eval_rl.signal, "alarm", lambda *args: None)
+
+    stats = run_eval_verbose(
+        FakeModel(),
+        "Ironclad",
+        n_games=1,
+        invalid_retries=0,
+        native_save_path=str(save),
+        **VERSION_FIELDS,
+    )
+
+    expected_seed = "native-seed" if with_sidecar else None
+    assert env_seeds == [expected_seed]
+    assert contexts[0]["seed"] == expected_seed
+    assert contexts[0]["scenario"] == "native_save"
+    assert stats["attempt_results"][0]["seed"] == expected_seed
+    assert "eval_fixed" not in json.dumps(stats["attempt_results"])
 
 
 def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_path):

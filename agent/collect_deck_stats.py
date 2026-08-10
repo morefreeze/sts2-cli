@@ -8,7 +8,8 @@ than early-death decks are flagged as empirically positive — those bonuses
 are written to data/card_empirical.json for use in card_scoring.py.
 
 Usage:
-    python agent/collect_deck_stats.py checkpoints/ppo_ironclad_3706k.zip --n-games 30
+    python agent/collect_deck_stats.py checkpoints/ppo_ironclad_3706k.zip \
+        --n-games 30 --game-version v0.103.2 --ascension 0
 """
 import argparse, json, os, random, signal, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,6 +19,12 @@ from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv
 from agent.train import mask_fn
 from agent.card_scoring import _card_id_norm
+from agent.run_metadata import (
+    ResolvedGameVersion,
+    build_run_context,
+    resolve_game_version,
+    validate_ascension,
+)
 
 _GAME_TIMEOUT = 300
 
@@ -26,9 +33,27 @@ def _timeout_handler(signum, frame):
     raise TimeoutError()
 
 
-def play_one_game(model, character: str, seed: str, extra_obs: bool):
+def play_one_game(
+    model,
+    character: str,
+    seed: str,
+    extra_obs: bool,
+    *,
+    game_version: ResolvedGameVersion | None = None,
+    ascension: int = 0,
+    checkpoint: str | None = None,
+):
+    ascension = validate_ascension(ascension)
+    run_context = build_run_context(
+        game_version,
+        character=character,
+        checkpoint=os.path.basename(checkpoint) if checkpoint else None,
+        evaluation_mode="deck_stats",
+        scenario="full_run",
+    )
     env = CombatEnv(character=character, seed=seed,
-                    seed_prefix=f"stats_{seed}", extra_obs=extra_obs)
+                    seed_prefix=f"stats_{seed}", extra_obs=extra_obs,
+                    ascension=ascension, run_context=run_context)
     env_w = ActionMasker(env, mask_fn)
     obs, _ = env_w.reset()
     max_floor = 1
@@ -79,7 +104,31 @@ def main():
     p.add_argument("--scores-out", default="data/card_empirical.json")
     p.add_argument("--boss-floor", type=int, default=14,
                    help="Decks reaching ≥ this floor count as 'boss-reach' (positive sample)")
+    p.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
+    p.add_argument("--ascension", type=int, default=0,
+                   help="Ascension level (0..10; default: 0)")
     args = p.parse_args()
+
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        ascension = validate_ascension(args.ascension)
+    except ValueError as exc:
+        p.error(str(exc))
+    report_context = build_run_context(
+        resolved_game_version,
+        character=args.character,
+        checkpoint=os.path.basename(args.checkpoint),
+        evaluation_mode="deck_stats",
+        scenario="full_run",
+        ascension=ascension,
+    )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     device = "cpu"  # CPU faster than MPS for small policy inference
@@ -93,7 +142,15 @@ def main():
         # Fixed N games
         for i in range(args.n_games):
             seed = f"stats_{random.randint(0, 0xFFFFFF):06x}_{i}"
-            result = play_one_game(model, args.character, seed, extra_obs)
+            result = play_one_game(
+                model,
+                args.character,
+                seed,
+                extra_obs,
+                game_version=resolved_game_version,
+                ascension=ascension,
+                checkpoint=args.checkpoint,
+            )
             games.append(result)
             marker = "★" if result["max_floor"] >= args.boss_floor else "·"
             print(f"  [{i+1:3d}/{args.n_games}] {marker} fl={result['max_floor']:2d} "
@@ -104,7 +161,15 @@ def main():
         i = 0
         while n_boss < args.target_boss_reach and i < args.max_games:
             seed = f"stats_{random.randint(0, 0xFFFFFF):06x}_{i}"
-            result = play_one_game(model, args.character, seed, extra_obs)
+            result = play_one_game(
+                model,
+                args.character,
+                seed,
+                extra_obs,
+                game_version=resolved_game_version,
+                ascension=ascension,
+                checkpoint=args.checkpoint,
+            )
             games.append(result)
             i += 1
             if result["max_floor"] >= args.boss_floor:
@@ -125,7 +190,7 @@ def main():
     if not boss_decks:
         print("No boss-reaching games — nothing to derive empirical scores from.")
         with open(args.out, "w") as f:
-            json.dump({"games": games}, f, indent=2)
+            json.dump({"games": games, "run_context": report_context}, f, indent=2)
         return 1
 
     def card_freq(decks: list) -> dict:
@@ -166,7 +231,8 @@ def main():
     with open(args.out, "w") as f:
         json.dump({"games": games, "boss_freq": boss_freq, "early_freq": early_freq,
                    "empirical_bonus": empirical, "boss_floor": args.boss_floor,
-                   "n_boss": len(boss_decks), "n_early": len(early_decks)}, f, indent=2)
+                   "n_boss": len(boss_decks), "n_early": len(early_decks),
+                   "run_context": report_context}, f, indent=2)
     print(f"\nRaw stats → {args.out}")
 
     with open(args.scores_out, "w") as f:
