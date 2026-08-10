@@ -1387,6 +1387,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
             "character": "Ironclad",
             "seed": "nested-seed",
             "build_id": "v1",
+            "game_version_source": "cli",
             "checkpoint": "replay-model",
             "evaluation_mode": "fixed",
             "scenario": "standard",
@@ -1424,6 +1425,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
                 "character": "Silent",
                 "seed": [],
                 "game_version": "v2",
+                "game_version_source": "environment",
                 "checkpoint": "summary-model",
                 "evaluation_mode": {},
                 "scenario": "summary-scenario",
@@ -1456,6 +1458,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
         "character": "Silent",
         "seed": "nested-seed",
         "game_version": "v2",
+        "game_version_source": "environment",
         "checkpoint": "summary-model",
         "evaluation_mode": "fixed",
         "scenario": "summary-scenario",
@@ -1470,6 +1473,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     for key, value in expected_metadata.items():
         assert exact["metadata"][key] == value
     assert exact["metadata"]["modifiers"] == ["TEST_MODIFIER"]
+    assert "game_version_source" not in large_cohort["filters"]
     assert len(exact["nodes"]) == 1
 
 
@@ -2153,6 +2157,7 @@ def test_eval_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
         "status": "dead",
         "max_global_floor": 9,
         "character": "Ironclad",
+        "game_version_source": "cli",
         "started_at": 10,
         "ended_at": 20,
         "ts": 99,
@@ -2195,6 +2200,7 @@ def test_eval_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
     assert large_run.metadata == small_run.metadata
     assert large_run.metadata.started_at == 10
     assert large_run.metadata.ended_at == 20
+    assert large_run.metadata.game_version_source == "cli"
     assert large_run.outcome == small_run.outcome
     assert large_run.coverage == small_run.coverage
     assert large_run.coverage.first_recorded_floor is None
@@ -2211,6 +2217,7 @@ def test_deck_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
             "floor_crossed": 3,
             "ts": 1,
             "character": "Silent",
+            "game_version_source": "environment",
         },
         {
             "event": "card_pick",
@@ -2262,6 +2269,7 @@ def test_deck_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
 
     assert large_run.metadata == small_run.metadata
     assert large_run.outcome == small_run.outcome
+    assert large_run.metadata.game_version_source == "environment"
     assert large_run.outcome.status is RunStatus.DEAD
     assert large_run.outcome.max_global_floor == 7
     assert large_run.outcome.max_floor_label == "corrected"

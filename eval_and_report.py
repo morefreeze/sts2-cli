@@ -14,6 +14,8 @@ import re
 import sys
 from datetime import datetime
 
+from agent.run_metadata import resolve_game_version, validate_ascension
+
 
 def extract_steps(checkpoint_path: str) -> int:
     """Extract step count from checkpoint filename."""
@@ -22,8 +24,20 @@ def extract_steps(checkpoint_path: str) -> int:
 
 
 def run_eval(checkpoint: str, n_games: int = 10,
-             fixed_seeds: bool = True, invalid_retries: int = 1) -> dict:
+             fixed_seeds: bool = True, invalid_retries: int = 1, *,
+             ascension: int = 0, game_version: str = None,
+             game_version_source: str = None) -> dict:
     """Run evaluation using eval_rl.py and parse output."""
+    if type(game_version) is not str or not game_version.strip():
+        raise ValueError("game_version must be a non-empty string")
+    game_version = game_version.strip()
+    if type(game_version_source) is not str or game_version_source not in {
+        "cli",
+        "environment",
+    }:
+        raise ValueError("game_version_source must be 'cli' or 'environment'")
+    ascension = validate_ascension(ascension)
+
     # Import eval_rl module directly instead of subprocess
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from agent.eval_rl import run_eval_verbose
@@ -47,7 +61,11 @@ def run_eval(checkpoint: str, n_games: int = 10,
         n_games=n_games,
         fixed_seeds=fixed_seeds,
         invalid_retries=invalid_retries,
-        verbose=False
+        verbose=False,
+        checkpoint_name=checkpoint,
+        ascension=ascension,
+        game_version=game_version,
+        game_version_source=game_version_source,
     )
     return stats
 
@@ -112,14 +130,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("checkpoint", help="Explicit path to checkpoint zip")
     parser.add_argument("--n-games", type=int, default=10)
     parser.add_argument("--invalid-retries", type=int, default=1)
+    parser.add_argument("--game-version", default=None)
+    parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--random-seeds", dest="fixed_seeds", action="store_false",
                         help="Use random seeds instead of the fixed comparison set")
     parser.set_defaults(fixed_seeds=True)
     return parser
 
 
+def _resolve_launch_metadata(args):
+    return resolve_game_version(args.game_version), validate_ascension(args.ascension)
+
+
 def main():
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    try:
+        resolved_game_version, ascension = _resolve_launch_metadata(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     checkpoint = args.checkpoint
     evaluation_key = _evaluation_key(
         checkpoint,
@@ -147,6 +176,9 @@ def main():
         n_games=args.n_games,
         fixed_seeds=args.fixed_seeds,
         invalid_retries=args.invalid_retries,
+        ascension=ascension,
+        game_version=resolved_game_version.value,
+        game_version_source=resolved_game_version.source,
     )
 
     # Format and print report

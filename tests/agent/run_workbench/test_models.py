@@ -166,6 +166,33 @@ def test_partial_record_serializes_coverage_and_capabilities() -> None:
     assert payload["capabilities"]["turn_replay"] is False
 
 
+def test_run_metadata_serializes_game_version_source_next_to_version() -> None:
+    record = RunRecord(
+        run_id="versioned-run",
+        source_id="eval.jsonl:1",
+        source_kind=SourceKind.EVAL_RESULTS,
+        metadata=RunMetadata(
+            game_version="v0.103.2",
+            game_version_source="cli",
+        ),
+    )
+
+    assert record.to_dict()["metadata"] == {
+        "character": None,
+        "seed": None,
+        "game_version": "v0.103.2",
+        "game_version_source": "cli",
+        "checkpoint": None,
+        "evaluation_mode": None,
+        "scenario": None,
+        "ascension": None,
+        "modifiers": [],
+        "is_multiplayer": None,
+        "started_at": None,
+        "ended_at": None,
+    }
+
+
 def test_model_output_is_json_safe_with_string_enum_values() -> None:
     record = RunRecord(
         run_id="run-2",

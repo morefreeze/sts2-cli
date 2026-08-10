@@ -108,6 +108,7 @@ class _CompactRun:
     character: str | None = None
     seed: str | None = None
     game_version: str | None = None
+    game_version_source: str | None = None
     checkpoint: str | None = None
     evaluation_mode: str | None = None
     scenario: str | None = None
@@ -174,6 +175,7 @@ class _CompactRun:
                 character=self.character,
                 seed=self.seed,
                 game_version=self.game_version,
+                game_version_source=self.game_version_source,
                 checkpoint=self.checkpoint,
                 evaluation_mode=self.evaluation_mode,
                 scenario=self.scenario,
@@ -930,6 +932,7 @@ def _item_metadata(record: _CohortItem) -> RunMetadata:
         character=record.character,
         seed=record.seed,
         game_version=record.game_version,
+        game_version_source=record.game_version_source,
         checkpoint=record.checkpoint,
         evaluation_mode=record.evaluation_mode,
         scenario=record.scenario,
@@ -1262,6 +1265,10 @@ def _update_compact_metadata(
     ):
         if getattr(compact, attribute) is None:
             setattr(compact, attribute, _first_scalar_text(record, *keys))
+    if compact.game_version_source is None:
+        compact.game_version_source = _first_exact_text(
+            record, "game_version_source"
+        )
     if compact.ascension is None:
         compact.ascension = _first_integral_int(record, "ascension")
 
@@ -1304,6 +1311,10 @@ def _update_compact_replay_metadata(
             value = _replay_scalar_text(record, *keys)
             if value is not None:
                 setattr(compact, attribute, value)
+    if compact.game_version_source is None:
+        compact.game_version_source = _first_exact_text(
+            record, "game_version_source"
+        )
     if compact.ascension is None:
         compact.ascension = _replay_ascension(record, "ascension")
     modifiers = _replay_modifiers(record)
@@ -1625,6 +1636,9 @@ def _apply_compact_replay_summary_metadata(
         value = _replay_scalar_text(summary, *keys)
         if value is not None:
             setattr(compact, attribute, value)
+    version_source = _first_exact_text(summary, "game_version_source")
+    if version_source is not None:
+        compact.game_version_source = version_source
     ascension = _replay_ascension(summary, "ascension")
     if ascension is not None:
         compact.ascension = ascension
@@ -1711,6 +1725,14 @@ def _first_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
             return value.strip()
         if isinstance(value, int) and not isinstance(value, bool):
             return str(value)
+    return None
+
+
+def _first_exact_text(record: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if type(value) is str and value.strip():
+            return value.strip()
     return None
 
 

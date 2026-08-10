@@ -163,6 +163,7 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
             or _first_text(record, "character"),
             seed=_first_text(record, "seed"),
             game_version=_first_text(record, "build_id", "game_version"),
+            game_version_source=_metadata_version_source(record),
             checkpoint=_first_text(record, "checkpoint"),
             evaluation_mode=_first_text(record, "evaluation_mode"),
             scenario=_first_text(record, "scenario"),
@@ -272,6 +273,7 @@ def _adapt_replay(
         or _replay_text(start_action, "seed"),
         game_version=_replay_text(summary, "game_version", "build_id")
         or _replay_text(start_action, "game_version", "build_id"),
+        game_version_source=_metadata_version_source(summary, start_action),
         checkpoint=_first_text(summary, "checkpoint")
         or _first_text(start_action, "checkpoint"),
         evaluation_mode=_first_text(summary, "evaluation_mode")
@@ -549,6 +551,7 @@ def _metadata_from_records(
         seed=_first_nonempty_record_value(records, "seed"),
         game_version=_first_nonempty_record_value(records, "game_version")
         or _first_nonempty_record_value(records, "build_id"),
+        game_version_source=_metadata_version_source(*records),
         checkpoint=_first_nonempty_record_value(records, "checkpoint"),
         evaluation_mode=_first_nonempty_record_value(records, "evaluation_mode"),
         scenario=_first_nonempty_record_value(records, "scenario"),
@@ -556,6 +559,14 @@ def _metadata_from_records(
         started_at=started_at,
         ended_at=ended_at,
     )
+
+
+def _metadata_version_source(*records: dict[str, Any]) -> str | None:
+    for record in records:
+        value = record.get("game_version_source")
+        if type(value) is str and value.strip():
+            return value.strip()
+    return None
 
 
 def _status_from_records(

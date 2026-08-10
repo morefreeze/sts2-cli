@@ -36,6 +36,7 @@ signal.signal(signal.SIGTERM, _cleanup_and_exit)
 signal.signal(signal.SIGINT,  _cleanup_and_exit)
 from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv
+from agent.run_metadata import resolve_game_version, validate_ascension
 
 CARDS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "localization_eng", "cards.json")
 CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints")
@@ -202,11 +203,14 @@ def _unfreeze_actor(model) -> None:
 
 
 def make_env(character: str, ascension: int, worker_id: int = 0, max_floor: int = 0,
-             native_save_path: str = None):
+             native_save_path: str = None, run_context: dict | None = None):
+    run_context_snapshot = dict(run_context or {})
+
     def _init():
         env = CombatEnv(character=character, ascension=ascension,
                         seed_prefix=f"w{worker_id}", max_floor=max_floor,
-                        native_save_path=native_save_path)
+                        native_save_path=native_save_path,
+                        run_context=run_context_snapshot)
         return ActionMasker(env, mask_fn)
     return _init
 
@@ -405,13 +409,39 @@ class TrainCallback(BaseCallback):
         self._recent_timeouts = 0
 
 
-def run_eval(model, character: str, n_games: int = 5) -> dict:
+def run_eval(model, character: str, n_games: int = 5, *, ascension: int = 0,
+             checkpoint: str = None, game_version: str = None,
+             game_version_source: str = None) -> dict:
     """Run n_games full evaluation runs (multiple combats each). Returns stats dict."""
+    if type(game_version) is not str or not game_version.strip():
+        raise ValueError("game_version must be a non-empty string")
+    game_version = game_version.strip()
+    if type(game_version_source) is not str or game_version_source not in {
+        "cli",
+        "environment",
+    }:
+        raise ValueError("game_version_source must be 'cli' or 'environment'")
+    ascension = validate_ascension(ascension)
+
     floors, wins, combat_wins = [], [], []
     for i in range(n_games):
         # fixed_seed makes eval deterministic across checkpoints for fair comparison
         fixed_seed = f"eval_fixed_{i}"
-        env = CombatEnv(character=character, seed=fixed_seed, seed_prefix=f"eval_{i}", max_floor=0)
+        run_context = {
+            "checkpoint": checkpoint,
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+            "game_version": game_version,
+            "game_version_source": game_version_source,
+        }
+        env = CombatEnv(
+            character=character,
+            ascension=ascension,
+            seed=fixed_seed,
+            seed_prefix=f"eval_{i}",
+            max_floor=0,
+            run_context=run_context,
+        )
         env_wrapped = ActionMasker(env, mask_fn)
         obs, _ = env_wrapped.reset()
         ep_combat_wins = 0
@@ -548,7 +578,8 @@ def _expand_obs_checkpoint(checkpoint_path: str, vec_env, device: str,
 def _make_vec_env(character: str, ascension: int, n_envs: int,
                   max_floor: int, seed_offset: int = 0,
                   load_saves: list = None,
-                  mix_save_envs: int = -1) -> SubprocVecEnv | DummyVecEnv:
+                  mix_save_envs: int = -1,
+                  run_context: dict | None = None) -> SubprocVecEnv | DummyVecEnv:
     """Spawn n_envs subprocesses.
     - If `load_saves` is empty: all envs are random fresh runs.
     - If `load_saves` is non-empty and mix_save_envs == -1: ALL envs round-robin
@@ -567,14 +598,18 @@ def _make_vec_env(character: str, ascension: int, n_envs: int,
     # full pool and picks a random snapshot per reset (CombatEnv handles list).
     # When only one save is provided, behave as before (single-save mode).
     pool = saves if len(saves) > 1 else None
+    base_context = dict(run_context or {})
     makers = []
     for i in range(n_envs):
         if i < n_save_envs:
             sp = pool if pool is not None else saves[i % len(saves)]
         else:
             sp = None
+        worker_context = dict(base_context)
+        worker_context["scenario"] = "native_save" if sp else "full_run"
         makers.append(make_env(character, ascension, i + seed_offset,
-                               max_floor=max_floor, native_save_path=sp))
+                               max_floor=max_floor, native_save_path=sp,
+                               run_context=worker_context))
     return SubprocVecEnv(makers) if n_envs > 1 else DummyVecEnv(makers)
 
 
@@ -587,6 +622,8 @@ def main():
     parser.add_argument("--steps",       type=int, default=500_000)
     parser.add_argument("--n-envs",      type=int, default=4)
     parser.add_argument("--ascension",   type=int, default=0)
+    parser.add_argument("--game-version", default=None,
+                        help="Explicit STS2 game version stored with run metadata")
     parser.add_argument("--checkpoint",  default=None)
     parser.add_argument("--reinit-value", action="store_true",
                         help="Reinitialize value network when loading checkpoint (use when reward scale changes)")
@@ -633,6 +670,11 @@ def main():
     }
     try:
         _apply_training_profile(args, explicit_options=explicit_options)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        args.ascension = validate_ascension(args.ascension)
     except ValueError as exc:
         parser.error(str(exc))
     global CHECKPOINT_DIR, HP_CURRICULUM_SCHEDULE
@@ -715,9 +757,19 @@ def main():
         for s in load_saves:
             print(f"  load_save: {s}")
 
+    training_run_context = {
+        "checkpoint": (
+            os.path.basename(args.checkpoint) if args.checkpoint else None
+        ),
+        "evaluation_mode": "training",
+        "scenario": "full_run",
+        "game_version": resolved_game_version.value,
+        "game_version_source": resolved_game_version.source,
+    }
     vec_env = _make_vec_env(args.character, args.ascension, args.n_envs, initial_floor,
                             load_saves=load_saves,
-                            mix_save_envs=current_mix_save_envs)
+                            mix_save_envs=current_mix_save_envs,
+                            run_context=training_run_context)
 
     policy_kwargs = dict(net_arch=dict(pi=[512, 512], vf=[512, 512]))
 
@@ -794,6 +846,9 @@ def main():
     last_eval_at  = 0
     # Checkpoint names include steps from prior runs so we never overwrite old files
     checkpoint_base = int(getattr(model, "num_timesteps", 0) or 0)
+    last_checkpoint = (
+        os.path.basename(args.checkpoint) if args.checkpoint else None
+    )
 
     while steps_done < args.steps:
         chunk = min(save_interval, args.steps - steps_done)
@@ -815,7 +870,8 @@ def main():
             vec_env = _make_vec_env(args.character, args.ascension, args.n_envs,
                                     floor, seed_offset=steps_done // 1000,
                                     load_saves=load_saves,
-                                    mix_save_envs=current_mix_save_envs)
+                                    mix_save_envs=current_mix_save_envs,
+                                    run_context=training_run_context)
             model.set_env(vec_env)
             old_vf_pretrain = getattr(callback, "_vf_pretrain_remaining", 0)
             callback = TrainCallback(args.steps, args.n_envs, N_STEPS,
@@ -834,6 +890,7 @@ def main():
         ckpt = os.path.join(CHECKPOINT_DIR,
                             f"ppo_{args.character.lower()}_{(checkpoint_base + steps_done) // 1000}k.zip")
         model.save(ckpt, exclude=["env", "_episode_storage", "_vec_normalize_env"])
+        last_checkpoint = os.path.basename(ckpt)
         print(f"\n  [save] {ckpt}", flush=True)
 
         # Periodic evaluation
@@ -841,7 +898,15 @@ def main():
             last_eval_at = steps_done
             print(f"  [eval] Running {5} games...", flush=True)
             try:
-                stats = run_eval(model, args.character, n_games=5)
+                stats = run_eval(
+                    model,
+                    args.character,
+                    n_games=5,
+                    ascension=args.ascension,
+                    checkpoint=os.path.basename(ckpt),
+                    game_version=resolved_game_version.value,
+                    game_version_source=resolved_game_version.source,
+                )
                 print(f"  [eval] avg_floor={stats['avg_floor']:.1f} "
                       f"max_floor={stats['max_floor']} "
                       f"win_rate={stats['win_rate']:.0%} "
@@ -873,6 +938,7 @@ def main():
                     seed_offset=steps_done // 1000,
                     load_saves=load_saves,
                     mix_save_envs=next_mix,
+                    run_context=training_run_context,
                 )
                 model.set_env(vec_env)
                 current_mix_save_envs = next_mix
@@ -889,7 +955,15 @@ def main():
     # Final evaluation
     print(f"\nFinal evaluation ({10} games)...")
     try:
-        stats = run_eval(model, args.character, n_games=10)
+        stats = run_eval(
+            model,
+            args.character,
+            n_games=10,
+            ascension=args.ascension,
+            checkpoint=last_checkpoint,
+            game_version=resolved_game_version.value,
+            game_version_source=resolved_game_version.source,
+        )
         print(f"  avg_floor={stats['avg_floor']:.1f} max_floor={stats['max_floor']} "
               f"win_rate={stats['win_rate']:.0%} avg_combats={stats['avg_combat_wins']:.1f}")
     except Exception as e:

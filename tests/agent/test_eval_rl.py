@@ -20,6 +20,12 @@ from agent.eval_rl import (
 )
 
 
+VERSION_FIELDS = {
+    "game_version": "v0.103.2",
+    "game_version_source": "cli",
+}
+
+
 def test_append_eval_result_row_writes_one_strict_json_object(tmp_path):
     path = tmp_path / "nested" / "eval_results.jsonl"
     row = {
@@ -185,14 +191,130 @@ def test_eval_cli_requires_checkpoint_and_defaults_to_fixed_seeds():
     assert args.invalid_retries == 1
     assert args.results_log == "data/eval_results.jsonl"
     assert args.scenario == "full_run"
+    assert args.game_version is None
+    assert args.ascension == 0
+    assert parser.parse_args(
+        ["checkpoints/model.zip", "--ascension", "10"]
+    ).ascension == 10
 
 
-def test_eval_cli_game_version_defaults_from_environment(monkeypatch):
+def test_eval_cli_leaves_environment_game_version_to_launch_resolver(monkeypatch):
     monkeypatch.setenv("STS2_GAME_VERSION", "v0.103.2")
 
     args = _build_parser().parse_args(["checkpoints/model.zip"])
 
-    assert args.game_version == "v0.103.2"
+    assert args.game_version is None
+
+
+@pytest.mark.parametrize("game_version", [None, "", " \t", 103])
+def test_run_eval_rejects_invalid_game_version_before_creating_an_env(
+    monkeypatch, game_version
+):
+    import agent.eval_rl as eval_rl
+
+    monkeypatch.setattr(
+        eval_rl,
+        "CombatEnv",
+        lambda **kwargs: pytest.fail("CombatEnv must not be created"),
+    )
+
+    with pytest.raises(ValueError, match="game_version"):
+        run_eval_verbose(
+            object(),
+            "Ironclad",
+            game_version=game_version,
+            game_version_source="cli",
+        )
+
+
+@pytest.mark.parametrize("game_version_source", [None, "", "auto", 1])
+def test_run_eval_rejects_invalid_version_source_before_creating_an_env(
+    monkeypatch, game_version_source
+):
+    import agent.eval_rl as eval_rl
+
+    monkeypatch.setattr(
+        eval_rl,
+        "CombatEnv",
+        lambda **kwargs: pytest.fail("CombatEnv must not be created"),
+    )
+
+    with pytest.raises(ValueError, match="game_version_source"):
+        run_eval_verbose(
+            object(),
+            "Ironclad",
+            game_version="v0.103.2",
+            game_version_source=game_version_source,
+        )
+
+
+@pytest.mark.parametrize("ascension", [True, -1, 11, 1.0, "1"])
+def test_run_eval_rejects_invalid_ascension_before_creating_an_env(
+    monkeypatch, ascension
+):
+    import agent.eval_rl as eval_rl
+
+    monkeypatch.setattr(
+        eval_rl,
+        "CombatEnv",
+        lambda **kwargs: pytest.fail("CombatEnv must not be created"),
+    )
+
+    with pytest.raises(ValueError, match=r"0\.\.10"):
+        run_eval_verbose(
+            object(),
+            "Ironclad",
+            ascension=ascension,
+            **VERSION_FIELDS,
+        )
+
+
+def test_eval_launch_requires_version_before_checkpoint_load(monkeypatch, capsys):
+    import agent.eval_rl as eval_rl
+
+    monkeypatch.delenv("STS2_GAME_VERSION", raising=False)
+    monkeypatch.setattr(eval_rl.sys, "argv", ["eval_rl.py", "model.zip"])
+    monkeypatch.setattr(
+        eval_rl.MaskablePPO,
+        "load",
+        lambda *args, **kwargs: pytest.fail("checkpoint must not be loaded"),
+    )
+
+    with pytest.raises(SystemExit):
+        eval_rl.main()
+
+    error = capsys.readouterr().err
+    assert "--game-version" in error
+    assert "STS2_GAME_VERSION" in error
+
+
+def test_eval_launch_rejects_out_of_range_ascension_before_checkpoint_load(
+    monkeypatch, capsys
+):
+    import agent.eval_rl as eval_rl
+
+    monkeypatch.setattr(
+        eval_rl.sys,
+        "argv",
+        [
+            "eval_rl.py",
+            "model.zip",
+            "--game-version",
+            "v0.103.2",
+            "--ascension",
+            "11",
+        ],
+    )
+    monkeypatch.setattr(
+        eval_rl.MaskablePPO,
+        "load",
+        lambda *args, **kwargs: pytest.fail("checkpoint must not be loaded"),
+    )
+
+    with pytest.raises(SystemExit):
+        eval_rl.main()
+
+    assert "ascension must be an integer in the range 0..10" in capsys.readouterr().err
 
 
 def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_path):
@@ -205,10 +327,12 @@ def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_p
         ("dead", 11),
     ]
     contexts = []
+    env_ascensions = []
 
     class FakeEnv:
         def __init__(self, **kwargs):
             contexts.append(kwargs["run_context"])
+            env_ascensions.append(kwargs["ascension"])
             self.status, self._current_floor = behaviors.pop(0)
             self._current_state = {
                 "decision": "combat_play",
@@ -256,9 +380,10 @@ def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_p
         invalid_retries=3,
         checkpoint_name="checkpoints/model_14000k.zip",
         batch_id="eval-14000k-20260803T120000",
-        game_version="v0.103.2",
+        ascension=10,
         scenario="full_run",
         results_log_path=str(results_path),
+        **VERSION_FIELDS,
     )
 
     rows = [json.loads(line) for line in results_path.read_text().splitlines()]
@@ -271,11 +396,26 @@ def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_p
     assert all(row["checkpoint"] == "model_14000k.zip" for row in rows)
     assert all(row["character"] == "Ironclad" for row in rows)
     assert all(row["game_version"] == "v0.103.2" for row in rows)
+    assert all(row["game_version_source"] == "cli" for row in rows)
+    assert all(row["ascension"] == 10 for row in rows)
     assert all(row["evaluation_mode"] == "fixed" for row in rows)
     assert all(row["scenario"] == "full_run" for row in rows)
     assert all(row["seed"] == "eval_fixed_0" for row in rows)
     assert [row["attempt_index"] for row in rows] == [1, 2, 3, 4]
     assert [context["run_id"] for context in contexts] == [row["run_id"] for row in rows]
+    assert env_ascensions == [10, 10, 10, 10]
+    assert all(
+        context
+        == {
+            "run_id": row["run_id"],
+            "checkpoint": "model_14000k.zip",
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+            "game_version": "v0.103.2",
+            "game_version_source": "cli",
+        }
+        for context, row in zip(contexts, rows)
+    )
     assert stats["attempt_results"] == rows
     assert len(stats["results"]) == 1
     assert stats["results"][0]["status"] == "dead"
@@ -337,6 +477,7 @@ def test_run_eval_retries_invalid_attempt_with_the_same_fixed_seed(monkeypatch):
         fixed_seeds=True,
         seed_offset=3,
         invalid_retries=1,
+        **VERSION_FIELDS,
     )
 
     assert seeds == ["eval_fixed_3", "eval_fixed_3"]
@@ -406,6 +547,7 @@ def test_result_log_failure_is_warned_and_does_not_stop_later_games(monkeypatch)
             invalid_retries=0,
             batch_id="eval-log-failure",
             results_log_path="unused.jsonl",
+            **VERSION_FIELDS,
         )
 
     assert stats["valid_n"] == 2
@@ -487,6 +629,7 @@ def test_run_eval_marks_act1_boss_beaten_after_entering_act2(monkeypatch, tmp_pa
         n_games=1,
         invalid_retries=0,
         boss_deck_log_path=str(deck_log),
+        **VERSION_FIELDS,
     )
 
     result = json.loads(deck_log.read_text().strip())

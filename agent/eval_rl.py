@@ -18,6 +18,7 @@ from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv, greedy_action
 from agent.train import mask_fn
 from agent.card_scoring import score_card_in_deck, deck_quality_score
+from agent.run_metadata import resolve_game_version, validate_ascension
 
 
 _GAME_TIMEOUT_SEC = 300  # 5 min per game — kills deadlocked C# processes
@@ -465,7 +466,9 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                      combat_snapshot_floors: set = None,
                      checkpoint_name: str = None,
                      batch_id: str = None,
+                     ascension: int = 0,
                      game_version: str = None,
+                     game_version_source: str = None,
                      scenario: str = None,
                      results_log_path: str = None) -> dict:
     """Full-run eval with per-game floor breakdown.
@@ -476,6 +479,16 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
     boss_deck_log_path: when set, append a JSONL record of the deck + per-card
         scores at the start of each boss combat (one record per boss-floor).
     """
+    if type(game_version) is not str or not game_version.strip():
+        raise ValueError("game_version must be a non-empty string")
+    game_version = game_version.strip()
+    if type(game_version_source) is not str or game_version_source not in {
+        "cli",
+        "environment",
+    }:
+        raise ValueError("game_version_source must be 'cli' or 'environment'")
+    ascension = validate_ascension(ascension)
+
     # Auto-detect obs_size from model width (161=legacy, 169=extra, 441=extra+relic)
     from agent.state_encoder import obs_flags_for_size
     model_obs_size = model.observation_space.shape[0]
@@ -516,10 +529,12 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             "evaluation_mode": evaluation_mode,
             "scenario": effective_scenario,
             "game_version": game_version,
+            "game_version_source": game_version_source,
         }
         env_kwargs = dict(character=character, seed=game_seed,
                           seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs,
-                          relic_obs=relic_obs, run_context=run_context)
+                          relic_obs=relic_obs, ascension=ascension,
+                          run_context=run_context)
         if replay_actions:
             env_kwargs["replay_actions"] = replay_actions
         if native_save_path:
@@ -736,6 +751,8 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             "checkpoint": checkpoint,
             "character": character,
             "game_version": game_version,
+            "game_version_source": game_version_source,
+            "ascension": ascension,
             "evaluation_mode": evaluation_mode,
             "scenario": effective_scenario,
             "seed": game_seed,
@@ -865,8 +882,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Retry crash/timeout/stuck attempts on the same seed (default: 1)")
     p.add_argument("--results-log", default="data/eval_results.jsonl",
                    help="JSONL file for every evaluation attempt. Pass 'none' to disable.")
-    p.add_argument("--game-version", default=os.environ.get("STS2_GAME_VERSION"),
+    p.add_argument("--game-version", default=None,
                    help="Explicit STS2 game version stored with evaluation results")
+    p.add_argument("--ascension", type=int, default=0,
+                   help="Ascension level for evaluation (0..10)")
     p.add_argument("--scenario", default="full_run",
                    help="Evaluation scenario label stored with evaluation results")
     p.add_argument("--verbose", action="store_true", default=False,
@@ -898,6 +917,11 @@ def main():
 
     p = _build_parser()
     args = p.parse_args()
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        ascension = validate_ascension(args.ascension)
+    except ValueError as exc:
+        p.error(str(exc))
     boss_deck_log_path = (None if str(args.deck_log).lower() in ("", "none")
                           else args.deck_log)
     results_log_path = (None if str(args.results_log).lower() in ("", "none")
@@ -964,7 +988,9 @@ def main():
                              combat_snapshot_dir=combat_snapshot_dir,
                              combat_snapshot_floors=combat_snapshot_floors,
                              checkpoint_name=checkpoint,
-                             game_version=args.game_version,
+                             ascension=ascension,
+                             game_version=resolved_game_version.value,
+                             game_version_source=resolved_game_version.source,
                              scenario=args.scenario,
                              results_log_path=results_log_path)
     print(f"---")

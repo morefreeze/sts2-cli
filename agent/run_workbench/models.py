@@ -387,6 +387,7 @@ class RunMetadata:
     character: str | None = None
     seed: str | None = None
     game_version: str | None = None
+    game_version_source: str | None = None
     checkpoint: str | None = None
     evaluation_mode: str | None = None
     scenario: str | None = None

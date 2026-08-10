@@ -33,6 +33,28 @@ def test_native_run_preserves_identity_and_format_capabilities() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("raw_source", "expected"),
+    [("environment", "environment"), (" \t", None), (7, None)],
+)
+def test_native_run_preserves_only_exact_nonempty_version_source(
+    raw_source: object, expected: str | None
+) -> None:
+    run = adapt_records(
+        "versioned.run",
+        [
+            {
+                "players": [{"character": "IRONCLAD"}],
+                "game_version": "v0.103.2",
+                "game_version_source": raw_source,
+                "map_point_history": [{"map_point_type": "ancient"}],
+            }
+        ],
+    ).runs[0]
+
+    assert run.metadata.game_version_source == expected
+
+
 @pytest.mark.parametrize("is_multiplayer", [False, True])
 def test_native_run_preserves_exact_multiplayer_flag(
     tmp_path: Path, is_multiplayer: bool
@@ -774,6 +796,40 @@ def test_replay_start_metadata_requires_integer_ascension(tmp_path: Path) -> Non
     assert run.metadata.ascension is None
 
 
+def test_replay_prefers_exact_summary_version_source_then_start_action() -> None:
+    records = [
+        {
+            "type": "action",
+            "data": {
+                "cmd": "start_run",
+                "run_id": "versioned-replay",
+                "game_version": "v0.103.2",
+                "game_version_source": "cli",
+            },
+        }
+    ]
+
+    from_summary = adapt_records(
+        "summary-source.jsonl",
+        records,
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {"game_version_source": "environment"},
+            "rooms": [],
+        },
+    ).runs[0]
+    from_start = adapt_records(
+        "start-source.jsonl",
+        records,
+        replay_parser=lambda entries, source_name=None: {
+            "summary": {"game_version_source": 7},
+            "rooms": [],
+        },
+    ).runs[0]
+
+    assert from_summary.metadata.game_version_source == "environment"
+    assert from_start.metadata.game_version_source == "cli"
+
+
 def test_partial_replay_reports_only_observed_coverage() -> None:
     adapted = adapt_path(
         FIXTURES / "partial_replay.jsonl",
@@ -1054,6 +1110,32 @@ def test_deck_history_produces_one_outcome_per_exact_run_id() -> None:
     assert all(node["_workbench_provenance"] for node in run.nodes)
 
 
+def test_deck_metadata_uses_first_exact_nonempty_version_source() -> None:
+    run = adapt_records(
+        "versioned-deck.jsonl",
+        [
+            {
+                "event": "milestone",
+                "run_id": "versioned-deck",
+                "game_version_source": 7,
+            },
+            {
+                "event": "card_pick",
+                "run_id": "versioned-deck",
+                "game_version_source": " \t",
+            },
+            {
+                "event": "outcome",
+                "run_id": "versioned-deck",
+                "status": "dead",
+                "game_version_source": "environment",
+            },
+        ],
+    ).runs[0]
+
+    assert run.metadata.game_version_source == "environment"
+
+
 def test_deck_history_does_not_group_empty_run_ids(tmp_path: Path) -> None:
     path = tmp_path / "old_deck_history.jsonl"
     path.write_text(
@@ -1100,6 +1182,28 @@ def test_eval_results_produce_one_record_per_row(tmp_path: Path) -> None:
     assert [run.run_id for run in adapted.runs] == ["eval-1", "eval-2"]
     assert [run.outcome.status for run in adapted.runs] == [RunStatus.DEAD, RunStatus.WIN]
     assert adapted.runs[1].metadata.checkpoint == "model_14000k.zip"
+
+
+@pytest.mark.parametrize(
+    ("raw_source", "expected"),
+    [("cli", "cli"), ("", None), (11, None)],
+)
+def test_eval_results_preserve_only_exact_nonempty_version_source(
+    raw_source: object, expected: str | None
+) -> None:
+    run = adapt_records(
+        "versioned-eval.jsonl",
+        [
+            {
+                "event": "eval_result",
+                "run_id": "versioned-eval",
+                "status": "dead",
+                "game_version_source": raw_source,
+            }
+        ],
+    ).runs[0]
+
+    assert run.metadata.game_version_source == expected
 
 
 @pytest.mark.parametrize(
