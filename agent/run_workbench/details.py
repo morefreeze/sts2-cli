@@ -123,10 +123,7 @@ def native_node_detail(
         combat_rounds=(),
         turn_replay=False,
         source_kind=SourceKind.NATIVE_RUN,
-        choices_complete=bool(
-            record.capabilities.node_rewards
-            and _native_choices(node)
-        ),
+        choices_complete=False,
     )
 
 
@@ -155,16 +152,9 @@ def replay_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
         combat_rounds=combat_rounds,
         turn_replay=bool(combat_rounds),
         source_kind=SourceKind.REPLAY_JSONL,
-        choices_complete=bool(
-            choices
-            and record.capabilities.decisions
-            and any(
-                isinstance(node.get(key), (list, tuple))
-                for key in ("options", "choices")
-            )
-        ),
+        choices_complete=False,
         combat_coverage_complete=(
-            True if combat.get("coverage_complete") is True else None
+            True if _complete_replay_combat(combat_rounds) else None
         ),
     )
 
@@ -237,9 +227,16 @@ def _detail(
         # The enum is the canonical technical kind. A free-form companion
         # string on a manually assembled record cannot override it.
         coverage["technical_failure_kind"] = run_status.value
+    outcome_max_floor = record.outcome.max_global_floor
+    trusted_max_floor = (
+        outcome_max_floor
+        if type(outcome_max_floor) is int
+        and 1 <= outcome_max_floor <= _MAX_GLOBAL_FLOOR
+        else None
+    )
     coverage["terminal_node"] = bool(
-        record.nodes
-        and node is record.nodes[-1]
+        trusted_max_floor is not None
+        and global_floor == trusted_max_floor
         and run_status not in {RunStatus.UNKNOWN, RunStatus.IN_PROGRESS}
     )
     coverage["choices_complete"] = choices_complete
@@ -275,6 +272,73 @@ def _detail(
 
     facts = tuple(fact.to_dict() for fact in collect_diagnostic_facts(base))
     return replace(base, facts=facts, hypotheses=())
+
+
+def _complete_replay_combat(
+    combat_rounds: tuple[dict[str, Any], ...],
+) -> bool:
+    """Validate the parser's closed, node-local combat-round contract."""
+
+    if not combat_rounds:
+        return False
+    previous_end: dict[str, Any] | None = None
+    previous_action_step: int | None = None
+    last_index = len(combat_rounds)
+    for expected_round, round_info in enumerate(combat_rounds, start=1):
+        if _int(round_info.get("round")) != expected_round:
+            return False
+        start_step = _int(round_info.get("start_step"))
+        if start_step is None:
+            return False
+        start_state = round_info.get("start_state")
+        end_state = round_info.get("end_state")
+        actions = round_info.get("actions")
+        if (
+            not isinstance(start_state, dict)
+            or not isinstance(end_state, dict)
+            or not isinstance(actions, (list, tuple))
+            or not all(_complete_replay_action(action) for action in actions)
+            or _int(start_state.get("round")) != expected_round
+        ):
+            return False
+        end_step = _int(end_state.get("step"))
+        if (
+            _int(start_state.get("step")) != start_step
+            or end_step is None
+            or end_step < start_step
+        ):
+            return False
+        for action in actions:
+            action_step = action["step"]
+            if (
+                previous_action_step is not None
+                and action_step < previous_action_step
+            ):
+                return False
+            previous_action_step = action_step
+        expected_end_reason = (
+            "combat_end" if expected_round == last_index else "next_round"
+        )
+        if round_info.get("end_reason") != expected_end_reason:
+            return False
+        if previous_end is not None and previous_end != start_state:
+            return False
+        previous_end = end_state
+    return True
+
+
+def _complete_replay_action(action: Any) -> bool:
+    if not isinstance(action, dict):
+        return False
+    payload = action.get("action")
+    return bool(
+        _int(action.get("step")) is not None
+        and isinstance(action.get("label"), str)
+        and action["label"]
+        and isinstance(payload, dict)
+        and isinstance(payload.get("action"), str)
+        and payload["action"]
+    )
 
 
 def _node_index(record: RunRecord, selected: dict[str, Any]) -> int:

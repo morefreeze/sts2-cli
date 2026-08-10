@@ -303,7 +303,8 @@ def test_replay_details_use_same_room_snapshots_and_canonical_rounds() -> None:
         "source_kind": "replay_jsonl",
         "run_status": "win",
         "terminal_node": True,
-        "choices_complete": True,
+        "choices_complete": False,
+        "combat_coverage_complete": True,
         "entry_inventory_fields": [
             "hp",
             "max_hp",
@@ -320,6 +321,16 @@ def test_replay_details_use_same_room_snapshots_and_canonical_rounds() -> None:
             "relics",
             "potions",
         ],
+    }
+    assert {fact["kind"] for fact in detail.facts} >= {
+        "unused_potion",
+        "card_reward_selected",
+    }
+    unused = next(fact for fact in detail.facts if fact["kind"] == "unused_potion")
+    assert unused["evidence"] == {
+        "potion_names": ["Training Potion"],
+        "recorded_actions": 4,
+        "combat_coverage_complete": True,
     }
 
 
@@ -364,24 +375,32 @@ def test_build_node_detail_attaches_only_collected_facts_and_no_hypotheses() -> 
                 },
                 "actions": [],
                 "combat": {
-                    "coverage_complete": True,
                     "rounds": [
                         {
                             "round": 1,
+                            "start_step": 1,
                             "start_state": {
+                                "step": 1,
+                                "round": 1,
                                 "hp": 80,
                                 "max_hp": 80,
                                 "potions": [potion],
                             },
                             "end_state": {
+                                "step": 2,
                                 "hp": 60,
                                 "max_hp": 80,
                                 "potions": [potion],
                             },
                             "actions": [
-                                {"action": {"action": "end_turn"}}
+                                {
+                                    "step": 1,
+                                    "label": "end_turn",
+                                    "action": {"action": "end_turn"},
+                                }
                             ],
                             "hp_loss": 20,
+                            "end_reason": "combat_end",
                         }
                     ],
                 },
@@ -409,6 +428,18 @@ def test_build_node_detail_attaches_only_collected_facts_and_no_hypotheses() -> 
     assert detail.hypotheses == ()
     assert detail.coverage["combat_coverage_complete"] is True
     json.dumps(detail.to_dict(), ensure_ascii=False, allow_nan=False)
+
+    malformed_run = deepcopy(run)
+    malformed_action = deepcopy(
+        malformed_run.nodes[0]["combat"]["rounds"][0]["actions"][0]
+    )
+    malformed_action["step"] = 0
+    malformed_run.nodes[0]["combat"]["rounds"][0]["actions"].append(
+        malformed_action
+    )
+    malformed = build_node_detail(malformed_run, "A1F1:Monster:1")
+    assert "combat_coverage_complete" not in malformed.coverage
+    assert all(fact["kind"] != "unused_potion" for fact in malformed.facts)
 
 
 def test_detail_exposes_typed_run_outcome_for_technical_fact_collection() -> None:
@@ -440,6 +471,154 @@ def test_detail_exposes_typed_run_outcome_for_technical_fact_collection() -> Non
     assert detail.coverage["technical_failure_kind"] == "timeout"
     assert detail.coverage["terminal_node"] is True
     assert [fact["kind"] for fact in detail.facts] == ["technical_failure"]
+
+
+def test_terminal_node_uses_typed_max_floor_not_unordered_node_position() -> None:
+    outcome = RunOutcome(
+        status=RunStatus.DEAD,
+        victory=False,
+        max_global_floor=5,
+    )
+    terminal_source = RunRecord(
+        run_id="unordered-terminal",
+        source_id="terminal-source",
+        source_kind=SourceKind.SUMMARY,
+        outcome=outcome,
+        coverage=Coverage(True, 1, 5),
+        nodes=[
+            {
+                "id": "actual-terminal",
+                "act": 1,
+                "floor": 5,
+                "global_floor": 5,
+                "status": "dead",
+                "exit_player": {
+                    "hp": 0,
+                    "potions": [{"id": "POTION.FIRE", "name": "Fire Potion"}],
+                },
+            }
+        ],
+    )
+    earlier_source = RunRecord(
+        run_id="unordered-terminal",
+        source_id="earlier-source",
+        source_kind=SourceKind.SUMMARY,
+        outcome=outcome,
+        coverage=Coverage(True, 1, 5),
+        nodes=[
+            {
+                "id": "last-in-list",
+                "act": 1,
+                "floor": 2,
+                "global_floor": 2,
+                "status": "dead",
+                "exit_player": {
+                    "hp": 0,
+                    "potions": [{"id": "POTION.FIRE", "name": "Fire Potion"}],
+                },
+            }
+        ],
+    )
+    run = join_records([terminal_source, earlier_source])[0]
+    terminal_node = next(node for node in run.nodes if node["id"] == "actual-terminal")
+    earlier_node = next(node for node in run.nodes if node["id"] == "last-in-list")
+    run.nodes[:] = [terminal_node, earlier_node]
+
+    terminal = build_node_detail(run, "actual-terminal")
+    nonterminal = build_node_detail(run, "last-in-list")
+
+    assert terminal.coverage["terminal_node"] is True
+    assert any(fact["kind"] == "death_with_potion" for fact in terminal.facts)
+    assert nonterminal.coverage["terminal_node"] is False
+    assert all(fact["kind"] != "death_with_potion" for fact in nonterminal.facts)
+
+
+def test_replay_card_reward_facts_require_selected_or_explicit_skip_action() -> None:
+    records = [
+        json.loads(line)
+        for line in (FIXTURES / "replay_a2f4_excerpt.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    reward_state_index = next(
+        index
+        for index, record in enumerate(records)
+        if record.get("type") == "state"
+        and (record.get("data") or {}).get("decision") == "card_reward"
+    )
+    descriptor = SourceDescriptor(
+        SourceKind.REPLAY_JSONL,
+        reward_state_index + 1,
+        "truncated reward evidence",
+    )
+    truncated_adapted = adapt_records(
+        "truncated-reward.jsonl",
+        records[: reward_state_index + 1],
+        descriptor=descriptor,
+        replay_parser=parse_game_progress,
+    )
+    assert truncated_adapted.errors == ()
+    truncated = build_node_detail(
+        truncated_adapted.runs[0], "A2F4:Monster:3"
+    )
+
+    last_combat_state_index = max(
+        index
+        for index, record in enumerate(records)
+        if record.get("type") == "state"
+        and (record.get("data") or {}).get("decision") == "combat_play"
+    )
+    combat_truncated_adapted = adapt_records(
+        "truncated-combat.jsonl",
+        records[: last_combat_state_index + 1],
+        descriptor=SourceDescriptor(
+            SourceKind.REPLAY_JSONL,
+            last_combat_state_index + 1,
+            "truncated combat evidence",
+        ),
+        replay_parser=parse_game_progress,
+    )
+    assert combat_truncated_adapted.errors == ()
+    combat_truncated = build_node_detail(
+        combat_truncated_adapted.runs[0], "A2F4:Monster:3"
+    )
+
+    skipped_records = deepcopy(records)
+    select_action = next(
+        record
+        for record in skipped_records
+        if record.get("type") == "action"
+        and (record.get("data") or {}).get("action") == "select_card_reward"
+    )
+    select_action["data"]["action"] = "skip_card_reward"
+    select_action["data"]["args"] = {}
+    skipped_adapted = adapt_records(
+        "skipped-reward.jsonl",
+        skipped_records,
+        descriptor=SourceDescriptor(
+            SourceKind.REPLAY_JSONL,
+            len(skipped_records),
+            "explicit skip reward evidence",
+        ),
+        replay_parser=parse_game_progress,
+    )
+    assert skipped_adapted.errors == ()
+    skipped = build_node_detail(skipped_adapted.runs[0], "A2F4:Monster:3")
+    selected = build_node_detail(
+        _fixture_replay_with_misleading_name(), "A2F4:Monster:3"
+    )
+
+    assert all(
+        fact["kind"] not in {"card_reward_selected", "card_reward_skipped"}
+        for fact in truncated.facts
+    )
+    assert "combat_coverage_complete" not in combat_truncated.coverage
+    assert all(
+        fact["kind"] != "unused_potion" for fact in combat_truncated.facts
+    )
+    assert any(fact["kind"] == "card_reward_skipped" for fact in skipped.facts)
+    assert any(fact["kind"] == "card_reward_selected" for fact in selected.facts)
+    assert selected.coverage["choices_complete"] is False
 
 
 def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() -> None:

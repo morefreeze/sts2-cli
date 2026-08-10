@@ -431,12 +431,10 @@ def _inventory_potion_names(detail: NodeDetail) -> list[str]:
 
 def _death_with_potion_fact(detail: NodeDetail) -> DiagnosticFact | None:
     run_status = detail.coverage.get("run_status")
-    death_is_terminal = detail.status == "dead" or (
-        run_status == "dead" and detail.coverage.get("terminal_node") is True
-    )
     known_exit_fields = detail.coverage.get("exit_inventory_fields")
     if (
-        not death_is_terminal
+        run_status != "dead"
+        or detail.coverage.get("terminal_node") is not True
         or not isinstance(known_exit_fields, Sequence)
         or isinstance(known_exit_fields, (str, bytes))
         or "potions" not in known_exit_fields
@@ -483,8 +481,6 @@ def _card_summary(choice: Mapping[str, Any]) -> dict[str, str] | None:
 
 
 def _card_reward_fact(detail: NodeDetail) -> DiagnosticFact | None:
-    if detail.coverage.get("choices_complete") is not True:
-        return None
     reward_choices = [
         choice
         for choice in detail.choices
@@ -502,7 +498,7 @@ def _card_reward_fact(detail: NodeDetail) -> DiagnosticFact | None:
         return None
     evidence = {
         "offered_cards": offered_cards,
-        "choices_complete": True,
+        "choices_complete": False,
     }
     if selected:
         selected_card = _card_summary(selected[0])
@@ -514,6 +510,12 @@ def _card_reward_fact(detail: NodeDetail) -> DiagnosticFact | None:
             statement=f"选择了卡牌奖励：{selected_card['name']}",
             evidence={"selected_card": selected_card, **evidence},
         )
+    if detail.coverage.get("source_kind") != "replay_jsonl" or not any(
+        _action_name(action) == "skip_card_reward"
+        for action in detail.actions
+        if isinstance(action, Mapping)
+    ):
+        return None
     return DiagnosticFact(
         kind="card_reward_skipped",
         severity="info",
@@ -591,12 +593,25 @@ def rank_run_anomalies(
             if key in seen:
                 continue
             seen.add(key)
+            located_fact = DiagnosticFact(
+                kind=fact.kind,
+                severity=fact.severity,
+                statement=fact.statement,
+                evidence={
+                    **fact.to_dict()["evidence"],
+                    "locator": {
+                        "run_id": detail.run_id,
+                        "node_id": detail.node_id,
+                        "global_floor": detail.global_floor,
+                    },
+                },
+            )
             ranked.append(
                 (
                     _SEVERITY_ORDER[fact.severity],
                     detail.global_floor,
                     ordinal,
-                    fact,
+                    located_fact,
                 )
             )
             ordinal += 1

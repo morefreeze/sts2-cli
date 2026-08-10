@@ -281,6 +281,19 @@ def test_terminal_death_with_known_potions_is_reported_but_unknown_states_are_no
         fact.kind != "death_with_potion"
         for fact in collect_diagnostic_facts(unknown_inventory)
     )
+    untyped_death = replace(
+        death,
+        status="dead",
+        coverage={
+            **death.coverage,
+            "run_status": "unknown",
+            "terminal_node": False,
+        },
+    )
+    assert all(
+        fact.kind != "death_with_potion"
+        for fact in collect_diagnostic_facts(untyped_death)
+    )
 
 
 def test_technical_failure_uses_typed_run_status_evidence() -> None:
@@ -322,13 +335,13 @@ def test_technical_failure_uses_typed_run_status_evidence() -> None:
     )
 
 
-def test_selected_and_skipped_card_rewards_require_complete_boolean_markers() -> None:
+def test_card_reward_facts_require_selected_marker_or_explicit_replay_skip() -> None:
     base_coverage = {
         "complete_run": True,
         "source_kind": "replay_jsonl",
         "run_status": "unknown",
         "terminal_node": False,
-        "choices_complete": True,
+        "choices_complete": False,
     }
     selected = _detail(
         choices=(
@@ -350,6 +363,7 @@ def test_selected_and_skipped_card_rewards_require_complete_boolean_markers() ->
     skipped = replace(
         selected,
         choices=tuple({**choice, "selected": False} for choice in selected.choices),
+        actions=({"action": "skip_card_reward"},),
     )
 
     selected_fact = next(
@@ -370,19 +384,31 @@ def test_selected_and_skipped_card_rewards_require_complete_boolean_markers() ->
             {"id": "CARD.A", "name": "Card A"},
             {"id": "CARD.B", "name": "Card B"},
         ],
-        "choices_complete": True,
+        "choices_complete": False,
     }
     assert skipped_fact.statement == "跳过了卡牌奖励"
     unknown_marker = replace(
         selected,
         choices=({**selected.choices[0], "selected": "unknown"},),
     )
-    incomplete = replace(selected, coverage={**base_coverage, "choices_complete": False})
-    for candidate in (unknown_marker, incomplete):
+    truncated = replace(
+        selected,
+        choices=tuple({**choice, "selected": False} for choice in selected.choices),
+        actions=(),
+    )
+    for candidate in (unknown_marker, truncated):
         assert not any(
             fact.kind in {"card_reward_selected", "card_reward_skipped"}
             for fact in collect_diagnostic_facts(candidate)
         )
+    native_skip = replace(
+        skipped,
+        coverage={**skipped.coverage, "source_kind": "native_run"},
+    )
+    assert all(
+        fact.kind != "card_reward_skipped"
+        for fact in collect_diagnostic_facts(native_skip)
+    )
 
 
 def test_partial_coverage_is_a_warning_not_a_strategy_judgement() -> None:
@@ -581,3 +607,28 @@ def test_rank_does_not_drop_later_runs_before_sorting() -> None:
 
     assert len(ranked) == 258
     assert ranked[0].kind == "technical_failure"
+
+
+def test_rank_adds_distinct_stable_locators_to_identical_node_facts() -> None:
+    first = _detail(
+        run_id="same-run",
+        global_floor=5,
+        entry=InventorySnapshot(hp=80, max_hp=80),
+        exit=InventorySnapshot(hp=60, max_hp=80),
+    )
+    second = replace(
+        first,
+        node_id="other-node",
+        floor=6,
+        global_floor=6,
+        label="A1F6",
+    )
+
+    ranked = rank_run_anomalies([first, second])
+
+    assert [fact.evidence["locator"] for fact in ranked] == [
+        {"run_id": "same-run", "node_id": "node-5", "global_floor": 5},
+        {"run_id": "same-run", "node_id": "other-node", "global_floor": 6},
+    ]
+    assert ranked[0].to_dict() != ranked[1].to_dict()
+    assert "locator" not in collect_diagnostic_facts(first)[0].evidence
