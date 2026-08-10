@@ -625,6 +625,8 @@ class CombatEnv(gym.Env):
             self._run_context.get("run_id")
             or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
         )
+        self._run_start_emitted = False
+        self._run_started_at = time.time()
         self._run_outcome_emitted = False
         self._run_logging_errors: list[str] = []
         self._run_milestone_records: list = []  # buffered rows until outcome known
@@ -711,11 +713,14 @@ class CombatEnv(gym.Env):
             or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
         )
         self._run_seed = run_seed
+        self._run_start_emitted = False
+        self._run_started_at = time.time()
         self._run_outcome_emitted = False
         self._run_milestone_records = []
         self._run_card_pick_records = []
         self._run_boss_id = None  # act boss from state.context.boss (set on first sight)
         self._kill_proc()
+        self._emit_run_start()
         self._start_proc()
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
@@ -1358,6 +1363,47 @@ class CombatEnv(gym.Env):
             "ts": time.time(),
         })
 
+    def _run_metadata_row(self, event: str) -> dict:
+        return {
+            "event": event,
+            "run_id": self._run_id,
+            "seed": self._run_seed,
+            "character": self.character,
+            "ascension": self.ascension,
+            "checkpoint": self._run_context.get("checkpoint"),
+            "evaluation_mode": self._run_context.get("evaluation_mode"),
+            "scenario": self._run_context.get("scenario"),
+            "game_version": self._run_context.get("game_version"),
+            "game_version_source": self._run_context.get("game_version_source"),
+        }
+
+    def _report_run_logging_error(self, prefix: str, exc: Exception):
+        error = f"{prefix} for {self._run_id}: {type(exc).__name__}: {exc}"
+        self._run_logging_errors.append(error)
+        try:
+            warnings.warn(error, RuntimeWarning, stacklevel=2)
+        except Warning:
+            print(error, file=sys.stderr)
+
+    def _emit_run_start(self):
+        if not self._deck_history_path or self._run_start_emitted:
+            return
+        run_start = {
+            **self._run_metadata_row("run_start"),
+            "ts": self._run_started_at,
+        }
+        try:
+            payload = json.dumps(
+                run_start, ensure_ascii=False, allow_nan=False
+            ) + "\n"
+            os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
+            with open(self._deck_history_path, "a", encoding="utf-8") as f:
+                f.write(payload)
+        except Exception as exc:
+            self._report_run_logging_error("run start logging failed", exc)
+            return
+        self._run_start_emitted = True
+
     def _emit_run_outcome(self, state: dict, victory: bool,
                           status: str | None = None):
         """Flush buffered milestone + card_pick records to disk with the final
@@ -1373,41 +1419,36 @@ class CombatEnv(gym.Env):
         technical_failure_kind = (final_status if final_status in technical_statuses
                                   else None)
         outcome = {
-            "event": "outcome",
-            "run_id": self._run_id,
+            **self._run_metadata_row("outcome"),
             "max_floor": int(self._run_max_floor),
             "won": bool(victory) and technical_failure_kind is None,
             "boss": getattr(self, "_run_boss_id", None),
-            "seed": self._run_seed,
-            "character": self.character,
-            "ascension": self.ascension,
-            "checkpoint": self._run_context.get("checkpoint"),
-            "evaluation_mode": self._run_context.get("evaluation_mode"),
-            "scenario": self._run_context.get("scenario"),
-            "game_version": self._run_context.get("game_version"),
             "status": final_status,
             "technical_failure_kind": technical_failure_kind,
             "ts": time.time(),
         }
         if self._deck_history_path:
             try:
-                rows = [*self._run_milestone_records, *self._run_card_pick_records, outcome]
+                rows = []
+                if not self._run_start_emitted:
+                    rows.append({
+                        **self._run_metadata_row("run_start"),
+                        "ts": self._run_started_at,
+                    })
+                rows.extend(self._run_milestone_records)
+                rows.extend(self._run_card_pick_records)
+                rows.append(outcome)
                 payload = "".join(
-                    json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+                    json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+                    for row in rows
+                )
                 os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
                 with open(self._deck_history_path, "a", encoding="utf-8") as f:
                     f.write(payload)
             except Exception as exc:
-                error = (
-                    f"run outcome logging failed for {self._run_id}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                self._run_logging_errors.append(error)
-                try:
-                    warnings.warn(error, RuntimeWarning, stacklevel=2)
-                except Warning:
-                    print(error, file=sys.stderr)
+                self._report_run_logging_error("run outcome logging failed", exc)
                 return
+            self._run_start_emitted = True
         # Mark successful/disabled logging before downstream updates so a
         # card-bandit failure cannot duplicate the JSON outcome.
         self._run_outcome_emitted = True

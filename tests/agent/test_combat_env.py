@@ -2,6 +2,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import json
+import math
 import pytest
 import agent.combat_env as combat_env
 from agent.combat_env import CombatEnv, greedy_action
@@ -106,6 +107,7 @@ def _recording_env(monkeypatch, tmp_path, **kwargs):
         "evaluation_mode": "fixed",
         "scenario": "full_run",
         "game_version": "v0.103.2",
+        "game_version_source": "cli",
     }
     context.update(kwargs.pop("run_context", {}))
     env = CombatEnv(
@@ -120,6 +122,65 @@ def _recording_env(monkeypatch, tmp_path, **kwargs):
     return env, history_path
 
 
+def _expected_run_metadata():
+    return {
+        "run_id": "eval-14000k-000",
+        "seed": "eval_fixed_0",
+        "character": "Ironclad",
+        "ascension": 3,
+        "checkpoint": "model_14000k.zip",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "game_version": "v0.103.2",
+        "game_version_source": "cli",
+    }
+
+
+def test_run_start_and_outcome_share_authoritative_metadata(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+
+    env._emit_run_start()
+    env._emit_run_start()
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == ["run_start", "outcome"]
+    for row in rows:
+        assert {key: row[key] for key in _expected_run_metadata()} == _expected_run_metadata()
+        assert math.isfinite(row["ts"])
+
+
+def test_failed_run_start_is_retried_with_terminal_outcome(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    real_open = open
+    attempts = 0
+
+    def flaky_open(path, *args, **kwargs):
+        nonlocal attempts
+        if path == str(history_path):
+            attempts += 1
+            if attempts == 1:
+                raise OSError("start disk unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(combat_env, "open", flaky_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="start disk unavailable"):
+        env._emit_run_start()
+
+    assert env._run_start_emitted is False
+    assert len(env._run_logging_errors) == 1
+
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    assert env._run_start_emitted is True
+    assert env._run_outcome_emitted is True
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == ["run_start", "outcome"]
+    for row in rows:
+        assert {key: row[key] for key in _expected_run_metadata()} == _expected_run_metadata()
+
+
 def test_run_outcome_retains_identity_and_is_idempotent(monkeypatch, tmp_path):
     env, history_path = _recording_env(monkeypatch, tmp_path)
     env._run_milestone_records = [{"event": "milestone", "floor": 7}]
@@ -129,7 +190,7 @@ def test_run_outcome_retains_identity_and_is_idempotent(monkeypatch, tmp_path):
     env._emit_run_outcome({}, victory=False, status="dead")
 
     rows = _read_history_rows(history_path)
-    assert len(rows) == 2
+    assert [row["event"] for row in rows] == ["run_start", "milestone", "outcome"]
     outcome = rows[-1]
     assert outcome["event"] == "outcome"
     assert outcome["run_id"] == "eval-14000k-000"
@@ -142,6 +203,7 @@ def test_run_outcome_retains_identity_and_is_idempotent(monkeypatch, tmp_path):
     assert outcome["evaluation_mode"] == "fixed"
     assert outcome["scenario"] == "full_run"
     assert outcome["game_version"] == "v0.103.2"
+    assert outcome["game_version_source"] == "cli"
     assert outcome["status"] == "dead"
     assert outcome["technical_failure_kind"] is None
 
@@ -212,11 +274,39 @@ def test_failed_start_emits_reset_failure_outcome(monkeypatch, tmp_path):
     _, info = env.reset()
 
     assert info["reset_failure"] is True
-    assert _read_history_rows(history_path)[-1]["status"] == "reset_failure"
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == ["run_start", "outcome"]
+    assert rows[-1]["status"] == "reset_failure"
+
+
+def test_fresh_reset_emits_run_start_before_process_start(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    calls = []
+    state = combat_env._dummy_combat_state()
+
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+
+    def fake_start_proc():
+        calls.append("start_proc")
+        assert [row["event"] for row in _read_history_rows(history_path)] == ["run_start"]
+
+    def fake_send(command):
+        calls.append(command["cmd"])
+        return state
+
+    monkeypatch.setattr(env, "_start_proc", fake_start_proc)
+    monkeypatch.setattr(env, "_send", fake_send)
+    monkeypatch.setattr(env, "_advance_to_combat", lambda current: current)
+
+    env.reset()
+
+    assert calls == ["start_proc", "start_run"]
 
 
 def test_run_outcome_logging_failure_is_visible_and_retryable(monkeypatch, tmp_path):
     env, history_path = _recording_env(monkeypatch, tmp_path)
+    env._emit_run_start()
     real_open = open
     attempts = 0
 
@@ -233,6 +323,7 @@ def test_run_outcome_logging_failure_is_visible_and_retryable(monkeypatch, tmp_p
     with pytest.warns(RuntimeWarning, match="disk unavailable"):
         env._emit_run_outcome({}, victory=False, status="crash")
 
+    assert env._run_start_emitted is True
     assert env._run_outcome_emitted is False
     assert len(env._run_logging_errors) == 1
     assert "disk unavailable" in env._run_logging_errors[0]
@@ -241,7 +332,32 @@ def test_run_outcome_logging_failure_is_visible_and_retryable(monkeypatch, tmp_p
 
     assert env._run_outcome_emitted is True
     rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == ["run_start", "outcome"]
+    assert [row["event"] for row in rows].count("run_start") == 1
     assert [row["event"] for row in rows].count("outcome") == 1
+
+
+def test_run_logging_rejects_nested_nan_without_marking_emitted(monkeypatch, tmp_path):
+    env, history_path = _recording_env(
+        monkeypatch,
+        tmp_path,
+        run_context={"scenario": {"temperature": float("nan")}},
+    )
+
+    with pytest.warns(RuntimeWarning, match="Out of range float"):
+        env._emit_run_start()
+
+    assert env._run_start_emitted is False
+    assert env._run_outcome_emitted is False
+    assert len(env._run_logging_errors) == 1
+
+    with pytest.warns(RuntimeWarning, match="Out of range float"):
+        env._emit_run_outcome({}, victory=False, status="invalid")
+
+    assert env._run_start_emitted is False
+    assert env._run_outcome_emitted is False
+    assert len(env._run_logging_errors) == 2
+    assert not history_path.exists()
 
 
 def test_initial_auto_advance_transport_failure_is_crash(monkeypatch, tmp_path):
