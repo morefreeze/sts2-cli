@@ -5,6 +5,7 @@ import weakref
 
 import pytest
 
+import agent.run_workbench.metrics as metrics_module
 from agent.run_workbench.metrics import (
     compare_cohorts,
     describe_comparison_readiness,
@@ -228,11 +229,17 @@ def test_comparison_signature_uses_launch_trimmed_string_semantics():
 
 
 @pytest.mark.parametrize(
-    ("varying_field", "expected_axis"),
-    [("version", "game_version"), ("seed", "seed")],
+    ("varying_field", "expected_axis", "expected_mixed_axes"),
+    [
+        ("version", "game_version", ("game_version",)),
+        ("seed", "seed", ()),
+    ],
 )
 def test_comparison_readiness_rejects_bounded_distinct_overflow(
-    monkeypatch: pytest.MonkeyPatch, varying_field: str, expected_axis: str
+    monkeypatch: pytest.MonkeyPatch,
+    varying_field: str,
+    expected_axis: str,
+    expected_mixed_axes: tuple[str, ...],
 ):
     monkeypatch.setattr("agent.run_workbench.metrics.COMPARISON_DISTINCT_LIMIT", 2)
     records = [
@@ -247,6 +254,7 @@ def test_comparison_readiness_rejects_bounded_distinct_overflow(
     readiness = describe_comparison_readiness(records)
 
     assert readiness.ready is False
+    assert readiness.mixed_axes == expected_mixed_axes
     assert readiness.invalid_axes == (expected_axis,)
     assert readiness.comparison_signature is None
     json.dumps(readiness.to_dict(), allow_nan=False)
@@ -277,8 +285,158 @@ def test_comparison_readiness_rejects_nonstring_version_and_seed(
     readiness = describe_comparison_readiness([_run("invalid", **override)])
 
     assert readiness.ready is False
+    assert readiness.mixed_axes == ()
     assert readiness.invalid_axes == (expected_axis,)
     assert readiness.comparison_signature is None
+
+
+@pytest.mark.parametrize(
+    ("records", "expected_mixed_axes", "expected_invalid_axes", "seed_complete"),
+    [
+        (
+            [
+                _run("valid-version", version="2026.08", seed="seed-a"),
+                _run("invalid-version", version=7, seed="seed-b"),
+            ],
+            ("game_version",),
+            ("game_version",),
+            True,
+        ),
+        (
+            [
+                _run("valid-ascension", ascension=0, seed="seed-a"),
+                _run("invalid-ascension", ascension=11, seed="seed-b"),
+            ],
+            ("ascension",),
+            ("ascension",),
+            True,
+        ),
+        (
+            [
+                _run("valid-seed", seed="seed-a"),
+                _run("invalid-seed", seed=7),
+            ],
+            (),
+            ("seed",),
+            False,
+        ),
+    ],
+)
+def test_comparison_readiness_marks_valid_and_invalid_axis_values(
+    records,
+    expected_mixed_axes,
+    expected_invalid_axes,
+    seed_complete,
+):
+    readiness = describe_comparison_readiness(records)
+
+    assert readiness.ready is False
+    assert readiness.missing_axes == ()
+    assert readiness.mixed_axes == expected_mixed_axes
+    assert readiness.invalid_axes == expected_invalid_axes
+    assert readiness.seed_complete is seed_complete
+    assert readiness.comparison_signature is None
+
+
+def test_valid_and_invalid_axis_diagnostics_keep_contract_order():
+    readiness = describe_comparison_readiness(
+        [
+            _run("valid", seed="valid-seed"),
+            _run(
+                "invalid",
+                character=7,
+                version=7,
+                mode=7,
+                scenario=True,
+                ascension=11,
+                seed=7,
+            ),
+        ]
+    )
+
+    assert readiness.mixed_axes == (
+        "character",
+        "game_version",
+        "evaluation_mode",
+        "scenario",
+        "ascension",
+    )
+    assert readiness.invalid_axes == (
+        "character",
+        "game_version",
+        "evaluation_mode",
+        "scenario",
+        "ascension",
+        "seed",
+    )
+
+
+def test_invalid_type_tracking_is_bounded_and_publicly_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("agent.run_workbench.metrics.COMPARISON_DISTINCT_LIMIT", 2)
+    invalid_values = [
+        type(f"InvalidType{index}", (), {})()
+        for index in range(5)
+    ]
+    tracker = metrics_module._BoundedStrings()
+    for value in invalid_values:
+        tracker.add(value)
+
+    details = tracker.details()
+    readiness = describe_comparison_readiness(
+        [
+            _run(f"invalid-{index}", version=value)
+            for index, value in enumerate(invalid_values)
+        ]
+    )
+
+    assert len(details.invalid_types) == 2
+    assert details.invalid_types_overflow is True
+    assert details.overflow is False
+    assert readiness.ready is False
+    assert readiness.mixed_axes == ()
+    assert readiness.invalid_axes == ("game_version",)
+    json.dumps(readiness.to_dict(), allow_nan=False)
+
+
+def test_invalid_type_labels_are_bounded_in_length():
+    long_named_type = type("X" * 10_000, (), {})
+    tracker = metrics_module._BoundedStrings()
+
+    tracker.add(long_named_type())
+
+    details = tracker.details()
+    assert len(details.invalid_types) == 1
+    assert len(details.invalid_types[0]) <= 64
+
+
+def test_invalid_metadata_with_hostile_metaclass_is_safe():
+    class HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise AssertionError("hostile metaclass name access")
+            return super().__getattribute__(name)
+
+    class HostileValue(metaclass=HostileMeta):
+        def __repr__(self):
+            raise AssertionError("hostile metadata repr")
+
+    readiness = describe_comparison_readiness(
+        [_run("hostile-readiness", version=HostileValue())]
+    )
+    comparison = compare_cohorts(
+        [_run("hostile-comparison", version=HostileValue())],
+        [_run("baseline")],
+    )
+
+    assert readiness.ready is False
+    assert readiness.invalid_axes == ("game_version",)
+    assert comparison.comparable is False
+    assert any(
+        "current version" in reason and "invalid" in reason
+        for reason in comparison.mismatch_reasons
+    )
 
 
 @pytest.mark.parametrize(
@@ -298,6 +456,7 @@ def test_comparison_readiness_requires_ascension_in_exact_game_range(
     )
 
     assert readiness.ready is False
+    assert readiness.mixed_axes == ()
     assert readiness.invalid_axes == ("ascension",)
     assert readiness.comparison_signature is None
 
@@ -333,7 +492,7 @@ def test_ascension_distinct_tracking_is_bounded(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert readiness.ready is False
-    assert readiness.mixed_axes == ()
+    assert readiness.mixed_axes == ("ascension",)
     assert readiness.invalid_axes == ("ascension",)
     assert readiness.comparison_signature is None
 

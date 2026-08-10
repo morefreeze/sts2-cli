@@ -24,6 +24,7 @@ from .models import RunRecord, RunStatus
 _GAMEPLAY_STATUSES = frozenset({RunStatus.WIN, RunStatus.DEAD})
 TREND_SAMPLE_LIMIT = 512
 COMPARISON_DISTINCT_LIMIT = 4_096
+COMPARISON_TYPE_LABEL_LIMIT = 64
 
 
 def _to_json_value(value: Any) -> Any:
@@ -157,6 +158,11 @@ class _StringDetails:
     invalid_types: tuple[str, ...]
     distinct_count: int
     overflow: bool = False
+    invalid_types_overflow: bool = False
+
+    @property
+    def has_invalid_types(self) -> bool:
+        return bool(self.invalid_types or self.invalid_types_overflow)
 
 
 @dataclass(frozen=True)
@@ -174,6 +180,7 @@ class _BoundedStrings:
     invalid_types: set[str] = field(default_factory=set)
     distinct_count: int = 0
     overflow: bool = False
+    invalid_types_overflow: bool = False
 
     def add(self, value: object) -> None:
         if type(value) is str:
@@ -193,7 +200,15 @@ class _BoundedStrings:
         elif value is None:
             self.missing = True
         else:
-            self.invalid_types.add(type(value).__name__)
+            if not self.invalid_types_overflow:
+                label = _bounded_type_label(value)
+                if (
+                    label not in self.invalid_types
+                    and len(self.invalid_types) >= COMPARISON_DISTINCT_LIMIT
+                ):
+                    self.invalid_types_overflow = True
+                else:
+                    self.invalid_types.add(label)
 
     def details(self) -> _StringDetails:
         return _StringDetails(
@@ -202,7 +217,18 @@ class _BoundedStrings:
             invalid_types=tuple(sorted(self.invalid_types)),
             distinct_count=self.distinct_count,
             overflow=self.overflow,
+            invalid_types_overflow=self.invalid_types_overflow,
         )
+
+
+def _bounded_type_label(value: object) -> str:
+    name = type.__getattribute__(type(value), "__name__")
+    if len(name) <= COMPARISON_TYPE_LABEL_LIMIT:
+        return name
+    digest = sha256(name.encode("utf-8", errors="backslashreplace")).hexdigest()[:12]
+    marker = f"...#{digest}"
+    prefix_length = COMPARISON_TYPE_LABEL_LIMIT - len(marker)
+    return f"{name[:prefix_length]}{marker}"
 
 
 @dataclass
@@ -283,14 +309,19 @@ def describe_comparison_readiness(
         details = accumulator.axes[axis].details()
         if details.missing:
             missing_axes.append(axis)
-        if len(details.values) > 1 or (details.missing and details.values):
+        if (
+            len(details.values) > 1
+            or (details.missing and details.values)
+            or (details.has_invalid_types and details.values)
+            or details.overflow
+        ):
             mixed_axes.append(axis)
-        if details.invalid_types or details.overflow:
+        if details.has_invalid_types or details.overflow:
             invalid_axes.append(axis)
         if (
             len(details.values) == 1
             and not details.missing
-            and not details.invalid_types
+            and not details.has_invalid_types
             and not details.overflow
         ):
             resolved[axis] = next(iter(details.values))
@@ -298,7 +329,12 @@ def describe_comparison_readiness(
     ascension = accumulator.ascension_details()
     if ascension.missing:
         missing_axes.append("ascension")
-    if len(ascension.values) > 1 or (ascension.missing and ascension.values):
+    if (
+        len(ascension.values) > 1
+        or (ascension.missing and ascension.values)
+        or (ascension.invalid and ascension.values)
+        or ascension.overflow
+    ):
         mixed_axes.append("ascension")
     if ascension.invalid or ascension.overflow:
         invalid_axes.append("ascension")
@@ -313,10 +349,10 @@ def describe_comparison_readiness(
     seeds = accumulator.seeds.details()
     if seeds.missing:
         missing_axes.append("seed")
-    if seeds.invalid_types or seeds.overflow:
+    if seeds.has_invalid_types or seeds.overflow:
         invalid_axes.append("seed")
     seed_complete = bool(seeds.values) and not (
-        seeds.missing or seeds.invalid_types or seeds.overflow
+        seeds.missing or seeds.has_invalid_types or seeds.overflow
     )
 
     if not accumulator.valid_n:
@@ -612,20 +648,20 @@ def _axis_value_from_details(
     details: _StringDetails, label: str, cohort: str
 ) -> tuple[str | None, tuple[str, ...]]:
     rendered_values = ", ".join(sorted(details.values))
-    rendered_types = ", ".join(details.invalid_types)
+    rendered_types = _invalid_type_summary(details)
     if details.overflow:
         return None, (
             f"{cohort} {label} has more than "
             f"{COMPARISON_DISTINCT_LIMIT} distinct values",
         )
-    if details.invalid_types and not details.values and not details.missing:
+    if details.has_invalid_types and not details.values and not details.missing:
         return None, (
             f"{cohort} {label} is invalid: expected nonempty string; "
             f"types={rendered_types}",
         )
-    if not details.values and details.missing and not details.invalid_types:
+    if not details.values and details.missing and not details.has_invalid_types:
         return None, (f"{cohort} {label} is missing",)
-    if len(details.values) > 1 or details.missing or details.invalid_types:
+    if len(details.values) > 1 or details.missing or details.has_invalid_types:
         parts: list[str] = []
         if details.missing:
             parts.append("missing")
@@ -635,6 +671,14 @@ def _axis_value_from_details(
             parts.append(f"invalid types={rendered_types}")
         return None, (f"{cohort} {label} is mixed: {'; '.join(parts)}",)
     return next(iter(details.values)), ()
+
+
+def _invalid_type_summary(details: _StringDetails) -> str:
+    rendered = ", ".join(details.invalid_types)
+    if not details.invalid_types_overflow:
+        return rendered
+    suffix = "additional type labels omitted"
+    return f"{rendered}; {suffix}" if rendered else suffix
 
 
 def _ascension_details(records: tuple[RunRecord, ...]) -> _AscensionDetails:
@@ -781,8 +825,8 @@ def compare_cohorts(
             and current_seeds == baseline_seeds
             and not current_seed_details.missing
             and not baseline_seed_details.missing
-            and not current_seed_details.invalid_types
-            and not baseline_seed_details.invalid_types
+            and not current_seed_details.has_invalid_types
+            and not baseline_seed_details.has_invalid_types
             and not current_seed_details.overflow
             and not baseline_seed_details.overflow
         )
@@ -797,17 +841,17 @@ def compare_cohorts(
                 )
             if current_seed_details.missing:
                 reasons.append("current seed set has missing seed values")
-            if current_seed_details.invalid_types:
+            if current_seed_details.has_invalid_types:
                 reasons.append(
                     "current seed set has invalid seed types: "
-                    f"{', '.join(current_seed_details.invalid_types)}"
+                    f"{_invalid_type_summary(current_seed_details)}"
                 )
             if baseline_seed_details.missing:
                 reasons.append("baseline seed set has missing seed values")
-            if baseline_seed_details.invalid_types:
+            if baseline_seed_details.has_invalid_types:
                 reasons.append(
                     "baseline seed set has invalid seed types: "
-                    f"{', '.join(baseline_seed_details.invalid_types)}"
+                    f"{_invalid_type_summary(baseline_seed_details)}"
                 )
             if current_seeds != baseline_seeds:
                 reasons.append(
