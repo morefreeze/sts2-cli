@@ -193,6 +193,27 @@ def test_run_metadata_serializes_game_version_source_next_to_version() -> None:
     }
 
 
+def test_run_metadata_preserves_legacy_positional_argument_order() -> None:
+    metadata = RunMetadata(
+        "Ironclad",
+        "eval_fixed_0",
+        "v0.103.2",
+        "model.zip",
+        "fixed",
+        "full_run",
+        10,
+    )
+
+    assert metadata.character == "Ironclad"
+    assert metadata.seed == "eval_fixed_0"
+    assert metadata.game_version == "v0.103.2"
+    assert metadata.checkpoint == "model.zip"
+    assert metadata.evaluation_mode == "fixed"
+    assert metadata.scenario == "full_run"
+    assert metadata.ascension == 10
+    assert metadata.game_version_source is None
+
+
 def test_model_output_is_json_safe_with_string_enum_values() -> None:
     record = RunRecord(
         run_id="run-2",

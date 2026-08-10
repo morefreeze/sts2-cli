@@ -387,7 +387,6 @@ class RunMetadata:
     character: str | None = None
     seed: str | None = None
     game_version: str | None = None
-    game_version_source: str | None = None
     checkpoint: str | None = None
     evaluation_mode: str | None = None
     scenario: str | None = None
@@ -396,6 +395,7 @@ class RunMetadata:
     is_multiplayer: bool | None = None
     started_at: float | None = None
     ended_at: float | None = None
+    game_version_source: str | None = None
 
 
 @dataclass(frozen=True)

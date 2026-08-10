@@ -27,14 +27,14 @@ import subprocess
 import sys
 import time
 
+from agent.run_metadata import (
+    ResolvedGameVersion,
+    resolve_game_version,
+    validate_ascension,
+)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(REPO, ".venv", "bin", "python")
-ENV = {
-    **os.environ,
-    "PATH": os.path.expanduser("~/.dotnet-arm64") + ":" + os.environ.get("PATH", ""),
-    "DOTNET_ROOT": os.path.expanduser("~/.dotnet-arm64"),
-    "STS2_MC_ROLLOUT": "smart",
-}
 SNAPSHOT = os.path.join(
     REPO, "data", "boss_snapshots_13186k", "eval_r0e093a_65_fl17_hp80.save")
 STOP_FILE = "/tmp/sts2-cli/evolve_stop"
@@ -45,10 +45,23 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _subprocess_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "PATH": (
+            os.path.expanduser("~/.dotnet-arm64")
+            + ":"
+            + os.environ.get("PATH", "")
+        ),
+        "DOTNET_ROOT": os.path.expanduser("~/.dotnet-arm64"),
+        "STS2_MC_ROLLOUT": "smart",
+    }
+
+
 def run(cmd: list[str], timeout: int, log_path: str) -> int:
     with open(log_path, "w") as f:
         try:
-            p = subprocess.run(cmd, cwd=REPO, env=ENV, stdout=f,
+            p = subprocess.run(cmd, cwd=REPO, env=_subprocess_env(), stdout=f,
                                stderr=subprocess.STDOUT, timeout=timeout)
             return p.returncode
         except subprocess.TimeoutExpired:
@@ -70,17 +83,29 @@ def latest_ckpt(dirpath: str) -> str | None:
     return os.path.join(dirpath, max(zips, key=steps))
 
 
+def _child_metadata_args(
+    game_version: ResolvedGameVersion, ascension: int
+) -> list[str]:
+    args = ["--ascension", str(ascension)]
+    if game_version.source == "cli":
+        args.extend(["--game-version", game_version.value])
+    return args
+
+
 def train_chunk(base_ckpt: str, out_dir: str, steps: int, ent: float,
-                round_idx: int) -> str | None:
+                round_idx: int, *, game_version: ResolvedGameVersion,
+                ascension: int) -> str | None:
     """Train one chunk; returns path of the newest ckpt or None."""
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     log(f"  train: {steps} steps from {os.path.basename(base_ckpt)} (ent={ent})")
-    rc = run([PY, "-m", "agent.train", "--character", "Ironclad",
-              "--steps", str(steps), "--checkpoint", base_ckpt,
-              "--ent-coef", str(ent), "--save-dir", out_dir,
-              "--eval-freq", "0"],
+    command = [PY, "-m", "agent.train", "--character", "Ironclad",
+               "--steps", str(steps), "--checkpoint", base_ckpt,
+               "--ent-coef", str(ent), "--save-dir", out_dir,
+               "--eval-freq", "0"]
+    command.extend(_child_metadata_args(game_version, ascension))
+    rc = run(command,
              timeout=3600, log_path=f"/tmp/sts2-cli/evolve_r{round_idx}_train.log")
     kill_orphans()
     ck = latest_ckpt(out_dir)
@@ -141,13 +166,19 @@ def parse_eval_reach(text: str) -> tuple[float, int]:
     return avg_floor, reach
 
 
-def eval_reach(ckpt: str, n_games: int, round_idx: int) -> tuple[float, int]:
+def eval_reach(ckpt: str, n_games: int, round_idx: int, *,
+               game_version: ResolvedGameVersion,
+               ascension: int) -> tuple[float, int]:
     """Quick eval; returns (avg_floor, boss_reach_count)."""
     log_path = f"/tmp/sts2-cli/evolve_r{round_idx}_eval.log"
-    rc = run([PY, "-m", "agent.eval_rl", ckpt, "--n-games", str(n_games),
-              "--character", "Ironclad"],
+    command = [PY, "-m", "agent.eval_rl", ckpt, "--n-games", str(n_games),
+               "--character", "Ironclad"]
+    command.extend(_child_metadata_args(game_version, ascension))
+    rc = run(command,
              timeout=3600, log_path=log_path)
     kill_orphans()
+    if rc != 0:
+        raise RuntimeError(f"evaluation failed rc={rc}; see {log_path}")
     avg_floor, reach = 0.0, 0
     try:
         with open(log_path) as f:
@@ -165,12 +196,19 @@ def main():
     p.add_argument("--chunk-steps", type=int, default=15000)
     p.add_argument("--ent", type=float, default=0.08)
     p.add_argument("--n-eval", type=int, default=15)
+    p.add_argument("--game-version", default=None)
+    p.add_argument("--ascension", type=int, default=0)
     p.add_argument("--best", default=os.path.join(
         REPO, "checkpoints_best", "ppo_ironclad_13308k_RETRAIN_23pct.zip"))
     p.add_argument("--best-reach", type=int, default=2,
                    help="current best reach count over --n-eval games "
                         "(13308k = 16.7%% → ~2.5/15)")
     args = p.parse_args()
+    try:
+        resolved_game_version = resolve_game_version(args.game_version)
+        ascension = validate_ascension(args.ascension)
+    except ValueError as exc:
+        p.error(str(exc))
 
     os.makedirs("/tmp/sts2-cli", exist_ok=True)
     os.makedirs(os.path.join(REPO, "checkpoints_evolve"), exist_ok=True)
@@ -186,14 +224,28 @@ def main():
             break
         log(f"=== round {r}/{args.rounds} ===")
         work = os.path.join(REPO, "checkpoints_evolve", f"round_{r}")
-        ck = train_chunk(best, work, args.chunk_steps, args.ent, r)
+        ck = train_chunk(
+            best,
+            work,
+            args.chunk_steps,
+            args.ent,
+            r,
+            game_version=resolved_game_version,
+            ascension=ascension,
+        )
         if ck is None:
             history.append({"round": r, "result": "train_failed"})
             continue
         if not sentinel_clutch(ck, r):
             history.append({"round": r, "ckpt": ck, "result": "clutch_fail"})
             continue
-        avg_floor, reach = eval_reach(ck, args.n_eval, r)
+        avg_floor, reach = eval_reach(
+            ck,
+            args.n_eval,
+            r,
+            game_version=resolved_game_version,
+            ascension=ascension,
+        )
         rec = {"round": r, "ckpt": ck, "result": "clutch_pass",
                "avg_floor": avg_floor, "reach": reach}
         if reach > best_reach:
