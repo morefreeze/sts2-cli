@@ -992,12 +992,200 @@ def test_detail_requests_are_latest_only_and_drawer_restores_focus():
     assert "function focusableDetailElements" in script
     assert "button:not([disabled])" in script
     assert "closest('[hidden], [inert]" in script
-    assert "node.matches(':disabled')" in script
+    assert "matches(':disabled')" in script
     assert "event.shiftKey" in script
     assert "event.preventDefault()" in script
     assert "focusables[0]" in script
     assert "focusables[focusables.length - 1]" in script
     assert "handleDetailKeydown" in script
+
+
+def test_metrics_refresh_captures_focus_before_busy_and_restores_after_enable():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "function isFocusable" in script
+    assert "function restoreMetricsFocus" in script
+    refresh = _javascript_section(
+        script, "async function refreshMetrics", "async function uploadSelectedFile"
+    )
+    focus_helper = _javascript_section(
+        script, "function isFocusable", "function handleDetailKeydown"
+    )
+
+    assert "const focusOpener = document.activeElement" in refresh
+    assert refresh.index("const focusOpener = document.activeElement") < refresh.index(
+        "setBusy(true)"
+    )
+    assert "finally" in refresh
+    assert refresh.index("setBusy(false)") < refresh.index("restoreMetricsFocus(")
+    assert "byId('currentCohort').value === current" in script
+    assert "byId('baselineCohort').value === baseline" in script
+    assert "candidate.isConnected" in focus_helper
+    assert "typeof candidate.focus" in focus_helper and "'function'" in focus_helper
+    assert "closest('[hidden], [inert], [aria-hidden=\"true\"]')" in focus_helper
+    assert "matches(':disabled')" in focus_helper
+    assert "window.getComputedStyle(candidate)" in focus_helper
+
+
+def test_metrics_refresh_focus_restoration_is_safe_latest_context_only():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "function isFocusable" in script
+    assert "function restoreMetricsFocus" in script
+    focus_helper = _javascript_section(
+        script, "function isFocusable", "function handleDetailKeydown"
+    )
+    restore_helper = _javascript_section(
+        script, "function restoreMetricsFocus", "async function refreshMetrics"
+    )
+    refresh = _javascript_section(
+        script, "async function refreshMetrics", "async function uploadSelectedFile"
+    )
+
+    payload = _run_node_json(
+        f"""
+        (async () => {{
+          const document = {{ body: null, documentElement: null, activeElement: null }};
+          const window = {{
+            getComputedStyle(candidate) {{
+              return {{
+                display: candidate.display || 'block',
+                visibility: candidate.visibility || 'visible',
+              }};
+            }},
+          }};
+          function makeElement(id) {{
+            return {{
+              id,
+              value: '',
+              isConnected: true,
+              disabled: false,
+              blockedAncestor: false,
+              focusCalls: 0,
+              focus() {{ this.focusCalls += 1; document.activeElement = this; }},
+              closest() {{ return this.blockedAncestor ? {{}} : null; }},
+              matches(selector) {{ return selector === ':disabled' && this.disabled; }},
+              hasAttribute(name) {{ return name === 'disabled' && this.disabled; }},
+            }};
+          }}
+          document.body = makeElement('body');
+          document.documentElement = makeElement('html');
+          const currentSelect = makeElement('currentCohort');
+          const baselineSelect = makeElement('baselineCohort');
+          const elsewhere = makeElement('elsewhere');
+          const nodes = {{
+            currentCohort: currentSelect,
+            baselineCohort: baselineSelect,
+          }};
+          const byId = (id) => nodes[id];
+          const controls = [currentSelect, baselineSelect];
+          function setBusy(isBusy) {{
+            controls.forEach((control) => {{ control.disabled = isBusy; }});
+            if (isBusy && controls.includes(document.activeElement)) {{
+              document.activeElement = document.body;
+            }}
+          }}
+          const state = {{ cohorts: [{{}}], currentMetrics: null }};
+          let status = '';
+          const setStatus = (message) => {{ status = message; }};
+          const resetMetrics = () => {{}};
+          const renderSummary = () => {{}};
+          const renderTrend = () => {{}};
+          const renderFunnel = () => {{}};
+          const renderComparison = () => {{}};
+          const renderAnomalies = () => {{}};
+          const renderRepresentatives = () => {{}};
+          const metrics = {{ current: {{}}, comparison: null }};
+          let getJSONImpl = async () => metrics;
+          const getJSON = (...args) => getJSONImpl(...args);
+          {focus_helper}
+          {restore_helper}
+          {refresh}
+
+          currentSelect.value = 'current-a';
+          baselineSelect.value = 'baseline-a';
+          document.activeElement = currentSelect;
+          await refreshMetrics();
+          const currentRestored = document.activeElement === currentSelect;
+
+          document.activeElement = baselineSelect;
+          await refreshMetrics();
+          const baselineRestored = document.activeElement === baselineSelect;
+
+          const currentFocusBeforeElsewhere = currentSelect.focusCalls;
+          const baselineFocusBeforeElsewhere = baselineSelect.focusCalls;
+          document.activeElement = elsewhere;
+          await refreshMetrics();
+          const elsewherePreserved = document.activeElement === elsewhere
+            && currentSelect.focusCalls === currentFocusBeforeElsewhere
+            && baselineSelect.focusCalls === baselineFocusBeforeElsewhere;
+
+          document.activeElement = baselineSelect;
+          getJSONImpl = async () => {{ throw new Error('metrics failed'); }};
+          await refreshMetrics();
+          const errorRestored = document.activeElement === baselineSelect
+            && status === '训练指标读取失败：metrics failed';
+
+          let resolveStale;
+          getJSONImpl = () => new Promise((resolve) => {{ resolveStale = resolve; }});
+          document.activeElement = currentSelect;
+          const staleRequest = refreshMetrics();
+          currentSelect.value = 'current-b';
+          resolveStale(metrics);
+          await staleRequest;
+          const staleSelectionDidNotRestore = document.activeElement === document.body;
+
+          currentSelect.value = 'current-b';
+          let resolveMoved;
+          getJSONImpl = () => new Promise((resolve) => {{ resolveMoved = resolve; }});
+          document.activeElement = currentSelect;
+          const movedRequest = refreshMetrics();
+          document.activeElement = elsewhere;
+          resolveMoved(metrics);
+          await movedRequest;
+          const movedFocusDidNotRestore = document.activeElement === elsewhere;
+
+          const valid = makeElement('valid');
+          const disconnected = makeElement('disconnected');
+          disconnected.isConnected = false;
+          const hidden = makeElement('hidden');
+          hidden.blockedAncestor = true;
+          const disabled = makeElement('disabled');
+          disabled.disabled = true;
+          const displayNone = makeElement('displayNone');
+          displayNone.display = 'none';
+          console.log(JSON.stringify({{
+            currentRestored,
+            baselineRestored,
+            elsewherePreserved,
+            errorRestored,
+            staleSelectionDidNotRestore,
+            movedFocusDidNotRestore,
+            focusable: {{
+              valid: isFocusable(valid),
+              disconnected: isFocusable(disconnected),
+              hidden: isFocusable(hidden),
+              disabled: isFocusable(disabled),
+              displayNone: isFocusable(displayNone),
+            }},
+          }}));
+        }})().catch((error) => {{ console.error(error); process.exit(1); }});
+        """
+    )
+
+    assert payload == {
+        "currentRestored": True,
+        "baselineRestored": True,
+        "elsewherePreserved": True,
+        "errorRestored": True,
+        "staleSelectionDidNotRestore": True,
+        "movedFocusDidNotRestore": True,
+        "focusable": {
+            "valid": True,
+            "disconnected": False,
+            "hidden": False,
+            "disabled": False,
+            "displayNone": False,
+        },
+    }
 
 
 def test_upload_size_guard_precedes_read_and_has_server_margin():

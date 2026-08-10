@@ -1059,6 +1059,16 @@ function showDetailPanel(opener = null) {
   byId('closeDetail').focus();
 }
 
+function isFocusable(candidate) {
+  if (!candidate || !candidate.isConnected || typeof candidate.focus !== 'function') return false;
+  if (typeof candidate.closest !== 'function'
+    || candidate.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+  if ((typeof candidate.matches === 'function' && candidate.matches(':disabled'))
+    || (typeof candidate.hasAttribute === 'function' && candidate.hasAttribute('disabled'))) return false;
+  const style = window.getComputedStyle(candidate);
+  return style.display !== 'none' && style.visibility !== 'hidden';
+}
+
 function closeDetail() {
   const panel = byId('detailPanel');
   state.detailRequestToken += 1;
@@ -1069,19 +1079,14 @@ function closeDetail() {
   panel.setAttribute('aria-hidden', 'true');
   panel.inert = true;
   panel.hidden = true;
-  if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
+  if (isFocusable(opener)) opener.focus();
   else byId('dashboardMain').focus();
 }
 
 function focusableDetailElements() {
   const panel = byId('detailPanel');
   const selector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-  return Array.from(panel.querySelectorAll(selector)).filter((node) => {
-    if (node.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
-    if (node.matches(':disabled') || node.hasAttribute('disabled')) return false;
-    const style = window.getComputedStyle(node);
-    return style.display !== 'none' && style.visibility !== 'hidden';
-  });
+  return Array.from(panel.querySelectorAll(selector)).filter(isFocusable);
 }
 
 function handleDetailKeydown(event) {
@@ -1158,6 +1163,16 @@ async function openRun(runId, opener = null) {
   }
 }
 
+function restoreMetricsFocus(focusOpener, current, baseline) {
+  const selectionUnchanged = byId('currentCohort').value === current
+    && byId('baselineCohort').value === baseline;
+  if (!selectionUnchanged || !isFocusable(focusOpener)) return;
+  const active = document.activeElement;
+  if (active === focusOpener) return;
+  if (active && active !== document.body && active !== document.documentElement) return;
+  focusOpener.focus();
+}
+
 async function refreshMetrics() {
   const current = byId('currentCohort').value;
   const baseline = byId('baselineCohort').value;
@@ -1167,6 +1182,7 @@ async function refreshMetrics() {
     setStatus(state.cohorts.length ? '当前筛选没有匹配批次' : '已载入，但没有可统计的训练批次');
     return;
   }
+  const focusOpener = document.activeElement;
   setBusy(true);
   setStatus('正在计算训练进度…', 'busy');
   try {
@@ -1187,6 +1203,7 @@ async function refreshMetrics() {
     setStatus(`训练指标读取失败：${error.message}`, 'error');
   } finally {
     setBusy(false);
+    restoreMetricsFocus(focusOpener, current, baseline);
   }
 }
 
