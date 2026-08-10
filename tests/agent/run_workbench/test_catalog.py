@@ -675,6 +675,104 @@ def test_game_version_source_filter_requires_one_utf8_safe_canonical_value(
 
 
 @pytest.mark.parametrize("record_count", [511, 513])
+def test_surrogate_metadata_is_isolated_without_hiding_valid_cohorts(
+    tmp_path: Path, record_count: int
+) -> None:
+    valid = {
+        "event": "eval_result",
+        "run_id": "valid",
+        "status": "dead",
+        "max_global_floor": 8,
+        "character": "Ironclad",
+        "game_version": "v1",
+        "checkpoint": "normal",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+        "seed": "seed-a",
+    }
+    malformed = {
+        **valid,
+        "run_id": "malformed",
+        "checkpoint": "inspection-only",
+        "game_version": json.loads('"\\ud800"'),
+        "seed": json.loads('"\\udfff"'),
+    }
+    fillers = [
+        {"event": "eval_result", "run_id": f"pending-{index}", "status": "in_progress"}
+        for index in range(record_count - 2)
+    ]
+    _write_jsonl(tmp_path / "eval.jsonl", [valid, malformed, *fillers])
+
+    cohorts = RunCatalog([tmp_path], replay_parser=_replay_parser).list_cohorts()
+
+    assert len(cohorts) == 2
+    normal = next(row for row in cohorts if row["filters"]["checkpoint"] == "normal")
+    invalid = next(
+        row for row in cohorts if row["filters"]["checkpoint"] == "inspection-only"
+    )
+    assert normal["comparison_readiness"]["ready"] is True
+    assert invalid["comparison_readiness"]["ready"] is False
+    assert invalid["filters"]["game_version"] is None
+    assert invalid["default_baseline_cohort_id"] is None
+    json.dumps({"cohorts": cohorts}, ensure_ascii=False).encode("utf-8", errors="strict")
+
+
+@pytest.mark.parametrize("record_count", [511, 513])
+def test_same_run_metadata_conflict_never_advertises_compatible_baseline(
+    tmp_path: Path, record_count: int
+) -> None:
+    common = {
+        "event": "eval_result",
+        "status": "dead",
+        "max_global_floor": 8,
+        "character": "Ironclad",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+    }
+    rows = [
+        {
+            **common,
+            "run_id": "current-run",
+            "checkpoint": "current",
+            "game_version": "v1",
+            "seed": "seed-a",
+        },
+        {
+            **common,
+            "run_id": "current-run",
+            "checkpoint": "current",
+            "game_version": "v2",
+            "seed": "seed-b",
+        },
+        {
+            **common,
+            "run_id": "baseline-run",
+            "checkpoint": "baseline",
+            "game_version": "v1",
+            "seed": "seed-a",
+        },
+    ]
+    rows.extend(
+        {"event": "eval_result", "run_id": f"pending-{index}", "status": "in_progress"}
+        for index in range(record_count - len(rows))
+    )
+    _write_jsonl(tmp_path / "eval.jsonl", rows)
+
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    cohorts = {
+        row["filters"]["checkpoint"]: row for row in catalog.list_cohorts()
+    }
+
+    assert cohorts["current"]["comparison_readiness"]["ready"] is False
+    assert cohorts["current"]["default_baseline_cohort_id"] is None
+    assert cohorts["baseline"]["comparison_readiness"]["ready"] is True
+    current_run = catalog.get_cohort_records(cohorts["current"]["cohort_id"])[0]
+    assert current_run.comparison_conflicts == frozenset({"game_version", "seed"})
+
+
+@pytest.mark.parametrize("record_count", [511, 513])
 def test_duplicate_run_version_source_evidence_survives_join_and_compact_paths(
     tmp_path: Path, record_count: int
 ) -> None:

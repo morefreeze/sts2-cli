@@ -12,6 +12,18 @@ MAX_GAME_VERSION_LENGTH = 128
 GameVersionSource = Literal["cli", "environment"]
 
 
+def is_unicode_scalar_text(value: object) -> bool:
+    """Return whether ``value`` is text that strict UTF-8 can represent."""
+
+    if type(value) is not str:
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ResolvedGameVersion:
     value: str

@@ -18,6 +18,8 @@ import json
 import math
 from typing import Any, Iterable
 
+from agent.run_metadata import is_unicode_scalar_text
+
 from .models import RunRecord, RunStatus
 
 
@@ -182,11 +184,17 @@ class _BoundedStrings:
     overflow: bool = False
     invalid_types_overflow: bool = False
 
+    def mark_conflict(self) -> None:
+        self.invalid_types.add("conflicting values")
+
     def add(self, value: object) -> None:
         if type(value) is str:
             value = value.strip()
             if not value:
                 self.missing = True
+                return
+            if not is_unicode_scalar_text(value):
+                self.invalid_types.add("non-Unicode-scalar string")
                 return
             if not self.overflow:
                 previous_count = len(self.values)
@@ -271,16 +279,27 @@ class _ComparisonAccumulator:
         }
     )
     seeds: _BoundedStrings = field(default_factory=_BoundedStrings)
+    valid_seeds: _BoundedStrings = field(default_factory=_BoundedStrings)
     ascensions: _BoundedAscensions = field(default_factory=_BoundedAscensions)
 
     def observe(self, record: RunRecord) -> None:
-        if record.outcome.status not in _GAMEPLAY_STATUSES:
-            return
-        self.valid_n += 1
         for attribute, details in self.axes.items():
             details.add(getattr(record.metadata, attribute))
         self.seeds.add(record.metadata.seed)
         self.ascensions.add(record.metadata.ascension)
+        for attribute in record.comparison_conflicts:
+            if attribute in self.axes:
+                self.axes[attribute].mark_conflict()
+            elif attribute == "seed":
+                self.seeds.mark_conflict()
+            elif attribute == "ascension":
+                self.ascensions.invalid = True
+        if record.outcome.status not in _GAMEPLAY_STATUSES:
+            return
+        self.valid_n += 1
+        self.valid_seeds.add(record.metadata.seed)
+        if "seed" in record.comparison_conflicts:
+            self.valid_seeds.mark_conflict()
 
     def ascension_details(self) -> _AscensionDetails:
         return self.ascensions.details()
@@ -346,13 +365,24 @@ def describe_comparison_readiness(
     ):
         resolved["ascension"] = next(iter(ascension.values))
 
-    seeds = accumulator.seeds.details()
-    if seeds.missing:
+    attempt_seeds = accumulator.seeds.details()
+    result_seeds = accumulator.valid_seeds.details()
+    if attempt_seeds.missing:
         missing_axes.append("seed")
-    if seeds.has_invalid_types or seeds.overflow:
+    if (
+        attempt_seeds.has_invalid_types
+        or attempt_seeds.overflow
+        or result_seeds.has_invalid_types
+        or result_seeds.overflow
+    ):
         invalid_axes.append("seed")
-    seed_complete = bool(seeds.values) and not (
-        seeds.missing or seeds.has_invalid_types or seeds.overflow
+    seed_complete = bool(result_seeds.values) and not (
+        attempt_seeds.missing
+        or attempt_seeds.has_invalid_types
+        or attempt_seeds.overflow
+        or result_seeds.has_invalid_types
+        or result_seeds.overflow
+        or not attempt_seeds.values.issubset(result_seeds.values)
     )
 
     if not accumulator.valid_n:
@@ -368,7 +398,7 @@ def describe_comparison_readiness(
     )
     comparison_signature = None
     if ready:
-        signature_payload = {**resolved, "seeds": sorted(seeds.values)}
+        signature_payload = {**resolved, "seeds": sorted(result_seeds.values)}
         comparison_signature = sha256(
             json.dumps(
                 signature_payload,
@@ -383,7 +413,7 @@ def describe_comparison_readiness(
         missing_axes=tuple(missing_axes),
         mixed_axes=tuple(mixed_axes),
         invalid_axes=tuple(invalid_axes),
-        seed_count=seeds.distinct_count,
+        seed_count=result_seeds.distinct_count,
         seed_complete=seed_complete,
         comparison_signature=comparison_signature,
     )
@@ -726,6 +756,31 @@ def _seed_details(records: tuple[RunRecord, ...]) -> _StringDetails:
     return _string_details(record.metadata.seed for record in records)
 
 
+def _seed_pairing_errors(
+    accumulator: _ComparisonAccumulator, cohort: str
+) -> tuple[str, ...]:
+    attempts = accumulator.seeds.details()
+    results = accumulator.valid_seeds.details()
+    errors: list[str] = []
+    if attempts.overflow or results.overflow:
+        errors.append(f"{cohort} seed set exceeds bounded comparison limit")
+    if attempts.missing:
+        errors.append(f"{cohort} seed set has missing seed values")
+    if attempts.has_invalid_types:
+        errors.append(
+            f"{cohort} seed set has invalid seed types: "
+            f"{_invalid_type_summary(attempts)}"
+        )
+    if not attempts.overflow and not results.overflow:
+        unresolved = sorted(attempts.values - results.values)
+        if unresolved:
+            errors.append(
+                f"{cohort} seed set has attempts without valid gameplay results: "
+                f"{unresolved}"
+            )
+    return tuple(errors)
+
+
 def _observed_records(
     records: Iterable[RunRecord], accumulator: _ComparisonAccumulator
 ) -> Iterable[RunRecord]:
@@ -816,43 +871,21 @@ def compare_cohorts(
                 "ascension mismatch: one cohort has invalid or incomplete metadata"
             )
 
-        current_seed_details = current_details.seeds.details()
-        baseline_seed_details = baseline_details.seeds.details()
+        current_seed_details = current_details.valid_seeds.details()
+        baseline_seed_details = baseline_details.valid_seeds.details()
         current_seeds = current_seed_details.values
         baseline_seeds = baseline_seed_details.values
+        current_seed_errors = _seed_pairing_errors(current_details, "current")
+        baseline_seed_errors = _seed_pairing_errors(baseline_details, "baseline")
         paired = (
             bool(current_seeds)
             and current_seeds == baseline_seeds
-            and not current_seed_details.missing
-            and not baseline_seed_details.missing
-            and not current_seed_details.has_invalid_types
-            and not baseline_seed_details.has_invalid_types
-            and not current_seed_details.overflow
-            and not baseline_seed_details.overflow
+            and not current_seed_errors
+            and not baseline_seed_errors
         )
         if require_paired_seeds:
-            if current_seed_details.overflow:
-                reasons.append(
-                    "current seed set exceeds bounded comparison limit"
-                )
-            if baseline_seed_details.overflow:
-                reasons.append(
-                    "baseline seed set exceeds bounded comparison limit"
-                )
-            if current_seed_details.missing:
-                reasons.append("current seed set has missing seed values")
-            if current_seed_details.has_invalid_types:
-                reasons.append(
-                    "current seed set has invalid seed types: "
-                    f"{_invalid_type_summary(current_seed_details)}"
-                )
-            if baseline_seed_details.missing:
-                reasons.append("baseline seed set has missing seed values")
-            if baseline_seed_details.has_invalid_types:
-                reasons.append(
-                    "baseline seed set has invalid seed types: "
-                    f"{_invalid_type_summary(baseline_seed_details)}"
-                )
+            reasons.extend(current_seed_errors)
+            reasons.extend(baseline_seed_errors)
             if current_seeds != baseline_seeds:
                 reasons.append(
                     "fixed seed set mismatch: "

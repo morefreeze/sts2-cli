@@ -12,6 +12,7 @@ from typing import Any, Callable
 from .deltas import derive_snapshot_deltas, native_node_deltas
 from .models import (
     Capabilities,
+    COMPARISON_METADATA_FIELDS,
     Coverage,
     NodeOrigin,
     RunMetadata,
@@ -197,6 +198,7 @@ def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
         ),
         acts=acts,
         nodes=nodes,
+        comparison_conflicts=_comparison_conflicts_from_records([record]),
         _node_provenance_index=_single_source_node_provenance(
             nodes,
             source_kind=SourceKind.NATIVE_RUN,
@@ -392,6 +394,9 @@ def _adapt_replay(
         nodes=nodes,
         replay_by_node=replay_by_node,
         warnings=identity_warnings,
+        comparison_conflicts=_comparison_conflicts_from_records(
+            [*records, start_action, summary]
+        ),
         _node_provenance_index=_single_source_node_provenance(
             nodes,
             source_kind=SourceKind.REPLAY_JSONL,
@@ -494,6 +499,7 @@ def _adapt_deck_run(
         ),
         nodes=nodes,
         warnings=list(warnings or ()),
+        comparison_conflicts=_comparison_conflicts_from_records(records),
         _node_provenance_index=_single_source_node_provenance(
             nodes,
             source_kind=SourceKind.DECK_HISTORY,
@@ -535,6 +541,7 @@ def _adapt_eval_results(
                     complete_run=status not in {RunStatus.UNKNOWN, RunStatus.IN_PROGRESS},
                     last_recorded_floor=floor,
                 ),
+                comparison_conflicts=_comparison_conflicts_from_records([row]),
             )
         )
     return AdaptedSource(descriptor, runs=tuple(runs))
@@ -559,6 +566,35 @@ def _metadata_from_records(
         started_at=started_at,
         ended_at=ended_at,
     )
+
+
+def _comparison_conflicts_from_records(
+    records: list[dict[str, Any]],
+) -> frozenset[str]:
+    conflicts: set[str] = set()
+    for attribute, keys in (
+        ("character", ("character",)),
+        ("seed", ("seed",)),
+        ("game_version", ("game_version", "build_id")),
+        ("evaluation_mode", ("evaluation_mode",)),
+        ("scenario", ("scenario",)),
+    ):
+        observed = {
+            value
+            for record in records
+            for key in keys
+            if (value := _first_text(record, key)) is not None
+        }
+        if len(observed) > 1:
+            conflicts.add(attribute)
+    ascensions = {
+        value
+        for record in records
+        if (value := _first_int(record, "ascension")) is not None
+    }
+    if len(ascensions) > 1:
+        conflicts.add("ascension")
+    return frozenset(conflicts & COMPARISON_METADATA_FIELDS)
 
 
 def _metadata_version_source(*records: dict[str, Any]) -> str | None:

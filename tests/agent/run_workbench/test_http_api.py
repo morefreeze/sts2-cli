@@ -227,6 +227,56 @@ def test_cohorts_http_omits_unencodable_game_version_source(
     assert payload["cohorts"][0]["filters"]["game_version_source"] is None
 
 
+def test_cohorts_http_keeps_valid_cohort_when_unrelated_metadata_has_surrogates(
+    tmp_path: Path,
+) -> None:
+    base_record = {
+        "event": "eval_result",
+        "status": "dead",
+        "max_global_floor": 8,
+        "character": "Ironclad",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+    }
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                **base_record,
+                "run_id": "normal",
+                "game_version": "v1",
+                "checkpoint": "normal",
+                "seed": "a",
+            },
+            {
+                **base_record,
+                "run_id": "malformed",
+                "game_version": json.loads('"\\ud800"'),
+                "checkpoint": "inspection-only",
+                "seed": json.loads('"\\udfff"'),
+            },
+        ],
+    )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(base, "/api/cohorts")
+
+    assert status == 200
+    normal = next(
+        row for row in payload["cohorts"] if row["filters"]["checkpoint"] == "normal"
+    )
+    invalid = next(
+        row
+        for row in payload["cohorts"]
+        if row["filters"]["checkpoint"] == "inspection-only"
+    )
+    assert normal["comparison_readiness"]["ready"] is True
+    assert invalid["comparison_readiness"]["ready"] is False
+    assert invalid["filters"]["game_version"] is None
+    json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="strict")
+
+
 def test_cohorts_http_uses_all_duplicate_run_version_source_evidence(
     tmp_path: Path,
 ) -> None:

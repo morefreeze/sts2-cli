@@ -174,15 +174,15 @@ def test_comparison_signature_handles_unicode_long_values_and_hides_seed_list():
 
 
 @pytest.mark.parametrize("field", ["version", "seed"])
-def test_comparison_signature_handles_lone_surrogate_strings(field: str):
+def test_comparison_signature_rejects_lone_surrogate_strings(field: str):
     lone_surrogate = json.loads('"\\ud800"')
     override = {field: lone_surrogate}
 
     first = describe_comparison_readiness([_run("first", **override)])
     second = describe_comparison_readiness([_run("second", **override)])
 
-    assert first.ready is True
-    assert first.comparison_signature is not None
+    assert first.ready is False
+    assert first.comparison_signature is None
     assert first.comparison_signature == second.comparison_signature
     json.dumps(first.to_dict(), allow_nan=False)
 
@@ -517,13 +517,13 @@ def test_comparison_readiness_consumes_input_iterable_once():
     assert records.iterations == 1
 
 
-def test_comparison_readiness_uses_valid_results_and_ignores_technical_noise():
+def test_comparison_readiness_observes_missing_metadata_on_technical_attempts():
     readiness = describe_comparison_readiness(
         [
             _run("valid", seed="valid-seed"),
             _run(
-                "progress",
-                status=RunStatus.IN_PROGRESS,
+                "crash",
+                status=RunStatus.CRASH,
                 character=None,
                 version=None,
                 mode=7,
@@ -534,11 +534,82 @@ def test_comparison_readiness_uses_valid_results_and_ignores_technical_noise():
         ]
     )
 
-    assert readiness.ready is True
+    assert readiness.ready is False
+    assert readiness.seed_complete is False
     assert readiness.seed_count == 1
-    assert readiness.missing_axes == ()
-    assert readiness.mixed_axes == ()
-    assert readiness.invalid_axes == ()
+    assert readiness.missing_axes == ("character", "game_version", "seed")
+    assert readiness.mixed_axes == (
+        "character",
+        "game_version",
+        "evaluation_mode",
+        "scenario",
+        "ascension",
+    )
+    assert readiness.invalid_axes == ("evaluation_mode", "scenario", "ascension")
+
+
+def test_comparison_readiness_rejects_technical_only_seed_coverage():
+    readiness = describe_comparison_readiness(
+        [
+            _run("valid-a", seed="a"),
+            _run("crash-b", status=RunStatus.CRASH, seed="b"),
+        ]
+    )
+
+    assert readiness.ready is False
+    assert readiness.seed_complete is False
+    assert readiness.seed_count == 1
+    assert readiness.comparison_signature is None
+
+
+def test_comparison_readiness_allows_same_seed_technical_retry():
+    readiness = describe_comparison_readiness(
+        [
+            _run("crash-a", status=RunStatus.CRASH, seed="a"),
+            _run("valid-a", seed="a"),
+        ]
+    )
+
+    assert readiness.ready is True
+    assert readiness.seed_complete is True
+    assert readiness.seed_count == 1
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_axis"),
+    [
+        ({"version": json.loads('"\\ud800"')}, "game_version"),
+        ({"seed": json.loads('"\\ud800"')}, "seed"),
+    ],
+)
+def test_comparison_readiness_rejects_non_unicode_scalar_metadata(
+    override, expected_axis
+):
+    readiness = describe_comparison_readiness([_run("surrogate", **override)])
+
+    assert readiness.ready is False
+    assert expected_axis in readiness.invalid_axes
+    assert readiness.comparison_signature is None
+
+
+def test_comparison_readiness_accepts_ordinary_unicode_scalar_metadata():
+    readiness = describe_comparison_readiness(
+        [_run("unicode", version="版本-一", seed="种子-一")]
+    )
+
+    assert readiness.ready is True
+
+
+def test_comparison_readiness_rejects_typed_same_run_metadata_conflicts():
+    record = _run("conflicted", seed="seed-a", version="v1")
+    record.comparison_conflicts = frozenset({"game_version", "seed"})
+
+    readiness = describe_comparison_readiness([record])
+
+    assert readiness.ready is False
+    assert readiness.seed_complete is False
+    assert readiness.mixed_axes == ("game_version",)
+    assert readiness.invalid_axes == ("game_version", "seed")
 
 
 def test_summary_excludes_technical_failures_from_gameplay_aggregates():
@@ -995,7 +1066,7 @@ def test_identical_nonempty_seed_sets_are_paired_and_duplicates_do_not_matter():
     assert result.notes == ()
 
 
-def test_technical_noise_does_not_create_metadata_or_pairing_mismatches():
+def test_technical_metadata_and_unresolved_seed_block_strict_comparison():
     current = [
         _run("valid", seed="same"),
         _run(
@@ -1008,6 +1079,20 @@ def test_technical_noise_does_not_create_metadata_or_pairing_mismatches():
             ascension=20,
             seed="other",
         ),
+    ]
+
+    result = compare_cohorts(current, [_run("baseline", seed="same")])
+
+    assert result.comparable is False
+    assert result.paired is False
+    assert any("current version is mixed" in reason for reason in result.mismatch_reasons)
+    assert any("without valid gameplay results" in reason for reason in result.mismatch_reasons)
+
+
+def test_same_seed_technical_retry_remains_strictly_paired():
+    current = [
+        _run("crash", status=RunStatus.CRASH, seed="same"),
+        _run("valid", seed="same"),
     ]
 
     result = compare_cohorts(current, [_run("baseline", seed="same")])

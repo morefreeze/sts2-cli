@@ -15,6 +15,16 @@ if TYPE_CHECKING:
 _CANONICAL_NODE_COLLECTION_LIMIT = 256
 _CANONICAL_ACT_LIMIT = 4
 _CANONICAL_FLOORS_PER_ACT = 17
+COMPARISON_METADATA_FIELDS = frozenset(
+    {
+        "character",
+        "seed",
+        "game_version",
+        "evaluation_mode",
+        "scenario",
+        "ascension",
+    }
+)
 
 
 class _FrozenMapping(Mapping[str, Any]):
@@ -526,6 +536,12 @@ class RunRecord:
     nodes: list[dict[str, Any]] = field(default_factory=list)
     replay_by_node: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    comparison_conflicts: frozenset[str] = field(
+        default_factory=frozenset,
+        repr=False,
+        compare=False,
+        metadata={"serialize": False},
+    )
     _node_provenance_index: Mapping[str, tuple[NodeOrigin, ...]] = field(
         default_factory=dict,
         repr=False,
@@ -534,6 +550,11 @@ class RunRecord:
     )
 
     def __post_init__(self) -> None:
+        self.comparison_conflicts = frozenset(
+            value
+            for value in self.comparison_conflicts
+            if value in COMPARISON_METADATA_FIELDS
+        )
         self._node_provenance_index = _snapshot_node_provenance_index(
             self._node_provenance_index
         )

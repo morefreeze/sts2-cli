@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from .models import (
     Capabilities,
+    COMPARISON_METADATA_FIELDS,
     Coverage,
     NodeOrigin,
     RunMetadata,
@@ -55,7 +56,7 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
         return _ensure_node_origins(records[0])
 
     warnings = _unique(warning for record in records for warning in record.warnings)
-    metadata, metadata_warnings = _merge_metadata(records)
+    metadata, metadata_warnings, comparison_conflicts = _merge_metadata(records)
     warnings.extend(metadata_warnings)
     outcome, outcome_warnings = _merge_outcome(records)
     warnings.extend(outcome_warnings)
@@ -108,6 +109,7 @@ def _merge_group(records: list[RunRecord]) -> RunRecord:
         nodes=merged_nodes,
         replay_by_node=replay_by_node,
         warnings=_unique(warnings),
+        comparison_conflicts=comparison_conflicts,
         _node_provenance_index={
             node_evidence_key(merged_nodes, index): origins
             for index, origins in enumerate(node_origins)
@@ -145,9 +147,16 @@ def _merge_typed_origins(
     )
 
 
-def _merge_metadata(records: list[RunRecord]) -> tuple[RunMetadata, list[str]]:
+def _merge_metadata(
+    records: list[RunRecord],
+) -> tuple[RunMetadata, list[str], frozenset[str]]:
     values: dict[str, Any] = {}
     warnings: list[str] = []
+    comparison_conflicts = {
+        conflict
+        for record in records
+        for conflict in record.comparison_conflicts
+    }
     ordered_records = _deterministic_evidence_records(records)
     for field in fields(RunMetadata):
         candidates = [
@@ -163,7 +172,9 @@ def _merge_metadata(records: list[RunRecord]) -> tuple[RunMetadata, list[str]]:
                 + ", ".join(repr(value) for value in distinct)
                 + f"; kept {values[field.name]!r}"
             )
-    return RunMetadata(**values), warnings
+            if field.name in COMPARISON_METADATA_FIELDS:
+                comparison_conflicts.add(field.name)
+    return RunMetadata(**values), warnings, frozenset(comparison_conflicts)
 
 
 def _merge_outcome(records: list[RunRecord]) -> tuple[RunOutcome, list[str]]:

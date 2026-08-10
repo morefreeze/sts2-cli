@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import math
@@ -12,6 +12,8 @@ import re
 import stat as stat_module
 from threading import RLock
 from typing import Any, Callable, Iterable
+
+from agent.run_metadata import is_unicode_scalar_text
 
 from .adapters import AdaptedSource, adapt_records
 from .joiner import join_records
@@ -22,6 +24,7 @@ from .metrics import (
 )
 from .models import (
     Capabilities,
+    COMPARISON_METADATA_FIELDS,
     Coverage,
     RunMetadata,
     RunOutcome,
@@ -116,9 +119,7 @@ class _GameVersionSourceEvidence:
         normalized = candidate.strip()
         if not normalized:
             return
-        try:
-            normalized.encode("utf-8", errors="strict")
-        except UnicodeEncodeError:
+        if not is_unicode_scalar_text(normalized):
             self.blocked = True
             return
         if self.value is None:
@@ -176,6 +177,7 @@ class _CompactRun:
     replay_observed_ids: tuple[str, ...] = ()
     replay_ids_omitted: bool = False
     warnings: tuple[str, ...] = ()
+    comparison_conflicts: set[str] = field(default_factory=set)
 
     def to_record(self) -> RunRecord:
         if self.source_kind is SourceKind.EVAL_RESULTS:
@@ -262,6 +264,7 @@ class _CompactRun:
                 ),
             ),
             warnings=list(self.warnings),
+            comparison_conflicts=frozenset(self.comparison_conflicts),
         )
 
 
@@ -855,23 +858,23 @@ class RunCatalog:
                     _item_metadata(record).game_version_source
                 )
             filters = {
-                "checkpoint": checkpoint,
-                "character": character,
-                "game_version": version,
+                "checkpoint": _safe_catalog_scalar(checkpoint),
+                "character": _safe_catalog_scalar(character),
+                "game_version": _safe_catalog_scalar(version),
                 "game_version_source": version_source_evidence.resolved(),
-                "evaluation_mode": mode,
-                "scenario": scenario,
+                "evaluation_mode": _safe_catalog_scalar(mode),
+                "scenario": _safe_catalog_scalar(scenario),
                 "ascension": ascension,
             }
             readiness = describe_comparison_readiness(
                 self._iter_cohort_records(ordered)
             )
             label_parts = [
-                checkpoint or checkpoint_or_source,
-                character,
-                version,
-                mode,
-                scenario,
+                _safe_catalog_scalar(checkpoint or checkpoint_or_source),
+                _safe_catalog_scalar(character),
+                _safe_catalog_scalar(version),
+                _safe_catalog_scalar(mode),
+                _safe_catalog_scalar(scenario),
                 f"A{ascension}"
                 if type(ascension) is int and ascension >= 0
                 else "A?",
@@ -1347,14 +1350,33 @@ def _update_compact_metadata(
         ("evaluation_mode", ("evaluation_mode",)),
         ("scenario", ("scenario",)),
     ):
-        if getattr(compact, attribute) is None:
-            setattr(compact, attribute, _first_scalar_text(record, *keys))
+        candidates = {
+            value
+            for key in keys
+            if (value := _first_scalar_text(record, key)) is not None
+        }
+        candidate = next(iter(candidates)) if len(candidates) == 1 else None
+        current = getattr(compact, attribute)
+        if len(candidates) > 1 or (
+            current is not None and candidate is not None and current != candidate
+        ):
+            if attribute in COMPARISON_METADATA_FIELDS:
+                compact.comparison_conflicts.add(attribute)
+        if current is None and candidate is not None:
+            setattr(compact, attribute, candidate)
     if compact.game_version_source is None:
         compact.game_version_source = _first_exact_text(
             record, "game_version_source"
         )
+    ascension = _first_integral_int(record, "ascension")
+    if (
+        compact.ascension is not None
+        and ascension is not None
+        and compact.ascension != ascension
+    ):
+        compact.comparison_conflicts.add("ascension")
     if compact.ascension is None:
-        compact.ascension = _first_integral_int(record, "ascension")
+        compact.ascension = ascension
 
 
 def _replay_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
@@ -1880,8 +1902,14 @@ def _source_redactions(source: _IndexedSource) -> dict[str, str]:
 
 
 def _cohort_id(key: tuple[Any, ...]) -> str:
-    rendered = json.dumps(key, ensure_ascii=False, separators=(",", ":"))
+    rendered = json.dumps(key, ensure_ascii=True, separators=(",", ":"))
     return "cohort_" + sha256(rendered.encode("utf-8")).hexdigest()[:20]
+
+
+def _safe_catalog_scalar(value: Any) -> Any:
+    if type(value) is str and not is_unicode_scalar_text(value):
+        return None
+    return value
 
 
 def _sortable_key(values: tuple[Any, ...]) -> tuple[str, ...]:

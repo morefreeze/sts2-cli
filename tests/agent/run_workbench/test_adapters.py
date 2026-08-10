@@ -1136,6 +1136,31 @@ def test_deck_metadata_uses_first_exact_nonempty_version_source() -> None:
     assert run.metadata.game_version_source == "environment"
 
 
+def test_deck_history_tracks_same_run_comparison_metadata_conflicts() -> None:
+    run = adapt_records(
+        "conflicted-deck.jsonl",
+        [
+            {
+                "event": "milestone",
+                "run_id": "same-run",
+                "game_version": "v1",
+                "seed": "seed-a",
+            },
+            {
+                "event": "outcome",
+                "run_id": "same-run",
+                "status": "dead",
+                "game_version": "v2",
+                "seed": "seed-b",
+            },
+        ],
+    ).runs[0]
+
+    assert run.metadata.game_version == "v1"
+    assert run.metadata.seed == "seed-a"
+    assert run.comparison_conflicts == frozenset({"game_version", "seed"})
+
+
 def test_deck_history_does_not_group_empty_run_ids(tmp_path: Path) -> None:
     path = tmp_path / "old_deck_history.jsonl"
     path.write_text(

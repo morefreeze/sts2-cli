@@ -125,6 +125,20 @@ def test_node_provenance_sidecar_is_typed_internal_immutable_and_stable() -> Non
         record._node_provenance_index[first_key] = ()  # type: ignore[index]
 
 
+def test_comparison_conflicts_are_typed_bounded_and_not_serialized() -> None:
+    record = RunRecord(
+        run_id="conflicted",
+        source_id="source",
+        source_kind=SourceKind.DECK_HISTORY,
+        comparison_conflicts={"seed", "game_version", "not-an-axis"},
+    )
+
+    assert record.comparison_conflicts == frozenset({"seed", "game_version"})
+    assert "comparison_conflicts" not in record.to_dict()
+    with pytest.raises(AttributeError):
+        record.comparison_conflicts.add("character")  # type: ignore[attr-defined]
+
+
 def test_only_technical_failures_are_marked_technical() -> None:
     technical_statuses = {
         RunStatus.CRASH,

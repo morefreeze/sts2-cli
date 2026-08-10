@@ -109,8 +109,30 @@ def test_conflicting_non_null_metadata_is_deterministic_and_warned() -> None:
     assert forward.metadata == reverse.metadata
     assert forward.metadata.character == "Ironclad"
     assert forward.metadata.seed == "seed-a"
+    assert forward.comparison_conflicts == frozenset({"character", "seed"})
+    assert reverse.comparison_conflicts == forward.comparison_conflicts
     assert any("conflicting metadata character" in warning for warning in forward.warnings)
     assert any("conflicting metadata seed" in warning for warning in forward.warnings)
+
+
+def test_join_preserves_existing_typed_comparison_conflicts() -> None:
+    conflicted = RunRecord(
+        run_id="same",
+        source_id="deck",
+        source_kind=SourceKind.DECK_HISTORY,
+        metadata=RunMetadata(game_version="v1", seed="a"),
+        comparison_conflicts={"game_version"},
+    )
+    matching = RunRecord(
+        run_id="same",
+        source_id="eval",
+        source_kind=SourceKind.EVAL_RESULTS,
+        metadata=RunMetadata(game_version="v1", seed="a"),
+    )
+
+    joined = join_records([matching, conflicted])[0]
+
+    assert joined.comparison_conflicts == frozenset({"game_version"})
 
 
 def test_conflicting_metadata_prefers_native_source_kind_before_filename() -> None:
