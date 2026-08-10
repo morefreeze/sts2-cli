@@ -108,11 +108,10 @@ def train_chunk(base_ckpt: str, out_dir: str, steps: int, ent: float,
     rc = run(command,
              timeout=3600, log_path=f"/tmp/sts2-cli/evolve_r{round_idx}_train.log")
     kill_orphans()
-    ck = latest_ckpt(out_dir)
-    if rc != 0 and ck is None:
+    if rc != 0:
         log(f"  train FAILED rc={rc}")
         return None
-    return ck
+    return latest_ckpt(out_dir)
 
 
 def sentinel_clutch(ckpt: str, round_idx: int, threshold: int = 12) -> bool:
@@ -123,6 +122,9 @@ def sentinel_clutch(ckpt: str, round_idx: int, threshold: int = 12) -> bool:
               "--n-stochastic", "0"],
              timeout=1800, log_path=log_path)
     kill_orphans()
+    if rc != 0:
+        log(f"  sentinel FAILED rc={rc}")
+        return False
     try:
         with open(log_path) as f:
             text = f.read()

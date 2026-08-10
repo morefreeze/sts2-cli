@@ -142,6 +142,44 @@ def test_evolve_eval_nonzero_exit_is_explicit_failure_before_log_parse(
         )
 
 
+def test_evolve_train_nonzero_exit_rejects_partial_checkpoint(
+    monkeypatch, tmp_path
+):
+    partial_checkpoint = str(tmp_path / "partial.zip")
+    monkeypatch.setattr(evolve_loop, "run", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(evolve_loop, "kill_orphans", lambda: None)
+    monkeypatch.setattr(
+        evolve_loop,
+        "latest_ckpt",
+        lambda out_dir: partial_checkpoint,
+    )
+
+    result = evolve_loop.train_chunk(
+        "base.zip",
+        str(tmp_path / "round"),
+        25,
+        0.08,
+        1,
+        game_version=ResolvedGameVersion("v0.103.2", "cli"),
+        ascension=0,
+    )
+
+    assert result is None
+
+
+def test_evolve_sentinel_nonzero_exit_rejects_partial_passing_log(monkeypatch):
+    monkeypatch.setattr(evolve_loop, "run", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(evolve_loop, "kill_orphans", lambda: None)
+    monkeypatch.setattr(
+        evolve_loop,
+        "open",
+        lambda *args, **kwargs: io.StringIO("hp=72 win 15/15"),
+        raising=False,
+    )
+
+    assert evolve_loop.sentinel_clutch("partial.zip", 1) is False
+
+
 @pytest.mark.parametrize(
     ("cli_args", "environment", "expected_source"),
     [
