@@ -10,8 +10,12 @@ Key design decisions vs previous version:
   - Periodic eval every 25k steps: report avg_floor, win_rate, combat_win_rate
 
 Usage:
-    python3 agent/train.py --steps 500000 --curriculum
-    python3 agent/train.py --steps 500000 --checkpoint checkpoints/ppo_ironclad_75k.zip --curriculum
+    python3 agent/train.py --steps 500000 --curriculum --game-version v0.103.2 --ascension 0
+    python3 agent/train.py --steps 500000 --checkpoint checkpoints/ppo_ironclad_75k.zip \
+        --curriculum --game-version v0.103.2 --ascension 0
+
+The game version is required via --game-version or STS2_GAME_VERSION; an
+explicit CLI value takes precedence over the environment.
 """
 import argparse, os, signal, sys, time, numpy as np
 import torch
@@ -621,9 +625,16 @@ def main():
     parser.add_argument("--character",   default="Ironclad")
     parser.add_argument("--steps",       type=int, default=500_000)
     parser.add_argument("--n-envs",      type=int, default=4)
-    parser.add_argument("--ascension",   type=int, default=0)
-    parser.add_argument("--game-version", default=None,
-                        help="Explicit STS2 game version stored with run metadata")
+    parser.add_argument("--ascension", type=int, default=0,
+                        help="Ascension level (0..10; default: 0)")
+    parser.add_argument(
+        "--game-version",
+        default=None,
+        help=(
+            "STS2 game version (required via this option or STS2_GAME_VERSION; "
+            "CLI value takes precedence)"
+        ),
+    )
     parser.add_argument("--checkpoint",  default=None)
     parser.add_argument("--reinit-value", action="store_true",
                         help="Reinitialize value network when loading checkpoint (use when reward scale changes)")

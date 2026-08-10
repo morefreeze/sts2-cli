@@ -40,6 +40,7 @@ INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
 REPLAY_WARNING_ID_LIMIT = 16
+RUN_ID_LENGTH_LIMIT = 256
 ERROR_DETAIL_LIMIT = 32
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
 _WORKBENCH_JSON_MARKERS = (
@@ -359,6 +360,8 @@ class RunCatalog:
     def get_run(self, run_id: str) -> dict[str, Any]:
         if not isinstance(run_id, str) or not run_id:
             raise CatalogError("run id must be a non-empty string")
+        if _safe_run_id(run_id) is None:
+            raise CatalogNotFoundError("unknown run id")
         with self._lock:
             self._refresh()
             candidate_ids = self._run_sources.get(run_id)
@@ -723,6 +726,7 @@ class RunCatalog:
         for record in adapted.runs:
             clone = deepcopy(record)
             clone.source_id = source.source_id
+            clone.run_id = _safe_run_id(clone.run_id) or ""
             public.append(clone)
         return tuple(public)
 
@@ -776,10 +780,11 @@ class RunCatalog:
         ] = {}
         for candidates in (records, compact_records):
             for record in candidates:
-                if not record.run_id:
+                run_id = _safe_run_id(record.run_id)
+                if run_id is None:
                     continue
                 evidence = version_source_evidence_by_run_id.setdefault(
-                    record.run_id, _GameVersionSourceEvidence()
+                    run_id, _GameVersionSourceEvidence()
                 )
                 evidence.observe(_item_metadata(record).game_version_source)
         joined = join_records(records)
@@ -832,7 +837,11 @@ class RunCatalog:
                 }
             )
             source_refs = all_source_refs[:SOURCE_REF_LIMIT]
-            run_ids = sorted(record.run_id for record in ordered if record.run_id)
+            run_ids = sorted(
+                run_id
+                for record in ordered
+                if (run_id := _safe_run_id(record.run_id)) is not None
+            )
             run_ids_complete = len(run_ids) <= COHORT_ID_SAMPLE_LIMIT
             timestamps = [
                 timestamp
@@ -847,9 +856,10 @@ class RunCatalog:
             )
             version_source_evidence = _GameVersionSourceEvidence()
             for record in ordered:
-                if record.run_id:
+                run_id = _safe_run_id(record.run_id)
+                if run_id is not None:
                     evidence = version_source_evidence_by_run_id.get(
-                        record.run_id
+                        run_id
                     )
                     if evidence is not None:
                         version_source_evidence.merge(evidence)
@@ -1004,12 +1014,12 @@ def _merge_compact_records(
 
 
 def _record_run_id(record: dict[str, Any]) -> str:
-    value = record.get("run_id")
-    if isinstance(value, str) and value:
+    value = _safe_run_id(record.get("run_id"))
+    if value is not None:
         return value
     data = record.get("data")
-    nested = data.get("run_id") if isinstance(data, dict) else None
-    return nested if isinstance(nested, str) and nested else ""
+    nested = _safe_run_id(data.get("run_id")) if isinstance(data, dict) else None
+    return nested or ""
 
 
 def _item_metadata(record: _CohortItem) -> RunMetadata:
@@ -1068,11 +1078,12 @@ def _reject_scan_constant(value: str) -> None:
 
 
 def _add_bounded_replay_id(observed: set[str], value: str | None) -> bool:
-    if value is None or value in observed:
+    safe_value = _safe_run_id(value)
+    if safe_value is None or safe_value in observed:
         return False
     if len(observed) >= REPLAY_WARNING_ID_LIMIT:
         return True
-    observed.add(value)
+    observed.add(safe_value)
     return False
 
 
@@ -1381,8 +1392,8 @@ def _update_compact_metadata(
 
 def _replay_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
-        value = record.get(key)
-        if isinstance(value, str) and value:
+        value = _safe_run_id(record.get(key))
+        if value is not None:
             return value
     return None
 
@@ -1912,6 +1923,17 @@ def _safe_catalog_scalar(value: Any) -> Any:
     return value
 
 
+def _safe_run_id(value: object) -> str | None:
+    if (
+        type(value) is not str
+        or not value.strip()
+        or len(value) > RUN_ID_LENGTH_LIMIT
+        or not is_unicode_scalar_text(value)
+    ):
+        return None
+    return value
+
+
 def _sortable_key(values: tuple[Any, ...]) -> tuple[str, ...]:
     return tuple("" if value is None else str(value) for value in values)
 
@@ -1935,8 +1957,9 @@ def _lightweight_run_ids(records: list[dict[str, Any]]) -> set[str]:
         if isinstance(data, dict):
             candidates.append(data.get("run_id"))
         for value in candidates:
-            if isinstance(value, str) and value:
-                run_ids.add(value)
+            safe_value = _safe_run_id(value)
+            if safe_value is not None:
+                run_ids.add(safe_value)
     return run_ids
 
 

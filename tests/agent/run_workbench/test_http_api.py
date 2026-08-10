@@ -277,6 +277,79 @@ def test_cohorts_http_keeps_valid_cohort_when_unrelated_metadata_has_surrogates(
     json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="strict")
 
 
+def test_surrogate_run_id_is_not_exposed_by_http_catalog_or_metrics(
+    tmp_path: Path,
+) -> None:
+    surrogate = json.loads('"\\ud800"')
+    common = {
+        "event": "eval_result",
+        "status": "dead",
+        "max_global_floor": 8,
+        "character": "Ironclad",
+        "game_version": "v1",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+        "ts": 1,
+    }
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                **common,
+                "run_id": "normal-run",
+                "checkpoint": "normal",
+                "seed": "seed-a",
+            },
+            {
+                **common,
+                "run_id": surrogate,
+                "checkpoint": "unrelated",
+                "seed": "seed-b",
+            },
+        ],
+    )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, content_type, body = _binary_request(base, "/api/cohorts")
+        payload = json.loads(body)
+        unrelated = next(
+            row
+            for row in payload["cohorts"]
+            if row["filters"]["checkpoint"] == "unrelated"
+        )
+        metrics_status, metrics = _request(
+            base, f"/api/metrics?current={unrelated['cohort_id']}"
+        )
+
+    assert status == 200
+    assert content_type == "application/json"
+    assert body.decode("utf-8", errors="strict")
+    assert any(
+        row["filters"]["checkpoint"] == "normal" for row in payload["cohorts"]
+    )
+    assert unrelated["run_ids"] == []
+    assert unrelated["representative_run_ids"] == []
+    assert metrics_status == 200
+    assert all(point["run_id"] != surrogate for point in metrics["current"]["trend"])
+
+
+def test_http_ascii_fail_safe_round_trips_valid_chinese_payload(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "训练.jsonl",
+        [{"event": "summary", "label": "对局"}],
+    )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, content_type, body = _binary_request(base, "/api/catalog")
+
+    assert status == 200
+    assert content_type == "application/json"
+    assert b"\\u8bad\\u7ec3.jsonl" in body
+    payload = json.loads(body)
+    assert payload["sources"][0]["display_name"] == "训练.jsonl"
+
+
 def test_cohorts_http_uses_all_duplicate_run_version_source_evidence(
     tmp_path: Path,
 ) -> None:

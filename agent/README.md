@@ -117,16 +117,20 @@ python python/play_full_run.py 5 Ironclad
 
 ### Step 2: RL 训练
 
+每次训练必须提供准确游戏版本：可显式传 `--game-version`，或设置
+`STS2_GAME_VERSION`；两者同时存在时 CLI 参数优先。以下示例均显式选择
+游戏版本和 ascension，可直接执行。
+
 ```bash
 # 100k steps，4 并行环境，约 1-2 小时（Apple Silicon）
-python agent/train.py --character Ironclad --steps 100000 --n-envs 4
+python agent/train.py --character Ironclad --steps 100000 --n-envs 4 --game-version v0.103.2 --ascension 0
 
 # 指定 ascension 等级
-python agent/train.py --character Ironclad --steps 100000 --ascension 1
+python agent/train.py --character Ironclad --steps 100000 --game-version v0.103.2 --ascension 1
 
 # 从 checkpoint 继续训练
 python agent/train.py --character Ironclad --steps 200000 \
-    --checkpoint checkpoints/ppo_ironclad_100k.zip
+    --checkpoint checkpoints/ppo_ironclad_100k.zip --game-version v0.103.2 --ascension 0
 ```
 
 训练过程每 25k steps 自动保存到 `checkpoints/` 目录。

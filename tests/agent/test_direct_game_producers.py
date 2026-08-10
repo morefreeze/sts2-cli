@@ -10,6 +10,7 @@ import agent.gen_boss_saves as gen_boss_saves
 import agent.mc_rollout as mc_rollout
 import agent.evolve_loop as evolve_loop
 import agent.eval_rl as eval_rl
+import agent.train as train
 from agent.run_metadata import ResolvedGameVersion
 
 
@@ -21,6 +22,7 @@ from agent.run_metadata import ResolvedGameVersion
         mc_rollout,
         gen_boss_saves,
         evolve_loop,
+        train,
     ],
 )
 def test_current_module_usage_teaches_required_version_and_ascension(module):
@@ -39,6 +41,7 @@ def test_current_module_usage_teaches_required_version_and_ascension(module):
         gen_boss_saves,
         evolve_loop,
         eval_rl,
+        train,
     ],
 )
 def test_cli_help_explains_version_precedence_and_ascension(
@@ -72,6 +75,26 @@ def test_readme_teaches_versioned_training_and_diagnostic_commands():
         assert command in readme
     assert "--game-version" in readme
     assert "--ascension" in readme
+
+
+def test_agent_readme_training_examples_are_directly_executable_with_metadata():
+    readme = (Path(__file__).parents[2] / "agent" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CLI" in readme and "STS2_GAME_VERSION" in readme and "优先" in readme
+    assert (
+        "python agent/train.py --character Ironclad --steps 100000 --n-envs 4 "
+        "--game-version v0.103.2 --ascension 0"
+    ) in readme
+    assert (
+        "python agent/train.py --character Ironclad --steps 100000 "
+        "--game-version v0.103.2 --ascension 1"
+    ) in readme
+    assert (
+        "--checkpoint checkpoints/ppo_ironclad_100k.zip "
+        "--game-version v0.103.2 --ascension 0"
+    ) in readme
 
 
 @pytest.mark.parametrize(

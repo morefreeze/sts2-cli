@@ -718,6 +718,73 @@ def test_surrogate_metadata_is_isolated_without_hiding_valid_cohorts(
     json.dumps({"cohorts": cohorts}, ensure_ascii=False).encode("utf-8", errors="strict")
 
 
+@pytest.mark.parametrize("record_count", [2, 513])
+@pytest.mark.parametrize(
+    "invalid_run_id",
+    [json.loads('"\\ud800"'), "x" * 257],
+)
+def test_invalid_run_ids_are_never_public_catalog_identities(
+    tmp_path: Path, record_count: int, invalid_run_id: str
+) -> None:
+    common = {
+        "event": "eval_result",
+        "status": "dead",
+        "max_global_floor": 8,
+        "character": "Ironclad",
+        "game_version": "v1",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+        "ts": 1,
+    }
+    valid = {
+        **common,
+        "run_id": "normal-run",
+        "checkpoint": "normal",
+        "seed": "seed-a",
+    }
+    malformed = {
+        **common,
+        "run_id": invalid_run_id,
+        "checkpoint": "unrelated",
+        "seed": "seed-b",
+    }
+    fillers = [
+        {
+            "event": "eval_result",
+            "run_id": f"pending-{index}",
+            "status": "in_progress",
+        }
+        for index in range(record_count - 2)
+    ]
+    _write_jsonl(tmp_path / "eval.jsonl", [valid, malformed, *fillers])
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    cohorts = catalog.list_cohorts()
+
+    normal = next(row for row in cohorts if row["filters"]["checkpoint"] == "normal")
+    unrelated = next(
+        row for row in cohorts if row["filters"]["checkpoint"] == "unrelated"
+    )
+    assert normal["run_ids"] == normal["representative_run_ids"] == ["normal-run"]
+    assert unrelated["run_id_count"] == 0
+    assert unrelated["run_ids"] == []
+    assert unrelated["representative_run_ids"] == []
+    source_view = catalog.get_source(catalog.list_sources()[0]["source_id"])
+    public_source_ids = (
+        [row["run_id"] for row in source_view["runs"]]
+        if "runs" in source_view
+        else source_view.get("representative_run_ids", [])
+    )
+    assert invalid_run_id not in public_source_ids
+    assert all(
+        point["run_id"] != invalid_run_id
+        for point in catalog.get_metrics(unrelated["cohort_id"])["current"]["trend"]
+    )
+    with pytest.raises(CatalogNotFoundError):
+        catalog.get_run(invalid_run_id)
+
+
 @pytest.mark.parametrize("record_count", [511, 513])
 def test_same_run_metadata_conflict_never_advertises_compatible_baseline(
     tmp_path: Path, record_count: int
