@@ -577,6 +577,66 @@ def test_terminal_node_fails_closed_when_max_floor_has_multiple_candidates() -> 
     )
 
 
+def test_terminal_node_isolated_from_malformed_peer_coordinates() -> None:
+    run = RunRecord(
+        run_id="malformed-terminal-peer",
+        source_id="summary-source",
+        source_kind=SourceKind.SUMMARY,
+        outcome=RunOutcome(
+            status=RunStatus.DEAD,
+            victory=False,
+            max_global_floor=5,
+        ),
+        coverage=Coverage(True, 1, 5),
+        nodes=[
+            {
+                "id": "good-terminal",
+                "act": 1,
+                "floor": 5,
+                "global_floor": 5,
+                "status": "dead",
+                "exit_player": {
+                    "hp": 0,
+                    "potions": [{"id": "POTION.FIRE", "name": "Fire Potion"}],
+                },
+            },
+            {
+                "id": "malformed-peer",
+                "label": "A" + "9" * 5000 + "F1",
+            },
+        ],
+    )
+
+    detail = build_node_detail(run, "good-terminal")
+
+    assert detail.coverage["terminal_node"] is False
+    assert all(fact["kind"] != "death_with_potion" for fact in detail.facts)
+
+
+@pytest.mark.parametrize(
+    "coordinate_fields",
+    [
+        {"label": "A" + "9" * 5000 + "F1"},
+        {"id": "A" + "9" * 5000 + "F1:Monster:1"},
+        {"id": "a" + "9" * 5000 + ":n0"},
+    ],
+    ids=["label", "replay-id", "native-id"],
+)
+def test_huge_coordinate_strings_raise_stable_invalid_detail_error(
+    coordinate_fields: dict[str, str],
+) -> None:
+    node = {"id": "malformed-coordinate", **coordinate_fields}
+    run = RunRecord(
+        run_id="malformed-coordinate-run",
+        source_id="summary-source",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[node],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, node["id"])
+
+
 def test_replay_card_reward_facts_require_selected_or_explicit_skip_action() -> None:
     records = [
         json.loads(line)

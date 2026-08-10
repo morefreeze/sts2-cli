@@ -26,6 +26,7 @@ _FLOORS_PER_ACT = 17
 _MAX_NATIVE_ACT_INDEX = 3
 _MAX_ACT = _MAX_NATIVE_ACT_INDEX + 1
 _MAX_GLOBAL_FLOOR = _MAX_ACT * _FLOORS_PER_ACT
+_COORDINATE_DIGIT_LIMIT = 16
 _LABEL_PATTERN = re.compile(r"^A(?P<act>\d+)F(?P<floor>\d+)$", re.IGNORECASE)
 _REPLAY_ID_PATTERN = re.compile(
     r"^A(?P<act>\d+)F(?P<floor>\d+)(?::|$)",
@@ -283,12 +284,15 @@ def _is_unique_terminal_candidate(
     selected: dict[str, Any],
     max_global_floor: int,
 ) -> bool:
-    candidates = [
-        candidate
-        for candidate in record.nodes
-        if isinstance(candidate, dict)
-        and _coordinates(candidate)[2] == max_global_floor
-    ]
+    candidates: list[dict[str, Any]] = []
+    for candidate in record.nodes:
+        if not isinstance(candidate, dict):
+            return False
+        candidate_global_floor = _coordinates(candidate)[2]
+        if candidate_global_floor is None:
+            return False
+        if candidate_global_floor == max_global_floor:
+            candidates.append(candidate)
     return len(candidates) == 1 and candidates[0] is selected
 
 
@@ -734,24 +738,20 @@ def _coordinate_parts(
     global_floor = _int(node.get("global_floor"))
     label = _text(node.get("label"))
     label_match = _LABEL_PATTERN.fullmatch(label) if label else None
-    label_act = int(label_match.group("act")) if label_match else None
-    label_floor = int(label_match.group("floor")) if label_match else None
+    label_act = _matched_coordinate(label_match, "act")
+    label_floor = _matched_coordinate(label_match, "floor")
+    if label_match is not None and (label_act is None or label_floor is None):
+        return None, None, None, label
     node_id = _text(node.get("id")) or ""
     replay_match = _REPLAY_ID_PATTERN.match(node_id)
-    replay_act = int(replay_match.group("act")) if replay_match else None
-    replay_floor = int(replay_match.group("floor")) if replay_match else None
+    replay_act = _matched_coordinate(replay_match, "act")
+    replay_floor = _matched_coordinate(replay_match, "floor")
+    if replay_match is not None and (replay_act is None or replay_floor is None):
+        return None, None, None, label
     native_match = _NATIVE_ID_PATTERN.fullmatch(node_id)
-    native_act_index = (
-        int(native_match.group("act_index"))
-        if native_match is not None
-        else None
-    )
+    native_act_index = _matched_coordinate(native_match, "act_index")
     native_act = native_act_index + 1 if native_act_index is not None else None
-    native_ordinal = (
-        int(native_match.group("node_index"))
-        if native_match is not None
-        else None
-    )
+    native_ordinal = _matched_coordinate(native_match, "node_index")
     if native_match is not None and (
         native_act_index is None
         or not 0 <= native_act_index <= _MAX_NATIVE_ACT_INDEX
@@ -817,6 +817,15 @@ def _coordinate_parts(
         derived_global_floor,
         label if label_match is not None else f"A{act}F{floor}",
     )
+
+
+def _matched_coordinate(match: re.Match[str] | None, group: str) -> int | None:
+    if match is None:
+        return None
+    digits = match.group(group)
+    if not 1 <= len(digits) <= _COORDINATE_DIGIT_LIMIT:
+        return None
+    return int(digits)
 
 
 def _room_type(node: dict[str, Any]) -> str:
