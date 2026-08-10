@@ -506,6 +506,42 @@ def test_out_of_range_native_ordinal_does_not_fabricate_a_floor() -> None:
         build_node_detail(run, "a1:n17")
 
 
+def test_global_floor_does_not_hide_an_out_of_range_native_ordinal() -> None:
+    run = RunRecord(
+        run_id="global-native-ordinal-bound",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "a1:n17",
+                "global_floor": 21,
+                "map_point_type": "monster",
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, "a1:n17")
+
+
+def test_global_floor_does_not_hide_an_out_of_range_native_act_index() -> None:
+    run = RunRecord(
+        run_id="global-native-act-bound",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "a99:n99",
+                "global_floor": 21,
+                "map_point_type": "monster",
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidNodeDetailError):
+        build_node_detail(run, "a99:n99")
+
+
 def test_global_floor_precedes_a_native_node_ordinal() -> None:
     run = RunRecord(
         run_id="global-over-native-ordinal",

@@ -22,6 +22,7 @@ from .models import (
 # single floor must not smuggle an unbounded raw replay into a detail response.
 DETAIL_COLLECTION_LIMIT = 256
 _FLOORS_PER_ACT = 17
+_MAX_NATIVE_ACT_INDEX = 3
 _LABEL_PATTERN = re.compile(r"^A(?P<act>\d+)F(?P<floor>\d+)$", re.IGNORECASE)
 _REPLAY_ID_PATTERN = re.compile(
     r"^A(?P<act>\d+)F(?P<floor>\d+)(?::|$)",
@@ -535,16 +536,24 @@ def _coordinate_parts(
     replay_act = int(replay_match.group("act")) if replay_match else None
     replay_floor = int(replay_match.group("floor")) if replay_match else None
     native_match = _NATIVE_ID_PATTERN.fullmatch(node_id)
-    native_act = (
-        int(native_match.group("act_index")) + 1
+    native_act_index = (
+        int(native_match.group("act_index"))
         if native_match is not None
         else None
     )
+    native_act = native_act_index + 1 if native_act_index is not None else None
     native_ordinal = (
         int(native_match.group("node_index"))
         if native_match is not None
         else None
     )
+    if native_match is not None and (
+        native_act_index is None
+        or not 0 <= native_act_index <= _MAX_NATIVE_ACT_INDEX
+        or native_ordinal is None
+        or not 0 <= native_ordinal < _FLOORS_PER_ACT
+    ):
+        return None, None, None, label
 
     if global_floor is not None:
         if global_floor < 1:
