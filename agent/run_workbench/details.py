@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 import math
 import re
 from typing import Any, Iterable
@@ -14,6 +14,7 @@ from .models import (
     NodeDetail,
     RunDelta,
     RunRecord,
+    RunStatus,
     SourceKind,
 )
 
@@ -121,6 +122,11 @@ def native_node_detail(
         actions=_dict_items(node.get("actions")),
         combat_rounds=(),
         turn_replay=False,
+        source_kind=SourceKind.NATIVE_RUN,
+        choices_complete=bool(
+            record.capabilities.node_rewards
+            and _native_choices(node)
+        ),
     )
 
 
@@ -135,6 +141,7 @@ def replay_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
     )
     combat = node.get("combat") if isinstance(node.get("combat"), dict) else {}
     combat_rounds = _dict_items(combat.get("rounds"))
+    choices = _dict_items(node.get("options"), node.get("choices"))
     return _detail(
         record,
         node,
@@ -143,10 +150,22 @@ def replay_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
         exit=exit_snapshot,
         entry_known=entry_known,
         exit_known=exit_known,
-        choices=_dict_items(node.get("options"), node.get("choices")),
+        choices=choices,
         actions=_dict_items(node.get("actions")),
         combat_rounds=combat_rounds,
         turn_replay=bool(combat_rounds),
+        source_kind=SourceKind.REPLAY_JSONL,
+        choices_complete=bool(
+            choices
+            and record.capabilities.decisions
+            and any(
+                isinstance(node.get(key), (list, tuple))
+                for key in ("options", "choices")
+            )
+        ),
+        combat_coverage_complete=(
+            True if combat.get("coverage_complete") is True else None
+        ),
     )
 
 
@@ -163,6 +182,7 @@ def basic_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
     ]
     entry, entry_known = _inventory_snapshot(entry_sources)
     exit_snapshot, exit_known = _inventory_snapshot(exit_sources)
+    node_index = _node_index(record, node)
     return _detail(
         record,
         node,
@@ -175,6 +195,8 @@ def basic_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
         actions=_dict_items(node.get("actions")),
         combat_rounds=(),
         turn_replay=False,
+        source_kind=_node_source_kind(record, node, node_index),
+        choices_complete=False,
     )
 
 
@@ -191,6 +213,9 @@ def _detail(
     actions: tuple[dict[str, Any], ...],
     combat_rounds: tuple[dict[str, Any], ...],
     turn_replay: bool,
+    source_kind: SourceKind,
+    choices_complete: bool,
+    combat_coverage_complete: bool | None = None,
 ) -> NodeDetail:
     act, floor, global_floor, label = _coordinates(node)
     if act is None or floor is None or global_floor is None:
@@ -200,12 +225,31 @@ def _detail(
         "first_recorded_floor": record.coverage.first_recorded_floor,
         "last_recorded_floor": record.coverage.last_recorded_floor,
         "turn_replay": turn_replay,
+        "source_kind": source_kind.value,
     }
+    run_status = (
+        record.outcome.status
+        if isinstance(record.outcome.status, RunStatus)
+        else RunStatus.UNKNOWN
+    )
+    coverage["run_status"] = run_status.value
+    if run_status.is_technical:
+        # The enum is the canonical technical kind. A free-form companion
+        # string on a manually assembled record cannot override it.
+        coverage["technical_failure_kind"] = run_status.value
+    coverage["terminal_node"] = bool(
+        record.nodes
+        and node is record.nodes[-1]
+        and run_status not in {RunStatus.UNKNOWN, RunStatus.IN_PROGRESS}
+    )
+    coverage["choices_complete"] = choices_complete
+    if combat_coverage_complete is True:
+        coverage["combat_coverage_complete"] = True
     if not turn_replay:
         coverage["message"] = "此记录不包含逐回合操作"
     coverage["entry_inventory_fields"] = list(entry_known)
     coverage["exit_inventory_fields"] = list(exit_known)
-    return NodeDetail(
+    base = NodeDetail(
         run_id=record.run_id,
         node_id=str(node.get("id")),
         act=act,
@@ -225,6 +269,12 @@ def _detail(
         facts=(),
         hypotheses=(),
     )
+    # Local import keeps diagnostics dependent only on the canonical model and
+    # avoids a details <-> diagnostics module-loading cycle.
+    from .diagnostics import collect_diagnostic_facts
+
+    facts = tuple(fact.to_dict() for fact in collect_diagnostic_facts(base))
+    return replace(base, facts=facts, hypotheses=())
 
 
 def _node_index(record: RunRecord, selected: dict[str, Any]) -> int:

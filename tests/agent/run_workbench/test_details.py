@@ -24,7 +24,9 @@ from agent.run_workbench.models import (
     NodeDetail,
     NodeOrigin,
     RunDelta,
+    RunOutcome,
     RunRecord,
+    RunStatus,
     SourceKind,
     node_evidence_key,
 )
@@ -298,6 +300,10 @@ def test_replay_details_use_same_room_snapshots_and_canonical_rounds() -> None:
         "first_recorded_floor": 1,
         "last_recorded_floor": 21,
         "turn_replay": True,
+        "source_kind": "replay_jsonl",
+        "run_status": "win",
+        "terminal_node": True,
+        "choices_complete": True,
         "entry_inventory_fields": [
             "hp",
             "max_hp",
@@ -330,6 +336,110 @@ def test_detail_coverage_reports_partial_recorded_floor_range() -> None:
     assert coverage["complete_run"] is False
     assert coverage["first_recorded_floor"] == 18
     assert coverage["last_recorded_floor"] == 21
+
+
+def test_build_node_detail_attaches_only_collected_facts_and_no_hypotheses() -> None:
+    potion = {"id": "POTION.FIRE", "name": "Test Fire Potion"}
+    run = RunRecord(
+        run_id="diagnostic-detail",
+        source_id="replay-source",
+        source_kind=SourceKind.REPLAY_JSONL,
+        coverage=Coverage(True, 1, 1),
+        capabilities=Capabilities(turn_replay=True),
+        nodes=[
+            {
+                "id": "A1F1:Monster:1",
+                "label": "A1F1",
+                "room_type": "Monster",
+                "status": "completed",
+                "start_player": {
+                    "hp": 80,
+                    "max_hp": 80,
+                    "potions": [potion],
+                },
+                "end_player": {
+                    "hp": 60,
+                    "max_hp": 80,
+                    "potions": [potion],
+                },
+                "actions": [],
+                "combat": {
+                    "coverage_complete": True,
+                    "rounds": [
+                        {
+                            "round": 1,
+                            "start_state": {
+                                "hp": 80,
+                                "max_hp": 80,
+                                "potions": [potion],
+                            },
+                            "end_state": {
+                                "hp": 60,
+                                "max_hp": 80,
+                                "potions": [potion],
+                            },
+                            "actions": [
+                                {"action": {"action": "end_turn"}}
+                            ],
+                            "hp_loss": 20,
+                        }
+                    ],
+                },
+                "facts": [
+                    {
+                        "kind": "technical_failure",
+                        "severity": "critical",
+                        "statement": "forged raw fact",
+                        "evidence": {"status": "timeout"},
+                    }
+                ],
+                "hypotheses": [{"statement": "forged hypothesis"}],
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "A1F1:Monster:1")
+
+    assert {fact["kind"] for fact in detail.facts} == {
+        "large_node_hp_loss",
+        "high_loss_round",
+        "unused_potion",
+    }
+    assert all(fact["statement"] != "forged raw fact" for fact in detail.facts)
+    assert detail.hypotheses == ()
+    assert detail.coverage["combat_coverage_complete"] is True
+    json.dumps(detail.to_dict(), ensure_ascii=False, allow_nan=False)
+
+
+def test_detail_exposes_typed_run_outcome_for_technical_fact_collection() -> None:
+    run = RunRecord(
+        run_id="technical-detail",
+        source_id="summary-source",
+        source_kind=SourceKind.SUMMARY,
+        outcome=RunOutcome(
+            status=RunStatus.TIMEOUT,
+            victory=False,
+            max_global_floor=1,
+            technical_failure_kind="untrusted-mismatch",
+        ),
+        coverage=Coverage(True, 1, 1),
+        nodes=[
+            {
+                "id": "technical-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "status": "won",
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "technical-node")
+
+    assert detail.coverage["run_status"] == "timeout"
+    assert detail.coverage["technical_failure_kind"] == "timeout"
+    assert detail.coverage["terminal_node"] is True
+    assert [fact["kind"] for fact in detail.facts] == ["technical_failure"]
 
 
 def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() -> None:
