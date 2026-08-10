@@ -172,6 +172,61 @@ def test_comparison_signature_handles_unicode_long_values_and_hides_seed_list():
     assert "private-seed" not in json.dumps(payload, allow_nan=False)
 
 
+@pytest.mark.parametrize("field", ["version", "seed"])
+def test_comparison_signature_handles_lone_surrogate_strings(field: str):
+    lone_surrogate = json.loads('"\\ud800"')
+    override = {field: lone_surrogate}
+
+    first = describe_comparison_readiness([_run("first", **override)])
+    second = describe_comparison_readiness([_run("second", **override)])
+
+    assert first.ready is True
+    assert first.comparison_signature is not None
+    assert first.comparison_signature == second.comparison_signature
+    json.dumps(first.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_axis"),
+    [
+        ({"character": " \t\n "}, "character"),
+        ({"version": " \t\n "}, "game_version"),
+        ({"mode": " \t\n "}, "evaluation_mode"),
+        ({"scenario": " \t\n "}, "scenario"),
+        ({"seed": " \t\n "}, "seed"),
+    ],
+)
+def test_comparison_readiness_treats_whitespace_only_strings_as_missing(
+    override, expected_axis
+):
+    readiness = describe_comparison_readiness([_run("blank", **override)])
+
+    assert readiness.ready is False
+    assert readiness.missing_axes == (expected_axis,)
+    assert readiness.mixed_axes == ()
+    assert readiness.invalid_axes == ()
+    assert readiness.comparison_signature is None
+
+
+def test_comparison_signature_uses_launch_trimmed_string_semantics():
+    padded = describe_comparison_readiness(
+        [
+            _run(
+                "padded",
+                character=" ironclad ",
+                version=" 2026.08 ",
+                mode=" evaluation ",
+                scenario=" standard ",
+                seed=" seed-1 ",
+            )
+        ]
+    )
+    canonical = describe_comparison_readiness([_run("canonical")])
+
+    assert padded.ready is True
+    assert padded.comparison_signature == canonical.comparison_signature
+
+
 @pytest.mark.parametrize(
     ("varying_field", "expected_axis"),
     [("version", "game_version"), ("seed", "seed")],
@@ -197,6 +252,21 @@ def test_comparison_readiness_rejects_bounded_distinct_overflow(
     json.dumps(readiness.to_dict(), allow_nan=False)
 
 
+def test_seed_count_saturates_at_the_bounded_overflow_marker(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("agent.run_workbench.metrics.COMPARISON_DISTINCT_LIMIT", 2)
+    readiness = describe_comparison_readiness(
+        [_run(f"run-{index}", seed=f"seed-{index}") for index in range(5)]
+    )
+
+    assert readiness.ready is False
+    assert readiness.seed_count == 3
+    assert readiness.seed_complete is False
+    assert readiness.invalid_axes == ("seed",)
+    assert readiness.comparison_signature is None
+
+
 @pytest.mark.parametrize(
     ("override", "expected_axis"),
     [({"version": 7}, "game_version"), ({"seed": 7}, "seed")],
@@ -208,6 +278,63 @@ def test_comparison_readiness_rejects_nonstring_version_and_seed(
 
     assert readiness.ready is False
     assert readiness.invalid_axes == (expected_axis,)
+    assert readiness.comparison_signature is None
+
+
+@pytest.mark.parametrize(
+    "invalid_ascension",
+    [
+        pytest.param(False, id="bool"),
+        pytest.param(-1, id="negative"),
+        pytest.param(11, id="above-max"),
+        pytest.param(10**1000, id="huge"),
+    ],
+)
+def test_comparison_readiness_requires_ascension_in_exact_game_range(
+    invalid_ascension
+):
+    readiness = describe_comparison_readiness(
+        [_run("invalid-ascension", ascension=invalid_ascension)]
+    )
+
+    assert readiness.ready is False
+    assert readiness.invalid_axes == ("ascension",)
+    assert readiness.comparison_signature is None
+
+
+def test_comparison_readiness_accepts_maximum_game_ascension():
+    readiness = describe_comparison_readiness([_run("ascension-10", ascension=10)])
+
+    assert readiness.ready is True
+    assert readiness.invalid_axes == ()
+
+
+def test_invalid_ascension_never_calls_user_controlled_repr():
+    class ExplosiveRepr:
+        def __repr__(self):
+            raise AssertionError("invalid ascension repr must not be called")
+
+    readiness = describe_comparison_readiness(
+        [_run("explosive-repr", ascension=ExplosiveRepr())]
+    )
+
+    assert readiness.ready is False
+    assert readiness.invalid_axes == ("ascension",)
+
+
+def test_ascension_distinct_tracking_is_bounded(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agent.run_workbench.metrics.COMPARISON_DISTINCT_LIMIT", 2)
+    readiness = describe_comparison_readiness(
+        [
+            _run("ascension-0", ascension=0),
+            _run("ascension-1", ascension=1),
+            _run("ascension-2", ascension=2),
+        ]
+    )
+
+    assert readiness.ready is False
+    assert readiness.mixed_axes == ()
+    assert readiness.invalid_axes == ("ascension",)
     assert readiness.comparison_signature is None
 
 
@@ -732,13 +859,13 @@ def test_technical_noise_does_not_create_metadata_or_pairing_mismatches():
 
 def test_ascension_mismatch_makes_cohorts_incompatible():
     result = compare_cohorts(
-        [_run("current", ascension=20, seed="same")],
+        [_run("current", ascension=10, seed="same")],
         [_run("baseline", ascension=0, seed="same")],
     )
 
     assert result.comparable is False
     assert any(
-        reason == "ascension mismatch: current=20, baseline=0"
+        reason == "ascension mismatch: current=10, baseline=0"
         for reason in result.mismatch_reasons
     )
 
@@ -766,7 +893,7 @@ def test_mixed_ascension_has_deterministic_reason():
     result = compare_cohorts(
         [
             _run("current-a", ascension=0, seed="a"),
-            _run("current-b", ascension=20, seed="b"),
+            _run("current-b", ascension=10, seed="b"),
         ],
         [
             _run("baseline-a", ascension=0, seed="a"),
@@ -776,7 +903,7 @@ def test_mixed_ascension_has_deterministic_reason():
 
     assert result.comparable is False
     assert any(
-        reason == "current ascension is mixed: values=0, 20"
+        reason == "current ascension is mixed: values=0, 10"
         for reason in result.mismatch_reasons
     )
 

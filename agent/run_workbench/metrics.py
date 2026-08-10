@@ -155,6 +155,7 @@ class _StringDetails:
     values: frozenset[str]
     missing: bool
     invalid_types: tuple[str, ...]
+    distinct_count: int
     overflow: bool = False
 
 
@@ -162,7 +163,8 @@ class _StringDetails:
 class _AscensionDetails:
     values: frozenset[int]
     missing: bool
-    invalid: tuple[str, ...]
+    invalid: bool
+    overflow: bool = False
 
 
 @dataclass
@@ -170,16 +172,25 @@ class _BoundedStrings:
     values: set[str] = field(default_factory=set)
     missing: bool = False
     invalid_types: set[str] = field(default_factory=set)
+    distinct_count: int = 0
     overflow: bool = False
 
     def add(self, value: object) -> None:
-        if type(value) is str and value:
+        if type(value) is str:
+            value = value.strip()
+            if not value:
+                self.missing = True
+                return
             if not self.overflow:
+                previous_count = len(self.values)
                 self.values.add(value)
-                if len(self.values) > COMPARISON_DISTINCT_LIMIT:
+                if len(self.values) > previous_count:
+                    self.distinct_count += 1
+                if self.distinct_count > COMPARISON_DISTINCT_LIMIT:
                     self.values.clear()
+                    self.distinct_count = COMPARISON_DISTINCT_LIMIT + 1
                     self.overflow = True
-        elif value is None or (type(value) is str and not value):
+        elif value is None:
             self.missing = True
         else:
             self.invalid_types.add(type(value).__name__)
@@ -189,6 +200,35 @@ class _BoundedStrings:
             values=frozenset(self.values),
             missing=self.missing,
             invalid_types=tuple(sorted(self.invalid_types)),
+            distinct_count=self.distinct_count,
+            overflow=self.overflow,
+        )
+
+
+@dataclass
+class _BoundedAscensions:
+    values: set[int] = field(default_factory=set)
+    missing: bool = False
+    invalid: bool = False
+    overflow: bool = False
+
+    def add(self, value: object) -> None:
+        if value is None:
+            self.missing = True
+        elif type(value) is int and 0 <= value <= 10:
+            if not self.overflow:
+                self.values.add(value)
+                if len(self.values) > COMPARISON_DISTINCT_LIMIT:
+                    self.values.clear()
+                    self.overflow = True
+        else:
+            self.invalid = True
+
+    def details(self) -> _AscensionDetails:
+        return _AscensionDetails(
+            values=frozenset(self.values),
+            missing=self.missing,
+            invalid=self.invalid,
             overflow=self.overflow,
         )
 
@@ -205,9 +245,7 @@ class _ComparisonAccumulator:
         }
     )
     seeds: _BoundedStrings = field(default_factory=_BoundedStrings)
-    ascension_values: set[int] = field(default_factory=set)
-    ascension_missing: bool = False
-    ascension_invalid: set[str] = field(default_factory=set)
+    ascensions: _BoundedAscensions = field(default_factory=_BoundedAscensions)
 
     def observe(self, record: RunRecord) -> None:
         if record.outcome.status not in _GAMEPLAY_STATUSES:
@@ -216,20 +254,10 @@ class _ComparisonAccumulator:
         for attribute, details in self.axes.items():
             details.add(getattr(record.metadata, attribute))
         self.seeds.add(record.metadata.seed)
-        value = record.metadata.ascension
-        if value is None:
-            self.ascension_missing = True
-        elif type(value) is int and value >= 0:
-            self.ascension_values.add(value)
-        else:
-            self.ascension_invalid.add(f"{type(value).__name__}={value!r}")
+        self.ascensions.add(record.metadata.ascension)
 
     def ascension_details(self) -> _AscensionDetails:
-        return _AscensionDetails(
-            values=frozenset(self.ascension_values),
-            missing=self.ascension_missing,
-            invalid=tuple(sorted(self.ascension_invalid)),
-        )
+        return self.ascensions.details()
 
 
 def describe_comparison_readiness(
@@ -272,9 +300,14 @@ def describe_comparison_readiness(
         missing_axes.append("ascension")
     if len(ascension.values) > 1 or (ascension.missing and ascension.values):
         mixed_axes.append("ascension")
-    if ascension.invalid:
+    if ascension.invalid or ascension.overflow:
         invalid_axes.append("ascension")
-    if len(ascension.values) == 1 and not ascension.missing and not ascension.invalid:
+    if (
+        len(ascension.values) == 1
+        and not ascension.missing
+        and not ascension.invalid
+        and not ascension.overflow
+    ):
         resolved["ascension"] = next(iter(ascension.values))
 
     seeds = accumulator.seeds.details()
@@ -303,7 +336,7 @@ def describe_comparison_readiness(
         comparison_signature = sha256(
             json.dumps(
                 signature_payload,
-                ensure_ascii=False,
+                ensure_ascii=True,
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -314,7 +347,7 @@ def describe_comparison_readiness(
         missing_axes=tuple(missing_axes),
         mixed_axes=tuple(mixed_axes),
         invalid_axes=tuple(invalid_axes),
-        seed_count=len(seeds.values),
+        seed_count=seeds.distinct_count,
         seed_complete=seed_complete,
         comparison_signature=comparison_signature,
     )
@@ -562,21 +595,10 @@ def _trend_priority(seed: _TrendSeed) -> int:
 
 
 def _string_details(values: Iterable[object]) -> _StringDetails:
-    valid_values: list[str] = []
-    missing = False
-    invalid_types: list[str] = []
+    details = _BoundedStrings()
     for value in values:
-        if type(value) is str and value:
-            valid_values.append(value)
-        elif value is None or (type(value) is str and not value):
-            missing = True
-        else:
-            invalid_types.append(type(value).__name__)
-    return _StringDetails(
-        values=frozenset(valid_values),
-        missing=missing,
-        invalid_types=tuple(sorted(set(invalid_types))),
-    )
+        details.add(value)
+    return details.details()
 
 
 def _axis_value(
@@ -616,22 +638,10 @@ def _axis_value_from_details(
 
 
 def _ascension_details(records: tuple[RunRecord, ...]) -> _AscensionDetails:
-    values: list[int] = []
-    missing = False
-    invalid: list[str] = []
+    details = _BoundedAscensions()
     for record in records:
-        value = record.metadata.ascension
-        if value is None:
-            missing = True
-        elif type(value) is int and value >= 0:
-            values.append(value)
-        else:
-            invalid.append(f"{type(value).__name__}={value!r}")
-    return _AscensionDetails(
-        values=frozenset(values),
-        missing=missing,
-        invalid=tuple(sorted(set(invalid))),
-    )
+        details.add(record.metadata.ascension)
+    return details.details()
 
 
 def _ascension_axis_value(
@@ -645,11 +655,14 @@ def _ascension_axis_value_from_details(
     details: _AscensionDetails, cohort: str
 ) -> tuple[int | None, tuple[str, ...]]:
     rendered_values = ", ".join(str(value) for value in sorted(details.values))
-    rendered_invalid = ", ".join(details.invalid)
+    if details.overflow:
+        return None, (
+            f"{cohort} ascension has more than "
+            f"{COMPARISON_DISTINCT_LIMIT} distinct values",
+        )
     if details.invalid and not details.values and not details.missing:
         return None, (
-            f"{cohort} ascension is invalid: expected nonnegative int; "
-            f"values={rendered_invalid}",
+            f"{cohort} ascension is invalid: expected int in range 0..10",
         )
     if not details.values and details.missing and not details.invalid:
         return None, (f"{cohort} ascension is missing",)
@@ -659,8 +672,8 @@ def _ascension_axis_value_from_details(
             parts.append("missing")
         if rendered_values:
             parts.append(f"values={rendered_values}")
-        if rendered_invalid:
-            parts.append(f"invalid={rendered_invalid}")
+        if details.invalid:
+            parts.append("invalid")
         return None, (f"{cohort} ascension is mixed: {'; '.join(parts)}",)
     return next(iter(details.values)), ()
 
@@ -753,6 +766,10 @@ def compare_cohorts(
             reasons.append(
                 "ascension mismatch: "
                 f"current={current_ascension}, baseline={baseline_ascension}"
+            )
+        elif bool(current_ascension_errors) != bool(baseline_ascension_errors):
+            reasons.append(
+                "ascension mismatch: one cohort has invalid or incomplete metadata"
             )
 
         current_seed_details = current_details.seeds.details()
