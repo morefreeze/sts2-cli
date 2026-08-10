@@ -40,6 +40,7 @@
   const BADGE_START_Y = 34;
   const DELTA_LIST_LABEL_LIMIT = 3;
   const DELTA_ITEM_LABEL_LIMIT = 48;
+  const DELTA_ITEM_DEPTH_LIMIT = 4;
   const mapState = {
     runId: '',
     actIndex: 0,
@@ -132,25 +133,61 @@
     svg.append(layer);
   }
 
-  function boundedDeltaLabel(value) {
+  function boundedDeltaLabel(value, limit = DELTA_ITEM_LABEL_LIMIT) {
     if (!['string', 'number', 'boolean'].includes(typeof value)) return '';
     const label = String(value).trim();
-    return label.length > DELTA_ITEM_LABEL_LIMIT
-      ? `${label.slice(0, DELTA_ITEM_LABEL_LIMIT - 1)}…`
+    return label.length > limit
+      ? `${label.slice(0, Math.max(0, limit - 1))}…`
       : label;
   }
 
-  function deltaItemLabel(item) {
+  function boundedTransformationLabel(from, to) {
+    const separator = ' → ';
+    const available = DELTA_ITEM_LABEL_LIMIT - separator.length;
+    const fromLimit = Math.floor(available / 2);
+    const toLimit = available - fromLimit;
+    return `${boundedDeltaLabel(from, fromLimit)}${separator}${boundedDeltaLabel(to, toLimit)}`;
+  }
+
+  function localizedDeltaLabel(value) {
+    const scalar = boundedDeltaLabel(value);
+    if (scalar) return scalar;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+    return boundedDeltaLabel(value.en)
+      || boundedDeltaLabel(value['zh-CN'])
+      || boundedDeltaLabel(value.zh);
+  }
+
+  function nestedDeltaItemLabel(item, depth = 0) {
+    if (depth > DELTA_ITEM_DEPTH_LIMIT) return '';
     const scalar = boundedDeltaLabel(item);
     if (scalar) return scalar;
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return '未知项目';
-    const name = boundedDeltaLabel(item.name)
-      || boundedDeltaLabel(item.name && item.name.en);
-    if (name) return name;
-    const identifier = boundedDeltaLabel(item.id)
-      || boundedDeltaLabel(item.id && item.id.en)
-      || boundedDeltaLabel(item.en);
-    return identifier || '未知项目';
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+
+    const transformationPairs = [
+      ['from', 'to'],
+      ['before', 'after'],
+      ['old', 'new'],
+    ];
+    for (const [fromKey, toKey] of transformationPairs) {
+      if (!(fromKey in item) && !(toKey in item)) continue;
+      const from = nestedDeltaItemLabel(item[fromKey], depth + 1);
+      const to = nestedDeltaItemLabel(item[toKey], depth + 1);
+      if (from && to) return boundedTransformationLabel(from, to);
+      if (from || to) return from || to;
+    }
+
+    if ('choice' in item) {
+      const choice = nestedDeltaItemLabel(item.choice, depth + 1);
+      if (choice) return choice;
+    }
+    return localizedDeltaLabel(item.name)
+      || localizedDeltaLabel(item.id)
+      || localizedDeltaLabel(item);
+  }
+
+  function deltaItemLabel(item) {
+    return nestedDeltaItemLabel(item) || '未知项目';
   }
 
   function boundedListLabels(items) {
@@ -330,36 +367,47 @@
   function renderActTabs(payload) {
     const tabs = byId('actTabs');
     clear(tabs);
+    let selectedTab = null;
     payload.acts.forEach((act) => {
       const button = element('button', {
         text: `${act.label}${act.available ? ` · ${act.visited_count} 点` : ' · 无记录'}`,
         attrs: {
           type: 'button', role: 'tab', 'aria-selected': act.index === payload.act.index,
           tabindex: act.index === payload.act.index ? '0' : '-1',
+          'data-act-index': act.index,
         },
       });
       button.disabled = !act.available;
       button.addEventListener('click', () => loadAct(mapState.runId, act.index, { historyMode: 'replace' }));
+      if (act.index === payload.act.index && act.available) selectedTab = button;
       tabs.append(button);
     });
+    return selectedTab;
   }
 
   function handleActTabKeydown(event) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     const availableTabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]:not(:disabled)'));
     if (!availableTabs.length) return;
-    const currentIndex = Math.max(0, availableTabs.indexOf(document.activeElement));
+    const requestedIndex = availableTabs.findIndex(
+      (tab) => Number(tab.dataset.actIndex) === mapState.actIndex,
+    );
+    const currentIndex = requestedIndex >= 0
+      ? requestedIndex
+      : Math.max(0, availableTabs.indexOf(document.activeElement));
     let nextIndex = currentIndex;
     if (event.key === 'Home') nextIndex = 0;
     else if (event.key === 'End') nextIndex = availableTabs.length - 1;
     else if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + availableTabs.length) % availableTabs.length;
     else nextIndex = (currentIndex + 1) % availableTabs.length;
     event.preventDefault();
-    availableTabs[nextIndex].focus();
-    availableTabs[nextIndex].click();
+    const nextActIndex = Number(availableTabs[nextIndex].dataset.actIndex);
+    if (Number.isInteger(nextActIndex)) {
+      loadAct(mapState.runId, nextActIndex, { historyMode: 'replace', focusActTab: true });
+    }
   }
 
-  function showMapPage() {
+  function showMapPage({ focusPage = true } = {}) {
     const main = byId('dashboardMain');
     const page = byId('runMapPage');
     const detailPanel = byId('detailPanel');
@@ -376,7 +424,7 @@
     }
     mapState.dashboardHidden.forEach(({ child }) => { child.hidden = child !== page; });
     page.hidden = false;
-    page.focus();
+    if (focusPage) page.focus();
   }
 
   function isUsableFocusTarget(candidate) {
@@ -404,7 +452,9 @@
     return `#run=${encodeURIComponent(runId)}&act=${actIndex}`;
   }
 
-  async function loadAct(runId, actIndex, { historyMode = 'none', opener = null } = {}) {
+  async function loadAct(runId, actIndex, {
+    historyMode = 'none', opener = null, focusActTab = false,
+  } = {}) {
     runId = typeof runId === 'string' ? runId.trim() : '';
     if (!runId) {
       setStatus('无法打开地图：缺少对局 ID', 'error');
@@ -413,7 +463,7 @@
     if (opener && opener.isConnected) mapState.opener = opener;
     mapState.runId = runId;
     mapState.actIndex = actIndex;
-    showMapPage();
+    showMapPage({ focusPage: !focusActTab });
     byId('runMapTitle').textContent = `对局 ${runId}`;
     byId('mapFallback').hidden = true;
     renderEmpty(byId('actSummary'), '正在重建地图…', 'loading-state');
@@ -435,7 +485,8 @@
       const payload = await getJSON(`/api/run/map?id=${encodeURIComponent(runId)}&act=${actIndex}`, { signal: controller.signal });
       if (token !== mapState.requestToken) return;
       mapState.abortController = null;
-      renderActTabs(payload);
+      const selectedTab = renderActTabs(payload);
+      if (focusActTab && selectedTab) selectedTab.focus();
       renderMap(payload);
       renderActSummary(payload);
       const fallback = byId('mapFallback');

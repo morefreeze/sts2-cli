@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+import json
 import re
 import subprocess
 import sys
@@ -71,6 +72,17 @@ def _javascript_section(script: str, start: str, end: str) -> str:
     start_index = script.index(start)
     end_index = script.index(end, start_index)
     return script[start_index:end_index]
+
+
+def _run_node_json(source: str):
+    result = subprocess.run(
+        ["node", "-e", source],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 def test_shell_uses_external_assets_and_stable_landmark_order():
@@ -211,11 +223,174 @@ def test_act_switch_replaces_the_open_map_history_entry_and_tooltips_keep_unknow
     assert "history.pushState" in load
     assert "historyMode === 'replace'" in load
     assert "history.replaceState" in load
+    assert "showMapPage({ focusPage: !focusActTab })" in load
+    assert "const selectedTab = renderActTabs(payload)" in load
+    assert "if (focusActTab && selectedTab) selectedTab.focus()" in load
+    assert ".click()" not in tabs
     assert script.count("history.pushState") == 1
     assert "measurementDisplay(measurement, field)" in tooltip
     assert "QUALITY_LABELS[measurement.quality]" in tooltip
     assert "nonzeroMeasurement" not in tooltip
     assert "'—'" in script
+
+
+def test_native_delta_item_shapes_render_known_bounded_labels():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith("const DELTA_")
+    )
+    labels = _javascript_section(
+        script, "function boundedDeltaLabel", "function measurementDisplay"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {labels}
+        const examples = [
+          {{ choice: 'Bash' }},
+          {{ choice: {{ name: {{ en: 'Pommel Strike' }} }} }},
+          {{ choice: {{ id: {{ en: 'Offering' }} }} }},
+          {{ from: {{ id: {{ en: 'Strike' }} }}, to: {{ name: 'Bash' }} }},
+          {{ before: {{ name: {{ en: 'Defend' }} }}, after: {{ id: 'Shrug It Off' }} }},
+        ];
+        let tooDeep = 'Known but too deep';
+        for (let index = 0; index < 12; index += 1) tooDeep = {{ choice: tooDeep }};
+        const longLabel = deltaItemLabel({{ choice: 'x'.repeat(200) }});
+        const longTransformation = deltaItemLabel({{
+          from: {{ id: 'a'.repeat(200) }},
+          to: {{ id: 'b'.repeat(200) }},
+        }});
+        console.log(JSON.stringify({{
+          labels: examples.map((item) => deltaItemLabel(item)),
+          deep: deltaItemLabel(tooDeep),
+          longLabel,
+          longTransformation,
+        }}));
+        """
+    )
+
+    assert result["labels"] == [
+        "Bash",
+        "Pommel Strike",
+        "Offering",
+        "Strike → Bash",
+        "Defend → Shrug It Off",
+    ]
+    assert result["deep"] == "未知项目"
+    assert len(result["longLabel"]) <= 48
+    assert result["longLabel"].endswith("…")
+    assert len(result["longTransformation"]) <= 48
+    assert " → " in result["longTransformation"]
+    assert result["longTransformation"].startswith("a")
+    assert result["longTransformation"].endswith("…")
+    assert "[object Object]" not in json.dumps(result)
+
+
+def test_act_keyboard_switches_directly_and_async_load_focuses_only_latest_tab():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    handler = _javascript_section(
+        script, "function handleActTabKeydown", "function showMapPage"
+    )
+    load = _javascript_section(script, "async function loadAct", "function closeMapPage")
+
+    result = _run_node_json(
+        f"""
+        const handlerCalls = [];
+        const tabEffects = {{ focus: 0, click: 0 }};
+        const mapState = {{ runId: 'run-1', actIndex: 0 }};
+        const document = {{ activeElement: null }};
+        function tab(actIndex) {{
+          return {{
+            dataset: {{ actIndex: String(actIndex) }},
+            focus() {{ tabEffects.focus += 1; }},
+            click() {{ tabEffects.click += 1; }},
+          }};
+        }}
+        const tabs = [tab(0), tab(1), tab(3)];
+        const tabList = {{ querySelectorAll() {{ return tabs; }} }};
+        function keyboardLoadAct(runId, actIndex, options) {{
+          handlerCalls.push({{ runId, actIndex, options }});
+          mapState.actIndex = actIndex;
+        }}
+        function key(key) {{
+          let prevented = false;
+          handleActTabKeydown({{
+            key,
+            currentTarget: tabList,
+            preventDefault() {{ prevented = true; }},
+          }});
+          return prevented;
+        }}
+        {handler.replace('loadAct(', 'keyboardLoadAct(')}
+        const prevented = [key('ArrowRight'), key('ArrowRight'), key('Home'), key('End')];
+
+        const pending = [];
+        const showCalls = [];
+        const renderedActs = [];
+        const focusedActs = [];
+        const elements = new Map();
+        const asyncMapState = {{
+          runId: '', actIndex: 0, opener: null, requestToken: 0,
+          abortController: null,
+        }};
+        function byId(id) {{
+          if (!elements.has(id)) elements.set(id, {{ hidden: false, textContent: '' }});
+          return elements.get(id);
+        }}
+        function showMapPage(options) {{ showCalls.push(options); }}
+        function renderEmpty() {{}}
+        function clear() {{}}
+        const history = {{
+          state: {{ fromDashboard: true }},
+          pushState() {{}},
+          replaceState() {{}},
+        }};
+        function mapLocation(runId, actIndex) {{ return `#run=${{runId}}&act=${{actIndex}}`; }}
+        function setStatus() {{}}
+        function getJSON(url) {{
+          return new Promise((resolve) => pending.push({{ url, resolve }}));
+        }}
+        function renderActTabs(payload) {{
+          renderedActs.push(payload.act.index);
+          return {{ focus() {{ focusedActs.push(payload.act.index); }} }};
+        }}
+        function renderMap() {{}}
+        function renderActSummary() {{}}
+        function selectNode() {{}}
+        {load.replace('mapState', 'asyncMapState')}
+        function payload(actIndex) {{
+          return {{
+            act: {{ index: actIndex }}, nodes: [], full_map: true,
+            fallback_reason: null,
+          }};
+        }}
+        async function exerciseLoads() {{
+          const first = loadAct('run-1', 1, {{ historyMode: 'replace', focusActTab: true }});
+          const second = loadAct('run-1', 3, {{ historyMode: 'replace', focusActTab: true }});
+          pending[1].resolve(payload(3));
+          await second;
+          pending[0].resolve(payload(1));
+          await first;
+          return {{
+            handlerCalls, tabEffects, prevented, showCalls,
+            renderedActs, focusedActs, finalAct: asyncMapState.actIndex,
+          }};
+        }}
+        exerciseLoads().then((value) => console.log(JSON.stringify(value)));
+        """
+    )
+
+    assert [call["actIndex"] for call in result["handlerCalls"]] == [1, 3, 0, 3]
+    assert all(call["options"]["focusActTab"] for call in result["handlerCalls"])
+    assert result["tabEffects"] == {"focus": 0, "click": 0}
+    assert result["prevented"] == [True, True, True, True]
+    assert result["showCalls"] == [{"focusPage": False}, {"focusPage": False}]
+    assert result["renderedActs"] == [3]
+    assert result["focusedActs"] == [3]
+    assert result["finalAct"] == 3
 
 
 def _js_number(script: str, name: str) -> int:
@@ -239,7 +414,7 @@ def test_map_fallback_route_badge_geometry_tabs_focus_and_image_contracts():
     assert ".sort((a, b) => a.path_index - b.path_index)" in route
     assert "boundedListLabels" in measurement
     assert "item.name" in script
-    assert "item.id.en" in script
+    assert "localizedDeltaLabel(item.id)" in script
     assert "[object Object]" not in script
     assert "textContent" in script
     assert "addEventListener('error'" in art
