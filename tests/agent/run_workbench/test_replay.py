@@ -247,6 +247,10 @@ def test_parse_game_progress_extracts_a2f4_metadata_and_coverage():
 
     combat = progress["rooms"][-1]["combat"]
     assert len(combat["rounds"]) == 2
+    assert [
+        round_info["actions"][-1]["label"]
+        for round_info in combat["rounds"]
+    ] == ["end_turn", "end_turn"]
     assert combat["rounds"][0]["hp_loss"] == 6
     assert combat["rounds"][0]["start_state"]["potions"][0]["name"] == (
         "Training Potion"
@@ -257,6 +261,7 @@ def test_parse_game_progress_extracts_a2f4_metadata_and_coverage():
     assert combat["rounds"][1]["actions"][0]["target"]["name"] == (
         "Training Beast"
     )
+    assert combat["rounds"][1]["end_reason"] == "combat_end"
 
 
 def test_parse_game_progress_uses_optional_state_context_metadata():
@@ -281,6 +286,80 @@ def test_parse_game_progress_uses_optional_state_context_metadata():
     assert summary["ascension"] == 3
     assert summary["modifiers"] == ["CONTEXT_MODIFIER"]
     assert summary["complete_run"] is False
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"act": 1, "room_type": "Monster"},
+        {"floor": 4, "room_type": "Monster"},
+        {"act": True, "floor": 4, "room_type": "Monster"},
+        {"act": 1, "floor": False, "room_type": "Monster"},
+        {"act": "1", "floor": 4, "room_type": "Monster"},
+        {"act": 1, "floor": "4", "room_type": "Monster"},
+        {"act": float("nan"), "floor": 4, "room_type": "Monster"},
+        {"act": 1, "floor": float("inf"), "room_type": "Monster"},
+        {"act": 1, "floor": 4.5, "room_type": "Monster"},
+    ],
+    ids=[
+        "missing-floor",
+        "missing-act",
+        "boolean-act",
+        "boolean-floor",
+        "string-act",
+        "string-floor",
+        "nan-act",
+        "infinite-floor",
+        "fractional-floor",
+    ],
+)
+def test_parse_game_progress_does_not_invent_coverage_from_invalid_coordinates(
+    context,
+):
+    entries = [
+        {"type": "action", "data": {"cmd": "start_run"}},
+        {
+            "type": "state",
+            "data": {
+                "decision": "game_over",
+                "context": context,
+                "player": {},
+            },
+        },
+    ]
+
+    progress = parse_game_progress(entries)
+
+    assert progress["summary"]["first_recorded_floor"] is None
+    assert progress["summary"]["last_recorded_floor"] is None
+    assert progress["summary"]["max_global_floor"] is None
+    assert progress["summary"]["max_floor_label"] is None
+    assert progress["summary"]["complete_run"] is False
+    assert progress["summary"]["room_count"] == 1
+
+
+def test_parse_game_progress_accepts_finite_integral_numeric_coordinates():
+    entries = [
+        {
+            "type": "state",
+            "data": {
+                "decision": "combat_play",
+                "context": {
+                    "act": 2.0,
+                    "floor": 4.0,
+                    "room_type": "Monster",
+                },
+                "player": {},
+            },
+        }
+    ]
+
+    summary = parse_game_progress(entries)["summary"]
+
+    assert summary["first_recorded_floor"] == 21
+    assert summary["last_recorded_floor"] == 21
+    assert summary["max_global_floor"] == 21
+    assert summary["max_floor_label"] == "A2F4"
 
 
 def test_parse_game_progress_rejects_action_only_records_explicitly():

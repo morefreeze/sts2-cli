@@ -3,19 +3,55 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
+
+
+def _display_coordinate(value: Any, default: int) -> int:
+    """Preserve legacy room-display fallbacks without creating evidence."""
+    if not value:
+        return default
+    try:
+        return int(value)
+    except (OverflowError, TypeError, ValueError):
+        return default
+
+
+def _observed_coordinate(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if (
+        isinstance(value, float)
+        and math.isfinite(value)
+        and value.is_integer()
+    ):
+        return int(value)
+    return None
+
+
+def _display_act_and_floor(context: dict[str, Any]) -> tuple[int, int]:
+    return (
+        _display_coordinate(context.get("act"), 1),
+        _display_coordinate(context.get("floor"), 0),
+    )
 
 
 def format_room_label(context: dict[str, Any]) -> str:
     """Return an act-relative room label such as A1F7 or A2F5."""
-    act = int(context.get("act") or 1)
-    floor = int(context.get("floor") or 0)
+    act, floor = _display_act_and_floor(context)
     return f"A{act}F{floor}"
 
 
-def _global_floor(context: dict[str, Any]) -> int:
-    act = int(context.get("act") or 1)
-    floor = int(context.get("floor") or 0)
+def _global_floor(context: dict[str, Any]) -> int | None:
+    act = _observed_coordinate(context.get("act"))
+    floor = _observed_coordinate(context.get("floor"))
+    if act is None or act < 1 or floor is None or floor < 0:
+        return None
+    return (act - 1) * 17 + floor
+
+
+def _display_global_floor(context: dict[str, Any]) -> int:
+    act, floor = _display_act_and_floor(context)
     return (act - 1) * 17 + floor
 
 
@@ -69,12 +105,13 @@ def _new_room(state: dict[str, Any], source_index: int) -> dict[str, Any]:
     context = state.get("context") or {}
     player = state.get("player") or {}
     hp = _player_hp(state)
+    act, floor = _display_act_and_floor(context)
     return {
         "id": f"{format_room_label(context)}:{context.get('room_type') or '?'}:{source_index}",
         "label": format_room_label(context),
-        "act": int(context.get("act") or 1),
-        "floor": int(context.get("floor") or 0),
-        "global_floor": _global_floor(context),
+        "act": act,
+        "floor": floor,
+        "global_floor": _display_global_floor(context),
         "room_type": context.get("room_type") or "?",
         "act_name": context.get("act_name"),
         "boss": (context.get("boss") or {}).get("name"),
@@ -426,6 +463,7 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
     victory = False
     last_state_data: dict[str, Any] | None = None
     observed_global_floors: list[int] = []
+    observed_floor_labels: dict[int, str] = {}
     has_state_records = False
     has_action_records = False
     first_evidence: tuple[str, dict[str, Any]] | None = None
@@ -434,8 +472,7 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
     def ensure_room(state: dict[str, Any], source_index: int) -> dict[str, Any]:
         nonlocal active_room
         context = state.get("context") or {}
-        act = int(context.get("act") or 1)
-        floor = int(context.get("floor") or 0)
+        act, floor = _display_act_and_floor(context)
         room_type = context.get("room_type") or "?"
         if room_type == "Map":
             room = rooms_by_floor.get((act, floor)) or active_room
@@ -511,7 +548,10 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
         if ascension is None and context.get("ascension") is not None:
             ascension = context.get("ascension")
         modifiers = modifiers or context.get("modifiers")
-        observed_global_floors.append(_global_floor(context))
+        observed_global_floor = _global_floor(context)
+        if observed_global_floor is not None:
+            observed_global_floors.append(observed_global_floor)
+            observed_floor_labels[observed_global_floor] = format_room_label(context)
 
         room = ensure_room(state, source_index)
         room["end_step"] = source_index
@@ -553,7 +593,6 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
                 break
     start_hp = next((room.get("start_hp") for room in rooms if room.get("start_hp") is not None), None)
     end_hp = next((room.get("end_hp") for room in reversed(rooms) if room.get("end_hp") is not None), None)
-    max_room = max(rooms, key=lambda item: item["global_floor"], default=None)
     first_recorded_floor = (
         min(observed_global_floors) if observed_global_floors else None
     )
@@ -583,8 +622,8 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
         "started_at": started_at,
         "ended_at": ended_at,
         "room_count": len(rooms),
-        "max_floor_label": max_room.get("label") if max_room else None,
-        "max_global_floor": max_room.get("global_floor") if max_room else None,
+        "max_floor_label": observed_floor_labels.get(last_recorded_floor),
+        "max_global_floor": last_recorded_floor,
         "start_hp": start_hp,
         "end_hp": end_hp,
         "total_hp_loss": sum(int(room.get("hp_loss") or 0) for room in rooms),
