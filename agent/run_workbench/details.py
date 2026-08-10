@@ -241,6 +241,7 @@ def _detail(
         trusted_max_floor is not None
         and global_floor == trusted_max_floor
         and run_status not in {RunStatus.UNKNOWN, RunStatus.IN_PROGRESS}
+        and _is_unique_terminal_candidate(record, node, trusted_max_floor)
     )
     coverage["choices_complete"] = choices_complete
     if combat_coverage_complete is True:
@@ -275,6 +276,20 @@ def _detail(
 
     facts = tuple(fact.to_dict() for fact in collect_diagnostic_facts(base))
     return replace(base, facts=facts, hypotheses=())
+
+
+def _is_unique_terminal_candidate(
+    record: RunRecord,
+    selected: dict[str, Any],
+    max_global_floor: int,
+) -> bool:
+    candidates = [
+        candidate
+        for candidate in record.nodes
+        if isinstance(candidate, dict)
+        and _coordinates(candidate)[2] == max_global_floor
+    ]
+    return len(candidates) == 1 and candidates[0] is selected
 
 
 def _complete_replay_combat(
@@ -336,6 +351,7 @@ def _trusted_replay_combat_start(
     if (
         record.coverage.complete_run is not True
         or node.get("combat_start_complete") is not True
+        or node.get("combat_action_stream_complete") is not True
     ):
         return False
     origins = record.node_origins(_node_index(record, node))

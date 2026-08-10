@@ -19,6 +19,7 @@ _EVIDENCE_COLLECTION_LIMIT = 256
 _EVIDENCE_DEPTH_LIMIT = 16
 _STATEMENT_LENGTH_LIMIT = 512
 _FACT_COLLECTION_LIMIT = 256
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
 _DIAGNOSTIC_KINDS = frozenset(
     {
@@ -112,8 +113,10 @@ class _FrozenEvidenceSequence(Sequence[Any]):
 def _freeze_evidence(value: Any, *, depth: int = 0) -> Any:
     if depth >= _EVIDENCE_DEPTH_LIMIT:
         return None
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or isinstance(value, (bool, str)):
         return value
+    if isinstance(value, int):
+        return value if abs(value) <= _MAX_JSON_SAFE_INTEGER else None
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, Mapping):
@@ -194,6 +197,10 @@ def _display_number(value: float) -> int | float:
     return int(value) if value.is_integer() else value
 
 
+def _hp_in_domain(value: float, max_hp: float) -> bool:
+    return 0 <= value <= max_hp
+
+
 def _max_hp(detail: NodeDetail, *states: Mapping[str, Any]) -> float | None:
     candidates: list[float] = []
     for state in states:
@@ -234,7 +241,13 @@ def _large_node_hp_loss_fact(detail: NodeDetail) -> DiagnosticFact | None:
     entry_hp = _number(detail.entry.hp)
     exit_hp = _number(detail.exit.hp)
     max_hp = _max_hp(detail)
-    if entry_hp is None or exit_hp is None or max_hp is None:
+    if (
+        entry_hp is None
+        or exit_hp is None
+        or max_hp is None
+        or not _hp_in_domain(entry_hp, max_hp)
+        or not _hp_in_domain(exit_hp, max_hp)
+    ):
         return None
     hp_loss = entry_hp - exit_hp
     ratio = hp_loss / max_hp
@@ -268,6 +281,7 @@ def _high_loss_round_facts(detail: NodeDetail) -> tuple[DiagnosticFact, ...]:
         end = round_info.get("end_state")
         if (
             round_number is None
+            or not 1 <= round_number <= _FACT_COLLECTION_LIMIT
             or not isinstance(start, Mapping)
             or not isinstance(end, Mapping)
         ):
@@ -275,7 +289,13 @@ def _high_loss_round_facts(detail: NodeDetail) -> tuple[DiagnosticFact, ...]:
         start_hp = _number(start.get("hp"))
         end_hp = _number(end.get("hp"))
         max_hp = _max_hp(detail, start, end)
-        if start_hp is None or end_hp is None or max_hp is None:
+        if (
+            start_hp is None
+            or end_hp is None
+            or max_hp is None
+            or not _hp_in_domain(start_hp, max_hp)
+            or not _hp_in_domain(end_hp, max_hp)
+        ):
             continue
         hp_loss = start_hp - end_hp
         ratio = hp_loss / max_hp
@@ -575,9 +595,8 @@ def rank_run_anomalies(
 ) -> tuple[DiagnosticFact, ...]:
     """Return stable, de-duplicated facts ordered by severity then floor."""
 
-    ranked: list[tuple[int, int, int, DiagnosticFact]] = []
-    seen: set[tuple[str, str, int, str]] = set()
-    ordinal = 0
+    candidates: list[tuple[NodeDetail, DiagnosticFact, str]] = []
+    partial_by_run: dict[str, tuple[tuple[bool, int, str, str], NodeDetail, DiagnosticFact, str]] = {}
     for detail in details:
         if type(detail) is not NodeDetail:
             continue
@@ -589,34 +608,61 @@ def rank_run_anomalies(
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            key = (detail.run_id, detail.node_id, detail.global_floor, fingerprint)
-            if key in seen:
+            if fact.kind != "partial_coverage":
+                candidates.append((detail, fact, fingerprint))
                 continue
-            seen.add(key)
-            located_fact = DiagnosticFact(
-                kind=fact.kind,
-                severity=fact.severity,
-                statement=fact.statement,
-                evidence={
-                    **fact.to_dict()["evidence"],
-                    "locator": {
-                        "run_id": detail.run_id,
-                        "node_id": detail.node_id,
-                        "global_floor": detail.global_floor,
-                    },
-                },
+            first_floor = _integer(fact.evidence.get("first_recorded_floor"))
+            canonical_key = (
+                detail.global_floor != first_floor,
+                detail.global_floor,
+                detail.node_id,
+                fingerprint,
             )
-            ranked.append(
-                (
-                    _SEVERITY_ORDER[fact.severity],
-                    detail.global_floor,
-                    ordinal,
-                    located_fact,
+            existing = partial_by_run.get(detail.run_id)
+            if existing is None or canonical_key < existing[0]:
+                partial_by_run[detail.run_id] = (
+                    canonical_key,
+                    detail,
+                    fact,
+                    fingerprint,
                 )
+    candidates.extend(
+        (detail, fact, fingerprint)
+        for _, detail, fact, fingerprint in partial_by_run.values()
+    )
+
+    ranked: list[tuple[int, int, str, str, str, DiagnosticFact]] = []
+    seen: set[tuple[str, str, int, str]] = set()
+    for detail, fact, fingerprint in candidates:
+        key = (detail.run_id, detail.node_id, detail.global_floor, fingerprint)
+        if key in seen:
+            continue
+        seen.add(key)
+        located_fact = DiagnosticFact(
+            kind=fact.kind,
+            severity=fact.severity,
+            statement=fact.statement,
+            evidence={
+                **fact.to_dict()["evidence"],
+                "locator": {
+                    "run_id": detail.run_id,
+                    "node_id": detail.node_id,
+                    "global_floor": detail.global_floor,
+                },
+            },
+        )
+        ranked.append(
+            (
+                _SEVERITY_ORDER[fact.severity],
+                detail.global_floor,
+                detail.run_id,
+                detail.node_id,
+                fingerprint,
+                located_fact,
             )
-            ordinal += 1
-    ranked.sort(key=lambda item: item[:3])
-    return tuple(item[3] for item in ranked)
+        )
+    ranked.sort(key=lambda item: item[:-1])
+    return tuple(item[-1] for item in ranked)
 
 
 __all__ = [

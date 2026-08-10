@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -275,11 +276,54 @@ def test_parse_game_progress_marks_only_verified_combat_start_boundaries():
     missing_first_state = parse_game_progress(
         [*entries[:3], *entries[4:]]
     )["rooms"][-1]
+    missing_round_one_action = parse_game_progress(
+        [
+            entry
+            for entry in entries
+            if not (
+                entry.get("type") == "action"
+                and entry.get("step") == 2
+                and (entry.get("data") or {}).get("action") == "play_card"
+            )
+        ]
+    )["rooms"][-1]
+    missing_round_two_action = parse_game_progress(
+        [
+            entry
+            for entry in entries
+            if not (
+                entry.get("type") == "action"
+                and entry.get("step") == 4
+                and (entry.get("data") or {}).get("action") == "play_card"
+            )
+        ]
+    )["rooms"][-1]
+    potion_entries = deepcopy(entries)
+    potion_action = next(
+        entry
+        for entry in potion_entries
+        if entry.get("type") == "action"
+        and entry.get("step") == 2
+        and (entry.get("data") or {}).get("action") == "play_card"
+    )
+    potion_action["data"] = {
+        "action": "use_potion",
+        "args": {"potion_index": 0, "target_index": 0},
+    }
+    used_potion = parse_game_progress(potion_entries)["rooms"][-1]
+    missing_potion_action = parse_game_progress(
+        [entry for entry in potion_entries if entry is not potion_action]
+    )["rooms"][-1]
 
     assert full["combat_start_complete"] is True
     assert missing_prefix["combat_start_complete"] is False
     assert start_run_with_gap["combat_start_complete"] is False
     assert missing_first_state["combat_start_complete"] is False
+    assert full["combat_action_stream_complete"] is True
+    assert used_potion["combat_action_stream_complete"] is True
+    assert missing_round_one_action["combat_action_stream_complete"] is False
+    assert missing_round_two_action["combat_action_stream_complete"] is False
+    assert missing_potion_action["combat_action_stream_complete"] is False
 
 
 def test_parse_game_progress_uses_optional_state_context_metadata():

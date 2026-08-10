@@ -480,6 +480,55 @@ def test_thresholds_trigger_at_equality_and_ignore_invalid_ratios() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("entry_hp", "exit_hp", "max_hp"),
+    [
+        (-1, -21, 80),
+        (100, 60, 80),
+        (80, -1, 80),
+    ],
+)
+def test_node_hp_loss_requires_values_within_max_hp(
+    entry_hp: int,
+    exit_hp: int,
+    max_hp: int,
+) -> None:
+    detail = _detail(
+        entry=InventorySnapshot(hp=entry_hp, max_hp=max_hp),
+        exit=InventorySnapshot(hp=exit_hp, max_hp=max_hp),
+    )
+
+    assert all(
+        fact.kind != "large_node_hp_loss"
+        for fact in collect_diagnostic_facts(detail)
+    )
+
+
+@pytest.mark.parametrize(
+    ("start_hp", "end_hp", "max_hp"),
+    [
+        (-1, -17, 80),
+        (96, 80, 80),
+        (80, -1, 80),
+    ],
+)
+def test_round_hp_loss_requires_values_within_max_hp(
+    start_hp: int,
+    end_hp: int,
+    max_hp: int,
+) -> None:
+    detail = _detail(
+        combat_rounds=(
+            _round(1, start_hp=start_hp, end_hp=end_hp, max_hp=max_hp),
+        ),
+    )
+
+    assert all(
+        fact.kind != "high_loss_round"
+        for fact in collect_diagnostic_facts(detail)
+    )
+
+
 def test_raw_detail_facts_cannot_inject_collected_diagnostics() -> None:
     detail = _detail(
         facts=(
@@ -519,6 +568,30 @@ def test_diagnostic_fact_is_validated_deeply_immutable_bounded_and_json_safe() -
         DiagnosticFact("invented", "warning", "bad", {})
     with pytest.raises(ValueError):
         DiagnosticFact("unused_potion", "urgent", "bad", {})
+
+
+def test_diagnostic_evidence_and_round_numbers_reject_json_unsafe_huge_ints() -> None:
+    huge = 10**5000
+    fact = DiagnosticFact(
+        kind="high_loss_round",
+        severity="warning",
+        statement="bounded",
+        evidence={"huge": huge, "nested": [huge]},
+    )
+
+    payload = fact.to_dict()
+    json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    assert payload["evidence"] == {"huge": None, "nested": [None]}
+
+    detail = _detail(
+        combat_rounds=(
+            _round(huge, start_hp=80, end_hp=60, max_hp=80),
+        ),
+    )
+    assert all(
+        candidate.kind != "high_loss_round"
+        for candidate in collect_diagnostic_facts(detail)
+    )
 
 
 def test_rank_orders_by_severity_then_floor_and_deduplicates_only_same_node_fact() -> None:
@@ -632,3 +705,33 @@ def test_rank_adds_distinct_stable_locators_to_identical_node_facts() -> None:
     ]
     assert ranked[0].to_dict() != ranked[1].to_dict()
     assert "locator" not in collect_diagnostic_facts(first)[0].evidence
+
+
+def test_rank_emits_partial_coverage_once_per_run_with_stable_canonical_locator() -> None:
+    coverage = {
+        "complete_run": False,
+        "first_recorded_floor": 18,
+        "last_recorded_floor": 21,
+        "source_kind": "replay_jsonl",
+        "run_status": "unknown",
+        "terminal_node": False,
+        "choices_complete": False,
+    }
+    first = _detail(run_id="run-a", global_floor=18, coverage=coverage)
+    later = _detail(run_id="run-a", global_floor=21, coverage=coverage)
+    other_run = _detail(run_id="run-b", global_floor=18, coverage=coverage)
+
+    forwards = rank_run_anomalies([later, other_run, first])
+    backwards = rank_run_anomalies([first, other_run, later])
+    forward_partial = [
+        fact.to_dict() for fact in forwards if fact.kind == "partial_coverage"
+    ]
+    backward_partial = [
+        fact.to_dict() for fact in backwards if fact.kind == "partial_coverage"
+    ]
+
+    assert forward_partial == backward_partial
+    assert [fact["evidence"]["locator"] for fact in forward_partial] == [
+        {"run_id": "run-a", "node_id": "node-18", "global_floor": 18},
+        {"run_id": "run-b", "node_id": "node-18", "global_floor": 18},
+    ]

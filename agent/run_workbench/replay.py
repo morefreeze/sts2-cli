@@ -313,6 +313,7 @@ def _new_room(state: dict[str, Any], source_index: int) -> dict[str, Any]:
         "actions": [],
         "combat": {"turns": [], "rounds": []},
         "combat_start_complete": False,
+        "combat_action_stream_complete": False,
         "start_player": _compact_player(player),
         "end_player": _compact_player(player),
         "event_name": state.get("event_name"),
@@ -415,10 +416,15 @@ def _collect_options(room: dict[str, Any], state: dict[str, Any]) -> None:
             )
 
 
-def _collect_combat(room: dict[str, Any], state: dict[str, Any], source_index: int) -> None:
+def _collect_combat(
+    room: dict[str, Any],
+    state: dict[str, Any],
+    source_index: int,
+    protocol_step: int | None,
+) -> None:
     if state.get("decision") != "combat_play":
         return
-    snapshot = _combat_snapshot(state, source_index)
+    snapshot = _combat_snapshot(state, source_index, protocol_step)
     room["combat"]["turns"].append(
         {
             "step": source_index,
@@ -449,12 +455,17 @@ def _compact_card(card: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def _combat_snapshot(state: dict[str, Any], source_index: int) -> dict[str, Any]:
+def _combat_snapshot(
+    state: dict[str, Any],
+    source_index: int,
+    protocol_step: int | None,
+) -> dict[str, Any]:
     player = state.get("player") or {}
     enemies = state.get("enemies") or []
     hand = state.get("hand") or []
     return {
         "step": source_index,
+        "protocol_step": protocol_step,
         "round": state.get("round"),
         "hp": player.get("hp"),
         "max_hp": player.get("max_hp"),
@@ -585,15 +596,32 @@ def _append_combat_action(room: dict[str, Any], action: dict[str, Any], source_s
     active["actions"].append(_combat_action_row(action, source_state, step))
 
 
-def _close_active_combat_round(room: dict[str, Any], state: dict[str, Any], source_index: int, reason: str) -> None:
+def _close_active_combat_round(
+    room: dict[str, Any],
+    state: dict[str, Any],
+    source_index: int,
+    reason: str,
+    protocol_step: int | None,
+) -> None:
     active = room.get("_active_combat_round")
-    if active is None:
+    if active is None or active.get("end_reason") != "in_round":
         return
     if state.get("decision") == "combat_play":
-        end_state = _combat_snapshot(state, source_index)
+        end_state = _combat_snapshot(state, source_index, protocol_step)
     else:
-        end_state = _combat_snapshot({**state, "hand": [], "enemies": [], "energy": None, "max_energy": None}, source_index)
+        end_state = _combat_snapshot(
+            {
+                **state,
+                "hand": [],
+                "enemies": [],
+                "energy": None,
+                "max_energy": None,
+            },
+            source_index,
+            protocol_step,
+        )
     _close_round(active, end_state, reason)
+    room["_active_combat_round"] = None
 
 
 def _action_label(action: dict[str, Any]) -> str:
@@ -646,6 +674,9 @@ def _finalize_room(room: dict[str, Any]) -> None:
         _close_round(active_round, active_round.get("_latest_state") or active_round["end_state"], "last_state")
     for round_info in room.get("combat", {}).get("rounds") or []:
         round_info.pop("_latest_state", None)
+    room["combat_action_stream_complete"] = _verified_combat_action_stream(
+        room.get("combat", {}).get("rounds") or []
+    )
     start = room.get("start_hp")
     end = room.get("end_hp")
     if isinstance(start, int) and isinstance(end, int):
@@ -654,6 +685,56 @@ def _finalize_room(room: dict[str, Any]) -> None:
         room["status"] = "completed"
     room.pop("_seen_options", None)
     room.pop("_active_combat_round", None)
+
+
+def _verified_combat_action_stream(rounds: list[dict[str, Any]]) -> bool:
+    """Prove that every raw protocol action between combat states is present."""
+
+    if not rounds:
+        return False
+    previous_end_step: int | None = None
+    for expected_round, round_info in enumerate(rounds, start=1):
+        if _observed_coordinate(round_info.get("round")) != expected_round:
+            return False
+        start_state = round_info.get("start_state")
+        end_state = round_info.get("end_state")
+        actions = round_info.get("actions")
+        if (
+            not isinstance(start_state, dict)
+            or not isinstance(end_state, dict)
+            or not isinstance(actions, list)
+            or not actions
+        ):
+            return False
+        start_step = _observed_coordinate(start_state.get("protocol_step"))
+        end_step = _observed_coordinate(end_state.get("protocol_step"))
+        action_steps = [
+            _observed_coordinate(action.get("step"))
+            if isinstance(action, dict)
+            else None
+            for action in actions
+        ]
+        if (
+            start_step is None
+            or end_step is None
+            or start_step < 0
+            or end_step < 0
+            or any(step is None or step < 0 for step in action_steps)
+            or action_steps[0] != start_step
+            or end_step != action_steps[-1] + 1
+            or (
+                previous_end_step is not None
+                and previous_end_step != start_step
+            )
+        ):
+            return False
+        if any(
+            current != previous + 1
+            for previous, current in zip(action_steps, action_steps[1:])
+        ):
+            return False
+        previous_end_step = end_step
+    return True
 
 
 def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None = None) -> dict[str, Any]:
@@ -803,9 +884,15 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
                 previous_action=prior_action,
                 previous_step=prior_step,
             )
-        _collect_combat(room, state, source_index)
+        _collect_combat(room, state, source_index, current_step)
         if state.get("decision") not in {"combat_play", "card_select"}:
-            _close_active_combat_round(room, state, source_index, "combat_end")
+            _close_active_combat_round(
+                room,
+                state,
+                source_index,
+                "combat_end",
+                current_step,
+            )
 
         player = state.get("player") or {}
         hp = _player_hp(state)

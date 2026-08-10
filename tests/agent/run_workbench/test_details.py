@@ -374,6 +374,8 @@ def test_build_node_detail_attaches_only_collected_facts_and_no_hypotheses() -> 
                     "potions": [potion],
                 },
                 "actions": [],
+                "combat_start_complete": True,
+                "combat_action_stream_complete": True,
                 "combat": {
                     "rounds": [
                         {
@@ -533,6 +535,48 @@ def test_terminal_node_uses_typed_max_floor_not_unordered_node_position() -> Non
     assert all(fact["kind"] != "death_with_potion" for fact in nonterminal.facts)
 
 
+def test_terminal_node_fails_closed_when_max_floor_has_multiple_candidates() -> None:
+    potion = [{"id": "POTION.FIRE", "name": "Fire Potion"}]
+    run = RunRecord(
+        run_id="ambiguous-terminal",
+        source_id="joined-source",
+        source_kind=SourceKind.SUMMARY,
+        outcome=RunOutcome(
+            status=RunStatus.DEAD,
+            victory=False,
+            max_global_floor=5,
+        ),
+        coverage=Coverage(True, 1, 5),
+        nodes=[
+            {
+                "id": "floor-5-a",
+                "act": 1,
+                "floor": 5,
+                "global_floor": 5,
+                "status": "dead",
+                "exit_player": {"hp": 0, "potions": potion},
+            },
+            {
+                "id": "floor-5-b",
+                "act": 1,
+                "floor": 5,
+                "global_floor": 5,
+                "status": "dead",
+                "exit_player": {"hp": 0, "potions": potion},
+            },
+        ],
+    )
+
+    details = [build_node_detail(run, node["id"]) for node in run.nodes]
+
+    assert all(detail.coverage["terminal_node"] is False for detail in details)
+    assert all(
+        fact["kind"] != "death_with_potion"
+        for detail in details
+        for fact in detail.facts
+    )
+
+
 def test_replay_card_reward_facts_require_selected_or_explicit_skip_action() -> None:
     records = [
         json.loads(line)
@@ -621,7 +665,7 @@ def test_replay_card_reward_facts_require_selected_or_explicit_skip_action() -> 
     assert selected.coverage["choices_complete"] is False
 
 
-def test_replay_missing_combat_start_boundary_never_claims_unused_potion() -> None:
+def test_replay_requires_complete_protocol_action_stream_for_unused_potion() -> None:
     records = [
         json.loads(line)
         for line in (FIXTURES / "replay_a2f4_excerpt.jsonl")
@@ -654,10 +698,59 @@ def test_replay_missing_combat_start_boundary_never_claims_unused_potion() -> No
         "start-run-with-gap.jsonl",
         [*records[:3], *records[5:]],
     )
+    missing_round_one_action = detail_for(
+        "missing-round-one-action.jsonl",
+        [
+            record
+            for record in records
+            if not (
+                record.get("type") == "action"
+                and record.get("step") == 2
+                and (record.get("data") or {}).get("action") == "play_card"
+            )
+        ],
+    )
+    missing_round_two_action = detail_for(
+        "missing-round-two-action.jsonl",
+        [
+            record
+            for record in records
+            if not (
+                record.get("type") == "action"
+                and record.get("step") == 4
+                and (record.get("data") or {}).get("action") == "play_card"
+            )
+        ],
+    )
+    potion_records = deepcopy(records)
+    potion_action = next(
+        record
+        for record in potion_records
+        if record.get("type") == "action"
+        and record.get("step") == 2
+        and (record.get("data") or {}).get("action") == "play_card"
+    )
+    potion_action["data"] = {
+        "action": "use_potion",
+        "args": {"potion_index": 0, "target_index": 0},
+    }
+    used_potion = detail_for("used-potion.jsonl", potion_records)
+    missing_potion_action = detail_for(
+        "missing-potion-action.jsonl",
+        [record for record in potion_records if record is not potion_action],
+    )
 
     assert full.coverage["combat_coverage_complete"] is True
     assert any(fact["kind"] == "unused_potion" for fact in full.facts)
-    for incomplete in (missing_prefix, start_run_with_gap):
+    assert used_potion.coverage["combat_coverage_complete"] is True
+    assert all(fact["kind"] != "unused_potion" for fact in used_potion.facts)
+    for incomplete in (
+        missing_prefix,
+        start_run_with_gap,
+        missing_round_one_action,
+        missing_round_two_action,
+        missing_potion_action,
+    ):
         assert incomplete.coverage.get("combat_coverage_complete") is not True
         assert all(fact["kind"] != "unused_potion" for fact in incomplete.facts)
 
