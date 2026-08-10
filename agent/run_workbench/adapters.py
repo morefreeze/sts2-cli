@@ -127,7 +127,10 @@ def adapt_records(
 def _adapt_native(path: Path, record: dict[str, Any]) -> RunRecord:
     players = record.get("players")
     player = players[0] if isinstance(players, list) and players and isinstance(players[0], dict) else {}
-    nodes = _adapt_native_history(record.get("map_point_history"))
+    nodes = _adapt_native_history(
+        record.get("map_point_history"),
+        source_id=str(path),
+    )
     if nodes:
         final_player = _native_final_player_evidence(player)
         if final_player:
@@ -226,7 +229,10 @@ def _adapt_replay(
             errors.append(f"{path.name}: replay parser failed: {error}")
 
     summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
-    nodes = _annotate_replay_nodes(_dict_list(parsed.get("rooms")))
+    nodes = _annotate_replay_nodes(
+        _dict_list(parsed.get("rooms")),
+        source_id=str(path),
+    )
     observed_floors = _observed_replay_floors(records)
     observed_floors.extend(_node_floors(nodes))
     has_parser_coverage = parser_succeeded and all(
@@ -766,7 +772,11 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     return [deepcopy(item) for item in value if isinstance(item, dict)]
 
 
-def _adapt_native_history(value: Any) -> list[dict[str, Any]]:
+def _adapt_native_history(
+    value: Any,
+    *,
+    source_id: str,
+) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
 
@@ -793,6 +803,7 @@ def _adapt_native_history(value: Any) -> list[dict[str, Any]]:
                     previous_node,
                     act_index=act_index,
                     node_index=node_index,
+                    source_id=source_id,
                 )
             )
             previous_node = node
@@ -848,9 +859,17 @@ def _annotate_native_node(
     *,
     act_index: int,
     node_index: int,
+    source_id: str,
 ) -> dict[str, Any]:
     enriched = deepcopy(node)
     enriched["id"] = f"a{act_index}:n{node_index}"
+    enriched["_workbench_evidence_kind"] = "route_node"
+    enriched["_workbench_provenance"] = [
+        {
+            "source_id": source_id,
+            "source_kind": SourceKind.NATIVE_RUN.value,
+        }
+    ]
     enriched["deltas"] = native_node_deltas(node, previous_node).to_dict()
     _sanitize_delta_measurements(enriched)
     return enriched
@@ -869,12 +888,23 @@ def _native_act_index(node: dict[str, Any]) -> int:
     return 0
 
 
-def _annotate_replay_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _annotate_replay_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    source_id: str,
+) -> list[dict[str, Any]]:
     annotated: list[dict[str, Any]] = []
     for node in nodes:
         start_snapshot = _replay_room_snapshot(node, phase="start")
         end_snapshot = _replay_room_snapshot(node, phase="end")
         enriched = deepcopy(node)
+        enriched["_workbench_evidence_kind"] = "route_node"
+        enriched["_workbench_provenance"] = [
+            {
+                "source_id": source_id,
+                "source_kind": SourceKind.REPLAY_JSONL.value,
+            }
+        ]
         enriched["deltas"] = derive_snapshot_deltas(
             end_snapshot or {}, start_snapshot
         ).to_dict()

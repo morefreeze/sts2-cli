@@ -345,13 +345,9 @@ class NodeDetail:
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", self.run_id if isinstance(self.run_id, str) else "")
         object.__setattr__(self, "node_id", self.node_id if isinstance(self.node_id, str) else "")
-        object.__setattr__(self, "act", _optional_contract_int(self.act))
-        object.__setattr__(self, "floor", _optional_contract_int(self.floor))
-        object.__setattr__(
-            self,
-            "global_floor",
-            _optional_contract_int(self.global_floor),
-        )
+        for name in ("act", "floor", "global_floor"):
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"NodeDetail {name} must be an integer")
         for name in ("label", "room_type", "status"):
             value = getattr(self, name)
             object.__setattr__(self, name, value if isinstance(value, str) else "unknown")

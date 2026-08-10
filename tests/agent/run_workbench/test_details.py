@@ -1,5 +1,6 @@
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,9 +9,11 @@ from agent.run_progress_viewer import parse_game_progress
 from agent.run_workbench.adapters import adapt_path, adapt_records
 from agent.run_workbench.details import (
     DETAIL_COLLECTION_LIMIT,
+    InvalidNodeDetailError,
     NodeNotFoundError,
     build_node_detail,
 )
+from agent.run_workbench.joiner import join_records
 from agent.run_workbench.models import (
     Capabilities,
     Coverage,
@@ -243,10 +246,8 @@ def test_native_details_preserve_encounter_choices_inventory_and_exact_deltas() 
     assert detail.combat_rounds == ()
     assert detail.coverage["turn_replay"] is False
     assert detail.coverage["message"] == "此记录不包含逐回合操作"
-    assert detail.facts == ({"kind": "observed", "value": "won"},)
-    assert detail.hypotheses == (
-        {"kind": "counterfactual", "value": "could lose hp"},
-    )
+    assert detail.facts == ()
+    assert detail.hypotheses == ()
 
 
 def test_replay_details_use_same_room_snapshots_and_canonical_rounds() -> None:
@@ -264,6 +265,9 @@ def test_replay_details_use_same_room_snapshots_and_canonical_rounds() -> None:
             "selected": True,
         },
     )
+    assert event.combat_rounds == ()
+    assert event.coverage["turn_replay"] is False
+    assert event.coverage["message"] == "此记录不包含逐回合操作"
     assert (detail.entry.hp, detail.exit.hp) == (70, 64)
     assert (detail.entry.gold, detail.exit.gold) == (120, 120)
     assert [choice["selected"] for choice in detail.choices] == [False, True]
@@ -320,6 +324,246 @@ def test_detail_coverage_reports_partial_recorded_floor_range() -> None:
     assert coverage["complete_run"] is False
     assert coverage["first_recorded_floor"] == 18
     assert coverage["last_recorded_floor"] == 21
+
+
+def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() -> None:
+    native = RunRecord(
+        run_id="joined-detail",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "native-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "map_point_type": "monster",
+                "player_stats": [{"current_hp": 77, "deck": [{"id": "NATIVE"}]}],
+            }
+        ],
+    )
+    replay = RunRecord(
+        run_id="joined-detail",
+        source_id="replay-source",
+        source_kind=SourceKind.REPLAY_JSONL,
+        capabilities=Capabilities(turn_replay=True),
+        nodes=[
+            {
+                "id": "A1F2:Monster:7",
+                "label": "A1F2",
+                "room_type": "Monster",
+                "start_player": {"hp": 20, "deck": [{"id": "REPLAY"}]},
+                "end_player": {"hp": 14, "deck": [{"id": "REPLAY"}]},
+                "combat": {
+                    "rounds": [
+                        {
+                            "round": 1,
+                            "start_state": {"hp": 20},
+                            "end_state": {"hp": 14},
+                            "actions": [],
+                            "hp_loss": 6,
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+    joined = join_records([replay, native])[0]
+
+    native_detail = build_node_detail(joined, "native-node")
+    replay_detail = build_node_detail(joined, "A1F2:Monster:7")
+
+    assert joined.source_kind is SourceKind.NATIVE_RUN
+    assert native_detail.exit.hp == 77
+    assert native_detail.combat_rounds == ()
+    assert replay_detail.entry.hp == 20
+    assert replay_detail.exit.hp == 14
+    assert len(replay_detail.combat_rounds) == 1
+    assert replay_detail.coverage["turn_replay"] is True
+
+
+def test_native_entry_does_not_cross_source_provenance_within_one_act() -> None:
+    first = RunRecord(
+        run_id="joined-native",
+        source_id="native-source-a",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "native-a",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "player_stats": [
+                    {"current_hp": 70, "deck": [{"id": "SOURCE_A"}]}
+                ],
+            }
+        ],
+    )
+    second = RunRecord(
+        run_id="joined-native",
+        source_id="native-source-b",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "native-b",
+                "act": 1,
+                "floor": 2,
+                "global_floor": 2,
+                "player_stats": [
+                    {"current_hp": 60, "deck": [{"id": "SOURCE_B"}]}
+                ],
+            }
+        ],
+    )
+    joined = join_records([first, second])[0]
+
+    detail = build_node_detail(joined, "native-b")
+
+    assert detail.entry.hp is None
+    assert detail.entry.deck == ()
+    assert detail.coverage["entry_inventory_fields"] == []
+
+
+def test_native_entry_does_not_borrow_the_previous_act_inventory() -> None:
+    run = RunRecord(
+        run_id="act-boundary",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[
+            {
+                "id": "a0:n16",
+                "act": 1,
+                "floor": 17,
+                "global_floor": 17,
+                "player_stats": [
+                    {"current_hp": 51, "deck": [{"id": "ACT_ONE"}]}
+                ],
+            },
+            {
+                "id": "a1:n0",
+                "act": 2,
+                "floor": 1,
+                "global_floor": 18,
+                "player_stats": [
+                    {"current_hp": 45, "deck": [{"id": "ACT_TWO"}]}
+                ],
+            },
+        ],
+    )
+
+    detail = build_node_detail(run, "a1:n0")
+
+    assert detail.entry.hp is None
+    assert detail.entry.deck == ()
+    assert detail.coverage["entry_inventory_fields"] == []
+    assert detail.exit.hp == 45
+    assert detail.exit.deck == ({"id": "ACT_TWO"},)
+
+
+def test_floor_coordinates_derive_from_a_canonical_replay_node_id_as_ints() -> None:
+    run = RunRecord(
+        run_id="coordinate-derivation",
+        source_id="opaque-source",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{"id": "A2F4:Monster:3", "room_type": "Monster"}],
+    )
+
+    detail = build_node_detail(run, "A2F4:Monster:3")
+
+    assert (detail.act, detail.floor, detail.global_floor) == (2, 4, 21)
+    assert all(
+        isinstance(value, int)
+        for value in (detail.act, detail.floor, detail.global_floor)
+    )
+
+
+def test_floor_coordinates_complete_explicit_act_from_a_native_node_id() -> None:
+    run = RunRecord(
+        run_id="native-coordinate-derivation",
+        source_id="native-source",
+        source_kind=SourceKind.NATIVE_RUN,
+        nodes=[{"id": "a1:n2", "act": 2, "map_point_type": "monster"}],
+    )
+
+    detail = build_node_detail(run, "a1:n2")
+
+    assert (detail.act, detail.floor, detail.global_floor) == (2, 3, 20)
+    assert all(
+        isinstance(value, int)
+        for value in (detail.act, detail.floor, detail.global_floor)
+    )
+
+
+def test_missing_floor_coordinates_raise_a_stable_path_free_error() -> None:
+    run = RunRecord(
+        run_id="safe-coordinate-run",
+        source_id="/private/secret/source.run",
+        source_kind=SourceKind.SUMMARY,
+        nodes=[{"id": "opaque-node", "room_type": "Unknown"}],
+    )
+
+    with pytest.raises(
+        InvalidNodeDetailError,
+        match=(
+            "^node 'opaque-node' in run 'safe-coordinate-run' "
+            "has invalid floor coordinates$"
+        ),
+    ) as caught:
+        build_node_detail(run, "opaque-node")
+
+    assert caught.value.run_id == "safe-coordinate-run"
+    assert caught.value.node_id == "opaque-node"
+    assert "/private/secret" not in str(caught.value)
+
+
+def test_node_detail_contract_rejects_non_integer_coordinates() -> None:
+    detail = build_node_detail(_rich_native_run(), "a0:n0")
+
+    with pytest.raises(ValueError, match="^NodeDetail act must be an integer$"):
+        replace(detail, act=None)  # type: ignore[arg-type]
+
+
+def test_invalid_nonempty_inventory_lists_are_unknown_not_known_empty() -> None:
+    run = RunRecord(
+        run_id="invalid-inventory",
+        source_id="replay-source",
+        source_kind=SourceKind.REPLAY_JSONL,
+        capabilities=Capabilities(turn_replay=True),
+        nodes=[
+            {
+                "id": "invalid-inventory-node",
+                "act": 1,
+                "floor": 1,
+                "global_floor": 1,
+                "start_player": {
+                    "hp": 20,
+                    "deck": [123],
+                    "relic_items": [None],
+                    "potion_items": [{"id": "VALID"}, False],
+                },
+                "end_player": {
+                    "hp": 20,
+                    "deck": [],
+                    "relic_items": [],
+                    "potion_items": [],
+                },
+                "combat": {"rounds": []},
+            }
+        ],
+    )
+
+    detail = build_node_detail(run, "invalid-inventory-node")
+
+    assert detail.entry.deck == ()
+    assert detail.entry.relics == ()
+    assert detail.entry.potions == ()
+    assert detail.coverage["entry_inventory_fields"] == ["hp"]
+    assert detail.coverage["exit_inventory_fields"] == [
+        "hp",
+        "deck",
+        "relics",
+        "potions",
+    ]
 
 
 def test_detail_is_a_deep_immutable_snapshot_with_stable_json_field_order() -> None:

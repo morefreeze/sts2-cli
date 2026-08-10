@@ -261,6 +261,13 @@ def test_native_final_node_retains_bounded_final_inventory_evidence() -> None:
 
     node = adapted.runs[0].nodes[0]
 
+    assert node["_workbench_evidence_kind"] == "route_node"
+    assert node["_workbench_provenance"] == [
+        {
+            "source_id": "opaque-native-source",
+            "source_kind": "native_run",
+        }
+    ]
     assert node["final_player"] == {
         "current_hp": 63,
         "max_hp": 80,
@@ -278,6 +285,15 @@ def test_replay_nodes_retain_only_their_own_detail_evidence() -> None:
     ).runs[0]
     event, combat = run.nodes
 
+    assert all(
+        node["_workbench_evidence_kind"] == "route_node"
+        for node in (event, combat)
+    )
+    assert all(
+        node["_workbench_provenance"]
+        and node["_workbench_provenance"][0]["source_kind"] == "replay_jsonl"
+        for node in (event, combat)
+    )
     assert event["start_player"]["hp"] == 80
     assert event["end_player"]["hp"] == 80
     assert event["options"][0]["selected"] is True

@@ -22,7 +22,18 @@ from .models import (
 # single floor must not smuggle an unbounded raw replay into a detail response.
 DETAIL_COLLECTION_LIMIT = 256
 _LABEL_PATTERN = re.compile(r"^A(?P<act>\d+)F(?P<floor>\d+)$", re.IGNORECASE)
-_NATIVE_ID_PATTERN = re.compile(r"^a(?P<act_index>\d+):n\d+$")
+_REPLAY_ID_PATTERN = re.compile(
+    r"^A(?P<act>\d+)F(?P<floor>\d+)(?::|$)",
+    re.IGNORECASE,
+)
+_NATIVE_ID_PATTERN = re.compile(
+    r"^a(?P<act_index>\d+):n(?P<node_index>\d+)$"
+)
+_EVIDENCE_SOURCE_KINDS = {
+    "native_run_node": SourceKind.NATIVE_RUN,
+    "replay_room": SourceKind.REPLAY_JSONL,
+    "deck_history_event": SourceKind.DECK_HISTORY,
+}
 
 
 class NodeNotFoundError(LookupError):
@@ -32,6 +43,17 @@ class NodeNotFoundError(LookupError):
         self.run_id = run_id
         self.node_id = node_id
         super().__init__(f"node '{node_id}' not found in run '{run_id}'")
+
+
+class InvalidNodeDetailError(ValueError):
+    """Raised when a canonical node has no complete floor coordinates."""
+
+    def __init__(self, run_id: str, node_id: str) -> None:
+        self.run_id = run_id
+        self.node_id = node_id
+        super().__init__(
+            f"node '{node_id}' in run '{run_id}' has invalid floor coordinates"
+        )
 
 
 def build_node_detail(record: RunRecord, node_id: str) -> NodeDetail:
@@ -47,16 +69,20 @@ def build_node_detail(record: RunRecord, node_id: str) -> NodeDetail:
     )
     if node is None:
         raise NodeNotFoundError(record.run_id, node_id)
-    if record.source_kind is SourceKind.NATIVE_RUN:
+    node_source_kind = _node_source_kind(record, node)
+    if node_source_kind is SourceKind.NATIVE_RUN:
         return native_node_detail(record, node)
-    if record.capabilities.turn_replay:
+    if (
+        node_source_kind is SourceKind.REPLAY_JSONL
+        and record.capabilities.turn_replay
+    ):
         return replay_node_detail(record, node)
     return basic_node_detail(record, node)
 
 
 def native_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
     index = _node_index(record, node)
-    previous = record.nodes[index - 1] if index > 0 else None
+    previous = _native_previous_node(record, node, index)
     entry_sources: list[dict[str, Any]] = []
     explicit_entry = node.get("entry_player")
     if isinstance(explicit_entry, dict):
@@ -102,6 +128,7 @@ def replay_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
         [node["end_player"]] if isinstance(node.get("end_player"), dict) else []
     )
     combat = node.get("combat") if isinstance(node.get("combat"), dict) else {}
+    combat_rounds = _dict_items(combat.get("rounds"))
     return _detail(
         record,
         node,
@@ -112,8 +139,8 @@ def replay_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
         exit_known=exit_known,
         choices=_dict_items(node.get("options"), node.get("choices")),
         actions=_dict_items(node.get("actions")),
-        combat_rounds=_dict_items(combat.get("rounds")),
-        turn_replay=True,
+        combat_rounds=combat_rounds,
+        turn_replay=bool(combat_rounds),
     )
 
 
@@ -160,6 +187,8 @@ def _detail(
     turn_replay: bool,
 ) -> NodeDetail:
     act, floor, global_floor, label = _coordinates(node)
+    if act is None or floor is None or global_floor is None:
+        raise InvalidNodeDetailError(record.run_id, str(node.get("id")))
     coverage: dict[str, Any] = {
         "complete_run": record.coverage.complete_run,
         "first_recorded_floor": record.coverage.first_recorded_floor,
@@ -173,9 +202,9 @@ def _detail(
     return NodeDetail(
         run_id=record.run_id,
         node_id=str(node.get("id")),
-        act=act,  # type: ignore[arg-type] -- None is the honest unknown value.
-        floor=floor,  # type: ignore[arg-type]
-        global_floor=global_floor,  # type: ignore[arg-type]
+        act=act,
+        floor=floor,
+        global_floor=global_floor,
         label=label,
         room_type=_room_type(node),
         status=_text(node.get("status")) or "unknown",
@@ -187,8 +216,8 @@ def _detail(
         actions=actions,
         combat_rounds=combat_rounds,
         coverage=coverage,
-        facts=_dict_items(node.get("facts")),
-        hypotheses=_dict_items(node.get("hypotheses")),
+        facts=(),
+        hypotheses=(),
     )
 
 
@@ -201,6 +230,68 @@ def _node_index(record: RunRecord, selected: dict[str, Any]) -> int:
         if isinstance(node, dict) and node.get("id") == selected_id:
             return index
     return 0
+
+
+def _node_source_kind(
+    record: RunRecord, node: dict[str, Any]
+) -> SourceKind:
+    marker = node.get("_workbench_evidence_kind")
+    if isinstance(marker, str) and marker in _EVIDENCE_SOURCE_KINDS:
+        return _EVIDENCE_SOURCE_KINDS[marker]
+    provenance = node.get("_workbench_provenance")
+    source_kinds: set[SourceKind] = set()
+    if isinstance(provenance, list):
+        for item in provenance:
+            if not isinstance(item, dict):
+                continue
+            try:
+                source_kinds.add(SourceKind(item.get("source_kind")))
+            except (TypeError, ValueError):
+                continue
+    if len(source_kinds) == 1:
+        return next(iter(source_kinds))
+    return record.source_kind
+
+
+def _node_provenance_identity(
+    record: RunRecord, node: dict[str, Any]
+) -> tuple[tuple[str, str], ...]:
+    provenance = node.get("_workbench_provenance")
+    identities: set[tuple[str, str]] = set()
+    if isinstance(provenance, list):
+        for item in provenance:
+            if not isinstance(item, dict):
+                continue
+            source_id = item.get("source_id")
+            source_kind = item.get("source_kind")
+            if isinstance(source_id, str) and isinstance(source_kind, str):
+                identities.add((source_kind, source_id))
+    if identities:
+        return tuple(sorted(identities))
+    return ((record.source_kind.value, record.source_id),)
+
+
+def _native_previous_node(
+    record: RunRecord,
+    node: dict[str, Any],
+    index: int,
+) -> dict[str, Any] | None:
+    if index <= 0:
+        return None
+    previous = record.nodes[index - 1]
+    if not isinstance(previous, dict):
+        return None
+    if _node_source_kind(record, previous) is not SourceKind.NATIVE_RUN:
+        return None
+    if _node_provenance_identity(record, previous) != _node_provenance_identity(
+        record, node
+    ):
+        return None
+    current_act = _coordinate_parts(node)[0]
+    previous_act = _coordinate_parts(previous)[0]
+    if current_act is None or current_act != previous_act:
+        return None
+    return previous
 
 
 def _native_player_stats(node: Any) -> dict[str, Any]:
@@ -268,8 +359,11 @@ def _first_inventory_list(
 ) -> object:
     for source in candidates:
         for key in keys:
-            if key in source and isinstance(source[key], list):
-                return source[key]
+            if key not in source or not isinstance(source[key], list):
+                continue
+            value = source[key]
+            if all(isinstance(item, (dict, str)) for item in value):
+                return value
     return _MISSING
 
 
@@ -412,6 +506,22 @@ def _contains_invalid_number(value: Any) -> bool:
 def _coordinates(
     node: dict[str, Any],
 ) -> tuple[int | None, int | None, int | None, str]:
+    act, floor, global_floor, label = _coordinate_parts(node)
+    if (
+        act is None
+        or floor is None
+        or global_floor is None
+        or act < 1
+        or floor < 1
+        or global_floor < 1
+    ):
+        return None, None, None, label or "unknown"
+    return act, floor, global_floor, label or f"A{act}F{floor}"
+
+
+def _coordinate_parts(
+    node: dict[str, Any],
+) -> tuple[int | None, int | None, int | None, str | None]:
     act = _int(node.get("act"))
     floor = _int(node.get("floor"))
     global_floor = _int(node.get("global_floor"))
@@ -420,15 +530,27 @@ def _coordinates(
     if label_match is not None:
         act = act if act is not None else int(label_match.group("act"))
         floor = floor if floor is not None else int(label_match.group("floor"))
+    node_id = _text(node.get("id")) or ""
+    replay_match = _REPLAY_ID_PATTERN.match(node_id)
+    if replay_match is not None:
+        act = act if act is not None else int(replay_match.group("act"))
+        floor = floor if floor is not None else int(replay_match.group("floor"))
+    native_match = _NATIVE_ID_PATTERN.fullmatch(node_id)
+    if native_match is not None:
+        act = (
+            act
+            if act is not None
+            else int(native_match.group("act_index")) + 1
+        )
+        floor = (
+            floor
+            if floor is not None
+            else int(native_match.group("node_index")) + 1
+        )
     if act is None:
         act_index = _int(node.get("act_index"))
         if act_index is not None and act_index >= 0:
             act = act_index + 1
-        else:
-            node_id = _text(node.get("id")) or ""
-            match = _NATIVE_ID_PATTERN.fullmatch(node_id)
-            if match is not None:
-                act = int(match.group("act_index")) + 1
     if global_floor is not None and global_floor > 0:
         if act is None:
             act = (global_floor - 1) // 17 + 1
@@ -438,7 +560,7 @@ def _coordinates(
         global_floor = (act - 1) * 17 + floor
     if label is None and act is not None and floor is not None:
         label = f"A{act}F{floor}"
-    return act, floor, global_floor, label or "unknown"
+    return act, floor, global_floor, label
 
 
 def _room_type(node: dict[str, Any]) -> str:
@@ -499,6 +621,7 @@ def _clean_value(value: Any, *, depth: int = 0) -> Any:
 
 __all__ = [
     "DETAIL_COLLECTION_LIMIT",
+    "InvalidNodeDetailError",
     "NodeNotFoundError",
     "basic_node_detail",
     "build_node_detail",
