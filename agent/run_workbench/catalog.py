@@ -103,6 +103,38 @@ class _IndexedSource:
 
 
 @dataclass(slots=True)
+class _GameVersionSourceEvidence:
+    value: str | None = None
+    blocked: bool = False
+
+    def observe(self, candidate: object) -> None:
+        if candidate is None:
+            return
+        if type(candidate) is not str:
+            self.blocked = True
+            return
+        normalized = candidate.strip()
+        if not normalized:
+            return
+        try:
+            normalized.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            self.blocked = True
+            return
+        if self.value is None:
+            self.value = normalized
+        elif self.value != normalized:
+            self.blocked = True
+
+    def merge(self, other: "_GameVersionSourceEvidence") -> None:
+        self.blocked = self.blocked or other.blocked
+        self.observe(other.value)
+
+    def resolved(self) -> str | None:
+        return None if self.blocked else self.value
+
+
+@dataclass(slots=True)
 class _CompactRun:
     """One outcome and scalar metadata, never per-room/card evidence."""
 
@@ -736,6 +768,17 @@ class RunCatalog:
                 compact_records.extend(source.deck_outcomes)
             else:
                 records.extend(self._public_records(source, self._adapt(source)))
+        version_source_evidence_by_run_id: dict[
+            str, _GameVersionSourceEvidence
+        ] = {}
+        for candidates in (records, compact_records):
+            for record in candidates:
+                if not record.run_id:
+                    continue
+                evidence = version_source_evidence_by_run_id.setdefault(
+                    record.run_id, _GameVersionSourceEvidence()
+                )
+                evidence.observe(_item_metadata(record).game_version_source)
         joined = join_records(records)
         merged = _merge_compact_records(joined, compact_records)
         eligible: list[_CohortItem] = [
@@ -799,35 +842,23 @@ class RunCatalog:
                 and not checkpoint_or_source.startswith("source:")
                 else None
             )
-            game_version_sources: set[str] = set()
-            invalid_game_version_source = False
+            version_source_evidence = _GameVersionSourceEvidence()
             for record in ordered:
-                source = _item_metadata(record).game_version_source
-                if source is None:
-                    continue
-                if type(source) is not str:
-                    invalid_game_version_source = True
-                    continue
-                source = source.strip()
-                if not source:
-                    continue
-                try:
-                    source.encode("utf-8", errors="strict")
-                except UnicodeEncodeError:
-                    invalid_game_version_source = True
-                    continue
-                game_version_sources.add(source)
-            game_version_source = (
-                next(iter(game_version_sources))
-                if not invalid_game_version_source
-                and len(game_version_sources) == 1
-                else None
-            )
+                if record.run_id:
+                    evidence = version_source_evidence_by_run_id.get(
+                        record.run_id
+                    )
+                    if evidence is not None:
+                        version_source_evidence.merge(evidence)
+                        continue
+                version_source_evidence.observe(
+                    _item_metadata(record).game_version_source
+                )
             filters = {
                 "checkpoint": checkpoint,
                 "character": character,
                 "game_version": version,
-                "game_version_source": game_version_source,
+                "game_version_source": version_source_evidence.resolved(),
                 "evaluation_mode": mode,
                 "scenario": scenario,
                 "ascension": ascension,

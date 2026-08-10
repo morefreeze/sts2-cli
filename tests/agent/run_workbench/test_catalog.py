@@ -26,6 +26,48 @@ def _write_jsonl(path: Path, records: list[dict]) -> Path:
     return path
 
 
+def _write_duplicate_version_source_eval_files(
+    root: Path, *, record_count: int
+) -> None:
+    paths = [root / "first.jsonl", root / "second.jsonl"]
+    for path in paths:
+        _write_jsonl(path, [{"event": "eval_result"}])
+    probe = RunCatalog([root], replay_parser=_replay_parser)
+    by_name = {
+        source["display_name"]: source["source_id"]
+        for source in probe.list_sources()
+    }
+    lower, higher = sorted(paths, key=lambda path: by_name[path.name])
+
+    def rows(source: str, prefix: str) -> list[dict]:
+        shared = {
+            "event": "eval_result",
+            "run_id": "shared",
+            "status": "dead",
+            "max_global_floor": 8,
+            "character": "Ironclad",
+            "game_version": "v1",
+            "game_version_source": source,
+            "checkpoint": "same",
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+            "ascension": 0,
+            "seed": "a",
+        }
+        fillers = [
+            {
+                "event": "eval_result",
+                "run_id": f"{prefix}-{index}",
+                "status": "in_progress",
+            }
+            for index in range(record_count - 1)
+        ]
+        return [shared, *fillers]
+
+    _write_jsonl(lower, rows("cli", "lower"))
+    _write_jsonl(higher, rows(json.loads('"\\ud800"'), "higher"))
+
+
 def _native(run_id: str = "native-1") -> dict:
     return {
         "run_id": run_id,
@@ -630,6 +672,30 @@ def test_game_version_source_filter_requires_one_utf8_safe_canonical_value(
     cohort = RunCatalog([tmp_path], replay_parser=_replay_parser).list_cohorts()[0]
 
     assert cohort["filters"]["game_version_source"] == expected
+
+
+@pytest.mark.parametrize("record_count", [511, 513])
+def test_duplicate_run_version_source_evidence_survives_join_and_compact_paths(
+    tmp_path: Path, record_count: int
+) -> None:
+    _write_duplicate_version_source_eval_files(
+        tmp_path, record_count=record_count
+    )
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    first = catalog.list_cohorts()
+    second = catalog.list_cohorts()
+
+    assert first == second
+    assert len(first) == 1
+    assert first[0]["filters"]["game_version_source"] is None
+    records = catalog.get_cohort_records(first[0]["cohort_id"])
+    assert len(records) == 1
+    assert records[0].metadata.game_version_source == "cli"
+    assert any(
+        "conflicting metadata game_version_source" in warning
+        for warning in records[0].warnings
+    )
 
 
 def test_ascension_levels_form_distinct_stable_catalog_cohorts(tmp_path: Path):

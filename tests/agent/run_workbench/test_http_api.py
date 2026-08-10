@@ -20,7 +20,13 @@ from agent.run_workbench.map_service import (
     MapServiceTimeoutError,
 )
 
-from .test_catalog import _native, _replay, _replay_parser, _write_jsonl
+from .test_catalog import (
+    _native,
+    _replay,
+    _replay_parser,
+    _write_duplicate_version_source_eval_files,
+    _write_jsonl,
+)
 
 
 @contextmanager
@@ -213,6 +219,18 @@ def test_cohorts_http_omits_unencodable_game_version_source(
             }
         ],
     )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(base, "/api/cohorts")
+
+    assert status == 200
+    assert payload["cohorts"][0]["filters"]["game_version_source"] is None
+
+
+def test_cohorts_http_uses_all_duplicate_run_version_source_evidence(
+    tmp_path: Path,
+) -> None:
+    _write_duplicate_version_source_eval_files(tmp_path, record_count=1)
 
     with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
         status, payload = _request(base, "/api/cohorts")
