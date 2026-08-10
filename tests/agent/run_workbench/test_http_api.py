@@ -147,6 +147,50 @@ def test_catalog_source_run_cohort_and_metrics_http_contracts(tmp_path: Path):
         assert metrics_payload["comparison"] is None
 
 
+def test_cohort_http_contract_provides_a_strictly_compatible_baseline(
+    tmp_path: Path,
+) -> None:
+    records = []
+    for checkpoint, timestamp in (("current", 40), ("baseline", 20)):
+        for seed in ("a", "b"):
+            records.append(
+                {
+                    "event": "eval_result",
+                    "run_id": f"{checkpoint}-{seed}",
+                    "status": "dead",
+                    "max_global_floor": 8,
+                    "character": "Ironclad",
+                    "game_version": "v1",
+                    "game_version_source": "cli",
+                    "checkpoint": checkpoint,
+                    "evaluation_mode": "fixed",
+                    "scenario": "full_run",
+                    "ascension": 0,
+                    "seed": seed,
+                    "ts": timestamp,
+                }
+            )
+    _write_jsonl(tmp_path / "eval.jsonl", records)
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, cohorts_payload = _request(base, "/api/cohorts")
+        assert status == 200
+        current = cohorts_payload["cohorts"][0]
+        baseline_id = current["default_baseline_cohort_id"]
+        assert current["filters"]["checkpoint"] == "current"
+        assert current["comparison_readiness"]["ready"] is True
+        assert isinstance(baseline_id, str)
+
+        status, metrics_payload = _request(
+            base,
+            f"/api/metrics?current={current['cohort_id']}&baseline={baseline_id}",
+        )
+
+    assert status == 200
+    assert metrics_payload["comparison"]["comparable"] is True
+    assert metrics_payload["comparison"]["paired"] is True
+
+
 def test_supported_native_run_map_returns_full_graph_route_art_and_visited_deltas(
     tmp_path: Path,
 ) -> None:

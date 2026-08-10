@@ -505,6 +505,89 @@ def test_cohorts_keep_metadata_axes_separate_and_feed_metrics(tmp_path: Path):
     assert compared["comparison"]["comparable"] is False
 
 
+def test_cohorts_describe_readiness_and_select_only_strict_baselines(
+    tmp_path: Path,
+) -> None:
+    records = []
+    for checkpoint, game_version, seeds, timestamp in (
+        ("current", "v1", ("a", "b"), 40),
+        ("compatible-old", "v1", ("a", "b"), 20),
+        ("wrong-version", "v2", ("a", "b"), 30),
+        ("missing-seed", "v1", ("a", None), 35),
+    ):
+        for index, seed in enumerate(seeds):
+            records.append(
+                {
+                    "event": "eval_result",
+                    "run_id": f"{checkpoint}-{index}",
+                    "status": "dead",
+                    "max_global_floor": 8,
+                    "character": "Ironclad",
+                    "game_version": game_version,
+                    "game_version_source": "cli",
+                    "checkpoint": checkpoint,
+                    "evaluation_mode": "fixed",
+                    "scenario": "full_run",
+                    "ascension": 0,
+                    "seed": seed,
+                    "ts": timestamp,
+                }
+            )
+    _write_jsonl(tmp_path / "eval.jsonl", records)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    cohorts = {
+        cohort["filters"]["checkpoint"]: cohort
+        for cohort in catalog.list_cohorts()
+    }
+    current = cohorts["current"]
+    compatible = cohorts["compatible-old"]
+    wrong_version = cohorts["wrong-version"]
+    missing_seed = cohorts["missing-seed"]
+
+    assert current["latest_at"] == 40.0
+    assert current["filters"]["game_version_source"] == "cli"
+    assert current["comparison_readiness"]["ready"] is True
+    assert current["default_baseline_cohort_id"] == compatible["cohort_id"]
+    assert compatible["comparison_readiness"]["ready"] is True
+    assert compatible["default_baseline_cohort_id"] == current["cohort_id"]
+    assert wrong_version["comparison_readiness"]["ready"] is True
+    assert wrong_version["default_baseline_cohort_id"] is None
+    assert missing_seed["comparison_readiness"]["ready"] is False
+    assert missing_seed["comparison_readiness"]["seed_complete"] is False
+    assert "seed" in missing_seed["comparison_readiness"]["missing_axes"]
+    assert missing_seed["default_baseline_cohort_id"] is None
+
+
+def test_game_version_source_is_display_only_and_never_splits_a_cohort(
+    tmp_path: Path,
+) -> None:
+    records = [
+        {
+            "event": "eval_result",
+            "run_id": source,
+            "status": "dead",
+            "max_global_floor": 8,
+            "character": "Ironclad",
+            "game_version": "v1",
+            "game_version_source": source,
+            "checkpoint": "same",
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+            "ascension": 0,
+            "seed": source,
+        }
+        for source in ("cli", "environment")
+    ]
+    _write_jsonl(tmp_path / "eval.jsonl", records)
+
+    cohorts = RunCatalog([tmp_path], replay_parser=_replay_parser).list_cohorts()
+
+    assert len(cohorts) == 1
+    assert cohorts[0]["run_count"] == 2
+    assert cohorts[0]["filters"]["game_version_source"] is None
+
+
 def test_ascension_levels_form_distinct_stable_catalog_cohorts(tmp_path: Path):
     records = [
         {
@@ -1473,7 +1556,7 @@ def test_start_run_metadata_matches_for_511_and_513_record_replays(
     for key, value in expected_metadata.items():
         assert exact["metadata"][key] == value
     assert exact["metadata"]["modifiers"] == ["TEST_MODIFIER"]
-    assert "game_version_source" not in large_cohort["filters"]
+    assert large_cohort["filters"]["game_version_source"] == "environment"
     assert len(exact["nodes"]) == 1
 
 

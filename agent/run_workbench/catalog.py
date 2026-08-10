@@ -15,7 +15,11 @@ from typing import Any, Callable, Iterable
 
 from .adapters import AdaptedSource, adapt_records
 from .joiner import join_records
-from .metrics import compare_cohorts, summarize_cohort
+from .metrics import (
+    compare_cohorts,
+    describe_comparison_readiness,
+    summarize_cohort,
+)
 from .models import (
     Capabilities,
     Coverage,
@@ -795,14 +799,28 @@ class RunCatalog:
                 and not checkpoint_or_source.startswith("source:")
                 else None
             )
+            game_version_sources: set[str] = set()
+            for record in ordered:
+                source = _item_metadata(record).game_version_source
+                if type(source) is str and source:
+                    game_version_sources.add(source)
+            game_version_source = (
+                next(iter(game_version_sources))
+                if len(game_version_sources) == 1
+                else None
+            )
             filters = {
                 "checkpoint": checkpoint,
                 "character": character,
                 "game_version": version,
+                "game_version_source": game_version_source,
                 "evaluation_mode": mode,
                 "scenario": scenario,
                 "ascension": ascension,
             }
+            readiness = describe_comparison_readiness(
+                self._iter_cohort_records(ordered)
+            )
             label_parts = [
                 checkpoint or checkpoint_or_source,
                 character,
@@ -818,6 +836,8 @@ class RunCatalog:
                     "cohort_id": cohort_id,
                     "label": " · ".join(str(value) for value in label_parts if value),
                     "filters": filters,
+                    "comparison_readiness": readiness.to_dict(),
+                    "default_baseline_cohort_id": None,
                     "run_count": len(ordered),
                     "run_id_count": len(run_ids),
                     "run_ids": run_ids if run_ids_complete else [],
@@ -832,8 +852,7 @@ class RunCatalog:
                     ),
                 }
             )
-        self._cohort_records = cohort_records
-        self._cohort_descriptors = sorted(
+        sorted_descriptors = sorted(
             descriptors,
             key=lambda item: (
                 item["latest_at"] is None,
@@ -842,6 +861,26 @@ class RunCatalog:
                 item["cohort_id"],
             ),
         )
+        compatible_groups: dict[str, list[dict[str, Any]]] = {}
+        for descriptor in sorted_descriptors:
+            signature = descriptor["comparison_readiness"][
+                "comparison_signature"
+            ]
+            if signature is not None:
+                compatible_groups.setdefault(signature, []).append(descriptor)
+        for group in compatible_groups.values():
+            for descriptor in group:
+                descriptor["default_baseline_cohort_id"] = next(
+                    (
+                        candidate["cohort_id"]
+                        for candidate in group
+                        if candidate["cohort_id"] != descriptor["cohort_id"]
+                    ),
+                    None,
+                )
+
+        self._cohort_records = cohort_records
+        self._cohort_descriptors = sorted_descriptors
         self._cohort_cache_key = cache_key
         return deepcopy(self._cohort_descriptors)
 
