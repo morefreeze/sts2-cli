@@ -1399,10 +1399,11 @@ class CombatEnv(gym.Env):
             os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
             with open(self._deck_history_path, "a", encoding="utf-8") as f:
                 f.write(payload)
+                f.flush()
+                self._run_start_emitted = True
         except Exception as exc:
             self._report_run_logging_error("run start logging failed", exc)
             return
-        self._run_start_emitted = True
 
     def _emit_run_outcome(self, state: dict, victory: bool,
                           status: str | None = None):

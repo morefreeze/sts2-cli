@@ -181,6 +181,96 @@ def test_failed_run_start_is_retried_with_terminal_outcome(monkeypatch, tmp_path
         assert {key: row[key] for key in _expected_run_metadata()} == _expected_run_metadata()
 
 
+def test_run_start_close_failure_after_flush_does_not_duplicate_start(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    real_open = open
+    wrapped = False
+    flush_calls = 0
+
+    class CloseFailingFile:
+        def __init__(self, file_obj):
+            self._file = file_obj
+
+        def __enter__(self):
+            self._file.__enter__()
+            return self
+
+        def write(self, payload):
+            return self._file.write(payload)
+
+        def flush(self):
+            nonlocal flush_calls
+            flush_calls += 1
+            return self._file.flush()
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._file.__exit__(exc_type, exc_value, traceback)
+            raise OSError("close failed after flush")
+
+    def close_failing_open(path, *args, **kwargs):
+        nonlocal wrapped
+        file_obj = real_open(path, *args, **kwargs)
+        if path == str(history_path) and not wrapped:
+            wrapped = True
+            return CloseFailingFile(file_obj)
+        return file_obj
+
+    monkeypatch.setattr(combat_env, "open", close_failing_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="close failed after flush"):
+        env._emit_run_start()
+
+    assert flush_calls == 1
+    assert env._run_start_emitted is True
+
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    assert [row["event"] for row in _read_history_rows(history_path)] == [
+        "run_start",
+        "outcome",
+    ]
+
+
+def test_run_start_flush_failure_remains_retryable(monkeypatch, tmp_path):
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    real_open = open
+    wrapped = False
+
+    class FlushFailingFile:
+        def __enter__(self):
+            return self
+
+        def write(self, payload):
+            return len(payload)
+
+        def flush(self):
+            raise OSError("flush unavailable")
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def flush_failing_open(path, *args, **kwargs):
+        nonlocal wrapped
+        if path == str(history_path) and not wrapped:
+            wrapped = True
+            return FlushFailingFile()
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(combat_env, "open", flush_failing_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="flush unavailable"):
+        env._emit_run_start()
+
+    assert env._run_start_emitted is False
+
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    assert [row["event"] for row in _read_history_rows(history_path)] == [
+        "run_start",
+        "outcome",
+    ]
+
+
 def test_run_outcome_retains_identity_and_is_idempotent(monkeypatch, tmp_path):
     env, history_path = _recording_env(monkeypatch, tmp_path)
     env._run_milestone_records = [{"event": "milestone", "floor": 7}]
