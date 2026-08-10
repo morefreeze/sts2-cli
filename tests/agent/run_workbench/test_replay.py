@@ -264,6 +264,24 @@ def test_parse_game_progress_extracts_a2f4_metadata_and_coverage():
     assert combat["rounds"][1]["end_reason"] == "combat_end"
 
 
+def test_parse_game_progress_marks_only_verified_combat_start_boundaries():
+    entries = _read_fixture("replay_a2f4_excerpt.jsonl")
+
+    full = parse_game_progress(entries)["rooms"][-1]
+    missing_prefix = parse_game_progress(entries[5:])["rooms"][0]
+    start_run_with_gap = parse_game_progress(
+        [*entries[:3], *entries[5:]]
+    )["rooms"][-1]
+    missing_first_state = parse_game_progress(
+        [*entries[:3], *entries[4:]]
+    )["rooms"][-1]
+
+    assert full["combat_start_complete"] is True
+    assert missing_prefix["combat_start_complete"] is False
+    assert start_run_with_gap["combat_start_complete"] is False
+    assert missing_first_state["combat_start_complete"] is False
+
+
 def test_parse_game_progress_uses_optional_state_context_metadata():
     entry = _state(1, "combat_play", 2, 4, "Monster", 64, round=1)
     entry["data"]["context"].update(

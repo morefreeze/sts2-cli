@@ -422,22 +422,22 @@ def test_build_node_detail_attaches_only_collected_facts_and_no_hypotheses() -> 
     assert {fact["kind"] for fact in detail.facts} == {
         "large_node_hp_loss",
         "high_loss_round",
-        "unused_potion",
     }
     assert all(fact["statement"] != "forged raw fact" for fact in detail.facts)
     assert detail.hypotheses == ()
-    assert detail.coverage["combat_coverage_complete"] is True
+    assert "combat_coverage_complete" not in detail.coverage
     json.dumps(detail.to_dict(), ensure_ascii=False, allow_nan=False)
 
-    malformed_run = deepcopy(run)
-    malformed_action = deepcopy(
-        malformed_run.nodes[0]["combat"]["rounds"][0]["actions"][0]
+    malformed_run = deepcopy(_fixture_replay_with_misleading_name())
+    malformed_node = next(
+        node for node in malformed_run.nodes if node["id"] == "A2F4:Monster:3"
     )
+    malformed_action = deepcopy(malformed_node["combat"]["rounds"][1]["actions"][0])
     malformed_action["step"] = 0
-    malformed_run.nodes[0]["combat"]["rounds"][0]["actions"].append(
+    malformed_node["combat"]["rounds"][1]["actions"].append(
         malformed_action
     )
-    malformed = build_node_detail(malformed_run, "A1F1:Monster:1")
+    malformed = build_node_detail(malformed_run, "A2F4:Monster:3")
     assert "combat_coverage_complete" not in malformed.coverage
     assert all(fact["kind"] != "unused_potion" for fact in malformed.facts)
 
@@ -619,6 +619,47 @@ def test_replay_card_reward_facts_require_selected_or_explicit_skip_action() -> 
     assert any(fact["kind"] == "card_reward_skipped" for fact in skipped.facts)
     assert any(fact["kind"] == "card_reward_selected" for fact in selected.facts)
     assert selected.coverage["choices_complete"] is False
+
+
+def test_replay_missing_combat_start_boundary_never_claims_unused_potion() -> None:
+    records = [
+        json.loads(line)
+        for line in (FIXTURES / "replay_a2f4_excerpt.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    def detail_for(source_name: str, entries: list[dict]) -> NodeDetail:
+        adapted = adapt_records(
+            source_name,
+            entries,
+            descriptor=SourceDescriptor(
+                SourceKind.REPLAY_JSONL,
+                len(entries),
+                "combat start boundary evidence",
+            ),
+            replay_parser=parse_game_progress,
+        )
+        assert adapted.errors == ()
+        combat_node = next(
+            node
+            for node in adapted.runs[0].nodes
+            if node.get("room_type") == "Monster"
+        )
+        return build_node_detail(adapted.runs[0], combat_node["id"])
+
+    full = detail_for("full-combat.jsonl", records)
+    missing_prefix = detail_for("missing-prefix.jsonl", records[5:])
+    start_run_with_gap = detail_for(
+        "start-run-with-gap.jsonl",
+        [*records[:3], *records[5:]],
+    )
+
+    assert full.coverage["combat_coverage_complete"] is True
+    assert any(fact["kind"] == "unused_potion" for fact in full.facts)
+    for incomplete in (missing_prefix, start_run_with_gap):
+        assert incomplete.coverage.get("combat_coverage_complete") is not True
+        assert all(fact["kind"] != "unused_potion" for fact in incomplete.facts)
 
 
 def test_joined_nodes_dispatch_by_node_provenance_not_aggregate_source_kind() -> None:

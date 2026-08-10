@@ -12,6 +12,7 @@ MIN_ACT = 1
 MAX_ACT = 4
 MIN_FLOOR = 0
 MAX_FLOOR = 17
+_COMBAT_BOUNDARY_ACTIONS = frozenset({"choose_option", "select_map_node"})
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -311,6 +312,7 @@ def _new_room(state: dict[str, Any], source_index: int) -> dict[str, Any]:
         "options": [],
         "actions": [],
         "combat": {"turns": [], "rounds": []},
+        "combat_start_complete": False,
         "start_player": _compact_player(player),
         "end_player": _compact_player(player),
         "event_name": state.get("event_name"),
@@ -322,6 +324,30 @@ def _new_room(state: dict[str, Any], source_index: int) -> dict[str, Any]:
 def _append_decision(room: dict[str, Any], decision: str | None) -> None:
     if decision and decision not in room["decisions"]:
         room["decisions"].append(decision)
+
+
+def _verified_combat_start_boundary(
+    state: dict[str, Any],
+    *,
+    current_step: int | None,
+    previous_entry_type: str | None,
+    previous_action: dict[str, Any] | None,
+    previous_step: int | None,
+) -> bool:
+    if (
+        state.get("decision") != "combat_play"
+        or _observed_coordinate(state.get("round")) != 1
+        or current_step is None
+        or current_step < 1
+        or previous_entry_type != "action"
+        or previous_action is None
+        or previous_step != current_step - 1
+    ):
+        return False
+    return bool(
+        previous_action.get("cmd") == "start_run"
+        or previous_action.get("action") in _COMBAT_BOUNDARY_ACTIONS
+    )
 
 
 def _option_key(kind: str, value: Any) -> str:
@@ -654,6 +680,9 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
     seen_start_run = False
     first_evidence: tuple[str, dict[str, Any]] | None = None
     last_evidence: tuple[str, dict[str, Any]] | None = None
+    previous_entry_type: str | None = None
+    previous_action: dict[str, Any] | None = None
+    previous_step: int | None = None
 
     def ensure_room(state: dict[str, Any], source_index: int) -> dict[str, Any]:
         nonlocal active_room
@@ -695,6 +724,13 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
             last_evidence = None
         else:
             data = {}
+        current_step = _observed_coordinate(entry.get("step"))
+        prior_entry_type = previous_entry_type
+        prior_action = previous_action
+        prior_step = previous_step
+        previous_entry_type = entry_type if isinstance(entry_type, str) else None
+        previous_action = data if entry_type == "action" else None
+        previous_step = current_step
         timestamp = _timestamp(entry.get("ts"))
         if timestamp is not None:
             ended_at = timestamp
@@ -759,6 +795,14 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
         room["end_step"] = source_index
         _append_decision(room, state.get("decision"))
         _collect_options(room, state)
+        if state.get("decision") == "combat_play" and not room["combat"]["rounds"]:
+            room["combat_start_complete"] = _verified_combat_start_boundary(
+                state,
+                current_step=current_step,
+                previous_entry_type=prior_entry_type,
+                previous_action=prior_action,
+                previous_step=prior_step,
+            )
         _collect_combat(room, state, source_index)
         if state.get("decision") not in {"combat_play", "card_select"}:
             _close_active_combat_round(room, state, source_index, "combat_end")

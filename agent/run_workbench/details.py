@@ -154,7 +154,10 @@ def replay_node_detail(record: RunRecord, node: dict[str, Any]) -> NodeDetail:
         source_kind=SourceKind.REPLAY_JSONL,
         choices_complete=False,
         combat_coverage_complete=(
-            True if _complete_replay_combat(combat_rounds) else None
+            True
+            if _trusted_replay_combat_start(record, node)
+            and _complete_replay_combat(combat_rounds)
+            else None
         ),
     )
 
@@ -325,6 +328,21 @@ def _complete_replay_combat(
             return False
         previous_end = end_state
     return True
+
+
+def _trusted_replay_combat_start(
+    record: RunRecord, node: dict[str, Any]
+) -> bool:
+    if (
+        record.coverage.complete_run is not True
+        or node.get("combat_start_complete") is not True
+    ):
+        return False
+    origins = record.node_origins(_node_index(record, node))
+    return bool(
+        len(origins) == 1
+        and origins[0].source_kind is SourceKind.REPLAY_JSONL
+    )
 
 
 def _complete_replay_action(action: Any) -> bool:
