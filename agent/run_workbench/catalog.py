@@ -48,6 +48,8 @@ SOURCE_REF_LIMIT = 32
 REPLAY_WARNING_ID_LIMIT = 16
 RUN_ID_LENGTH_LIMIT = MAX_RUN_ID_LENGTH
 ERROR_DETAIL_LIMIT = 32
+_RECORDED_MAP_WARNING_LIMIT = 32
+_RECORDED_MAP_WARNING_CHARS = 160
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
 _WORKBENCH_JSON_MARKER_GROUPS = (
     (b'"players"', b'"map_point_history"'),
@@ -172,6 +174,7 @@ class _CompactRun:
     has_floor: bool = False
     has_card_pick: bool = False
     has_valid_recorded_map: bool = False
+    recorded_map_count: int = 0
     has_replay_action: bool = False
     has_replay_state: bool = False
     replay_parser_succeeded: bool = False
@@ -1531,9 +1534,16 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
     event = record.get("event")
     compact.has_card_pick = compact.has_card_pick or event == "card_pick"
     if event == "map_snapshot":
+        map_ordinal = compact.recorded_map_count
+        compact.recorded_map_count += 1
         try:
             snapshot = parse_recorded_map_row(record)
-        except RecordedMapError:
+        except RecordedMapError as error:
+            if len(compact.warnings) < _RECORDED_MAP_WARNING_LIMIT:
+                warning = f"row {map_ordinal}: {error}"[
+                    :_RECORDED_MAP_WARNING_CHARS
+                ]
+                compact.warnings = (*compact.warnings, warning)
             return
         for node in snapshot.route_nodes:
             _update_observed_floor(

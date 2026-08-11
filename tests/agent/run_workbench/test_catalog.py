@@ -2863,6 +2863,127 @@ def test_malformed_recorded_map_cannot_raise_compact_capabilities(
     assert exact["warnings"]
 
 
+def test_recorded_map_warnings_match_for_511_and_513_sources(
+    tmp_path: Path,
+) -> None:
+    valid = _recorded_map_snapshot("recorded-warnings")
+    malformed = deepcopy(valid)
+    malformed["ts"] = 2
+    malformed["map"].pop("type")
+    malformed["private_path"] = "/private/recorded-map-secret"
+    core = [
+        valid,
+        {
+            "event": "card_pick",
+            "run_id": "recorded-warnings",
+            "floor": 1,
+        },
+        malformed,
+        {
+            "event": "outcome",
+            "run_id": "recorded-warnings",
+            "status": "dead",
+            "max_global_floor": 1,
+        },
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": "recorded-warnings"}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-recorded-warnings"
+    large_root = tmp_path / "large-recorded-warnings"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+    expected_warnings = [
+        "row 1: recorded map payload must have type map"
+    ]
+
+    assert small_run.warnings == large_run.warnings == expected_warnings
+    assert small_run.capabilities == large_run.capabilities
+    assert large_run.capabilities.full_map is True
+    assert large_run.capabilities.visited_route is True
+    assert large_run.capabilities.node_rewards is True
+    assert large_run.capabilities.decisions is True
+    assert small.get_run("recorded-warnings")["run"]["warnings"] == expected_warnings
+    assert large.get_run("recorded-warnings")["run"]["warnings"] == expected_warnings
+    assert all(len(warning) <= 160 for warning in large_run.warnings)
+    assert all("recorded-map-secret" not in warning for warning in large_run.warnings)
+
+
+def test_recorded_map_warning_limit_matches_for_511_and_513_sources(
+    tmp_path: Path,
+) -> None:
+    malformed_maps: list[dict] = []
+    for index in range(40):
+        malformed = _recorded_map_snapshot("bounded-recorded-warnings")
+        malformed["ts"] = index
+        malformed["map"].pop("type")
+        malformed["private_path"] = f"/private/secret-{index}"
+        malformed_maps.extend(
+            [
+                {
+                    "event": "milestone",
+                    "run_id": "bounded-recorded-warnings",
+                },
+                malformed,
+            ]
+        )
+    core = [
+        *malformed_maps,
+        {
+            "event": "outcome",
+            "run_id": "bounded-recorded-warnings",
+            "status": "dead",
+            "max_global_floor": 1,
+        },
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": "bounded-recorded-warnings"}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-bounded-recorded-warnings"
+    large_root = tmp_path / "large-bounded-recorded-warnings"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+    expected_warnings = [
+        f"row {index}: recorded map payload must have type map"
+        for index in range(32)
+    ]
+
+    assert small_run.warnings == large_run.warnings == expected_warnings
+    assert small_run.capabilities == large_run.capabilities
+    assert large_run.capabilities.full_map is False
+    assert large_run.capabilities.visited_route is False
+    assert large_run.capabilities.node_rewards is False
+    assert small.get_run("bounded-recorded-warnings")["run"]["warnings"] == (
+        expected_warnings
+    )
+    assert large.get_run("bounded-recorded-warnings")["run"]["warnings"] == (
+        expected_warnings
+    )
+    assert len(large_run.warnings) == 32
+    assert all(len(warning) <= 160 for warning in large_run.warnings)
+    assert all("secret" not in warning for warning in large_run.warnings)
+
+
 def test_no_map_card_pick_never_claims_compact_node_rewards(
     tmp_path: Path,
 ) -> None:
