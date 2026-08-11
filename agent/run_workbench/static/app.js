@@ -163,11 +163,21 @@ function filterValue(cohort, key) {
   return value === null || value === undefined || value === '' ? '未标注' : String(value);
 }
 
+function safeCohortId(cohort) {
+  try {
+    if (!cohort || typeof cohort !== 'object') return '';
+    const value = cohort.cohort_id;
+    return typeof value === 'string' ? value.trim() : '';
+  } catch (error) {
+    return '';
+  }
+}
+
 function filterValuesFromCohorts(cohorts, key) {
   if (!Array.isArray(cohorts)) return [];
   const values = [];
   cohorts.forEach((cohort) => {
-    if (!cohort || typeof cohort !== 'object') return;
+    if (!safeCohortId(cohort)) return;
     try {
       values.push(filterValue(cohort, key));
     } catch (error) {
@@ -188,7 +198,7 @@ function cohortsForSelectedVersion() {
   if (!Array.isArray(state.cohorts)) return [];
   const version = byId('versionFilter').value;
   return state.cohorts.filter((cohort) => {
-    if (!cohort || typeof cohort !== 'object') return false;
+    if (!safeCohortId(cohort)) return false;
     try {
       const cohortVersion = filterValue(cohort, 'game_version');
       return !version || cohortVersion === version;
@@ -235,9 +245,8 @@ function defaultBaselineCohortId(current, candidates) {
     if (!current || typeof current !== 'object') return '';
     const readiness = current.comparison_readiness;
     if (!readiness || typeof readiness !== 'object' || readiness.ready !== true) return '';
-    if (typeof current.cohort_id !== 'string'
-      || typeof current.default_baseline_cohort_id !== 'string') return '';
-    currentId = current.cohort_id.trim();
+    if (typeof current.default_baseline_cohort_id !== 'string') return '';
+    currentId = safeCohortId(current);
     baselineId = current.default_baseline_cohort_id.trim();
   } catch (error) {
     return '';
@@ -248,9 +257,7 @@ function defaultBaselineCohortId(current, candidates) {
   try {
     for (const candidate of candidates) {
       try {
-        if (!candidate || typeof candidate !== 'object') continue;
-        const candidateId = candidate.cohort_id;
-        if (typeof candidateId === 'string' && candidateId.trim() === baselineId) matches += 1;
+        if (safeCohortId(candidate) === baselineId) matches += 1;
       } catch (error) {
         // Ignore malformed candidate descriptors and fail closed on ambiguity below.
       }
@@ -345,19 +352,22 @@ function updateCohortOptions({ chooseDefaults = false, currentChanged = false } 
   const baselineSelect = byId('baselineCohort');
   const previousCurrent = currentSelect.value;
   const previousBaseline = baselineSelect.value;
-  const candidates = filteredCohorts();
-  const options = candidates.map((cohort) => ({
-    value: cohort.cohort_id,
+  const entries = filteredCohorts().map((cohort) => ({ cohort, id: safeCohortId(cohort) }))
+    .filter((entry) => entry.id);
+  const candidates = entries.map((entry) => entry.cohort);
+  const options = entries.map(({ cohort, id }) => ({
+    value: id,
     label: `${cohort.label} · ${cohort.run_count} 局 · ${Number.isFinite(cohort.latest_at) ? formatTime(cohort.latest_at) : '时间未知'}`,
   }));
   let current = previousCurrent;
-  if (!candidates.some((cohort) => cohort.cohort_id === current)) {
-    current = candidates.length ? candidates[0].cohort_id : '';
+  if (!entries.some((entry) => entry.id === current)) {
+    current = entries.length ? entries[0].id : '';
   }
-  if (chooseDefaults && candidates.length) current = candidates[0].cohort_id;
+  if (chooseDefaults && entries.length) current = entries[0].id;
   setSelectOptions(currentSelect, options, candidates.length ? null : '没有匹配批次', current);
   currentSelect.value = current;
-  const selected = candidates.find((cohort) => cohort.cohort_id === current);
+  const selectedEntry = entries.find((entry) => entry.id === current);
+  const selected = selectedEntry && selectedEntry.cohort;
 
   let baseline = previousBaseline;
   const baselineOptions = options.filter((option) => option.value !== current);
@@ -775,8 +785,10 @@ function renderAnomalies(metrics) {
 }
 
 function currentCohortDescriptor() {
-  const id = byId('currentCohort').value;
-  return state.cohorts.find((cohort) => cohort.cohort_id === id) || null;
+  const value = byId('currentCohort').value;
+  const id = typeof value === 'string' ? value.trim() : '';
+  if (!id || !Array.isArray(state.cohorts)) return null;
+  return state.cohorts.find((cohort) => safeCohortId(cohort) === id) || null;
 }
 
 function stablePointKey(point) {

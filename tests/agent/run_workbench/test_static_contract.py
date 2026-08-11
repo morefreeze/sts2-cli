@@ -552,12 +552,16 @@ def test_baseline_default_uses_server_descriptor_without_client_axis_logic():
 
 def test_default_baseline_helper_is_pure_and_fails_closed_on_bad_descriptors():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    identity = _javascript_section(
+        script, "function safeCohortId", "function filterValuesFromCohorts"
+    )
     helper = _javascript_section(
         script, "function defaultBaselineCohortId", "function comparisonAxisLabel"
     )
 
     payload = _run_node_json(
         f"""
+        {identity}
         {helper}
         const ready = {{
           cohort_id: 'a',
@@ -661,6 +665,9 @@ def test_comparison_help_is_neutral_complete_and_redrawn_without_duplication():
 
 def test_cohort_options_preserve_manual_choice_and_only_default_on_current_change():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    identity = _javascript_section(
+        script, "function safeCohortId", "function filterValuesFromCohorts"
+    )
     selector = _javascript_section(
         script, "function defaultBaselineCohortId", "function resetMetrics"
     )
@@ -697,6 +704,7 @@ def test_cohort_options_preserve_manual_choice_and_only_default_on_current_chang
             select.value = preferred;
           }}
         }}
+        {identity}
         {selector}
         const ready = {{ ready: true, missing_axes: [], mixed_axes: [], invalid_axes: [] }};
         const cohort = (id, defaultId, extra = {{}}) => ({{
@@ -1069,6 +1077,150 @@ def test_axis_helpers_skip_malformed_cohorts_without_losing_valid_values():
     }
 
 
+def test_cohort_identity_guards_options_current_descriptor_and_comparison():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    filters = _javascript_section(
+        script, "function setSelectOptions", "function defaultBaselineCohortId"
+    )
+    cohort_options = _javascript_section(
+        script, "function updateCohortOptions", "function resetMetrics"
+    )
+    comparison = _javascript_section(
+        script, "function renderComparison", "function anomalyRow"
+    )
+    current_descriptor = _javascript_section(
+        script, "function currentCohortDescriptor", "function stablePointKey"
+    )
+
+    payload = _run_node_json(
+        f"""
+        function makeNode() {{
+          return {{
+            textContent: '', dataset: {{}}, children: [], value: '',
+            append(...children) {{ this.children.push(...children); }},
+          }};
+        }}
+        function makeSelect() {{
+          const select = makeNode();
+          select.replaceChildren = function replaceChildren() {{
+            this.children = [];
+            this.value = '';
+          }};
+          select.append = function append(option) {{
+            this.children.push(option);
+            if (this.children.length === 1) this.value = option.value;
+          }};
+          return select;
+        }}
+        const comparisonBody = makeNode();
+        const comparisonBanner = makeNode();
+        comparisonBanner.querySelector = () => comparisonBody;
+        const nodes = {{
+          versionFilter: makeSelect(),
+          characterFilter: makeSelect(),
+          validityFilter: makeSelect(),
+          currentCohort: makeSelect(),
+          baselineCohort: makeSelect(),
+          comparisonBanner,
+          comparisonTitle: makeNode(),
+        }};
+        const byId = (id) => nodes[id];
+        const clear = (node) => {{
+          if (typeof node.replaceChildren === 'function') node.replaceChildren();
+          else node.children = [];
+        }};
+        const element = (tag, options = {{}}) => {{
+          const node = makeNode();
+          node.tag = tag;
+          node.textContent = options.text === undefined ? '' : String(options.text);
+          node.value = options.attrs && options.attrs.value !== undefined
+            ? String(options.attrs.value)
+            : '';
+          return node;
+        }};
+        const formatTime = (value) => `time-${{value}}`;
+        const updateCohortHelp = () => {{}};
+        const defaultBaselineCohortId = () => '';
+        const valid = {{
+          cohort_id: 'valid-cohort',
+          label: 'valid',
+          run_count: 2,
+          technical_count: 0,
+          latest_at: 2,
+          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+          comparison_readiness: {{ ready: false }},
+        }};
+        const missingId = {{
+          label: 'missing-id',
+          run_count: 1,
+          technical_count: 0,
+          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+        }};
+        const whitespaceId = {{
+          cohort_id: '   ',
+          label: 'whitespace-id',
+          run_count: 1,
+          technical_count: 0,
+          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+        }};
+        const throwingId = {{
+          get cohort_id() {{ throw new Error('bad cohort id getter'); }},
+          label: 'throwing-id',
+          run_count: 1,
+          technical_count: 0,
+          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+        }};
+        const malformed = [null, 42, missingId, whitespaceId, throwingId];
+        const state = {{ cohorts: [...malformed, valid] }};
+        {filters}
+        {cohort_options}
+        {current_descriptor}
+        {comparison}
+
+        nodes.versionFilter.value = 'v1';
+        nodes.characterFilter.value = 'Ironclad';
+        updateCohortOptions({{ chooseDefaults: true }});
+        const selection = {{
+          candidates: filteredCohorts().map((cohort) => cohort.cohort_id),
+          options: nodes.currentCohort.children.map((option) => option.value),
+          current: nodes.currentCohort.value,
+          descriptor: currentCohortDescriptor() === valid,
+        }};
+
+        renderComparison(null);
+        const rendered = {{
+          title: nodes.comparisonTitle.textContent,
+          body: comparisonBody.children.map((child) => child.textContent),
+        }};
+
+        const descriptorCases = [];
+        for (const descriptor of malformed) {{
+          state.cohorts = [descriptor];
+          nodes.currentCohort.value = 'valid-cohort';
+          descriptorCases.push(currentCohortDescriptor() === null);
+        }}
+        state.cohorts = null;
+        descriptorCases.push(currentCohortDescriptor() === null);
+
+        console.log(JSON.stringify({{ selection, rendered, descriptorCases }}));
+        """
+    )
+
+    assert payload == {
+        "selection": {
+            "candidates": ["valid-cohort"],
+            "options": ["valid-cohort"],
+            "current": "valid-cohort",
+            "descriptor": True,
+        },
+        "rendered": {
+            "title": "元数据不完整",
+            "body": ["历史记录仍可查看，但不会用于训练提升比较。"],
+        },
+        "descriptorCases": [True, True, True, True, True, True],
+    }
+
+
 def test_character_and_validity_changes_choose_server_first_candidate():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     filters = _javascript_section(
@@ -1187,6 +1339,9 @@ def test_character_and_validity_changes_choose_server_first_candidate():
 
 def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    identity = _javascript_section(
+        script, "function safeCohortId", "function filterValuesFromCohorts"
+    )
     comparison = _javascript_section(
         script, "function renderComparison", "function anomalyRow"
     )
@@ -1232,6 +1387,7 @@ def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
           {{ cohort_id: 'incomplete', comparison_readiness: {{ ready: false }} }},
           {{ cohort_id: 'ready', comparison_readiness: {{ ready: true }} }},
         ] }};
+        {identity}
         {current_descriptor}
         {comparison}
 
@@ -1282,7 +1438,7 @@ def test_current_default_uses_server_latest_order_instead_of_label_order():
         script, "function updateCohortOptions", "function resetMetrics"
     )
 
-    assert "candidates[0].cohort_id" in selector
+    assert "entries[0].id" in selector
     assert "candidates[candidates.length - 1].cohort_id" not in selector
 
 
@@ -1350,7 +1506,7 @@ def test_current_default_trusts_server_latest_order_without_inventing_time():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     cohorts = _javascript_section(script, "function updateCohortOptions", "function resetMetrics")
 
-    assert "candidates[0].cohort_id" in cohorts
+    assert "entries[0].id" in cohorts
     assert "candidates[candidates.length - 1]" not in cohorts
     assert "latest_at" in cohorts
     assert "时间未知" in cohorts
