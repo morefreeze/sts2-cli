@@ -122,10 +122,10 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
     layout_order = [
         "workbenchStatus",
         "sourceFile",
+        "versionFilter",
+        "characterFilter",
         "currentCohort",
         "baselineCohort",
-        "characterFilter",
-        "versionFilter",
         "validityFilter",
         "avgFloor",
         "medianFloor",
@@ -157,6 +157,24 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
     assert "训练进度" in html
     assert "正在读取训练记录…" in html
     assert not hasattr(viewer, "HTML")
+
+
+def test_filter_panel_orders_scope_before_cohorts():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    panel = html[
+        html.index('<section class="panel filter-panel"') : html.index(
+            '<section class="metrics-section"'
+        )
+    ]
+    positions = [
+        panel.index('id="versionFilter"'),
+        panel.index('id="characterFilter"'),
+        panel.index('id="currentCohort"'),
+        panel.index('id="baselineCohort"'),
+        panel.index('id="validityFilter"'),
+    ]
+
+    assert positions == sorted(positions)
 
 
 def test_existing_direct_script_entrypoint_still_imports_package():
