@@ -68,6 +68,10 @@ class RecordedMapError(ValueError):
     """A bounded validation error for one untrusted recorded map row."""
 
 
+class _RecordedMapValidationError(ValueError):
+    """An internal-only marker for intentional, safe validator failures."""
+
+
 @dataclass(frozen=True)
 class RecordedActSnapshot:
     act_index: int
@@ -105,8 +109,8 @@ class _GraphNode:
     model_id: str | None = None
 
 
-def _error(message: str) -> RecordedMapError:
-    return RecordedMapError(message[:_MAX_ERROR_CHARS])
+def _error(message: str) -> _RecordedMapValidationError:
+    return _RecordedMapValidationError(message[:_MAX_ERROR_CHARS])
 
 
 def _map_int(value: Any, *, label: str) -> int:
@@ -179,12 +183,16 @@ def _json_value(value: Any, *, depth: int, count: list[int]) -> Any:
             raise _error("recorded player inventory contains an oversized list")
         return [_json_value(item, depth=depth + 1, count=count) for item in value]
     if type(value) is dict:
-        if (
-            len(value) > 32
-            or any(type(key) is not str or len(key) > 256 for key in value)
-            or any(key.casefold() in _PRODUCER_STRIPPED_KEYS for key in value)
-        ):
+        if len(value) > 32:
             raise _error("recorded player inventory contains an invalid object")
+        for key in value:
+            if type(key) is not str:
+                raise TypeError("recorded player inventory key is not a string")
+            if (
+                len(key) > 256
+                or key.casefold() in _PRODUCER_STRIPPED_KEYS
+            ):
+                raise _error("recorded player inventory contains an invalid object")
         return {
             key: _json_value(item, depth=depth + 1, count=count)
             for key, item in value.items()
@@ -520,17 +528,25 @@ def _parse_recorded_row(
     return snapshot, timestamp
 
 
+def _parse_public_row(
+    row: Mapping[str, Any],
+) -> tuple[RecordedActSnapshot, int | float]:
+    """Translate only trusted internal validation failures to public detail."""
+
+    try:
+        normalized = _normalize_root_mapping(row)
+        return _parse_recorded_row(normalized)
+    except _RecordedMapValidationError as exc:
+        raise RecordedMapError(str(exc)) from None
+    except Exception:
+        raise RecordedMapError("invalid recorded map row") from None
+
+
 def parse_recorded_map_row(row: Mapping[str, Any]) -> RecordedActSnapshot:
     """Validate and detach one persisted ``map_snapshot`` row."""
 
-    normalized = _normalize_root_mapping(row)
-    try:
-        snapshot, _timestamp = _parse_recorded_row(normalized)
-        return snapshot
-    except RecordedMapError:
-        raise
-    except Exception:
-        raise _error("invalid recorded map row") from None
+    snapshot, _timestamp = _parse_public_row(row)
+    return snapshot
 
 
 def latest_recorded_acts(
@@ -542,8 +558,7 @@ def latest_recorded_acts(
     errors: list[str] = []
     for index, row in enumerate(rows):
         try:
-            normalized = _normalize_root_mapping(row)
-            snapshot, timestamp = _parse_recorded_row(normalized)
+            snapshot, timestamp = _parse_public_row(row)
         except RecordedMapError as exc:
             if len(errors) < _MAX_ERRORS:
                 errors.append(f"row {index}: {exc}"[:_MAX_ERROR_CHARS])

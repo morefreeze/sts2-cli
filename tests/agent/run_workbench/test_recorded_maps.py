@@ -538,6 +538,62 @@ def test_root_normalization_rejects_hostile_nonstring_keys_before_lookup() -> No
     assert "/private/inventory" not in str(raised.value) + repr(errors)
 
 
+class _CollidingNestedKey:
+    def __init__(self, target: str, error_type):
+        self._target = target
+        self._error = error_type("NESTED_SECRET /private/inventory" + "x" * 300)
+
+    def __hash__(self):
+        return hash(self._target)
+
+    def __eq__(self, _other):
+        raise self._error
+
+
+def _inject_hostile_nested_key(row, location: str, error_type) -> None:
+    if location == "map":
+        row["map"] = {_CollidingNestedKey("type", error_type): "map"}
+    elif location == "context":
+        row["map"]["context"] = {_CollidingNestedKey("act", error_type): 1}
+    elif location == "current_coord":
+        row["map"]["current_coord"] = {
+            _CollidingNestedKey("col", error_type): 1,
+            "row": 2,
+        }
+    elif location == "child":
+        row["map"]["rows"][0][0]["children"][0] = {
+            _CollidingNestedKey("col", error_type): 0,
+            "row": 1,
+        }
+    elif location == "inventory_identity":
+        row["visited_nodes"][0]["entry_player"]["deck"] = [{
+            _CollidingNestedKey("id", error_type): "STRIKE",
+        }]
+    else:  # pragma: no cover - guards the test helper itself
+        raise AssertionError(location)
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["map", "context", "current_coord", "child", "inventory_identity"],
+)
+def test_nested_forged_public_errors_are_always_generic(location: str) -> None:
+    api = _api()
+    row = _valid_row()
+    _inject_hostile_nested_key(row, location, api.RecordedMapError)
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(row)
+    snapshots, errors = api.latest_recorded_acts(iter((row,)))
+
+    assert str(raised.value) == "invalid recorded map row"
+    assert snapshots == {}
+    assert errors == ("row 0: invalid recorded map row",)
+    combined = str(raised.value) + repr(errors)
+    assert "NESTED_SECRET" not in combined
+    assert "/private/inventory" not in combined
+
+
 def test_parse_recorded_map_row_normalizes_known_variants_and_bounded_unknowns() -> None:
     api = _api()
     row = _valid_row()
