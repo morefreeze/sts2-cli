@@ -940,6 +940,122 @@ def test_version_filter_cascades_character_and_cohort_candidates():
     }
 
 
+def test_character_and_validity_changes_choose_server_first_candidate():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    filters = _javascript_section(
+        script, "function setSelectOptions", "function defaultBaselineCohortId"
+    )
+    cohort_options = _javascript_section(
+        script, "function updateCohortOptions", "function resetMetrics"
+    )
+    filter_changed = _javascript_section(
+        script, "function filterChanged", "function versionFilterChanged"
+    )
+
+    payload = _run_node_json(
+        f"""
+        function makeSelect(value = '') {{
+          return {{
+            value,
+            children: [],
+            replaceChildren() {{ this.children = []; this.value = ''; }},
+            append(option) {{
+              this.children.push(option);
+              if (this.children.length === 1) this.value = option.value;
+            }},
+          }};
+        }}
+        const nodes = {{
+          versionFilter: makeSelect(),
+          characterFilter: makeSelect(),
+          validityFilter: makeSelect(),
+          currentCohort: makeSelect(),
+          baselineCohort: makeSelect(),
+        }};
+        const byId = (id) => nodes[id];
+        const clear = (node) => node.replaceChildren();
+        const element = (tag, options = {{}}) => ({{
+          tag,
+          textContent: options.text === undefined ? '' : String(options.text),
+          value: String(options.attrs.value),
+        }});
+        const formatTime = (value) => `time-${{value}}`;
+        const updateCohortHelp = () => {{}};
+        const defaultBaselineCohortId = () => '';
+        let refreshCount = 0;
+        const refreshMetrics = () => {{ refreshCount += 1; }};
+        const state = {{ cohorts: [
+          {{
+            cohort_id: 'server-first-iron',
+            label: 'server-first-iron',
+            run_count: 2,
+            technical_count: 0,
+            latest_at: 2,
+            filters: {{ game_version: 'v1', character: 'Ironclad' }},
+          }},
+          {{
+            cohort_id: 'server-second-necro',
+            label: 'server-second-necro',
+            run_count: 2,
+            technical_count: 2,
+            latest_at: 1,
+            filters: {{ game_version: 'v1', character: 'Necrobinder' }},
+          }},
+        ] }};
+        {filters}
+        {cohort_options}
+        {filter_changed}
+
+        nodes.versionFilter.value = 'v1';
+        nodes.characterFilter.value = 'Necrobinder';
+        filterChanged();
+        const narrowCharacter = nodes.currentCohort.value;
+
+        nodes.characterFilter.value = '';
+        filterChanged();
+        const wideCharacter = {{
+          current: nodes.currentCohort.value,
+          options: nodes.currentCohort.children.map((option) => option.value),
+        }};
+
+        nodes.currentCohort.value = 'server-first-iron';
+        nodes.validityFilter.value = 'technical';
+        filterChanged();
+        const narrowValidity = nodes.currentCohort.value;
+
+        nodes.validityFilter.value = '';
+        filterChanged();
+        const wideValidity = {{
+          current: nodes.currentCohort.value,
+          options: nodes.currentCohort.children.map((option) => option.value),
+        }};
+
+        console.log(JSON.stringify({{
+          narrowCharacter,
+          wideCharacter,
+          narrowValidity,
+          wideValidity,
+          refreshCount,
+        }}));
+        """
+    )
+
+    assert payload == {
+        "narrowCharacter": "server-second-necro",
+        "wideCharacter": {
+            "current": "server-first-iron",
+            "options": ["server-first-iron", "server-second-necro"],
+        },
+        "narrowValidity": "server-second-necro",
+        "wideValidity": {
+            "current": "server-first-iron",
+            "options": ["server-first-iron", "server-second-necro"],
+        },
+        "refreshCount": 4,
+    }
+    assert "updateCohortOptions({ chooseDefaults: true })" in filter_changed
+
+
 def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     comparison = _javascript_section(

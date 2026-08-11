@@ -1326,7 +1326,7 @@ async function bootstrap() {
 }
 
 function filterChanged() {
-  updateCohortOptions();
+  updateCohortOptions({ chooseDefaults: true });
   refreshMetrics();
 }
 
