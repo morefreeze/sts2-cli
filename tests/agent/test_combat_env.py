@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import agent.combat_env as combat_env
 from agent.combat_env import CombatEnv, greedy_action
+from agent.run_workbench.recorded_maps import parse_recorded_map_row
 from agent.strategy import rest_site_action
 
 CARDS_JSON = os.path.join(os.path.dirname(__file__), '..', '..', 'localization_eng', 'cards.json')
@@ -1139,7 +1140,46 @@ def test_map_rejects_inconsistent_current_coord_across_rows_and_boss(case):
         CombatEnv._validated_map_reply(reply)
 
 
-def test_same_act_replacement_preserves_boss_visit_when_current_moves_to_row(
+def test_same_act_forward_route_reconciles_markers_and_remains_parseable(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    middle = _map_reply(current=(0, 1))
+    boss = _csharp_boss_current_map_reply()
+    for reply in (middle, boss):
+        reply["rows"][1][0]["children"] = [{"col": 0, "row": 2}]
+    replies = iter([
+        _map_reply(current=(0, 0)),
+        middle,
+        boss,
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
+
+    env._capture_run_map_state(_map_state(hp=55))
+    env._capture_run_map_state(_map_state(hp=50))
+    env._capture_run_map_state(_map_state(hp=44))
+
+    snapshot = env._run_map_snapshots[1]
+    assert [(node["col"], node["row"]) for node in snapshot["visited_nodes"]] == [
+        (0, 0),
+        (0, 1),
+        (0, 2),
+    ]
+    assert snapshot["visited_nodes"][0]["entry_player"]["hp"] == 55
+    assert snapshot["visited_nodes"][1]["entry_player"]["hp"] == 50
+    assert snapshot["visited_nodes"][2]["entry_player"]["hp"] == 44
+    assert (0, 2) in snapshot["_coord_lookup"]
+    serialized = env._serialized_run_map_snapshots()[0]
+    assert serialized["map"]["rows"][1][0]["visited"] is True
+    assert serialized["map"]["boss"]["visited"] is True
+    assert parse_recorded_map_row(serialized).route_nodes[-1]["model_id"] == (
+        "TEST_BOSS"
+    )
+
+
+def test_boss_to_ordinary_refresh_fails_closed_without_mutating_prior_snapshot(
     monkeypatch, tmp_path
 ):
     env, _ = _recording_env(
@@ -1147,21 +1187,26 @@ def test_same_act_replacement_preserves_boss_visit_when_current_moves_to_row(
     )
     replies = iter([
         _csharp_boss_current_map_reply(),
-        _map_reply(current=(0, 0), ancient_type="AncientUpdated"),
+        _map_reply(current=(0, 0)),
     ])
     monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
 
     env._capture_run_map_state(_map_state(hp=55))
-    env._capture_run_map_state(_map_state(hp=44))
+    before = env._serialized_run_map_snapshots()[0]
+    assert parse_recorded_map_row(before).route_nodes[-1]["model_id"] == "TEST_BOSS"
 
-    snapshot = env._run_map_snapshots[1]
-    assert [(node["col"], node["row"]) for node in snapshot["visited_nodes"]] == [
-        (0, 2),
-        (0, 0),
-    ]
-    assert snapshot["visited_nodes"][0]["entry_player"]["hp"] == 55
-    assert snapshot["visited_nodes"][0]["exit_player"]["hp"] == 44
-    assert (0, 2) in snapshot["_coord_lookup"]
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        accepted = env._capture_run_map_state(_map_state(hp=44))
+
+    serialized = env._serialized_run_map_snapshots()[0]
+    assert accepted is False
+    assert serialized == before
+    assert env._run_current_map_coord == (1, 0, 2)
+    assert serialized["visited_nodes"][0]["exit_player"]["hp"] == 55
+    assert "children" not in serialized["map"]["boss"]
+    assert parse_recorded_map_row(serialized).route_nodes[-1]["model_id"] == (
+        "TEST_BOSS"
+    )
 
 
 def test_same_act_graph_replacement_drops_stale_visits_and_preserves_survivors(
@@ -1171,6 +1216,7 @@ def test_same_act_graph_replacement_drops_stale_visits_and_preserves_survivors(
         monkeypatch, tmp_path, run_context={"capture_map": True}
     )
     third_reply = _map_reply(current=(1, 1))
+    third_reply["rows"][1][0]["children"] = [{"col": 1, "row": 1}]
     third_reply["rows"] = [third_reply["rows"][1]]
     replies = iter([
         _map_reply(current=(0, 0)),

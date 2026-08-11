@@ -27,6 +27,10 @@ _map_strategy: MapStrategy = HpAwareMapStrategy()
 _decision_advisor = DecisionAdvisor()
 
 
+class _RunMapTransitionError(ValueError):
+    """A validated map refresh would make the retained route impossible."""
+
+
 def _decision_advisor_enabled() -> bool:
     flag = os.environ.get("STS2_DECISION_ADVISOR", "").strip().lower()
     return flag in {"1", "true", "on", "yes"}
@@ -1505,6 +1509,29 @@ class CombatEnv(gym.Env):
                 continue
         return snapshot
 
+    def _buffered_inventory_checkpoint(self):
+        if self._run_current_map_coord is None:
+            return None
+        act, col, row = self._run_current_map_coord
+        snapshot = self._run_map_snapshots.get(act)
+        if snapshot is None:
+            return None
+        node = snapshot.get("_coord_lookup", {}).get((col, row))
+        if node is None:
+            return None
+        detached = json.loads(json.dumps(
+            node, ensure_ascii=False, allow_nan=False
+        ))
+        return node, detached
+
+    @staticmethod
+    def _restore_buffered_inventory(checkpoint):
+        if checkpoint is None:
+            return
+        node, detached = checkpoint
+        node.clear()
+        node.update(detached)
+
     def _update_buffered_node_inventory(self, state: dict):
         """Update the latest known coordinate without consulting the subprocess."""
         if self._run_current_map_coord is None:
@@ -1709,6 +1736,18 @@ class CombatEnv(gym.Env):
             }
             self._run_map_snapshots[act] = snapshot
         else:
+            previous_map = snapshot["map"]
+            previous_boss = previous_map["boss"]
+            previous_boss_coord = (
+                previous_boss["col"], previous_boss["row"]
+            )
+            previous_current = previous_map["current_coord"]
+            if ((previous_current["col"], previous_current["row"])
+                    == previous_boss_coord
+                    and (col, row) != previous_boss_coord):
+                raise _RunMapTransitionError(
+                    "map refresh follows an already-current terminal boss"
+                )
             survivors = [
                 node for node in snapshot["visited_nodes"]
                 if (node["col"], node["row"]) in graph_coords
@@ -1736,20 +1775,40 @@ class CombatEnv(gym.Env):
                 node["id"] = current_node["id"]
             coord_lookup[(col, row)] = node
             snapshot["visited_nodes"].append(node)
+        visited_coords = {
+            (visited["col"], visited["row"])
+            for visited in snapshot["visited_nodes"]
+        }
+        current_coord = (col, row)
+        for raw_row in snapshot["map"]["rows"]:
+            for raw_node in raw_row:
+                raw_coord = (raw_node["col"], raw_node["row"])
+                raw_node["visited"] = raw_coord in visited_coords
+                raw_node["current"] = raw_coord == current_coord
+        raw_boss = snapshot["map"]["boss"]
+        boss_coord = (raw_boss["col"], raw_boss["row"])
+        raw_boss["visited"] = boss_coord in visited_coords
+        raw_boss["current"] = boss_coord == current_coord
         self._run_current_map_coord = (act, col, row)
         self._update_buffered_node_inventory(state)
         self._run_map_capture_failure_active = False
 
-    def _detached_run_map_poll_state(self, state: dict, state_id: int | None = None):
-        return {
+    def _detached_run_map_poll_state(
+        self, state: dict, state_id: int | None = None, inventory_checkpoint=None
+    ):
+        retained = {
             "state_id": id(state) if state_id is None else state_id,
             "state": {"player": self._bounded_player_snapshot(state)},
         }
+        if inventory_checkpoint is not None:
+            retained["inventory_checkpoint"] = inventory_checkpoint
+        return retained
 
     def _capture_run_map_state(
         self, state: dict, *, poll_state_id: int | None = None
     ) -> bool:
         """Capture evaluation map observability without affecting gameplay."""
+        inventory_checkpoint = self._buffered_inventory_checkpoint()
         self._update_buffered_node_inventory(state)
         if not self._capture_run_maps:
             return True
@@ -1760,10 +1819,16 @@ class CombatEnv(gym.Env):
             reply = self._send_read_only({"cmd": "get_map"})
             if self._pending_read_only_replies > 0:
                 self._run_pending_map_capture = self._detached_run_map_poll_state(
-                    state, effective_state_id
+                    state, effective_state_id, inventory_checkpoint
                 )
             self._ingest_run_map_reply(reply, state)
             return True
+        except _RunMapTransitionError as exc:
+            self._restore_buffered_inventory(inventory_checkpoint)
+            if not self._run_map_capture_failure_active:
+                self._report_run_logging_error("map capture failed", exc)
+                self._run_map_capture_failure_active = True
+            return False
         except Exception as exc:
             if not self._run_map_capture_failure_active:
                 self._report_run_logging_error("map capture failed", exc)
@@ -2370,6 +2435,16 @@ class CombatEnv(gym.Env):
                             retained_capture["state_id"]
                         )
                         self._run_map_retry_state = None
+                    except _RunMapTransitionError as exc:
+                        self._restore_buffered_inventory(
+                            retained_capture.get("inventory_checkpoint")
+                        )
+                        if not self._run_map_capture_failure_active:
+                            self._report_run_logging_error(
+                                "map capture failed", exc
+                            )
+                            self._run_map_capture_failure_active = True
+                        self._run_map_retry_state = retained_capture
                     except Exception as exc:
                         if not self._run_map_capture_failure_active:
                             self._report_run_logging_error(
