@@ -380,10 +380,11 @@ class _VerboseCombatEnv(CombatEnv):
         for _ in range(200):
             if state is None:
                 return {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
-            self._capture_run_map_state(state)
+            if state.get("decision") != "game_over":
+                self._poll_run_map_state_once(state)
             if state.get("decision") == "combat_play":
                 state = self._greedy_use_potions(state)
-                self._capture_run_map_state(state)
+                self._update_buffered_node_inventory(state)
                 return state
             if state.get("decision") == "game_over":
                 return state
@@ -391,7 +392,7 @@ class _VerboseCombatEnv(CombatEnv):
             self._log_room(state, dec)
             cmd = greedy_action(state)
             state = self._send(cmd)
-            self._capture_run_map_state(state)
+            self._update_buffered_node_inventory(state)
         return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
 
     def _log_room(self, state: dict, dec: str):

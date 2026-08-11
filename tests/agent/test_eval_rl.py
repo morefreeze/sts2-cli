@@ -127,6 +127,33 @@ def test_verbose_card_reward_log_uses_actual_greedy_command(monkeypatch):
     assert env.room_log[-1].endswith("→ BASH")
 
 
+def test_verbose_advance_polls_each_distinct_state_once(monkeypatch):
+    import agent.eval_rl as eval_rl
+
+    env = _VerboseCombatEnv(dry_run=True, run_context={"capture_map": True})
+    start = {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 1},
+        "player": {"hp": 80, "max_hp": 80},
+        "choices": [],
+    }
+    combat = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+        "player": {"hp": 75, "max_hp": 80},
+    }
+    post_potion = {**combat, "player": {"hp": 78, "max_hp": 80}}
+    captured = []
+    monkeypatch.setattr(env, "_capture_run_map_state", lambda state: captured.append(state))
+    monkeypatch.setattr(env, "_send", lambda command: combat)
+    monkeypatch.setattr(env, "_greedy_use_potions", lambda state: post_potion)
+    monkeypatch.setattr(eval_rl, "greedy_action", lambda state: {"cmd": "action"})
+    monkeypatch.setattr(env, "_log_room", lambda state, decision: None)
+
+    assert env._advance_to_combat(start) is post_potion
+    assert captured == [start, combat]
+
+
 @pytest.mark.parametrize(
     ("timed_out", "run_won", "info", "expected"),
     [

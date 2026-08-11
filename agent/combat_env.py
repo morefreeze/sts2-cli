@@ -11,7 +11,7 @@ Design: simple 1:1 mapping — each env.step() = one game action (including
 end_turn). No auto-skip. Policy and value networks are separated in train.py
 to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import json, math, os, subprocess, random, time, select, sys, warnings
+import fcntl, json, math, os, subprocess, random, time, select, sys, warnings
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -624,6 +624,7 @@ class CombatEnv(gym.Env):
         self._capture_run_maps = self._run_context.get("capture_map") is True
         self._run_map_snapshots: dict[int, dict] = {}
         self._run_current_map_coord: tuple[int, int, int] | None = None
+        self._run_last_map_poll_state_id: int | None = None
         self._run_seed = self._seed
         self._run_id = str(
             self._run_context.get("run_id")
@@ -633,6 +634,7 @@ class CombatEnv(gym.Env):
         self._run_started_at = time.time()
         self._run_outcome_emitted = False
         self._run_logging_errors: list[str] = []
+        self._run_map_capture_failure_active = False
         self._run_milestone_records: list = []  # buffered rows until outcome known
         self._run_card_pick_records: list = []   # buffered card-reward decisions (per pick, see _buffer_card_pick)
 
@@ -724,6 +726,9 @@ class CombatEnv(gym.Env):
         self._run_card_pick_records = []
         self._run_map_snapshots = {}
         self._run_current_map_coord = None
+        self._run_last_map_poll_state_id = None
+        self._run_logging_errors = []
+        self._run_map_capture_failure_active = False
         self._run_boss_id = None  # act boss from state.context.boss (set on first sight)
         self._kill_proc()
         self._emit_run_start()
@@ -731,16 +736,16 @@ class CombatEnv(gym.Env):
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
-            self._capture_run_map_state(state)
+            self._poll_run_map_state_once(state)
             if state is not None and state.get("type") != "error" and self._set_hp_after_load is not None:
                 updated_state = self._send({"cmd": "set_player", "hp": self._set_hp_after_load})
-                self._capture_run_map_state(updated_state)
+                self._update_buffered_node_inventory(updated_state)
                 if updated_state is not None and updated_state.get("type") != "error":
                     state = updated_state
         else:
             state = self._send({"cmd": "start_run", "character": self.character,
                                 "seed": run_seed, "ascension": self.ascension})
-            self._capture_run_map_state(state)
+            self._poll_run_map_state_once(state)
         if state is None or state.get("type") == "error":
             self._emit_run_outcome(state or {}, False, status="reset_failure")
             self._game_alive = False
@@ -758,7 +763,7 @@ class CombatEnv(gym.Env):
         if self._replay_pending:
             for cmd in self._replay_actions:
                 state = self._send(cmd)
-                self._capture_run_map_state(state)
+                self._poll_run_map_state_once(state)
                 if state is None:
                     self._emit_run_outcome(self._current_state or {}, False, status="invalid")
                     self._game_alive = False
@@ -829,7 +834,7 @@ class CombatEnv(gym.Env):
         # the block/intents the agent committed to before the enemy turn fires.
         pre_state = self._current_state
         state = self._send(cmd)
-        self._capture_run_map_state(state)
+        self._update_buffered_node_inventory(state)
 
         # Detect stuck: end_turn ignored by engine (round/HP unchanged)
         if (state and state.get("decision") == "combat_play"
@@ -839,7 +844,7 @@ class CombatEnv(gym.Env):
             # Try proceed to unstick
             for _ in range(5):
                 state = self._send({"cmd": "action", "action": "proceed"})
-                self._capture_run_map_state(state)
+                self._update_buffered_node_inventory(state)
                 if state is None or state.get("decision") != "combat_play":
                     break
                 if state.get("round") != self._current_state.get("round"):
@@ -966,7 +971,7 @@ class CombatEnv(gym.Env):
                 for _ in range(10):
                     auto_cmd = greedy_action(state)
                     state = self._send(auto_cmd)
-                    self._capture_run_map_state(state)
+                    self._update_buffered_node_inventory(state)
                     if state is None:
                         self._game_alive = False
                         self._emit_run_outcome(self._current_state, False, status="crash")
@@ -1397,7 +1402,8 @@ class CombatEnv(gym.Env):
 
     def _report_run_logging_error(self, prefix: str, exc: Exception):
         error = f"{prefix} for {self._run_id}: {type(exc).__name__}: {exc}"
-        self._run_logging_errors.append(error)
+        if error not in self._run_logging_errors and len(self._run_logging_errors) < 64:
+            self._run_logging_errors.append(error)
         try:
             warnings.warn(error, RuntimeWarning, stacklevel=2)
         except Warning:
@@ -1420,24 +1426,76 @@ class CombatEnv(gym.Env):
             except (OverflowError, TypeError, ValueError):
                 continue
 
+        invalid = object()
+        verbose_keys = {
+            "description", "description_raw", "flavor", "flavor_text", "text",
+        }
+
+        def sanitize(value, depth, node_count):
+            node_count[0] += 1
+            if depth > 4 or node_count[0] > 4096:
+                return invalid
+            if value is None or type(value) is bool:
+                return value
+            if type(value) is int:
+                return value if -(2**63) <= value < 2**63 else invalid
+            if type(value) is float:
+                return value if math.isfinite(value) else invalid
+            if type(value) is str:
+                return value if len(value) <= 256 else invalid
+            if type(value) is list:
+                if len(value) > 256:
+                    return invalid
+                result = []
+                for item in value:
+                    safe_item = sanitize(item, depth + 1, node_count)
+                    if safe_item is invalid:
+                        return invalid
+                    result.append(safe_item)
+                return result
+            if type(value) is dict:
+                if any(type(key) is not str for key in value):
+                    return invalid
+                retained = [
+                    (key, item) for key, item in value.items()
+                    if key.lower() not in verbose_keys
+                ]
+                if len(retained) > 32:
+                    return invalid
+                result = {}
+                for key, item in retained:
+                    if len(key) > 256:
+                        return invalid
+                    safe_item = sanitize(item, depth + 1, node_count)
+                    if safe_item is invalid:
+                        return invalid
+                    result[key] = safe_item
+                return result
+            return invalid
+
         collection_fields = (
             ("deck", ("deck",)),
             ("relics", ("relics", "relic_items")),
             ("potions", ("potions", "potion_items")),
         )
         for output_field, aliases in collection_fields:
-            value = None
-            found = False
+            safe_value = invalid
             for alias in aliases:
-                if alias in player:
-                    value = player[alias]
-                    found = True
+                if alias not in player or type(player[alias]) is not list:
+                    continue
+                candidate = sanitize(player[alias], 0, [0])
+                if candidate is not invalid:
+                    safe_value = candidate
                     break
-            if not found or type(value) is not list or len(value) > 256:
+            if safe_value is invalid:
                 continue
             try:
-                payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
-                snapshot[output_field] = json.loads(payload)
+                candidate_snapshot = {**snapshot, output_field: safe_value}
+                payload = json.dumps(
+                    candidate_snapshot, ensure_ascii=False, allow_nan=False,
+                ).encode("utf-8")
+                if len(payload) <= 64 * 1024:
+                    snapshot[output_field] = safe_value
             except Exception:
                 continue
         return snapshot
@@ -1610,6 +1668,8 @@ class CombatEnv(gym.Env):
         self._update_buffered_node_inventory(state)
         if not self._capture_run_maps:
             return
+        if self._pending_read_only_replies > 0:
+            return
         try:
             reply = self._send_read_only({"cmd": "get_map"})
             act, raw_map, (col, row), current_node, graph_coords = (
@@ -1656,8 +1716,21 @@ class CombatEnv(gym.Env):
                 snapshot["visited_nodes"].append(node)
             self._run_current_map_coord = (act, col, row)
             self._update_buffered_node_inventory(state)
+            self._run_map_capture_failure_active = False
         except Exception as exc:
-            self._report_run_logging_error("map capture failed", exc)
+            if not self._run_map_capture_failure_active:
+                self._report_run_logging_error("map capture failed", exc)
+                self._run_map_capture_failure_active = True
+
+    def _poll_run_map_state_once(self, state: dict):
+        self._update_buffered_node_inventory(state)
+        if type(state) is not dict:
+            return
+        state_id = id(state)
+        if self._run_last_map_poll_state_id == state_id:
+            return
+        self._run_last_map_poll_state_id = state_id
+        self._capture_run_map_state(state)
 
     def _serialized_run_map_snapshots(self) -> list[dict]:
         rows = []
@@ -1676,6 +1749,43 @@ class CombatEnv(gym.Env):
             })
         return rows
 
+    @staticmethod
+    def _append_run_payload(path: str, payload: str) -> Exception | None:
+        """Append one locked batch, rolling back any pre-commit partial write."""
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        encoded = payload.encode("utf-8")
+        committed = False
+        try:
+            with open(path, "a+b", buffering=0) as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.seek(0, os.SEEK_END)
+                    original_offset = f.tell()
+                    try:
+                        written = f.write(encoded)
+                        if written != len(encoded):
+                            raise OSError(
+                                f"short append: wrote {written} of {len(encoded)} bytes"
+                            )
+                        f.flush()
+                        committed = True
+                    except Exception as write_exc:
+                        try:
+                            f.truncate(original_offset)
+                            f.flush()
+                        except Exception as rollback_exc:
+                            raise OSError(
+                                f"append rollback failed: {rollback_exc}"
+                            ) from write_exc
+                        raise
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as exc:
+            if committed:
+                return exc
+            raise
+        return None
+
     def _emit_run_start(self):
         if not self._deck_history_path or self._run_start_emitted:
             return
@@ -1687,11 +1797,14 @@ class CombatEnv(gym.Env):
             payload = json.dumps(
                 run_start, ensure_ascii=False, allow_nan=False
             ) + "\n"
-            os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
-            with open(self._deck_history_path, "a", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                self._run_start_emitted = True
+            post_commit_error = self._append_run_payload(
+                self._deck_history_path, payload
+            )
+            self._run_start_emitted = True
+            if post_commit_error is not None:
+                self._report_run_logging_error(
+                    "run start logging failed", post_commit_error
+                )
         except Exception as exc:
             self._report_run_logging_error("run start logging failed", exc)
             return
@@ -1738,9 +1851,13 @@ class CombatEnv(gym.Env):
                     json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
                     for row in rows
                 )
-                os.makedirs(os.path.dirname(self._deck_history_path) or ".", exist_ok=True)
-                with open(self._deck_history_path, "a", encoding="utf-8") as f:
-                    f.write(payload)
+                post_commit_error = self._append_run_payload(
+                    self._deck_history_path, payload
+                )
+                if post_commit_error is not None:
+                    self._report_run_logging_error(
+                        "run outcome logging failed", post_commit_error
+                    )
             except Exception as exc:
                 self._report_run_logging_error("run outcome logging failed", exc)
                 return
@@ -1806,7 +1923,7 @@ class CombatEnv(gym.Env):
                 if target_type == "anyenemy":
                     args["target_index"] = 0
                 new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
-                self._capture_run_map_state(new_state)
+                self._update_buffered_node_inventory(new_state)
                 if new_state is None:
                     self._game_alive = False
                     break
@@ -1932,7 +2049,7 @@ class CombatEnv(gym.Env):
                 "target_index": target_index if target_index is not None else 0,
             }
             new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
-            self._capture_run_map_state(new_state)
+            self._update_buffered_node_inventory(new_state)
             if new_state is None:
                 self._game_alive = False
                 break
@@ -1940,7 +2057,7 @@ class CombatEnv(gym.Env):
             for _ in range(10):
                 if new_state.get("decision") == "card_select":
                     new_state = self._send(greedy_action(new_state))
-                    self._capture_run_map_state(new_state)
+                    self._update_buffered_node_inventory(new_state)
                 elif new_state.get("decision") in ("combat_play", "game_over"):
                     break
                 else:
@@ -1961,13 +2078,14 @@ class CombatEnv(gym.Env):
         for _ in range(200):
             if state is None:
                 return None
-            self._capture_run_map_state(state)
+            if state.get("decision") != "game_over":
+                self._poll_run_map_state_once(state)
             self._track_run_floor(state)
             if state.get("decision") == "game_over":
                 return state
             if state.get("decision") == "combat_play":
                 state = self._greedy_use_potions(state)
-                self._capture_run_map_state(state)
+                self._update_buffered_node_inventory(state)
                 return state
             cmd = None
             # STS2_MAP_PLANNER=1 (Jun 11): full-map path planning — maximize
@@ -1988,7 +2106,7 @@ class CombatEnv(gym.Env):
             if state.get("decision") == "card_reward":
                 self._buffer_card_pick(state, cmd)
             state = self._send(cmd)
-            self._capture_run_map_state(state)
+            self._update_buffered_node_inventory(state)
             if state is None:
                 return None
         return {
@@ -2007,6 +2125,7 @@ class CombatEnv(gym.Env):
             start_new_session=True,  # own process group — killed with os.killpg
         )
         self._read_buf = b""
+        self._pending_read_only_replies = 0
         ready = self._read_json(timeout_sec=15.0)
         if ready is None:
             # Game process failed to produce ready message — kill it now
@@ -2039,12 +2158,39 @@ class CombatEnv(gym.Env):
                 return outcome, payload
             return payload
 
+        def consume_buffered_frame():
+            while b"\n" in self._read_buf:
+                line, self._read_buf = self._read_buf.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                if not line.startswith(b"{"):
+                    if stop_on_malformed:
+                        return result("malformed_consumed")
+                    continue
+                try:
+                    return result("valid", json.loads(line))
+                except json.JSONDecodeError:
+                    if stop_on_malformed:
+                        return result("malformed_consumed")
+                    continue
+                except Exception:
+                    if stop_on_malformed:
+                        return result("malformed_consumed")
+                    if kill_on_failure:
+                        self._kill_proc()
+                    return result("no_complete_frame")
+            return None
+
         if self._proc is None:
             return result("no_complete_frame")
         try:
             fileno = self._proc.stdout.fileno()
             deadline = time.monotonic() + timeout_sec
             while time.monotonic() < deadline:
+                buffered = consume_buffered_frame()
+                if buffered is not None:
+                    return buffered
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -2053,29 +2199,13 @@ class CombatEnv(gym.Env):
                     continue
                 chunk = os.read(fileno, 4096)
                 if not chunk:
-                    return None
+                    if kill_on_failure:
+                        self._kill_proc()
+                    return result("eof")
                 self._read_buf += chunk
-                while b"\n" in self._read_buf:
-                    line, self._read_buf = self._read_buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if not line.startswith(b"{"):
-                        if stop_on_malformed:
-                            return result("malformed_consumed")
-                        continue
-                    try:
-                        return result("valid", json.loads(line))
-                    except json.JSONDecodeError:
-                        if stop_on_malformed:
-                            return result("malformed_consumed")
-                        continue
-                    except Exception:
-                        if stop_on_malformed:
-                            return result("malformed_consumed")
-                        if kill_on_failure:
-                            self._kill_proc()
-                        return result("no_complete_frame")
+            buffered = consume_buffered_frame()
+            if buffered is not None:
+                return buffered
             if kill_on_failure:
                 self._kill_proc()
             return result("no_complete_frame")
@@ -2119,15 +2249,21 @@ class CombatEnv(gym.Env):
         if self._proc is None:
             return None
         try:
+            while self._pending_read_only_replies > 0:
+                frame_outcome, _ = self._read_json(
+                    timeout_sec=60.0,
+                    return_frame_outcome=True,
+                    stop_on_malformed=True,
+                )
+                if frame_outcome not in {"valid", "malformed_consumed"}:
+                    return None
+                self._pending_read_only_replies -= 1
+            if self._proc is None:
+                return None
             self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
             self._proc.stdin.flush()
             # DoEndTurn takes ~3-15s; killing blow triggers DetectPostCombatState
             # which can take up to ~10s for reward generation. Use 60s to be safe.
-            while self._pending_read_only_replies > 0:
-                pending_reply = self._read_json(timeout_sec=60.0)
-                if pending_reply is None:
-                    return None
-                self._pending_read_only_replies -= 1
             return self._read_json(timeout_sec=60.0)
         except Exception:
             self._kill_proc()

@@ -3,6 +3,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import json
 import math
+import select
+import time
+import warnings
 from types import SimpleNamespace
 import pytest
 import agent.combat_env as combat_env
@@ -268,6 +271,92 @@ def test_bounded_player_snapshot_omits_only_invalid_fields(monkeypatch, tmp_path
     assert snapshot == {"hp": 73, "gold": 123}
 
 
+def test_player_snapshot_recursively_bounds_items_and_uses_safe_alias_fallback(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    state = _map_state(
+        deck=[{"id": "x" * 100_000, "upgraded": True}],
+        relics=[],
+        potions=[{f"key-{index}": index for index in range(33)}],
+    )
+    state["player"]["relics"] = {"malicious": "alias"}
+    state["player"]["relic_items"] = [
+        {"id": "ANCHOR", "upgraded": False}
+    ]
+
+    snapshot = env._bounded_player_snapshot(state)
+
+    assert snapshot["hp"] == 80
+    assert "deck" not in snapshot
+    assert snapshot["relics"] == [{"id": "ANCHOR", "upgraded": False}]
+    assert "potions" not in snapshot
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        {"a": {"b": {"c": {"d": {"e": "too deep"}}}}},
+        {"nested": list(range(257))},
+        {"huge": ["x" * 256 for _ in range(256)]},
+    ],
+)
+def test_player_snapshot_omits_only_collection_with_unsafe_nested_value(
+    monkeypatch, tmp_path, unsafe_value
+):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    state = _map_state(
+        deck=[unsafe_value],
+        relics=[{"id": "ANCHOR"}],
+        potions=[{"id": "HEALING"}],
+    )
+
+    snapshot = env._bounded_player_snapshot(state)
+
+    assert "deck" not in snapshot
+    assert snapshot["relics"] == [{"id": "ANCHOR"}]
+    assert snapshot["potions"] == [{"id": "HEALING"}]
+
+
+def test_player_snapshot_drops_unbounded_descriptions_but_keeps_item_identity(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    state = _map_state(
+        deck=[{
+            "id": "BASH",
+            "upgraded": True,
+            "description": "x" * 100_000,
+        }],
+        relics=[{"id": "ANCHOR", "description": "x" * 100_000}],
+        potions=[{"id": "HEALING", "description": "x" * 100_000}],
+    )
+
+    snapshot = env._bounded_player_snapshot(state)
+
+    assert snapshot["deck"] == [{"id": "BASH", "upgraded": True}]
+    assert snapshot["relics"] == [{"id": "ANCHOR"}]
+    assert snapshot["potions"] == [{"id": "HEALING"}]
+
+
+def test_player_snapshot_total_serialized_size_is_at_most_64_kib(monkeypatch, tmp_path):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    state = _map_state(
+        # Compact JSON is under 64 KiB while the actual default serializer used
+        # for map inventories is over it.  The persisted representation governs.
+        deck=[{"id": "x" * 226, "upgraded": True} for _ in range(256)],
+        relics=[{"id": "ANCHOR"}],
+        potions=[{"id": "HEALING"}],
+    )
+
+    snapshot = env._bounded_player_snapshot(state)
+
+    assert "deck" not in snapshot
+    assert snapshot["relics"] == [{"id": "ANCHOR"}]
+    assert snapshot["potions"] == [{"id": "HEALING"}]
+    assert len(json.dumps(snapshot, ensure_ascii=False).encode("utf-8")) <= 64 * 1024
+
+
 def test_capture_rejects_invalid_acts_and_malformed_maps_with_warning(
     monkeypatch, tmp_path
 ):
@@ -290,10 +379,12 @@ def test_capture_rejects_invalid_acts_and_malformed_maps_with_warning(
         for _ in range(6):
             env._capture_run_map_state(_map_state())
 
-    assert len(warnings_seen) == 2
+    # Consecutive malformed observations are one failure episode.  A later
+    # successful capture re-arms the warning for a new episode.
+    assert len(warnings_seen) == 1
     assert set(env._run_map_snapshots) == {1, 2, 3, 4}
     assert len(env._run_map_snapshots) <= 4
-    assert len(env._run_logging_errors) == 2
+    assert len(env._run_logging_errors) == 1
 
 
 def test_capture_bounds_map_nodes(monkeypatch, tmp_path):
@@ -321,17 +412,23 @@ def test_capture_bounds_map_nodes(monkeypatch, tmp_path):
 
 
 class _FakeProtocolInput:
-    def __init__(self, *, write_error=None):
+    def __init__(self, *, write_error=None, flush_error=None, on_write=None):
         self.payloads = []
         self.write_error = write_error
+        self.flush_error = flush_error
+        self.on_write = on_write
 
     def write(self, payload):
         if self.write_error is not None:
             raise self.write_error
         self.payloads.append(payload)
+        if self.on_write is not None:
+            self.on_write(payload)
         return len(payload)
 
     def flush(self):
+        if self.flush_error is not None:
+            raise self.flush_error
         return None
 
 
@@ -360,7 +457,10 @@ def test_read_only_map_timeout_preserves_process_and_drains_before_next_action(
     assert env._pending_read_only_replies == 1
 
     replies = iter([_map_reply(), {"decision": "combat_play", "round": 2}])
-    monkeypatch.setattr(env, "_read_json", lambda **kwargs: next(replies))
+    def fake_read_json(**kwargs):
+        reply = next(replies)
+        return ("valid", reply) if kwargs.get("return_frame_outcome") else reply
+    monkeypatch.setattr(env, "_read_json", fake_read_json)
 
     result = env._send({"cmd": "action", "action": "end_turn"})
 
@@ -452,6 +552,208 @@ def test_malformed_map_frame_does_not_discard_next_gameplay_response(
     finally:
         os.close(write_fd)
         os.close(read_fd)
+
+
+def _pipe_process(read_fd, protocol_input, events=None):
+    events = events if events is not None else []
+    return SimpleNamespace(
+        stdin=protocol_input,
+        stdout=SimpleNamespace(fileno=lambda: read_fd),
+        terminate=lambda: events.append("terminate"),
+        wait=lambda timeout=None: None,
+        kill=lambda: events.append("kill"),
+    )
+
+
+def _fast_pipe_reads(monkeypatch, env):
+    real_read_json = env._read_json
+    monkeypatch.setattr(
+        env,
+        "_read_json",
+        lambda timeout_sec=5.0, **kwargs: real_read_json(
+            timeout_sec=0.05, **kwargs
+        ),
+    )
+
+
+def test_pending_map_is_drained_before_action_and_buffered_gameplay_is_reused(
+    monkeypatch
+):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    read_fd, write_fd = os.pipe()
+    combat = {"decision": "combat_play", "round": 3}
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            assert env._pending_read_only_replies == 0
+            os.write(write_fd, (json.dumps(combat) + "\n").encode())
+
+    protocol_input = _FakeProtocolInput(on_write=reply_to_action)
+    proc = _pipe_process(read_fd, protocol_input)
+    env._proc = proc
+    env._game_alive = True
+    env._pending_read_only_replies = 1
+    _fast_pipe_reads(monkeypatch, env)
+    try:
+        late_map = json.dumps(_map_reply()).encode() + b"\n"
+        os.write(write_fd, late_map)
+
+        assert env._send({"cmd": "action", "action": "end_turn"}) == combat
+        assert env._proc is proc
+        assert env._game_alive is True
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_read_json_reuses_second_complete_frame_already_in_buffer(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    read_fd, write_fd = os.pipe()
+    proc = _pipe_process(read_fd, _FakeProtocolInput())
+    env._proc = proc
+    env._game_alive = True
+    _fast_pipe_reads(monkeypatch, env)
+    first = _map_reply()
+    second = {"decision": "combat_play", "round": 4}
+    try:
+        os.write(
+            write_fd,
+            (json.dumps(first) + "\n" + json.dumps(second) + "\n").encode(),
+        )
+
+        assert env._read_json() == first
+        assert env._read_json() == second
+        assert env._proc is proc
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_pending_partial_map_frame_completes_before_action_write(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    read_fd, write_fd = os.pipe()
+    combat = {"decision": "combat_play", "round": 5}
+    full_map = (json.dumps(_map_reply()) + "\n").encode()
+    split = len(full_map) // 2
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            assert env._pending_read_only_replies == 0
+            os.write(write_fd, (json.dumps(combat) + "\n").encode())
+
+    proc = _pipe_process(
+        read_fd, _FakeProtocolInput(on_write=reply_to_action)
+    )
+    env._proc = proc
+    env._game_alive = True
+    env._pending_read_only_replies = 1
+    _fast_pipe_reads(monkeypatch, env)
+    writer = None
+    try:
+        os.write(write_fd, full_map[:split])
+
+        import threading
+        writer = threading.Thread(
+            target=lambda: (time.sleep(0.01), os.write(write_fd, full_map[split:])),
+        )
+        writer.start()
+        assert env._send({"cmd": "action", "action": "end_turn"}) == combat
+        writer.join(timeout=1)
+        assert env._proc is proc
+    finally:
+        if writer is not None:
+            writer.join(timeout=1)
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_pending_malformed_map_frame_does_not_consume_gameplay(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    read_fd, write_fd = os.pipe()
+    combat = {"decision": "combat_play", "round": 6}
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            assert env._pending_read_only_replies == 0
+            os.write(write_fd, (json.dumps(combat) + "\n").encode())
+
+    proc = _pipe_process(
+        read_fd, _FakeProtocolInput(on_write=reply_to_action)
+    )
+    env._proc = proc
+    env._game_alive = True
+    env._pending_read_only_replies = 1
+    _fast_pipe_reads(monkeypatch, env)
+    try:
+        os.write(write_fd, b"{late-malformed}\n")
+
+        assert env._send({"cmd": "action", "action": "end_turn"}) == combat
+        assert env._proc is proc
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_pending_eof_stops_before_writing_gameplay(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    read_fd, write_fd = os.pipe()
+    protocol_input = _FakeProtocolInput()
+    proc = _pipe_process(read_fd, protocol_input)
+    env._proc = proc
+    env._game_alive = True
+    env._pending_read_only_replies = 1
+    _fast_pipe_reads(monkeypatch, env)
+    os.close(write_fd)
+    try:
+        assert env._send({"cmd": "action", "action": "end_turn"}) is None
+        assert not any(json.loads(payload).get("cmd") == "action"
+                       for payload in protocol_input.payloads)
+        assert env._proc is None
+        assert env._game_alive is False
+    finally:
+        os.close(read_fd)
+
+
+@pytest.mark.parametrize("failure_field", ["write_error", "flush_error"])
+def test_action_transport_failure_happens_after_pending_map_drain(
+    monkeypatch, failure_field
+):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    read_fd, write_fd = os.pipe()
+    kwargs = {failure_field: OSError(f"{failure_field} unavailable")}
+    protocol_input = _FakeProtocolInput(**kwargs)
+    proc = _pipe_process(read_fd, protocol_input)
+    env._proc = proc
+    env._game_alive = True
+    env._pending_read_only_replies = 1
+    _fast_pipe_reads(monkeypatch, env)
+    try:
+        os.write(write_fd, (json.dumps(_map_reply()) + "\n").encode())
+
+        assert env._send({"cmd": "action", "action": "end_turn"}) is None
+        assert env._pending_read_only_replies == 0
+        assert env._proc is None
+        assert select.select([read_fd], [], [], 0)[0] == []
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_start_proc_clears_pending_protocol_state(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    fake_proc = _fake_protocol_process()
+    env._pending_read_only_replies = 1
+    env._read_buf = b"stale\n"
+    monkeypatch.setattr(combat_env.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
+    monkeypatch.setattr(
+        combat_env, "open", lambda *args, **kwargs: SimpleNamespace(), raising=False
+    )
+    monkeypatch.setattr(env, "_read_json", lambda **kwargs: {"type": "ready"})
+
+    env._start_proc()
+
+    assert env._pending_read_only_replies == 0
+    assert env._read_buf == b""
 
 
 def _set_map_reply(monkeypatch, env, reply):
@@ -558,6 +860,79 @@ def test_same_act_graph_replacement_drops_stale_visits_and_preserves_survivors(
     assert env._run_current_map_coord == (1, 1, 1)
 
 
+def test_pending_map_capture_skip_does_not_repeat_warning(monkeypatch, tmp_path):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    env._pending_read_only_replies = 1
+    monkeypatch.setattr(
+        env,
+        "_send_read_only",
+        lambda command: (_ for _ in ()).throw(AssertionError("duplicate poll")),
+    )
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        for _ in range(25):
+            env._capture_run_map_state(_map_state())
+
+    assert seen == []
+    assert env._run_logging_errors == []
+
+
+def test_map_capture_warns_once_per_failure_episode_and_resets_after_success(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    replies = iter([
+        {"type": "error", "message": "unavailable"},
+        {"type": "error", "message": "unavailable"},
+        _map_reply(),
+        {"type": "error", "message": "unavailable"},
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        for _ in range(4):
+            env._capture_run_map_state(_map_state())
+
+    assert len(seen) == 2
+    assert len(env._run_logging_errors) == 1
+
+
+def test_run_logging_errors_are_deduplicated_and_bounded(monkeypatch, tmp_path):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for index in range(100):
+            env._report_run_logging_error(f"failure-{index}", ValueError("bad"))
+        env._report_run_logging_error("failure-99", ValueError("bad"))
+
+    assert len(env._run_logging_errors) == 64
+    assert len(set(env._run_logging_errors)) == 64
+
+
+def test_fresh_run_resets_logging_error_state(monkeypatch, tmp_path):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    env.dry_run = False
+    env._run_logging_errors = ["old failure"]
+    env._run_map_capture_failure_active = True
+    state = combat_env._dummy_combat_state()
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+    monkeypatch.setattr(env, "_start_proc", lambda: None)
+    monkeypatch.setattr(env, "_send", lambda command: state)
+    monkeypatch.setattr(env, "_advance_to_combat", lambda current: current)
+
+    env.reset()
+
+    assert env._run_logging_errors == []
+    assert env._run_map_capture_failure_active is False
+
+
 @pytest.mark.parametrize(
     "status", ["dead", "crash", "timeout", "stuck", "invalid", "reset_failure"]
 )
@@ -609,7 +984,7 @@ def test_failure_before_first_map_does_not_fabricate_snapshot(monkeypatch, tmp_p
     ]
 
 
-def test_advance_captures_loop_send_and_post_potion_states(monkeypatch):
+def test_advance_polls_each_distinct_state_once_without_post_potion_duplicate(monkeypatch):
     env = CombatEnv(
         cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
     )
@@ -625,7 +1000,32 @@ def test_advance_captures_loop_send_and_post_potion_states(monkeypatch):
     result = env._advance_to_combat(start)
 
     assert result is post_potion
-    assert captured == [start, combat, combat, post_potion]
+    assert captured == [start, combat]
+
+
+def test_combat_step_updates_inventory_without_polling_map(monkeypatch):
+    env = CombatEnv(
+        cards_json=CARDS_JSON, dry_run=False, run_context={"capture_map": True}
+    )
+    current = combat_env._dummy_combat_state()
+    current["context"] = {"act": 1, "floor": 1, "room_type": "Monster"}
+    next_state = json.loads(json.dumps(current))
+    next_state["round"] = 2
+    env._current_state = current
+    env._game_alive = True
+    captured = []
+    updated = []
+    monkeypatch.setattr(env.enc, "decode", lambda action, state: {"action": "play_card"})
+    monkeypatch.setattr(env, "_send", lambda command: next_state)
+    monkeypatch.setattr(env, "_capture_run_map_state", lambda state: captured.append(state))
+    monkeypatch.setattr(env, "_update_buffered_node_inventory", lambda state: updated.append(state))
+    monkeypatch.setattr(env, "_shaping_reward", lambda state: 0.0)
+
+    _, _, terminated, _, _ = env.step(0)
+
+    assert terminated is False
+    assert captured == []
+    assert updated == [next_state]
 
 
 def test_run_start_and_outcome_share_authoritative_metadata(monkeypatch, tmp_path):
@@ -710,6 +1110,18 @@ def test_run_start_close_failure_after_flush_does_not_duplicate_start(monkeypatc
             flush_calls += 1
             return self._file.flush()
 
+        def fileno(self):
+            return self._file.fileno()
+
+        def seek(self, *args):
+            return self._file.seek(*args)
+
+        def tell(self):
+            return self._file.tell()
+
+        def truncate(self, *args):
+            return self._file.truncate(*args)
+
         def __exit__(self, exc_type, exc_value, traceback):
             self._file.__exit__(exc_type, exc_value, traceback)
             raise OSError("close failed after flush")
@@ -744,24 +1156,45 @@ def test_run_start_flush_failure_remains_retryable(monkeypatch, tmp_path):
     wrapped = False
 
     class FlushFailingFile:
+        def __init__(self, file_obj):
+            self._file = file_obj
+            self._failed = False
+
         def __enter__(self):
+            self._file.__enter__()
             return self
 
         def write(self, payload):
-            return len(payload)
+            return self._file.write(payload)
 
         def flush(self):
-            raise OSError("flush unavailable")
+            if not self._failed:
+                self._failed = True
+                raise OSError("flush unavailable")
+            return self._file.flush()
+
+        def fileno(self):
+            return self._file.fileno()
+
+        def seek(self, *args):
+            return self._file.seek(*args)
+
+        def tell(self):
+            return self._file.tell()
+
+        def truncate(self, *args):
+            return self._file.truncate(*args)
 
         def __exit__(self, exc_type, exc_value, traceback):
-            return False
+            return self._file.__exit__(exc_type, exc_value, traceback)
 
     def flush_failing_open(path, *args, **kwargs):
         nonlocal wrapped
+        file_obj = real_open(path, *args, **kwargs)
         if path == str(history_path) and not wrapped:
             wrapped = True
-            return FlushFailingFile()
-        return real_open(path, *args, **kwargs)
+            return FlushFailingFile(file_obj)
+        return file_obj
 
     monkeypatch.setattr(combat_env, "open", flush_failing_open, raising=False)
 
@@ -932,6 +1365,128 @@ def test_run_outcome_logging_failure_is_visible_and_retryable(monkeypatch, tmp_p
     assert [row["event"] for row in rows] == ["run_start", "outcome"]
     assert [row["event"] for row in rows].count("run_start") == 1
     assert [row["event"] for row in rows].count("outcome") == 1
+
+
+class _DelegatingAppendFile:
+    def __init__(self, file_obj):
+        self._file = file_obj
+
+    def __enter__(self):
+        self._file.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._file.__exit__(exc_type, exc_value, traceback)
+
+    def __getattr__(self, name):
+        return getattr(self._file, name)
+
+
+class _PartialWriteFile(_DelegatingAppendFile):
+    def write(self, payload):
+        self._file.write(payload[: max(1, len(payload) // 2)])
+        self._file.flush()
+        raise OSError("partial append")
+
+
+class _FlushAfterWriteFile(_DelegatingAppendFile):
+    def __init__(self, file_obj):
+        super().__init__(file_obj)
+        self._failed = False
+
+    def write(self, payload):
+        return self._file.write(payload)
+
+    def flush(self):
+        if not self._failed:
+            self._failed = True
+            raise OSError("flush after write")
+        return self._file.flush()
+
+
+class _CloseAfterFlushFile(_DelegatingAppendFile):
+    def write(self, payload):
+        return self._file.write(payload)
+
+    def flush(self):
+        return self._file.flush()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._file.__exit__(exc_type, exc_value, traceback)
+        raise OSError("close after committed flush")
+
+
+def _terminal_batch_env(monkeypatch, tmp_path):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    env._emit_run_start()
+    _set_map_reply(monkeypatch, env, _map_reply())
+    env._capture_run_map_state(_map_state(hp=70))
+    env._run_milestone_records = [{"event": "milestone", "floor": 7}]
+    env._run_card_pick_records = [{"event": "card_pick", "picked": "BASH"}]
+    return env, history_path
+
+
+@pytest.mark.parametrize("wrapper_type", [_PartialWriteFile, _FlushAfterWriteFile])
+def test_terminal_batch_append_rolls_back_before_retry(
+    monkeypatch, tmp_path, wrapper_type
+):
+    env, history_path = _terminal_batch_env(monkeypatch, tmp_path)
+    before = history_path.read_bytes()
+    real_open = open
+    wrapped = False
+
+    def failing_open(path, *args, **kwargs):
+        nonlocal wrapped
+        file_obj = real_open(path, *args, **kwargs)
+        if path == str(history_path) and not wrapped:
+            wrapped = True
+            return wrapper_type(file_obj)
+        return file_obj
+
+    monkeypatch.setattr(combat_env, "open", failing_open, raising=False)
+
+    with pytest.warns(RuntimeWarning):
+        env._emit_run_outcome(_map_state(hp=0), victory=False, status="dead")
+
+    assert history_path.read_bytes() == before
+    assert env._run_outcome_emitted is False
+
+    env._emit_run_outcome(_map_state(hp=0), victory=False, status="dead")
+
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == [
+        "run_start", "map_snapshot", "milestone", "card_pick", "outcome",
+    ]
+
+
+def test_terminal_batch_close_after_committed_flush_does_not_retry(
+    monkeypatch, tmp_path
+):
+    env, history_path = _terminal_batch_env(monkeypatch, tmp_path)
+    real_open = open
+    wrapped = False
+
+    def close_failing_open(path, *args, **kwargs):
+        nonlocal wrapped
+        file_obj = real_open(path, *args, **kwargs)
+        if path == str(history_path) and not wrapped:
+            wrapped = True
+            return _CloseAfterFlushFile(file_obj)
+        return file_obj
+
+    monkeypatch.setattr(combat_env, "open", close_failing_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="close after committed flush"):
+        env._emit_run_outcome(_map_state(hp=0), victory=False, status="dead")
+    env._emit_run_outcome(_map_state(hp=0), victory=False, status="dead")
+
+    assert env._run_outcome_emitted is True
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == [
+        "run_start", "map_snapshot", "milestone", "card_pick", "outcome",
+    ]
 
 
 def test_run_logging_rejects_nested_nan_without_marking_emitted(monkeypatch, tmp_path):
@@ -1109,6 +1664,8 @@ def test_greedy_use_potions_refreshes_indices_after_use(monkeypatch):
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
     env._current_floor = 8
     used_indices = []
+    captured = []
+    updated = []
 
     def fake_send(cmd):
         idx = cmd["args"]["potion_index"]
@@ -1123,10 +1680,14 @@ def test_greedy_use_potions_refreshes_indices_after_use(monkeypatch):
         return {"type": "error", "message": f"Invalid potion index {idx}"}
 
     monkeypatch.setattr(env, "_send", fake_send)
+    monkeypatch.setattr(env, "_capture_run_map_state", lambda state: captured.append(state))
+    monkeypatch.setattr(env, "_update_buffered_node_inventory", lambda state: updated.append(state))
 
     result = env._greedy_use_potions(state_with([vulnerable_0, blood_1, vulnerable_2]))
 
     assert used_indices == [0, 1]
+    assert captured == []
+    assert len(updated) == 2
     assert result["decision"] == "combat_play"
     assert result.get("type") != "error"
 
