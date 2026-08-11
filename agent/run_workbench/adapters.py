@@ -495,7 +495,7 @@ def _adapt_deck_run(
             last_recorded_floor=max_floor,
         ),
         capabilities=Capabilities(
-            visited_route=bool(floors),
+            visited_route=False,
             node_rewards=any(row.get("event") == "card_pick" for row in records),
             decisions=any(row.get("event") == "card_pick" for row in records),
         ),

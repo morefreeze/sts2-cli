@@ -934,11 +934,18 @@ function appendErrors(container, errors, source = null) {
   container.append(section);
 }
 
+function runHasMapCapability(value) {
+  const run = value && value.run ? value.run : value;
+  const capabilities = run && run.capabilities;
+  return Boolean(capabilities && (capabilities.full_map || capabilities.visited_route));
+}
+
 function renderCanonicalRun(container, run, index = null) {
   const section = element('section', { className: 'detail-section' });
   const heading = element('div', { className: 'detail-run-heading' });
+  const mapAvailable = runHasMapCapability(run);
   heading.append(element('h3', { text: index === null ? `对局 ${run.run_id || '未标注'}` : `对局 ${index + 1} · ${run.run_id || '未标注'}` }));
-  if (typeof run.run_id === 'string' && run.run_id.trim()) {
+  if (mapAvailable && typeof run.run_id === 'string' && run.run_id.trim()) {
     const mapButton = element('button', { text: '查看地图', attrs: { type: 'button' } });
     mapButton.addEventListener('click', (event) => openRun(run.run_id, event.currentTarget));
     heading.append(mapButton);
@@ -965,7 +972,6 @@ function renderCanonicalRun(container, run, index = null) {
     }));
   });
   capabilitySection.append(grid);
-  const mapAvailable = run.capabilities && (run.capabilities.full_map || run.capabilities.visited_route);
   capabilitySection.append(element('p', {
     className: 'section-note',
     text: mapAvailable
@@ -1143,18 +1149,19 @@ async function openRun(runId, opener = null) {
     setStatus('无法打开对局：缺少对局 ID', 'error');
     return;
   }
-  if (window.STS2Map && typeof window.STS2Map.openRun === 'function') {
-    window.STS2Map.openRun(runId, opener);
-    return;
-  }
   const { token, signal } = beginDetailRequest(opener);
   setStatus('正在读取对局…', 'busy');
   try {
     const payload = await getJSON(`/api/run?id=${encodeURIComponent(runId)}`, { signal });
     if (!isCurrentDetailRequest(token)) return;
     state.detailAbortController = null;
+    if (runHasMapCapability(payload)
+      && window.STS2Map && typeof window.STS2Map.openRun === 'function') {
+      window.STS2Map.openRun(runId, opener);
+      return;
+    }
     renderDetail(payload, `对局 ${runId}`, opener);
-    setStatus('已载入');
+    setStatus('已载入对局摘要');
   } catch (error) {
     if (!isCurrentDetailRequest(token) || error.name === 'AbortError') return;
     state.detailAbortController = null;

@@ -207,6 +207,10 @@ class _CompactRun:
                 None if self.replay_parser_rejected else self.first_recorded_floor
             )
             visited_route = self.has_floor or self.has_replay_nodes
+        elif self.source_kind is SourceKind.DECK_HISTORY:
+            complete_run = self.has_outcome
+            first_recorded_floor = self.first_recorded_floor
+            visited_route = False
         else:
             complete_run = self.has_outcome
             first_recorded_floor = self.first_recorded_floor

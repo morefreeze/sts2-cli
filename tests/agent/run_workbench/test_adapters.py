@@ -1137,6 +1137,7 @@ def test_deck_history_produces_one_outcome_per_exact_run_id() -> None:
     assert run.metadata.character is None
     assert run.metadata.seed is None
     assert run.metadata.checkpoint is None
+    assert run.capabilities.visited_route is False
     assert all(node["_workbench_evidence_kind"] == "deck_history_event" for node in run.nodes)
     assert all(node["_workbench_provenance"] for node in run.nodes)
 

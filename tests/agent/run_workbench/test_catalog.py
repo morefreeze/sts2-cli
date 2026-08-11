@@ -2687,5 +2687,5 @@ def test_deck_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
     assert large_run.coverage == small_run.coverage
     assert large_run.coverage.first_recorded_floor == 3
     assert large_run.capabilities == small_run.capabilities
-    assert large_run.capabilities.visited_route is True
+    assert large_run.capabilities.visited_route is False
     assert large_run.capabilities.node_rewards is True

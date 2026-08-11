@@ -937,6 +937,91 @@ def test_representatives_never_request_an_empty_run_id():
     assert "trend_timestamped_n" in rows
 
 
+def test_open_run_uses_map_only_when_canonical_run_has_route_capability():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "function runHasMapCapability" in script
+    capability = _javascript_section(
+        script, "function runHasMapCapability", "function renderCanonicalRun"
+    )
+    canonical = _javascript_section(
+        script, "function renderCanonicalRun", "function renderDetail"
+    )
+    open_run = _javascript_section(
+        script, "async function openRun", "async function refreshMetrics"
+    )
+    assert "if (mapAvailable" in canonical
+
+    payload = _run_node_json(
+        f"""
+        (async () => {{
+          const calls = [];
+          const state = {{ detailAbortController: {{}} }};
+          const opener = {{ id: 'trend-point' }};
+          let response = null;
+          const window = {{
+            STS2Map: {{
+              openRun(runId, candidate) {{
+                calls.push({{ type: 'map', runId, opener: candidate && candidate.id }});
+              }},
+            }},
+          }};
+          function beginDetailRequest(candidate) {{
+            calls.push({{ type: 'begin', opener: candidate && candidate.id }});
+            return {{ token: 1, signal: {{}} }};
+          }}
+          function isCurrentDetailRequest(token) {{ return token === 1; }}
+          async function getJSON(path) {{
+            calls.push({{ type: 'fetch', path }});
+            return response;
+          }}
+          function renderDetail(value, title, candidate) {{
+            calls.push({{
+              type: 'detail', title, runId: value.run.run_id,
+              opener: candidate && candidate.id,
+            }});
+          }}
+          function setStatus(message, kind) {{ calls.push({{ type: 'status', message, kind }}); }}
+          {capability}
+          {open_run}
+
+          response = {{
+            view: 'run',
+            run: {{ run_id: 'deck-only', capabilities: {{ visited_route: false, full_map: false }} }},
+          }};
+          await openRun('deck-only', opener);
+          response = {{
+            view: 'run',
+            run: {{ run_id: 'native-route', capabilities: {{ visited_route: true, full_map: false }} }},
+          }};
+          await openRun('native-route', opener);
+          console.log(JSON.stringify(calls));
+        }})().catch((error) => {{ console.error(error); process.exit(1); }});
+        """
+    )
+
+    assert [call["type"] for call in payload].count("fetch") == 2
+    assert [call for call in payload if call["type"] == "detail"] == [
+        {
+            "type": "detail",
+            "title": "对局 deck-only",
+            "runId": "deck-only",
+            "opener": "trend-point",
+        }
+    ]
+    assert [call for call in payload if call["type"] == "map"] == [
+        {
+            "type": "map",
+            "runId": "native-route",
+            "opener": "trend-point",
+        }
+    ]
+    assert any(
+        call["type"] == "status" and call["message"] == "已载入对局摘要"
+        for call in payload
+    )
+
+
 def test_representative_candidates_dedupe_only_the_same_anonymous_point():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     bounding = _javascript_section(
