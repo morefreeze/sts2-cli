@@ -1,0 +1,507 @@
+"""Strict parsing for locally recorded authoritative map snapshots."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import math
+from typing import Any, Iterable, Mapping
+
+from .deltas import derive_snapshot_deltas
+from .models import ActMap, MapAlignment, MapEdge, MapNode
+
+
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_MAX_GRAPH_NODES = 256
+_MAX_GRAPH_EDGES = 2048
+_MAX_GRAPH_STRING = 64
+_MAX_PLAYER_BYTES = 64 * 1024
+_MAX_ERRORS = 32
+_MAX_ERROR_CHARS = 160
+
+_ROOM_TYPES = {
+    "ancient": "Ancient",
+    "ancientroom": "Ancient",
+    "neow": "Ancient",
+    "neowroom": "Ancient",
+    "monster": "Monster",
+    "monsterroom": "Monster",
+    "combat": "Monster",
+    "combatroom": "Monster",
+    "normalcombat": "Monster",
+    "normalcombatroom": "Monster",
+    "elite": "Elite",
+    "eliteroom": "Elite",
+    "boss": "Boss",
+    "bossroom": "Boss",
+    "shop": "Shop",
+    "shoproom": "Shop",
+    "merchant": "Shop",
+    "merchantroom": "Shop",
+    "rest": "RestSite",
+    "restroom": "RestSite",
+    "restsite": "RestSite",
+    "restsiteroom": "RestSite",
+    "campfire": "RestSite",
+    "campfireroom": "RestSite",
+    "treasure": "Treasure",
+    "treasureroom": "Treasure",
+    "chest": "Treasure",
+    "chestroom": "Treasure",
+    "unknown": "Unknown",
+    "unknownroom": "Unknown",
+    "event": "Unknown",
+    "eventroom": "Unknown",
+    "questionmark": "Unknown",
+}
+_PLAYER_FIELDS = frozenset({"hp", "max_hp", "gold", "deck", "relics", "potions"})
+_IDENTITY_KEYS = ("id", "card_id", "relic_id", "potion_id", "model_id")
+_PRODUCER_STRIPPED_KEYS = frozenset({
+    "description", "description_raw", "flavor", "flavor_text", "text",
+})
+
+
+class RecordedMapError(ValueError):
+    """A bounded validation error for one untrusted recorded map row."""
+
+
+@dataclass(frozen=True)
+class RecordedActSnapshot:
+    act_index: int
+    act_id: str
+    act_map: ActMap
+    route_nodes: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class _GraphNode:
+    coord: tuple[int, int]
+    room_type: str
+    children: tuple[tuple[int, int], ...]
+    visited: bool
+    current: bool
+    model_id: str | None = None
+
+
+def _error(message: str) -> RecordedMapError:
+    return RecordedMapError(message[:_MAX_ERROR_CHARS])
+
+
+def _map_int(value: Any, *, label: str) -> int:
+    if type(value) is not int or not _INT32_MIN <= value <= _INT32_MAX:
+        raise _error(f"{label} must be an Int32 integer")
+    return value
+
+
+def _coordinate(value: Any, *, label: str) -> tuple[int, int]:
+    if type(value) is not dict:
+        raise _error(f"{label} must be an object")
+    return (
+        _map_int(value.get("col"), label=f"{label} col"),
+        _map_int(value.get("row"), label=f"{label} row"),
+    )
+
+
+def _bounded_graph_string(value: Any, *, label: str) -> str:
+    if type(value) is not str or not value or len(value) > _MAX_GRAPH_STRING:
+        raise _error(f"{label} must be a non-empty bounded string")
+    return value
+
+
+def _room_type(value: Any, *, label: str) -> str:
+    raw = _bounded_graph_string(value, label=label)
+    key = "".join(character for character in raw.casefold() if character.isalnum())
+    return _ROOM_TYPES.get(key, "Unknown")
+
+
+def _finite_timestamp(value: Any) -> float:
+    if type(value) is int:
+        if not _INT64_MIN <= value <= _INT64_MAX:
+            raise _error("recorded map timestamp must be finite")
+    elif type(value) is float:
+        if not math.isfinite(value):
+            raise _error("recorded map timestamp must be finite")
+    else:
+        raise _error("recorded map timestamp must be finite")
+    return float(value)
+
+
+def _json_value(value: Any, *, depth: int, count: list[int]) -> Any:
+    count[0] += 1
+    if depth > 4 or count[0] > 4096:
+        raise _error("recorded player inventory exceeds structural limits")
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        if not _INT64_MIN <= value <= _INT64_MAX:
+            raise _error("recorded player inventory contains an invalid integer")
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise _error("recorded player inventory contains a non-finite number")
+        return value
+    if type(value) is str:
+        if len(value) > 256:
+            raise _error("recorded player inventory contains an oversized string")
+        return value
+    if type(value) is list:
+        if len(value) > 256:
+            raise _error("recorded player inventory contains an oversized list")
+        return [_json_value(item, depth=depth + 1, count=count) for item in value]
+    if type(value) is dict:
+        if (
+            len(value) > 32
+            or any(type(key) is not str or len(key) > 256 for key in value)
+            or any(key.casefold() in _PRODUCER_STRIPPED_KEYS for key in value)
+        ):
+            raise _error("recorded player inventory contains an invalid object")
+        return {
+            key: _json_value(item, depth=depth + 1, count=count)
+            for key, item in value.items()
+        }
+    raise _error("recorded player inventory is not JSON-safe")
+
+
+def _identity_value(value: Any, *, depth: int = 0) -> bool:
+    if depth > 4 or type(value) is bool:
+        return False
+    if type(value) is str:
+        return bool(value.strip()) and len(value) <= 256
+    if type(value) is int:
+        return _INT64_MIN <= value <= _INT64_MAX
+    if type(value) is dict:
+        return any(
+            key in value and _identity_value(value[key], depth=depth + 1)
+            for key in (*_IDENTITY_KEYS, "key", "value", "text_key", "TextKey", "en")
+        )
+    return False
+
+
+def _inventory_list(value: Any, *, label: str) -> list[Any]:
+    if type(value) is not list:
+        raise _error(f"recorded player {label} must be a list")
+    detached = _json_value(value, depth=0, count=[0])
+    for item in detached:
+        if type(item) is not dict or not any(
+            key in item and _identity_value(item[key]) for key in _IDENTITY_KEYS
+        ):
+            raise _error(f"recorded player {label} item lacks a bounded identity")
+    return detached
+
+
+def _player_snapshot(value: Any) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != _PLAYER_FIELDS:
+        raise _error("recorded player snapshot has an invalid shape")
+    detached: dict[str, Any] = {}
+    for field in ("hp", "max_hp", "gold"):
+        number = value[field]
+        if type(number) is int:
+            valid_number = _INT64_MIN <= number <= _INT64_MAX
+        elif type(number) is float:
+            valid_number = math.isfinite(number)
+        else:
+            valid_number = False
+        if not valid_number:
+            raise _error("recorded player snapshot contains an invalid number")
+        detached[field] = number
+    for field in ("deck", "relics", "potions"):
+        detached[field] = _inventory_list(value[field], label=field)
+    try:
+        encoded = json.dumps(
+            detached, ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        raise _error("recorded player snapshot is not JSON-safe") from None
+    if len(encoded) > _MAX_PLAYER_BYTES:
+        raise _error("recorded player snapshot exceeds the size limit")
+    return detached
+
+
+def _parse_graph(raw_map: Any, *, act: int) -> tuple[
+    tuple[_GraphNode, ...],
+    frozenset[tuple[int, int]],
+    tuple[int, int],
+    frozenset[tuple[tuple[int, int], tuple[int, int]]],
+]:
+    if type(raw_map) is not dict or raw_map.get("type") != "map":
+        raise _error("recorded map payload must have type map")
+    context = raw_map.get("context")
+    if type(context) is not dict:
+        raise _error("recorded map context must be an object")
+    context_act = context.get("act")
+    if type(context_act) is not int or context_act != act:
+        raise _error("recorded map context act is inconsistent")
+    rows = raw_map.get("rows")
+    if type(rows) is not list:
+        raise _error("recorded map rows must be a list")
+    if len(rows) > _MAX_GRAPH_NODES:
+        raise _error("recorded map exceeds the node limit")
+
+    graph: list[_GraphNode] = []
+    coordinates: set[tuple[int, int]] = set()
+    current_markers: list[tuple[int, int]] = []
+    edge_count = 0
+    for row_container in rows:
+        if type(row_container) is not list:
+            raise _error("recorded map row container must be a list")
+        for raw_node in row_container:
+            if len(graph) + 1 >= _MAX_GRAPH_NODES:
+                raise _error("recorded map exceeds the node limit")
+            if type(raw_node) is not dict:
+                raise _error("recorded map node must be an object")
+            coord = _coordinate(raw_node, label="recorded map node coordinate")
+            if coord in coordinates:
+                raise _error("recorded map node coordinates must be unique")
+            visited = raw_node.get("visited")
+            current = raw_node.get("current")
+            if type(visited) is not bool:
+                raise _error("recorded map visited marker must be boolean")
+            if type(current) is not bool:
+                raise _error("recorded map current marker must be boolean")
+            children = raw_node.get("children")
+            if type(children) is not list:
+                raise _error("recorded map children must be a list")
+            edge_count += len(children)
+            if edge_count > _MAX_GRAPH_EDGES:
+                raise _error("recorded map exceeds the edge limit")
+            child_coords = tuple(
+                _coordinate(child, label="recorded map child coordinate")
+                for child in children
+            )
+            graph.append(_GraphNode(
+                coord=coord,
+                room_type=_room_type(raw_node.get("type"), label="recorded map room type"),
+                children=child_coords,
+                visited=visited,
+                current=current,
+            ))
+            coordinates.add(coord)
+            if current:
+                current_markers.append(coord)
+
+    boss = raw_map.get("boss")
+    if type(boss) is not dict:
+        raise _error("recorded map boss must be an object")
+    boss_coord = _coordinate(boss, label="recorded map boss coordinate")
+    if boss_coord in coordinates:
+        raise _error("recorded map boss coordinate must be unique")
+    boss_id = boss.get("id")
+    if boss_id is not None:
+        boss_id = _bounded_graph_string(boss_id, label="recorded map boss id")
+    boss_visited = boss.get("visited", False)
+    boss_current = boss.get("current", False)
+    if type(boss_visited) is not bool:
+        raise _error("recorded map boss visited marker must be boolean")
+    if type(boss_current) is not bool:
+        raise _error("recorded map boss current marker must be boolean")
+    graph.append(_GraphNode(
+        coord=boss_coord,
+        room_type=_room_type(boss.get("type"), label="recorded map boss type"),
+        children=(),
+        visited=boss_visited,
+        current=boss_current,
+        model_id=boss_id,
+    ))
+    coordinates.add(boss_coord)
+    if boss_current:
+        current_markers.append(boss_coord)
+
+    current_coord = _coordinate(
+        raw_map.get("current_coord"), label="recorded map current coordinate"
+    )
+    if current_coord not in coordinates:
+        raise _error("recorded map current coordinate is absent")
+    if current_markers != [current_coord]:
+        raise _error("recorded map current markers are inconsistent")
+
+    edge_set: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for node in graph:
+        for child in node.children:
+            edge = (node.coord, child)
+            if child not in coordinates:
+                raise _error("recorded map edge points outside the graph")
+            if child == node.coord:
+                raise _error("recorded map self edges are not allowed")
+            if edge in edge_set:
+                raise _error("recorded map edges must be unique")
+            edge_set.add(edge)
+
+    raw_visited = frozenset(node.coord for node in graph if node.visited)
+    return tuple(graph), raw_visited, current_coord, frozenset(edge_set)
+
+
+def _visited_type(value: dict[str, Any]) -> str:
+    present = [key for key in ("type", "room_type") if key in value]
+    if not present:
+        raise _error("recorded route node must contain a room type")
+    normalized = [
+        _room_type(value[key], label="recorded route room type") for key in present
+    ]
+    if any(room_type != normalized[0] for room_type in normalized[1:]):
+        raise _error("recorded route room types are inconsistent")
+    return normalized[0]
+
+
+def _parse_recorded_row(
+    row: Mapping[str, Any],
+) -> tuple[RecordedActSnapshot, float]:
+    if not isinstance(row, Mapping):
+        raise _error("recorded map row must be an object")
+    if row.get("event") != "map_snapshot":
+        raise _error("recorded map row has an invalid event")
+    act = row.get("act")
+    if type(act) is not int or not 1 <= act <= 4:
+        raise _error("recorded map act must be an integer from 1 to 4")
+    if "is_multiplayer" in row and row.get("is_multiplayer") is not False:
+        raise _error("recorded map row must be single-player")
+    timestamp = _finite_timestamp(row.get("ts"))
+    graph, raw_visited, current_coord, edge_set = _parse_graph(row.get("map"), act=act)
+    by_coord = {node.coord: node for node in graph}
+
+    raw_route = row.get("visited_nodes")
+    if type(raw_route) is not list:
+        raise _error("recorded visited route must be a list")
+    if len(raw_route) > _MAX_GRAPH_NODES:
+        raise _error("recorded visited route exceeds the node limit")
+    route_coordinates: list[tuple[int, int]] = []
+    route_nodes: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    act_index = act - 1
+    for path_index, raw_route_node in enumerate(raw_route):
+        if type(raw_route_node) is not dict:
+            raise _error("recorded route node must be an object")
+        coord = _coordinate(raw_route_node, label="recorded route coordinate")
+        if coord not in by_coord:
+            raise _error("recorded route coordinate is absent from the graph")
+        if coord in seen:
+            raise _error("recorded route coordinates must be unique")
+        seen.add(coord)
+        room_type = _visited_type(raw_route_node)
+        graph_node = by_coord[coord]
+        if room_type != graph_node.room_type:
+            raise _error("recorded route room type disagrees with the graph")
+        entry = _player_snapshot(raw_route_node.get("entry_player"))
+        exit_ = _player_snapshot(raw_route_node.get("exit_player"))
+        route_node: dict[str, Any] = {
+            "id": f"a{act_index}:n{path_index}",
+            "act": act,
+            "act_index": act_index,
+            "floor": path_index + 1,
+            "global_floor": act_index * 17 + path_index + 1,
+            "col": coord[0],
+            "row": coord[1],
+            "map_point_type": room_type,
+            "room_type": room_type,
+            "start_player": entry,
+            "end_player": exit_,
+            "deltas": derive_snapshot_deltas(exit_, entry).to_dict(),
+        }
+        if graph_node.model_id is not None:
+            route_node["model_id"] = graph_node.model_id
+        route_nodes.append(route_node)
+        route_coordinates.append(coord)
+
+    route_set = frozenset(route_coordinates)
+    if route_set != raw_visited:
+        raise _error("recorded route does not match graph visited markers")
+    if not route_coordinates or route_coordinates[-1] != current_coord:
+        raise _error("recorded route does not end at the current coordinate")
+    for previous, current in zip(route_coordinates, route_coordinates[1:]):
+        if (previous, current) not in edge_set:
+            raise _error("recorded route is not connected in order")
+
+    path_index_by_coord = {
+        coord: index for index, coord in enumerate(route_coordinates)
+    }
+    map_nodes = tuple(
+        MapNode(
+            id=f"recorded:{node.coord[0]}:{node.coord[1]}",
+            col=node.coord[0],
+            row=node.coord[1],
+            room_type=node.room_type,
+            visited=node.coord in raw_visited,
+            path_index=path_index_by_coord.get(node.coord),
+        )
+        for node in graph
+    )
+    map_edges = tuple(
+        MapEdge(
+            from_id=f"recorded:{node.coord[0]}:{node.coord[1]}",
+            to_id=f"recorded:{child[0]}:{child[1]}",
+        )
+        for node in graph
+        for child in node.children
+    )
+    path_ids = tuple(
+        f"recorded:{coord[0]}:{coord[1]}" for coord in route_coordinates
+    )
+    act_id = f"RECORDED.ACT.{act}"
+    snapshot = RecordedActSnapshot(
+        act_index=act_index,
+        act_id=act_id,
+        act_map=ActMap(
+            act_id=act_id,
+            nodes=map_nodes,
+            edges=map_edges,
+            alignment=MapAlignment(
+                ok=True,
+                ambiguous=False,
+                path_node_ids=path_ids,
+            ),
+            full_map=True,
+            visited_route=bool(route_nodes),
+            fallback_reason=None,
+        ),
+        route_nodes=tuple(route_nodes),
+    )
+    try:
+        json.dumps(
+            {"map": snapshot.act_map.to_dict(), "route": snapshot.route_nodes},
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError):
+        raise _error("recorded map output is not JSON-safe") from None
+    return snapshot, timestamp
+
+
+def parse_recorded_map_row(row: Mapping[str, Any]) -> RecordedActSnapshot:
+    """Validate and detach one persisted ``map_snapshot`` row."""
+
+    snapshot, _timestamp = _parse_recorded_row(row)
+    return snapshot
+
+
+def latest_recorded_acts(
+    rows: Iterable[Mapping[str, Any]],
+) -> tuple[dict[int, RecordedActSnapshot], tuple[str, ...]]:
+    """Consume rows once and keep the latest valid snapshot for each act."""
+
+    selected: dict[int, tuple[float, RecordedActSnapshot]] = {}
+    errors: list[str] = []
+    for index, row in enumerate(rows):
+        try:
+            snapshot, timestamp = _parse_recorded_row(row)
+        except RecordedMapError as exc:
+            if len(errors) < _MAX_ERRORS:
+                errors.append(f"row {index}: {exc}"[:_MAX_ERROR_CHARS])
+            continue
+        except Exception:
+            if len(errors) < _MAX_ERRORS:
+                errors.append(
+                    f"row {index}: invalid recorded map row"[:_MAX_ERROR_CHARS]
+                )
+            continue
+        retained = selected.get(snapshot.act_index)
+        if retained is None or timestamp >= retained[0]:
+            selected[snapshot.act_index] = (timestamp, snapshot)
+    return (
+        {
+            act_index: selected[act_index][1]
+            for act_index in sorted(selected)
+        },
+        tuple(errors),
+    )
