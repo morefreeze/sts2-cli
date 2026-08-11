@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict, fields, replace
 import importlib
 import json
 import math
-from collections.abc import Mapping
+import operator
 from typing import Any, Callable
 
 import pytest
@@ -291,26 +292,86 @@ def test_parse_recorded_map_row_detaches_input_and_has_frozen_outer_contract() -
 
     assert parsed.route_nodes[0]["start_player"]["deck"][0]["id"] == "STRIKE"
     assert len(parsed.act_map.edges) == 5
-    parsed.route_nodes[1]["start_player"]["deck"][0]["id"] = "OUTPUT_MUTATION"
+    with pytest.raises(TypeError):
+        parsed.route_nodes[1]["start_player"]["deck"][0]["id"] = "OUTPUT_MUTATION"
     assert parsed.route_nodes[1]["end_player"]["deck"][0]["id"] == "STRIKE"
     with pytest.raises(FrozenInstanceError):
         parsed.act_index = 2
 
 
-def test_route_nodes_property_returns_fresh_deep_defensive_copies() -> None:
+def test_route_nodes_field_is_deeply_immutable_and_json_serializable() -> None:
     api = _api()
     parsed = api.parse_recorded_map_row(_valid_row())
-    first_view = parsed.route_nodes
+    route = parsed.route_nodes
+    node = route[0]
+    deck = node["start_player"]["deck"]
+    card = deck[0]
 
-    first_view[0]["start_player"]["deck"][0]["id"] = "MUTATED"
-    first_view[0]["deltas"]["cards_gained"]["value"][0]["id"] = "MUTATED"
+    dict_mutators = [
+        lambda: operator.setitem(node, "extra", True),
+        lambda: operator.delitem(node, "id"),
+        lambda: node.update({"extra": True}),
+        lambda: node.setdefault("extra", True),
+        lambda: node.pop("id"),
+        lambda: node.popitem(),
+        lambda: node.clear(),
+        lambda: operator.ior(node, {"extra": True}),
+        lambda: operator.setitem(card, "id", "MUTATED"),
+    ]
+    list_mutators = [
+        lambda: deck.append({"id": "NEW"}),
+        lambda: deck.extend([{"id": "NEW"}]),
+        lambda: deck.insert(0, {"id": "NEW"}),
+        lambda: deck.pop(),
+        lambda: deck.remove(card),
+        lambda: deck.clear(),
+        lambda: deck.sort(key=lambda item: item["id"]),
+        lambda: deck.reverse(),
+        lambda: operator.setitem(deck, 0, {"id": "NEW"}),
+        lambda: operator.delitem(deck, 0),
+        lambda: operator.iadd(deck, [{"id": "NEW"}]),
+        lambda: operator.imul(deck, 2),
+    ]
+    for mutate in (*dict_mutators, *list_mutators):
+        with pytest.raises(TypeError):
+            mutate()
 
-    second_view = parsed.route_nodes
-    assert second_view is not first_view
-    assert second_view[0] is not first_view[0]
-    assert second_view[0]["start_player"]["deck"][0]["id"] == "STRIKE"
-    assert second_view[0]["deltas"]["cards_gained"]["value"][0]["id"] == "BASH"
-    json.dumps(second_view, ensure_ascii=False, allow_nan=False)
+    assert parsed.route_nodes is route
+    assert parsed.route_nodes[0]["start_player"]["deck"][0]["id"] == "STRIKE"
+    assert parsed.route_nodes[0]["deltas"]["cards_gained"]["value"][0]["id"] == "BASH"
+    json.dumps(parsed.route_nodes, ensure_ascii=False, allow_nan=False)
+
+
+def test_recorded_snapshot_preserves_exact_standard_dataclass_api() -> None:
+    api = _api()
+    parsed = api.parse_recorded_map_row(_valid_row())
+
+    assert [item.name for item in fields(parsed)] == [
+        "act_index", "act_id", "act_map", "route_nodes",
+    ]
+    positional = api.RecordedActSnapshot(
+        parsed.act_index,
+        parsed.act_id,
+        parsed.act_map,
+        parsed.route_nodes,
+    )
+    replaced = replace(parsed, act_id="RECORDED.ACT.REPLACED")
+    serialized = asdict(parsed)
+    deep_copied = deepcopy(parsed)
+
+    assert positional == parsed
+    assert replaced.act_id == "RECORDED.ACT.REPLACED"
+    assert [item.name for item in fields(replaced)] == [
+        "act_index", "act_id", "act_map", "route_nodes",
+    ]
+    assert set(serialized) == {"act_index", "act_id", "act_map", "route_nodes"}
+    assert "_route_nodes_json" not in serialized
+    assert deep_copied == parsed
+    with pytest.raises(TypeError):
+        operator.setitem(serialized["route_nodes"][0], "extra", True)
+    with pytest.raises(TypeError):
+        operator.setitem(deep_copied.route_nodes[0], "extra", True)
+    json.dumps(serialized, ensure_ascii=False, allow_nan=False)
 
 
 @pytest.mark.parametrize("route_state", ["absent", "empty"])
@@ -352,12 +413,15 @@ class _BadGet(Mapping):
         raise RuntimeError("PRIVATE /local/path inventory")
 
     def __iter__(self):
-        return iter(())
+        raise RuntimeError("PRIVATE /local/path inventory")
 
     def __len__(self):
         return 0
 
     def get(self, _key, _default=None):
+        raise RuntimeError("PRIVATE /local/path inventory")
+
+    def items(self):
         raise RuntimeError("PRIVATE /local/path inventory")
 
 
@@ -369,6 +433,44 @@ def test_public_parser_contains_hostile_root_mapping_exceptions() -> None:
 
     assert str(raised.value) == "invalid recorded map row"
     assert "PRIVATE" not in str(raised.value)
+
+
+class _ForgedRecordedMapError(Mapping):
+    def __init__(self, error_type):
+        self._error = error_type("SECRET /private/inventory" + "x" * 300)
+
+    def _raise(self):
+        raise self._error
+
+    def __getitem__(self, _key):
+        self._raise()
+
+    def __iter__(self):
+        self._raise()
+
+    def __len__(self):
+        return 1
+
+    def get(self, _key, _default=None):
+        self._raise()
+
+    def items(self):
+        self._raise()
+
+
+def test_public_parser_normalizes_forged_recorded_map_errors_from_hostile_mapping() -> None:
+    api = _api()
+    hostile = _ForgedRecordedMapError(api.RecordedMapError)
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(hostile)
+    snapshots, errors = api.latest_recorded_acts(iter((hostile,)))
+
+    assert str(raised.value) == "invalid recorded map row"
+    assert snapshots == {}
+    assert errors == ("row 0: invalid recorded map row",)
+    assert "SECRET" not in str(raised.value) + repr(errors)
+    assert "/private/inventory" not in str(raised.value) + repr(errors)
 
 
 def test_parse_recorded_map_row_normalizes_known_variants_and_bounded_unknowns() -> None:

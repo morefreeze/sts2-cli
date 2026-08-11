@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import math
 from typing import Any, Iterable, Mapping
@@ -68,38 +68,84 @@ class RecordedMapError(ValueError):
     """A bounded validation error for one untrusted recorded map row."""
 
 
-@dataclass(frozen=True, init=False)
+def _immutable_mutation(*_args: Any, **_kwargs: Any) -> None:
+    raise TypeError("recorded route data is immutable")
+
+
+class _FrozenDict(dict):
+    """JSON-serializable dict whose recursively frozen contents cannot mutate."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        source = dict(*args, **kwargs)
+        dict.__init__(self)
+        for key, value in source.items():
+            dict.__setitem__(self, key, _freeze_json(value))
+
+    __setitem__ = _immutable_mutation
+    __delitem__ = _immutable_mutation
+    clear = _immutable_mutation
+    pop = _immutable_mutation
+    popitem = _immutable_mutation
+    setdefault = _immutable_mutation
+    update = _immutable_mutation
+    __ior__ = _immutable_mutation
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> _FrozenDict:
+        return self
+
+
+class _FrozenList(list):
+    """JSON-serializable list whose recursively frozen contents cannot mutate."""
+
+    def __init__(self, values: Iterable[Any] = ()) -> None:
+        list.__init__(self, (_freeze_json(value) for value in values))
+
+    __setitem__ = _immutable_mutation
+    __delitem__ = _immutable_mutation
+    append = _immutable_mutation
+    clear = _immutable_mutation
+    extend = _immutable_mutation
+    insert = _immutable_mutation
+    pop = _immutable_mutation
+    remove = _immutable_mutation
+    reverse = _immutable_mutation
+    sort = _immutable_mutation
+    __iadd__ = _immutable_mutation
+    __imul__ = _immutable_mutation
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> _FrozenList:
+        return self
+
+
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, (_FrozenDict, _FrozenList)):
+        return value
+    if isinstance(value, dict):
+        return _FrozenDict(value)
+    if isinstance(value, list):
+        return _FrozenList(value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
 class RecordedActSnapshot:
     act_index: int
     act_id: str
     act_map: ActMap
-    _route_nodes_json: str = field(repr=False)
+    route_nodes: tuple[dict[str, Any], ...]
 
-    def __init__(
-        self,
-        *,
-        act_index: int,
-        act_id: str,
-        act_map: ActMap,
-        route_nodes: tuple[dict[str, Any], ...],
-    ) -> None:
+    def __post_init__(self) -> None:
+        frozen_route = tuple(_freeze_json(node) for node in self.route_nodes)
         encoded = json.dumps(
-            route_nodes,
+            frozen_route,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
         )
         encoded.encode("utf-8")
-        object.__setattr__(self, "act_index", act_index)
-        object.__setattr__(self, "act_id", act_id)
-        object.__setattr__(self, "act_map", act_map)
-        object.__setattr__(self, "_route_nodes_json", encoded)
-
-    @property
-    def route_nodes(self) -> tuple[dict[str, Any], ...]:
-        """Return a fresh ordinary-JSON view of the immutable route data."""
-
-        return tuple(json.loads(self._route_nodes_json))
+        object.__setattr__(self, "route_nodes", frozen_route)
 
 
 @dataclass(frozen=True)
@@ -386,11 +432,22 @@ def _visited_type(value: dict[str, Any]) -> str:
     return normalized[0]
 
 
+def _normalize_root_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy an untrusted root Mapping without preserving attacker exceptions."""
+
+    try:
+        if type(row) is dict:
+            return dict(row)
+        if not isinstance(row, Mapping):
+            raise TypeError("root is not a mapping")
+        return dict(row.items())
+    except Exception:
+        raise _error("invalid recorded map row") from None
+
+
 def _parse_recorded_row(
-    row: Mapping[str, Any],
+    row: dict[str, Any],
 ) -> tuple[RecordedActSnapshot, int | float]:
-    if not isinstance(row, Mapping):
-        raise _error("recorded map row must be an object")
     event = row.get("event")
     if type(event) is not str or event != "map_snapshot":
         raise _error("recorded map row has an invalid event")
@@ -515,8 +572,9 @@ def _parse_recorded_row(
 def parse_recorded_map_row(row: Mapping[str, Any]) -> RecordedActSnapshot:
     """Validate and detach one persisted ``map_snapshot`` row."""
 
+    normalized = _normalize_root_mapping(row)
     try:
-        snapshot, _timestamp = _parse_recorded_row(row)
+        snapshot, _timestamp = _parse_recorded_row(normalized)
         return snapshot
     except RecordedMapError:
         raise
@@ -533,7 +591,8 @@ def latest_recorded_acts(
     errors: list[str] = []
     for index, row in enumerate(rows):
         try:
-            snapshot, timestamp = _parse_recorded_row(row)
+            normalized = _normalize_root_mapping(row)
+            snapshot, timestamp = _parse_recorded_row(normalized)
         except RecordedMapError as exc:
             if len(errors) < _MAX_ERRORS:
                 errors.append(f"row {index}: {exc}"[:_MAX_ERROR_CHARS])
