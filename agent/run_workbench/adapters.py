@@ -25,6 +25,7 @@ from .models import (
     SourceKind,
     node_evidence_key,
 )
+from .recorded_maps import latest_recorded_acts
 from .sources import (
     SourceDescriptor,
     SourceFormatError,
@@ -454,6 +455,12 @@ def _adapt_deck_run(
     warnings: list[str] | None = None,
 ) -> RunRecord:
     resolved_source_id = source_id or f"{path}:{run_id}"
+    recorded_acts, parser_errors = latest_recorded_acts(records)
+    route_nodes = [
+        _annotate_recorded_route_evidence(node, resolved_source_id)
+        for snapshot in recorded_acts.values()
+        for node in snapshot.route_nodes
+    ]
     outcome_rows = [row for row in records if row.get("event") == "outcome"]
     outcome_row = outcome_rows[-1] if outcome_rows else {}
     status, victory, technical_kind = _status_from_record(outcome_row)
@@ -462,7 +469,7 @@ def _adapt_deck_run(
         for row in records
         if (timestamp := _first_number(row, "ts")) is not None
     ]
-    floors = _deck_floors(records)
+    floors = [*_deck_floors(records), *_node_floors(route_nodes)]
     max_floor = _first_int(outcome_row, "max_global_floor", "max_floor", "floor")
     if max_floor is None and floors:
         max_floor = max(floors)
@@ -473,9 +480,14 @@ def _adapt_deck_run(
         if outcome_row
         else (max(timestamps) if timestamps else None),
     )
-    nodes = [
+    raw_nodes = [
         _annotate_deck_history_evidence(row, resolved_source_id)
         for row in records
+    ]
+    nodes = [*route_nodes, *raw_nodes]
+    acts = [
+        {"id": snapshot.act_id, "act_index": snapshot.act_index}
+        for snapshot in recorded_acts.values()
     ]
     return RunRecord(
         run_id=run_id,
@@ -495,12 +507,17 @@ def _adapt_deck_run(
             last_recorded_floor=max_floor,
         ),
         capabilities=Capabilities(
-            visited_route=False,
-            node_rewards=any(row.get("event") == "card_pick" for row in records),
+            full_map=bool(recorded_acts)
+            and all(snapshot.act_map.full_map for snapshot in recorded_acts.values()),
+            visited_route=bool(route_nodes),
+            node_rewards=any(
+                isinstance(node.get("deltas"), dict) for node in route_nodes
+            ),
             decisions=any(row.get("event") == "card_pick" for row in records),
         ),
+        acts=acts,
         nodes=nodes,
-        warnings=list(warnings or ()),
+        warnings=[*list(warnings or ()), *parser_errors],
         comparison_conflicts=_comparison_conflicts_from_records(records),
         _node_provenance_index=_single_source_node_provenance(
             nodes,
@@ -565,9 +582,21 @@ def _metadata_from_records(
         evaluation_mode=_first_nonempty_record_value(records, "evaluation_mode"),
         scenario=_first_nonempty_record_value(records, "scenario"),
         ascension=_first_record_int(records, "ascension"),
+        is_multiplayer=_single_exact_record_bool(records, "is_multiplayer"),
         started_at=started_at,
         ended_at=ended_at,
     )
+
+
+def _single_exact_record_bool(
+    records: list[dict[str, Any]], key: str
+) -> bool | None:
+    observed = {
+        record[key]
+        for record in records
+        if key in record and type(record[key]) is bool
+    }
+    return next(iter(observed)) if len(observed) == 1 else None
 
 
 def _comparison_conflicts_from_records(
@@ -1136,6 +1165,18 @@ def _annotate_deck_history_evidence(
 ) -> dict[str, Any]:
     evidence = deepcopy(record)
     evidence["_workbench_evidence_kind"] = "deck_history_event"
+    evidence["_workbench_provenance"] = [
+        {"source_id": source_id, "source_kind": SourceKind.DECK_HISTORY.value}
+    ]
+    return evidence
+
+
+def _annotate_recorded_route_evidence(
+    node: dict[str, Any],
+    source_id: str,
+) -> dict[str, Any]:
+    evidence = deepcopy(node)
+    evidence["_workbench_evidence_kind"] = "route_node"
     evidence["_workbench_provenance"] = [
         {"source_id": source_id, "source_kind": SourceKind.DECK_HISTORY.value}
     ]

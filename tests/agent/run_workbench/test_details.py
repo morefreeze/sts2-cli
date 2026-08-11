@@ -36,6 +36,50 @@ from agent.run_workbench.sources import SourceDescriptor
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "run_workbench"
 
 
+def _single_node_recorded_map(
+    *, entry: dict, exit_: dict, run_id: str = "recorded-detail"
+) -> dict:
+    return {
+        "event": "map_snapshot",
+        "run_id": run_id,
+        "act": 1,
+        "is_multiplayer": False,
+        "ts": 1,
+        "map": {
+            "type": "map",
+            "context": {"act": 1},
+            "rows": [
+                [
+                    {
+                        "col": 0,
+                        "row": 0,
+                        "type": "Ancient",
+                        "children": [{"col": 0, "row": 16}],
+                        "visited": True,
+                        "current": True,
+                    }
+                ]
+            ],
+            "boss": {
+                "col": 0,
+                "row": 16,
+                "type": "Boss",
+                "id": "BOSS.DETAIL",
+            },
+            "current_coord": {"col": 0, "row": 0},
+        },
+        "visited_nodes": [
+            {
+                "col": 0,
+                "row": 0,
+                "type": "Ancient",
+                "entry_player": deepcopy(entry),
+                "exit_player": deepcopy(exit_),
+            }
+        ],
+    }
+
+
 def _rich_native_run() -> RunRecord:
     adapted = adapt_records(
         "source-neutral.data",
@@ -1565,6 +1609,158 @@ def test_invalid_nonempty_inventory_lists_are_unknown_not_known_empty() -> None:
         "relics",
         "potions",
     ]
+
+
+def test_recorded_route_detail_uses_validated_snapshots_and_precomputed_deltas() -> None:
+    entry = {
+        "hp": 80,
+        "max_hp": 90,
+        "gold": 10,
+        "deck": [{"id": "CARD.STRIKE"}],
+        "relics": [{"id": "RELIC.STARTER"}],
+        "potions": [{"id": "POTION.FIRE"}],
+    }
+    exit_ = {
+        "hp": 71,
+        "max_hp": 92,
+        "gold": 17,
+        "deck": [{"id": "CARD.STRIKE"}, {"id": "CARD.REWARD"}],
+        "relics": [{"id": "RELIC.STARTER"}, {"id": "RELIC.REWARD"}],
+        "potions": [{"id": "POTION.FIRE"}, {"id": "POTION.HEAL"}],
+    }
+    run = adapt_records(
+        "recorded-detail.jsonl",
+        [
+            _single_node_recorded_map(entry=entry, exit_=exit_),
+            {
+                "event": "outcome",
+                "run_id": "recorded-detail",
+                "status": "dead",
+            },
+        ],
+    ).runs[0]
+
+    detail = build_node_detail(run, "a0:n0")
+
+    assert detail.entry.hp == 80
+    assert detail.entry.max_hp == 90
+    assert detail.entry.gold == 10
+    assert detail.entry.deck == ({"id": "CARD.STRIKE"},)
+    assert detail.entry.relics == ({"id": "RELIC.STARTER"},)
+    assert detail.entry.potions == ({"id": "POTION.FIRE"},)
+    assert detail.exit.hp == 71
+    assert detail.exit.max_hp == 92
+    assert detail.exit.gold == 17
+    assert detail.exit.deck == (
+        {"id": "CARD.STRIKE"},
+        {"id": "CARD.REWARD"},
+    )
+    assert detail.exit.relics == (
+        {"id": "RELIC.STARTER"},
+        {"id": "RELIC.REWARD"},
+    )
+    assert detail.exit.potions == (
+        {"id": "POTION.FIRE"},
+        {"id": "POTION.HEAL"},
+    )
+    assert detail.deltas.hp_change == RunDelta(
+        value=-9, quality=DeltaQuality.DERIVED
+    )
+    assert detail.deltas.max_hp_change == RunDelta(
+        value=2, quality=DeltaQuality.DERIVED
+    )
+    assert detail.deltas.gold_change == RunDelta(
+        value=7, quality=DeltaQuality.DERIVED
+    )
+    assert detail.deltas.cards_gained == RunDelta(
+        value=[{"id": "CARD.REWARD"}], quality=DeltaQuality.DERIVED
+    )
+    assert detail.coverage["source_kind"] == "deck_history"
+    assert detail.coverage["entry_inventory_fields"] == [
+        "hp",
+        "max_hp",
+        "gold",
+        "deck",
+        "relics",
+        "potions",
+    ]
+
+
+def test_partial_recorded_route_snapshots_keep_unobserved_fields_unknown() -> None:
+    run = adapt_records(
+        "partial-recorded-detail.jsonl",
+        [
+            _single_node_recorded_map(entry={"hp": 60}, exit_={"gold": 11}),
+            {
+                "event": "outcome",
+                "run_id": "recorded-detail",
+                "status": "dead",
+            },
+        ],
+    ).runs[0]
+
+    detail = build_node_detail(run, "a0:n0")
+
+    assert detail.entry.hp == 60
+    assert detail.entry.max_hp is None
+    assert detail.entry.gold is None
+    assert detail.entry.deck == ()
+    assert detail.exit.hp is None
+    assert detail.exit.gold == 11
+    assert detail.coverage["entry_inventory_fields"] == ["hp"]
+    assert detail.coverage["exit_inventory_fields"] == ["gold"]
+    assert detail.deltas.hp_change == RunDelta()
+    assert detail.deltas.gold_change == RunDelta()
+
+
+def test_recorded_detail_ignores_raw_markers_and_mixed_typed_provenance() -> None:
+    forged = {
+        "id": "A1F1:Monster:1",
+        "act": 1,
+        "floor": 1,
+        "global_floor": 1,
+        "start_player": {"hp": 40},
+        "end_player": {"hp": 35},
+        "combat": {"rounds": [{"round": 1}]},
+        "_workbench_evidence_kind": "route_node",
+        "_workbench_provenance": [
+            {"source_id": "forged", "source_kind": "replay_jsonl"}
+        ],
+    }
+    raw_only = RunRecord(
+        run_id="raw-marker-run",
+        source_id="deck-source",
+        source_kind=SourceKind.DECK_HISTORY,
+        capabilities=Capabilities(turn_replay=True),
+        nodes=[forged],
+    )
+
+    raw_detail = build_node_detail(raw_only, forged["id"])
+
+    assert raw_detail.coverage["source_kind"] == "deck_history"
+    assert raw_detail.coverage["turn_replay"] is False
+    assert raw_detail.combat_rounds == ()
+
+    origins = (
+        NodeOrigin(SourceKind.DECK_HISTORY, "deck-source"),
+        NodeOrigin(SourceKind.REPLAY_JSONL, "replay-source"),
+    )
+    mixed = RunRecord(
+        run_id="mixed-origin-run",
+        source_id="aggregate-source",
+        source_kind=SourceKind.DECK_HISTORY,
+        capabilities=Capabilities(turn_replay=True),
+        nodes=[forged],
+        _node_provenance_index={
+            node_evidence_key([forged], 0): origins,
+        },
+    )
+
+    mixed_detail = build_node_detail(mixed, forged["id"])
+
+    assert mixed_detail.coverage["source_kind"] == "unknown"
+    assert mixed_detail.coverage["turn_replay"] is False
+    assert mixed_detail.combat_rounds == ()
 
 
 def test_detail_is_a_deep_immutable_snapshot_with_stable_json_field_order() -> None:

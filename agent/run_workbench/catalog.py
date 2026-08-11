@@ -37,6 +37,7 @@ from .models import (
     RunStatus,
     SourceKind,
 )
+from .recorded_maps import RecordedMapError, parse_recorded_map_row
 from .sources import SourceDescriptor, SourceFormatError, classify_records, read_json_records
 
 
@@ -152,6 +153,9 @@ class _CompactRun:
     scenario: str | None = None
     ascension: int | None = None
     modifiers: tuple[str, ...] = ()
+    is_multiplayer: bool | None = None
+    has_is_multiplayer_observation: bool = False
+    is_multiplayer_conflicted: bool = False
     started_at: float | None = None
     ended_at: float | None = None
     status: RunStatus = RunStatus.UNKNOWN
@@ -167,6 +171,7 @@ class _CompactRun:
     has_outcome: bool = False
     has_floor: bool = False
     has_card_pick: bool = False
+    has_valid_recorded_map: bool = False
     has_replay_action: bool = False
     has_replay_state: bool = False
     replay_parser_succeeded: bool = False
@@ -205,7 +210,7 @@ class _CompactRun:
         elif self.source_kind is SourceKind.DECK_HISTORY:
             complete_run = self.has_outcome
             first_recorded_floor = self.first_recorded_floor
-            visited_route = False
+            visited_route = self.has_valid_recorded_map
         else:
             complete_run = self.has_outcome
             first_recorded_floor = self.first_recorded_floor
@@ -224,6 +229,7 @@ class _CompactRun:
                 scenario=self.scenario,
                 ascension=self.ascension,
                 modifiers=self.modifiers,
+                is_multiplayer=self.is_multiplayer,
                 started_at=self.started_at,
                 ended_at=self.ended_at,
             ),
@@ -247,9 +253,14 @@ class _CompactRun:
                 ),
             ),
             capabilities=Capabilities(
+                full_map=(
+                    self.has_valid_recorded_map
+                    if self.source_kind is SourceKind.DECK_HISTORY
+                    else False
+                ),
                 visited_route=visited_route,
                 node_rewards=(
-                    self.has_card_pick
+                    self.has_valid_recorded_map
                     if self.source_kind is SourceKind.DECK_HISTORY
                     else False
                 ),
@@ -1164,6 +1175,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 if event in {
                     "milestone",
                     "card_pick",
+                    "map_snapshot",
                     "outcome",
                     "eval_result",
                     "result",
@@ -1215,7 +1227,12 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     compact = _CompactRun(run_id=_record_run_id(record))
                     _update_compact_eval(compact, record)
                     eval_runs.append(compact)
-                elif event in {"milestone", "card_pick", "outcome"}:
+                elif event in {
+                    "milestone",
+                    "card_pick",
+                    "map_snapshot",
+                    "outcome",
+                }:
                     run_ids.update(record_run_ids)
                     run_id = _record_run_id(record)
                     if run_id:
@@ -1387,6 +1404,14 @@ def _update_compact_metadata(
         compact.comparison_conflicts.add("ascension")
     if compact.ascension is None:
         compact.ascension = ascension
+    multiplayer = record.get("is_multiplayer")
+    if type(multiplayer) is bool and not compact.is_multiplayer_conflicted:
+        if not compact.has_is_multiplayer_observation:
+            compact.is_multiplayer = multiplayer
+            compact.has_is_multiplayer_observation = True
+        elif compact.is_multiplayer is not multiplayer:
+            compact.is_multiplayer = None
+            compact.is_multiplayer_conflicted = True
 
 
 def _replay_scalar_text(record: dict[str, Any], *keys: str) -> str | None:
@@ -1505,6 +1530,17 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
     )
     event = record.get("event")
     compact.has_card_pick = compact.has_card_pick or event == "card_pick"
+    if event == "map_snapshot":
+        try:
+            snapshot = parse_recorded_map_row(record)
+        except RecordedMapError:
+            return
+        for node in snapshot.route_nodes:
+            _update_observed_floor(
+                compact, _first_integral_int(node, "global_floor")
+            )
+        compact.has_valid_recorded_map = True
+        return
     if event != "outcome":
         return
     compact.has_outcome = True

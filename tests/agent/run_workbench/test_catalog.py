@@ -83,6 +83,56 @@ def _native(run_id: str = "native-1") -> dict:
     }
 
 
+def _recorded_map_snapshot(run_id: str = "recorded") -> dict:
+    player = {
+        "hp": 80,
+        "max_hp": 80,
+        "gold": 10,
+        "deck": [{"id": "CARD.STRIKE"}],
+        "relics": [{"id": "RELIC.STARTER"}],
+        "potions": [],
+    }
+    return {
+        "event": "map_snapshot",
+        "run_id": run_id,
+        "act": 1,
+        "is_multiplayer": False,
+        "ts": 1,
+        "map": {
+            "type": "map",
+            "context": {"act": 1},
+            "rows": [
+                [
+                    {
+                        "col": 0,
+                        "row": 0,
+                        "type": "Ancient",
+                        "children": [{"col": 0, "row": 16}],
+                        "visited": True,
+                        "current": True,
+                    }
+                ]
+            ],
+            "boss": {
+                "col": 0,
+                "row": 16,
+                "type": "Boss",
+                "id": "BOSS.CATALOG",
+            },
+            "current_coord": {"col": 0, "row": 0},
+        },
+        "visited_nodes": [
+            {
+                "col": 0,
+                "row": 0,
+                "type": "Ancient",
+                "entry_player": deepcopy(player),
+                "exit_player": deepcopy(player),
+            }
+        ],
+    }
+
+
 def _replay(run_id: str, *, floor: int = 4) -> list[dict]:
     return [
         {
@@ -2704,4 +2754,151 @@ def test_deck_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
     assert large_run.coverage.first_recorded_floor == 3
     assert large_run.capabilities == small_run.capabilities
     assert large_run.capabilities.visited_route is False
+    assert large_run.capabilities.node_rewards is False
+    assert large_run.capabilities.decisions is True
+
+
+def test_valid_recorded_map_capabilities_match_for_511_and_513_sources(
+    tmp_path: Path,
+) -> None:
+    core = [
+        _recorded_map_snapshot("recorded"),
+        {
+            "event": "card_pick",
+            "run_id": "recorded",
+            "is_multiplayer": "false",
+        },
+        {
+            "event": "outcome",
+            "run_id": "recorded",
+            "status": "dead",
+            "max_global_floor": 1,
+        },
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": "recorded"}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-valid"
+    large_root = tmp_path / "large-valid"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+
+    assert large_run.metadata == small_run.metadata
+    assert large_run.metadata.is_multiplayer is False
+    assert large_run.coverage == small_run.coverage
+    assert large_run.coverage.first_recorded_floor == 1
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.capabilities.full_map is True
+    assert large_run.capabilities.visited_route is True
     assert large_run.capabilities.node_rewards is True
+    assert large_run.capabilities.decisions is True
+
+    exact = large.get_run("recorded")["run"]
+    assert exact["acts"] == [{"id": "RECORDED.ACT.1", "act_index": 0}]
+    assert exact["nodes"][0]["id"] == "a0:n0"
+    assert exact["nodes"][0]["_workbench_evidence_kind"] == "route_node"
+
+
+def test_malformed_recorded_map_cannot_raise_compact_capabilities(
+    tmp_path: Path,
+) -> None:
+    malformed = _recorded_map_snapshot("malformed")
+    malformed["map"].pop("type")
+    core = [
+        malformed,
+        {
+            "event": "card_pick",
+            "run_id": "malformed",
+            "floor": 1,
+        },
+        {
+            "event": "outcome",
+            "run_id": "malformed",
+            "status": "dead",
+            "max_global_floor": 1,
+            "is_multiplayer": True,
+        },
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": "malformed", "floor_crossed": 1}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-malformed"
+    large_root = tmp_path / "large-malformed"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+
+    assert large_run.metadata == small_run.metadata
+    assert large_run.metadata.is_multiplayer is None
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.capabilities.full_map is False
+    assert large_run.capabilities.visited_route is False
+    assert large_run.capabilities.node_rewards is False
+    assert large_run.capabilities.decisions is True
+
+    exact = large.get_run("malformed")["run"]
+    assert exact["acts"] == []
+    assert exact["warnings"]
+
+
+def test_no_map_card_pick_never_claims_compact_node_rewards(
+    tmp_path: Path,
+) -> None:
+    core = [
+        {
+            "event": "card_pick",
+            "run_id": "no-map",
+            "floor": 1,
+            "is_multiplayer": 0,
+        },
+        {
+            "event": "outcome",
+            "run_id": "no-map",
+            "status": "dead",
+            "max_global_floor": 1,
+        },
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": "no-map", "floor_crossed": 1}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-no-map"
+    large_root = tmp_path / "large-no-map"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+
+    assert large_run.metadata == small_run.metadata
+    assert large_run.metadata.is_multiplayer is None
+    assert large_run.capabilities == small_run.capabilities
+    assert large_run.capabilities.full_map is False
+    assert large_run.capabilities.visited_route is False
+    assert large_run.capabilities.node_rewards is False
+    assert large_run.capabilities.decisions is True

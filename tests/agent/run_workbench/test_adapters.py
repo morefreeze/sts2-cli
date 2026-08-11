@@ -1,5 +1,6 @@
 import math
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,68 @@ from agent.run_workbench.models import NodeOrigin, RunStatus, SourceKind
 
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "run_workbench"
+
+
+def _recorded_map_row(
+    *,
+    act: int,
+    ts: int,
+    snapshots: list[tuple[dict, dict]],
+) -> dict:
+    boss_row = {1: 16, 2: 16, 3: 15, 4: 14}[act]
+    rows = []
+    visited_nodes = []
+    for path_index, (entry, exit_) in enumerate(snapshots):
+        room_type = "Ancient" if path_index == 0 else "Monster"
+        child_row = (
+            path_index + 1
+            if path_index + 1 < len(snapshots)
+            else boss_row
+        )
+        rows.append(
+            [
+                {
+                    "col": 0,
+                    "row": path_index,
+                    "type": room_type,
+                    "children": [{"col": 0, "row": child_row}],
+                    "visited": True,
+                    "current": path_index == len(snapshots) - 1,
+                }
+            ]
+        )
+        visited_nodes.append(
+            {
+                "col": 0,
+                "row": path_index,
+                "type": room_type,
+                "entry_player": deepcopy(entry),
+                "exit_player": deepcopy(exit_),
+            }
+        )
+    return {
+        "event": "map_snapshot",
+        "run_id": "recorded-run",
+        "act": act,
+        "is_multiplayer": False,
+        "ts": ts,
+        "map": {
+            "type": "map",
+            "context": {"act": act},
+            "rows": rows,
+            "boss": {
+                "col": 0,
+                "row": boss_row,
+                "type": "Boss",
+                "id": f"BOSS.ACT.{act}",
+            },
+            "current_coord": {
+                "col": 0,
+                "row": len(snapshots) - 1,
+            },
+        },
+        "visited_nodes": visited_nodes,
+    }
 
 
 def test_native_run_preserves_identity_and_format_capabilities() -> None:
@@ -1140,6 +1203,169 @@ def test_deck_history_produces_one_outcome_per_exact_run_id() -> None:
     assert run.capabilities.visited_route is False
     assert all(node["_workbench_evidence_kind"] == "deck_history_event" for node in run.nodes)
     assert all(node["_workbench_provenance"] for node in run.nodes)
+
+
+def test_deck_history_exposes_only_validated_recorded_acts_and_route_nodes() -> None:
+    base_player = {
+        "hp": 80,
+        "max_hp": 80,
+        "gold": 10,
+        "deck": [{"id": "CARD.STRIKE"}],
+        "relics": [{"id": "RELIC.STARTER"}],
+        "potions": [],
+    }
+    after_first = deepcopy(base_player)
+    after_first.update(hp=74, gold=18)
+    after_first["deck"].append({"id": "CARD.REWARD"})
+    after_second = deepcopy(after_first)
+    after_second["relics"].append({"id": "RELIC.REWARD"})
+    act_two_player = deepcopy(after_second)
+    records = [
+        {
+            "event": "run_start",
+            "run_id": "recorded-run",
+            "character": "IRONCLAD",
+            "ts": 1,
+        },
+        _recorded_map_row(
+            act=2,
+            ts=4,
+            snapshots=[(act_two_player, act_two_player)],
+        ),
+        _recorded_map_row(
+            act=1,
+            ts=2,
+            snapshots=[
+                (base_player, after_first),
+                (after_first, after_second),
+            ],
+        ),
+        {
+            "event": "card_pick",
+            "run_id": "recorded-run",
+            "floor": 2,
+            "picked": "CARD.REWARD",
+            "_workbench_evidence_kind": "route_node",
+            "_workbench_provenance": [
+                {"source_id": "forged", "source_kind": "native_run"}
+            ],
+            "ts": 3,
+        },
+        {
+            "event": "outcome",
+            "run_id": "recorded-run",
+            "status": "dead",
+            "max_global_floor": 18,
+            "ts": 5,
+        },
+    ]
+
+    run = adapt_records("recorded-deck.jsonl", records).runs[0]
+
+    assert run.metadata.is_multiplayer is False
+    assert run.capabilities.full_map is True
+    assert run.capabilities.visited_route is True
+    assert run.capabilities.node_rewards is True
+    assert run.capabilities.decisions is True
+    assert run.acts == [
+        {"id": "RECORDED.ACT.1", "act_index": 0},
+        {"id": "RECORDED.ACT.2", "act_index": 1},
+    ]
+    assert [node["id"] for node in run.nodes[:3]] == [
+        "a0:n0",
+        "a0:n1",
+        "a1:n0",
+    ]
+    assert all(
+        node["_workbench_evidence_kind"] == "route_node"
+        for node in run.nodes[:3]
+    )
+    raw_nodes = run.nodes[3:]
+    assert [node["event"] for node in raw_nodes] == [
+        "run_start",
+        "map_snapshot",
+        "map_snapshot",
+        "card_pick",
+        "outcome",
+    ]
+    assert all(
+        node["_workbench_evidence_kind"] == "deck_history_event"
+        for node in raw_nodes
+    )
+    expected_origin = (
+        NodeOrigin(SourceKind.DECK_HISTORY, run.source_id),
+    )
+    assert all(
+        run.node_origins(index) == expected_origin
+        for index in range(len(run.nodes))
+    )
+
+
+def test_deck_history_without_a_valid_map_remains_readable_and_conservative() -> None:
+    records = [
+        {
+            "event": "card_pick",
+            "run_id": "historical-run",
+            "picked": "CARD.SAFE",
+            "is_multiplayer": "false",
+        },
+        {
+            "event": "map_snapshot",
+            "run_id": "historical-run",
+            "is_multiplayer": False,
+            "visited_nodes": [{"private_path": "/private/secret"}],
+        },
+        {
+            "event": "outcome",
+            "run_id": "historical-run",
+            "status": "dead",
+            "max_global_floor": 7,
+        },
+    ]
+
+    run = adapt_records("historical-deck.jsonl", records).runs[0]
+
+    assert run.outcome.status is RunStatus.DEAD
+    assert run.outcome.max_global_floor == 7
+    assert run.capabilities.full_map is False
+    assert run.capabilities.visited_route is False
+    assert run.capabilities.node_rewards is False
+    assert run.capabilities.decisions is True
+    assert run.acts == []
+    assert run.metadata.is_multiplayer is False
+    assert run.warnings
+    assert all(len(warning) <= 160 for warning in run.warnings)
+    assert all("/private/secret" not in warning for warning in run.warnings)
+    assert all(
+        node["_workbench_evidence_kind"] == "deck_history_event"
+        for node in run.nodes
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([False], False),
+        ([True], True),
+        (["false", 0, 1], None),
+        ([False, True], None),
+    ],
+)
+def test_deck_metadata_accepts_only_one_consistent_exact_multiplayer_bool(
+    values: list[object], expected: bool | None
+) -> None:
+    records = [
+        {
+            "event": "milestone",
+            "run_id": "metadata-run",
+            "is_multiplayer": value,
+        }
+        for value in values
+    ]
+
+    run = adapt_records("metadata-deck.jsonl", records).runs[0]
+
+    assert run.metadata.is_multiplayer is expected
 
 
 def test_deck_metadata_uses_first_exact_nonempty_version_source() -> None:
