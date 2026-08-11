@@ -163,10 +163,24 @@ function filterValue(cohort, key) {
   return value === null || value === undefined || value === '' ? '未标注' : String(value);
 }
 
+function filterValuesFromCohorts(cohorts, key) {
+  if (!Array.isArray(cohorts)) return [];
+  const values = [];
+  cohorts.forEach((cohort) => {
+    if (!cohort || typeof cohort !== 'object') return;
+    try {
+      values.push(filterValue(cohort, key));
+    } catch (error) {
+      // Ignore malformed descriptors without discarding the remaining cohorts.
+    }
+  });
+  return Array.from(new Set(values)).sort();
+}
+
 function populateAxisFilter(id, key, allLabel) {
   const select = byId(id);
   const previous = select.value;
-  const values = Array.from(new Set(state.cohorts.map((cohort) => filterValue(cohort, key)))).sort();
+  const values = filterValuesFromCohorts(state.cohorts, key);
   setSelectOptions(select, values.map((value) => ({ value, label: value })), allLabel, previous);
 }
 
@@ -176,7 +190,8 @@ function cohortsForSelectedVersion() {
   return state.cohorts.filter((cohort) => {
     if (!cohort || typeof cohort !== 'object') return false;
     try {
-      return !version || filterValue(cohort, 'game_version') === version;
+      const cohortVersion = filterValue(cohort, 'game_version');
+      return !version || cohortVersion === version;
     } catch (error) {
       return false;
     }
@@ -186,18 +201,10 @@ function cohortsForSelectedVersion() {
 function updateCharacterFilterOptions() {
   const select = byId('characterFilter');
   const previous = select.value;
-  const values = [];
-  cohortsForSelectedVersion().forEach((cohort) => {
-    try {
-      values.push(filterValue(cohort, 'character'));
-    } catch (error) {
-      // Ignore malformed descriptors so they cannot widen the available roles.
-    }
-  });
-  const uniqueValues = Array.from(new Set(values)).sort();
+  const values = filterValuesFromCohorts(cohortsForSelectedVersion(), 'character');
   setSelectOptions(
     select,
-    uniqueValues.map((value) => ({ value, label: value })),
+    values.map((value) => ({ value, label: value })),
     '全部角色',
     previous,
   );
@@ -208,7 +215,8 @@ function filteredCohorts() {
   const validity = byId('validityFilter').value;
   return cohortsForSelectedVersion().filter((cohort) => {
     try {
-      if (character && filterValue(cohort, 'character') !== character) return false;
+      const cohortCharacter = filterValue(cohort, 'character');
+      if (character && cohortCharacter !== character) return false;
       const technical = Number(cohort.technical_count || 0);
       const gameplay = Number(cohort.run_count || 0) - technical;
       if (validity === 'valid' && gameplay <= 0) return false;

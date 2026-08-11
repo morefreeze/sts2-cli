@@ -940,6 +940,135 @@ def test_version_filter_cascades_character_and_cohort_candidates():
     }
 
 
+def test_axis_helpers_skip_malformed_cohorts_without_losing_valid_values():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    filters = _javascript_section(
+        script, "function setSelectOptions", "function defaultBaselineCohortId"
+    )
+
+    payload = _run_node_json(
+        f"""
+        function makeSelect(value = '') {{
+          return {{
+            value,
+            children: [],
+            replaceChildren() {{ this.children = []; this.value = ''; }},
+            append(option) {{
+              this.children.push(option);
+              if (this.children.length === 1) this.value = option.value;
+            }},
+          }};
+        }}
+        const nodes = {{
+          versionFilter: makeSelect(),
+          characterFilter: makeSelect(),
+          validityFilter: makeSelect(),
+        }};
+        const byId = (id) => nodes[id];
+        const clear = (node) => node.replaceChildren();
+        const element = (tag, options = {{}}) => ({{
+          tag,
+          textContent: options.text === undefined ? '' : String(options.text),
+          value: String(options.attrs.value),
+        }});
+        const validCohort = {{
+          cohort_id: 'valid',
+          run_count: 2,
+          technical_count: 0,
+          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+        }};
+        const state = {{ cohorts: [null, 42, validCohort] }};
+        {filters}
+
+        populateAxisFilter('versionFilter', 'game_version', '全部版本');
+        nodes.versionFilter.value = 'v1';
+        updateCharacterFilterOptions();
+        nodes.characterFilter.value = 'Ironclad';
+        const mixedDescriptors = {{
+          versionOptions: nodes.versionFilter.children.map((option) => option.value),
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          versionCandidates: cohortsForSelectedVersion().map((cohort) => cohort.cohort_id),
+          filteredCandidates: filteredCohorts().map((cohort) => cohort.cohort_id),
+        }};
+
+        const throwingVersion = {{
+          cohort_id: 'throwing-version',
+          get filters() {{ throw new Error('bad version getter'); }},
+        }};
+        const throwingCharacter = {{
+          cohort_id: 'throwing-character',
+          run_count: 2,
+          technical_count: 0,
+          filters: {{
+            game_version: 'v1',
+            get character() {{ throw new Error('bad character getter'); }},
+          }},
+        }};
+        const throwingCount = {{
+          cohort_id: 'throwing-count',
+          run_count: 2,
+          get technical_count() {{ throw new Error('bad count getter'); }},
+          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+        }};
+        state.cohorts = [throwingVersion, throwingCharacter, throwingCount, validCohort];
+        populateAxisFilter('versionFilter', 'game_version', '全部版本');
+        nodes.versionFilter.value = 'v1';
+        updateCharacterFilterOptions();
+        nodes.characterFilter.value = 'Ironclad';
+        const throwingGetters = {{
+          versionOptions: nodes.versionFilter.children.map((option) => option.value),
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          versionCandidates: cohortsForSelectedVersion().map((cohort) => cohort.cohort_id),
+          filteredCandidates: filteredCohorts().map((cohort) => cohort.cohort_id),
+        }};
+        nodes.characterFilter.value = '';
+        throwingGetters.allCharacterCandidates = filteredCohorts()
+          .map((cohort) => cohort.cohort_id);
+        nodes.versionFilter.value = '';
+        throwingGetters.allVersionCandidates = cohortsForSelectedVersion()
+          .map((cohort) => cohort.cohort_id);
+        throwingGetters.allScopeCandidates = filteredCohorts()
+          .map((cohort) => cohort.cohort_id);
+
+        state.cohorts = null;
+        populateAxisFilter('versionFilter', 'game_version', '全部版本');
+        updateCharacterFilterOptions();
+        const nonArray = {{
+          versionOptions: nodes.versionFilter.children.map((option) => option.value),
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          versionCandidates: cohortsForSelectedVersion().length,
+          filteredCandidates: filteredCohorts().length,
+        }};
+
+        console.log(JSON.stringify({{ mixedDescriptors, throwingGetters, nonArray }}));
+        """
+    )
+
+    assert payload == {
+        "mixedDescriptors": {
+            "versionOptions": ["", "v1"],
+            "characterOptions": ["", "Ironclad"],
+            "versionCandidates": ["valid"],
+            "filteredCandidates": ["valid"],
+        },
+        "throwingGetters": {
+            "versionOptions": ["", "v1"],
+            "characterOptions": ["", "Ironclad"],
+            "versionCandidates": ["throwing-character", "throwing-count", "valid"],
+            "filteredCandidates": ["valid"],
+            "allCharacterCandidates": ["valid"],
+            "allVersionCandidates": ["throwing-character", "throwing-count", "valid"],
+            "allScopeCandidates": ["valid"],
+        },
+        "nonArray": {
+            "versionOptions": [""],
+            "characterOptions": [""],
+            "versionCandidates": 0,
+            "filteredCandidates": 0,
+        },
+    }
+
+
 def test_character_and_validity_changes_choose_server_first_candidate():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     filters = _javascript_section(
