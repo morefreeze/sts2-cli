@@ -21,6 +21,23 @@ class TestMapStructure:
         assert "rows" in m
         assert "boss" in m
         assert "current_coord" in m
+        nodes = [node for row in m["rows"] for node in row]
+        coordinates = [(node["col"], node["row"]) for node in nodes]
+        starting_nodes = [
+            node for node in nodes
+            if node["row"] == 0 and node["type"] == "Ancient"
+        ]
+
+        assert len(starting_nodes) == 1
+        start = starting_nodes[0]
+        start_coord = (start["col"], start["row"])
+        current_coord = (m["current_coord"]["col"], m["current_coord"]["row"])
+        assert len(coordinates) == len(set(coordinates))
+        assert current_coord in set(coordinates)
+        assert start["children"]
+        assert start_coord == current_coord
+        assert start["visited"] is True
+        assert start["current"] is True
 
     def test_context_fields(self, game):
         state = game.start(seed="ms3")

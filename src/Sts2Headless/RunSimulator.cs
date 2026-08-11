@@ -4023,6 +4023,37 @@ public class RunSimulator
         var rows = new List<List<Dictionary<string, object?>>>();
         var currentCoord = _runState.CurrentMapCoord;
         var visited = _runState.VisitedMapCoords;
+        var serializedCoords = new HashSet<(int col, int row)>();
+
+        var startPoint = map.StartingMapPoint;
+        if (startPoint != null)
+        {
+            var startCol = (int)startPoint.coord.col;
+            var startRow = (int)startPoint.coord.row;
+            var startChildren = startPoint.Children?.Select(ch => new Dictionary<string, object?>
+            {
+                ["col"] = (int)ch.coord.col,
+                ["row"] = (int)ch.coord.row,
+            }).ToList();
+            var isCurrent = currentCoord.HasValue &&
+                currentCoord.Value.col == startPoint.coord.col && currentCoord.Value.row == startPoint.coord.row;
+            var isVisited = currentCoord.HasValue ||
+                (visited?.Any(v => v.col == startPoint.coord.col && v.row == startPoint.coord.row) ?? false);
+
+            rows.Add(new List<Dictionary<string, object?>>
+            {
+                new()
+                {
+                    ["col"] = startCol,
+                    ["row"] = startRow,
+                    ["type"] = startPoint.PointType.ToString(),
+                    ["children"] = startChildren,
+                    ["visited"] = isVisited,
+                    ["current"] = isCurrent,
+                },
+            });
+            serializedCoords.Add((startCol, startRow));
+        }
 
         for (int row = 0; row < map.GetRowCount(); row++)
         {
@@ -4030,6 +4061,7 @@ public class RunSimulator
             foreach (var point in map.GetPointsInRow(row))
             {
                 if (point == null) continue;
+                if (!serializedCoords.Add(((int)point.coord.col, (int)point.coord.row))) continue;
                 var children = point.Children?.Select(ch => new Dictionary<string, object?>
                 {
                     ["col"] = (int)ch.coord.col,

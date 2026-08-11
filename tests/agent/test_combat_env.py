@@ -10,7 +10,10 @@ from types import SimpleNamespace
 import pytest
 import agent.combat_env as combat_env
 from agent.combat_env import CombatEnv, greedy_action
-from agent.run_workbench.recorded_maps import parse_recorded_map_row
+from agent.run_workbench.recorded_maps import (
+    latest_recorded_acts,
+    parse_recorded_map_row,
+)
 from agent.strategy import rest_site_action
 
 CARDS_JSON = os.path.join(os.path.dirname(__file__), '..', '..', 'localization_eng', 'cards.json')
@@ -178,6 +181,59 @@ def _map_reply(*, act=1, current=(0, 0), ancient_type="Ancient"):
     }
 
 
+def _producer_branch_map_reply(*, current):
+    """GetFullMap shape with its distinct starting row and an open branch."""
+
+    start_coord = (3, 0)
+    monster_coord = (1, 1)
+    shop_coord = (5, 1)
+    return {
+        "type": "map",
+        "context": {
+            "act": 1,
+            "floor": 1 if current == start_coord else 2,
+        },
+        "rows": [
+            [{
+                "col": start_coord[0],
+                "row": start_coord[1],
+                "type": "Ancient",
+                "children": [
+                    {"col": monster_coord[0], "row": monster_coord[1]},
+                    {"col": shop_coord[0], "row": shop_coord[1]},
+                ],
+                "visited": True,
+                "current": current == start_coord,
+            }],
+            [
+                {
+                    "col": monster_coord[0],
+                    "row": monster_coord[1],
+                    "type": "Monster",
+                    "children": [{"col": 3, "row": 16}],
+                    "visited": current == monster_coord,
+                    "current": current == monster_coord,
+                },
+                {
+                    "col": shop_coord[0],
+                    "row": shop_coord[1],
+                    "type": "Shop",
+                    "children": [{"col": 3, "row": 16}],
+                    "visited": False,
+                    "current": False,
+                },
+            ],
+        ],
+        "boss": {
+            "col": 3,
+            "row": 16,
+            "type": "Boss",
+            "id": "TEST_BOSS",
+        },
+        "current_coord": {"col": current[0], "row": current[1]},
+    }
+
+
 def _map_state(*, hp=80, deck=None, relics=None, potions=None):
     return {
         "decision": "map_select",
@@ -292,6 +348,48 @@ def test_capture_replaces_graph_and_tracks_detached_ordered_node_inventories(
     assert first_node["entry_player"]["deck"] == [{"id": "STRIKE"}]
     assert second_node["entry_player"]["relics"] == [{"id": "ANCHOR"}]
     assert replies_list[0][0]["type"] == "AncientLatest"
+
+
+def test_producer_starting_point_capture_roundtrips_with_outcome_floor(
+    monkeypatch, tmp_path
+):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    replies = iter([
+        _producer_branch_map_reply(current=(3, 0)),
+        _producer_branch_map_reply(current=(1, 1)),
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: next(replies))
+    starting_state = _map_state(hp=80)
+    ordinary_state = _map_state(hp=74)
+    starting_state["context"] = {"act": 1, "floor": 1}
+    ordinary_state["context"] = {"act": 1, "floor": 2}
+
+    assert env._capture_run_map_state(starting_state) is True
+    assert env._capture_run_map_state(ordinary_state) is True
+    env._emit_run_outcome(ordinary_state, victory=False, status="dead")
+
+    rows = _read_history_rows(history_path)
+    serialized = next(row for row in rows if row["event"] == "map_snapshot")
+    snapshots, errors = latest_recorded_acts(iter((serialized,)))
+
+    assert errors == ()
+    parsed = snapshots[0]
+    assert [
+        (node["room_type"], node["col"], node["row"], node["floor"])
+        for node in parsed.route_nodes
+    ] == [
+        ("Ancient", 3, 0, 1),
+        ("Monster", 1, 1, 2),
+    ]
+    assert any(
+        node.room_type == "Shop" and node.visited is False
+        for node in parsed.act_map.nodes
+    )
+    outcome = next(row for row in rows if row["event"] == "outcome")
+    assert outcome["status"] == "dead"
+    assert outcome["max_floor"] == parsed.route_nodes[-1]["global_floor"] == 2
 
 
 def test_bounded_player_snapshot_omits_only_invalid_fields(monkeypatch, tmp_path):
