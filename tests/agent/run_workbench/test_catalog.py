@@ -2756,6 +2756,9 @@ def test_deck_semantics_match_for_511_and_513_record_sources(tmp_path: Path) -> 
     assert large_run.capabilities.visited_route is False
     assert large_run.capabilities.node_rewards is False
     assert large_run.capabilities.decisions is True
+    assert small_run.warnings == large_run.warnings == []
+    assert small.get_run("corrected")["run"]["warnings"] == []
+    assert large.get_run("corrected")["run"]["warnings"] == []
 
 
 def test_valid_recorded_map_capabilities_match_for_511_and_513_sources(

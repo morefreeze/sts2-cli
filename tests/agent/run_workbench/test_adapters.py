@@ -1301,6 +1301,85 @@ def test_deck_history_exposes_only_validated_recorded_acts_and_route_nodes() -> 
     )
 
 
+def test_deck_history_without_map_preserves_empty_warnings() -> None:
+    run = adapt_records(
+        "no-map-deck.jsonl",
+        [
+            {"event": "run_start", "run_id": "no-map", "ts": 1},
+            {"event": "card_pick", "run_id": "no-map", "ts": 2},
+            {
+                "event": "outcome",
+                "run_id": "no-map",
+                "status": "dead",
+                "ts": 3,
+            },
+        ],
+    ).runs[0]
+
+    assert run.warnings == []
+
+
+def test_deck_history_warns_only_for_a_real_malformed_recorded_map() -> None:
+    valid = _recorded_map_row(
+        act=1,
+        ts=1,
+        snapshots=[({"hp": 80}, {"hp": 80})],
+    )
+    malformed_newest = deepcopy(valid)
+    malformed_newest["ts"] = 2
+    malformed_newest["map"].pop("type")
+
+    run = adapt_records(
+        "malformed-newest-deck.jsonl",
+        [
+            valid,
+            malformed_newest,
+            {
+                "event": "outcome",
+                "run_id": "recorded-run",
+                "status": "dead",
+                "ts": 3,
+            },
+        ],
+    ).runs[0]
+
+    assert [node["id"] for node in run.nodes if node.get("id") == "a0:n0"] == [
+        "a0:n0"
+    ]
+    assert run.warnings == [
+        "row 1: recorded map payload must have type map"
+    ]
+
+
+def test_non_map_deck_events_cannot_hide_a_later_recorded_map_error() -> None:
+    malformed = _recorded_map_row(
+        act=1,
+        ts=1,
+        snapshots=[({"hp": 80}, {"hp": 80})],
+    )
+    malformed["map"].pop("type")
+    records = [
+        {"event": "milestone", "run_id": "warning-budget"}
+        for _ in range(40)
+    ]
+    records.extend(
+        [
+            {**malformed, "run_id": "warning-budget"},
+            {
+                "event": "outcome",
+                "run_id": "warning-budget",
+                "status": "dead",
+            },
+        ]
+    )
+
+    run = adapt_records("warning-budget-deck.jsonl", records).runs[0]
+
+    assert run.warnings == [
+        "row 0: recorded map payload must have type map"
+    ]
+
+
 def test_deck_history_without_a_valid_map_remains_readable_and_conservative() -> None:
     records = [
         {

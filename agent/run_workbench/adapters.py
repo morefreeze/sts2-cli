@@ -455,7 +455,9 @@ def _adapt_deck_run(
     warnings: list[str] | None = None,
 ) -> RunRecord:
     resolved_source_id = source_id or f"{path}:{run_id}"
-    recorded_acts, parser_errors = latest_recorded_acts(records)
+    recorded_acts, parser_errors = latest_recorded_acts(
+        row for row in records if row.get("event") == "map_snapshot"
+    )
     route_nodes = [
         _annotate_recorded_route_evidence(node, resolved_source_id)
         for snapshot in recorded_acts.values()
