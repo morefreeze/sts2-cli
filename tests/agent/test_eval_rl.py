@@ -515,6 +515,7 @@ def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_p
             "scenario": "full_run",
             "game_version": "v0.103.2",
             "game_version_source": "cli",
+            "capture_map": True,
         }
         for context, row in zip(contexts, rows)
     )

@@ -133,7 +133,256 @@ def _expected_run_metadata():
         "scenario": "full_run",
         "game_version": "v0.103.2",
         "game_version_source": "cli",
+        "is_multiplayer": False,
     }
+
+
+def _map_reply(*, act=1, current=(0, 0), ancient_type="Ancient"):
+    nodes = [
+        {
+            "col": 0,
+            "row": 0,
+            "type": ancient_type,
+            "children": [{"col": 0, "row": 1}, {"col": 1, "row": 1}],
+            "visited": True,
+            "current": current == (0, 0),
+        },
+        {
+            "col": 0,
+            "row": 1,
+            "type": "Monster",
+            "children": [],
+            "visited": current == (0, 1),
+            "current": current == (0, 1),
+        },
+        {
+            "col": 1,
+            "row": 1,
+            "type": "Shop",
+            "children": [],
+            "visited": current == (1, 1),
+            "current": current == (1, 1),
+        },
+    ]
+    return {
+        "type": "map",
+        "context": {"act": act},
+        "rows": [[nodes[0]], nodes[1:]],
+        "boss": {"col": 0, "row": 2, "type": "Boss", "id": "TEST_BOSS"},
+        "current_coord": {"col": current[0], "row": current[1]},
+    }
+
+
+def _map_state(*, hp=80, deck=None, relics=None, potions=None):
+    return {
+        "decision": "map_select",
+        "context": {"act": 1, "floor": 1},
+        "player": {
+            "hp": hp,
+            "max_hp": 80,
+            "gold": 99,
+            "deck": deck if deck is not None else [{"id": "STRIKE"}],
+            "relics": relics if relics is not None else [{"id": "BURNING_BLOOD"}],
+            "potions": potions if potions is not None else [{"id": "HEALING"}],
+        },
+    }
+
+
+def test_default_combat_env_never_requests_authoritative_map(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    commands = []
+    monkeypatch.setattr(env, "_send", lambda command: commands.append(command))
+
+    env._capture_run_map_state(_map_state())
+
+    assert commands == []
+
+
+def test_capture_replaces_graph_and_tracks_detached_ordered_node_inventories(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    first = _map_state()
+    second = _map_state(hp=70, deck=[{"id": "STRIKE"}, {"id": "BASH"}])
+    third = _map_state(hp=65, relics=[{"id": "ANCHOR"}])
+    replies = iter([
+        _map_reply(ancient_type="Ancient"),
+        _map_reply(ancient_type="AncientUpdated"),
+        _map_reply(current=(0, 1), ancient_type="AncientLatest"),
+    ])
+    commands = []
+
+    def fake_send(command):
+        commands.append(command)
+        return next(replies)
+
+    monkeypatch.setattr(env, "_send", fake_send)
+    original_first = json.loads(json.dumps(first))
+
+    env._capture_run_map_state(first)
+    env._capture_run_map_state(second)
+    env._capture_run_map_state(third)
+
+    assert first == original_first
+    assert commands == [{"cmd": "get_map"}] * 3
+    snapshot = env._run_map_snapshots[1]
+    assert snapshot["map"]["rows"][0][0]["type"] == "AncientLatest"
+    assert [(node["col"], node["row"]) for node in snapshot["visited_nodes"]] == [
+        (0, 0),
+        (0, 1),
+    ]
+    first_node, second_node = snapshot["visited_nodes"]
+    assert first_node["entry_player"]["hp"] == 80
+    assert first_node["exit_player"]["hp"] == 65
+    assert second_node["entry_player"]["hp"] == 65
+    assert second_node["exit_player"]["hp"] == 65
+
+    first["player"]["deck"][0]["id"] = "MUTATED"
+    third["player"]["relics"][0]["id"] = "MUTATED"
+    replies_list = snapshot["map"]["rows"]
+    assert first_node["entry_player"]["deck"] == [{"id": "STRIKE"}]
+    assert second_node["entry_player"]["relics"] == [{"id": "ANCHOR"}]
+    assert replies_list[0][0]["type"] == "AncientLatest"
+
+
+def test_bounded_player_snapshot_omits_only_invalid_fields(monkeypatch, tmp_path):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    state = _map_state(
+        deck=[{"id": str(index)} for index in range(257)],
+        relics=[{"value": float("nan")}],
+        potions=[{"unsafe": object()}],
+    )
+    state["player"].update({"hp": 73, "max_hp": True, "gold": 123})
+
+    snapshot = env._bounded_player_snapshot(state)
+
+    assert snapshot == {"hp": 73, "gold": 123}
+
+
+def test_capture_rejects_invalid_acts_and_malformed_maps_with_warning(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    malformed = _map_reply(act=1)
+    malformed["rows"][0][0]["current"] = False
+    replies = iter([
+        _map_reply(act=1),
+        _map_reply(act=2),
+        _map_reply(act=3),
+        _map_reply(act=4),
+        _map_reply(act=5),
+        malformed,
+    ])
+    monkeypatch.setattr(env, "_send", lambda command: next(replies))
+
+    with pytest.warns(RuntimeWarning) as warnings_seen:
+        for _ in range(6):
+            env._capture_run_map_state(_map_state())
+
+    assert len(warnings_seen) == 2
+    assert set(env._run_map_snapshots) == {1, 2, 3, 4}
+    assert len(env._run_map_snapshots) <= 4
+    assert len(env._run_logging_errors) == 2
+
+
+def test_capture_bounds_map_nodes(monkeypatch, tmp_path):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    oversized = _map_reply()
+    oversized["rows"] = [[
+        {
+            "col": index,
+            "row": 0,
+            "type": "Monster",
+            "children": [],
+            "visited": False,
+            "current": index == 0,
+        }
+        for index in range(257)
+    ]]
+    monkeypatch.setattr(env, "_send", lambda command: oversized)
+
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._capture_run_map_state(_map_state())
+
+    assert env._run_map_snapshots == {}
+
+
+@pytest.mark.parametrize(
+    "status", ["dead", "crash", "timeout", "stuck", "invalid", "reset_failure"]
+)
+def test_terminal_outcome_flushes_maps_before_decisions_without_subprocess(
+    monkeypatch, tmp_path, status
+):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    replies = iter([_map_reply(act=2), _map_reply(act=1)])
+    monkeypatch.setattr(env, "_send", lambda command: next(replies))
+    env._capture_run_map_state(_map_state(hp=80))
+    env._capture_run_map_state(_map_state(hp=70))
+    env._run_milestone_records = [{"event": "milestone", "floor": 7}]
+    env._run_card_pick_records = [{"event": "card_pick", "picked": "BASH"}]
+    monkeypatch.setattr(
+        env,
+        "_send",
+        lambda command: (_ for _ in ()).throw(AssertionError("terminal map poll")),
+    )
+
+    env._emit_run_outcome(_map_state(hp=0), victory=False, status=status)
+
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == [
+        "run_start",
+        "map_snapshot",
+        "map_snapshot",
+        "milestone",
+        "card_pick",
+        "outcome",
+    ]
+    assert [row["act"] for row in rows[1:3]] == [1, 2]
+    assert all(row["is_multiplayer"] is False for row in rows)
+    assert all(math.isfinite(row["ts"]) for row in rows if "ts" in row)
+    assert rows[-1]["status"] == status
+
+
+def test_failure_before_first_map_does_not_fabricate_snapshot(monkeypatch, tmp_path):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+
+    env._emit_run_outcome({}, victory=False, status="reset_failure")
+
+    assert [row["event"] for row in _read_history_rows(history_path)] == [
+        "run_start",
+        "outcome",
+    ]
+
+
+def test_advance_captures_loop_send_and_post_potion_states(monkeypatch):
+    env = CombatEnv(
+        cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
+    )
+    start = _map_state()
+    combat = {**_map_state(hp=70), "decision": "combat_play"}
+    post_potion = {**_map_state(hp=75), "decision": "combat_play"}
+    captured = []
+    monkeypatch.setattr(env, "_capture_run_map_state", lambda state: captured.append(state))
+    monkeypatch.setattr(combat_env, "greedy_action", lambda state: {"cmd": "action"})
+    monkeypatch.setattr(env, "_send", lambda command: combat)
+    monkeypatch.setattr(env, "_greedy_use_potions", lambda state: post_potion)
+
+    result = env._advance_to_combat(start)
+
+    assert result is post_potion
+    assert captured == [start, combat, combat, post_potion]
 
 
 def test_run_start_and_outcome_share_authoritative_metadata(monkeypatch, tmp_path):

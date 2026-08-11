@@ -11,7 +11,7 @@ Design: simple 1:1 mapping — each env.step() = one game action (including
 end_turn). No auto-skip. Policy and value networks are separated in train.py
 to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import json, os, subprocess, random, time, select, sys, warnings
+import json, math, os, subprocess, random, time, select, sys, warnings
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -620,6 +620,9 @@ class CombatEnv(gym.Env):
         # Per-run state for the predictor: max floor seen, milestones captured
         self._run_max_floor = 1
         self._run_context = dict(run_context or {})
+        self._capture_run_maps = self._run_context.get("capture_map") is True
+        self._run_map_snapshots: dict[int, dict] = {}
+        self._run_current_map_coord: tuple[int, int, int] | None = None
         self._run_seed = self._seed
         self._run_id = str(
             self._run_context.get("run_id")
@@ -718,6 +721,8 @@ class CombatEnv(gym.Env):
         self._run_outcome_emitted = False
         self._run_milestone_records = []
         self._run_card_pick_records = []
+        self._run_map_snapshots = {}
+        self._run_current_map_coord = None
         self._run_boss_id = None  # act boss from state.context.boss (set on first sight)
         self._kill_proc()
         self._emit_run_start()
@@ -725,13 +730,16 @@ class CombatEnv(gym.Env):
         if self._native_save_path:
             state = self._send({"cmd": "load_save",
                                 "path": self._native_save_path, "lang": "en"})
+            self._capture_run_map_state(state)
             if state is not None and state.get("type") != "error" and self._set_hp_after_load is not None:
                 updated_state = self._send({"cmd": "set_player", "hp": self._set_hp_after_load})
+                self._capture_run_map_state(updated_state)
                 if updated_state is not None and updated_state.get("type") != "error":
                     state = updated_state
         else:
             state = self._send({"cmd": "start_run", "character": self.character,
                                 "seed": run_seed, "ascension": self.ascension})
+            self._capture_run_map_state(state)
         if state is None or state.get("type") == "error":
             self._emit_run_outcome(state or {}, False, status="reset_failure")
             self._game_alive = False
@@ -749,6 +757,7 @@ class CombatEnv(gym.Env):
         if self._replay_pending:
             for cmd in self._replay_actions:
                 state = self._send(cmd)
+                self._capture_run_map_state(state)
                 if state is None:
                     self._emit_run_outcome(self._current_state or {}, False, status="invalid")
                     self._game_alive = False
@@ -819,6 +828,7 @@ class CombatEnv(gym.Env):
         # the block/intents the agent committed to before the enemy turn fires.
         pre_state = self._current_state
         state = self._send(cmd)
+        self._capture_run_map_state(state)
 
         # Detect stuck: end_turn ignored by engine (round/HP unchanged)
         if (state and state.get("decision") == "combat_play"
@@ -828,6 +838,7 @@ class CombatEnv(gym.Env):
             # Try proceed to unstick
             for _ in range(5):
                 state = self._send({"cmd": "action", "action": "proceed"})
+                self._capture_run_map_state(state)
                 if state is None or state.get("decision") != "combat_play":
                     break
                 if state.get("round") != self._current_state.get("round"):
@@ -954,6 +965,7 @@ class CombatEnv(gym.Env):
                 for _ in range(10):
                     auto_cmd = greedy_action(state)
                     state = self._send(auto_cmd)
+                    self._capture_run_map_state(state)
                     if state is None:
                         self._game_alive = False
                         self._emit_run_outcome(self._current_state, False, status="crash")
@@ -1379,6 +1391,7 @@ class CombatEnv(gym.Env):
             "scenario": self._run_context.get("scenario"),
             "game_version": self._run_context.get("game_version"),
             "game_version_source": self._run_context.get("game_version_source"),
+            "is_multiplayer": False,
         }
 
     def _report_run_logging_error(self, prefix: str, exc: Exception):
@@ -1388,6 +1401,196 @@ class CombatEnv(gym.Env):
             warnings.warn(error, RuntimeWarning, stacklevel=2)
         except Warning:
             print(error, file=sys.stderr)
+
+    @staticmethod
+    def _bounded_player_snapshot(state: dict) -> dict:
+        """Return a detached, JSON-safe inventory snapshot from state.player."""
+        if type(state) is not dict or type(state.get("player")) is not dict:
+            return {}
+        player = state["player"]
+        snapshot = {}
+        for field in ("hp", "max_hp", "gold"):
+            value = player.get(field)
+            if type(value) not in (int, float):
+                continue
+            try:
+                if math.isfinite(value):
+                    snapshot[field] = value
+            except (OverflowError, TypeError, ValueError):
+                continue
+
+        collection_fields = (
+            ("deck", ("deck",)),
+            ("relics", ("relics", "relic_items")),
+            ("potions", ("potions", "potion_items")),
+        )
+        for output_field, aliases in collection_fields:
+            value = None
+            found = False
+            for alias in aliases:
+                if alias in player:
+                    value = player[alias]
+                    found = True
+                    break
+            if not found or type(value) is not list or len(value) > 256:
+                continue
+            try:
+                payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
+                snapshot[output_field] = json.loads(payload)
+            except Exception:
+                continue
+        return snapshot
+
+    def _update_buffered_node_inventory(self, state: dict):
+        """Update the latest known coordinate without consulting the subprocess."""
+        if self._run_current_map_coord is None:
+            return
+        if type(state) is not dict or type(state.get("player")) is not dict:
+            return
+        act, col, row = self._run_current_map_coord
+        snapshot = self._run_map_snapshots.get(act)
+        if snapshot is None:
+            return
+        node = snapshot.get("_coord_lookup", {}).get((col, row))
+        if node is None:
+            return
+        player = self._bounded_player_snapshot(state)
+        if "entry_player" not in node:
+            node["entry_player"] = json.loads(json.dumps(
+                player, ensure_ascii=False, allow_nan=False
+            ))
+        node["exit_player"] = player
+
+    @staticmethod
+    def _validated_map_reply(reply: object) -> tuple[int, dict, tuple[int, int], dict]:
+        if type(reply) is not dict or reply.get("type") != "map":
+            raise ValueError("get_map did not return type=map")
+        context = reply.get("context")
+        if type(context) is not dict:
+            raise ValueError("map context must be an object")
+        act = context.get("act")
+        if type(act) is not int or not 1 <= act <= 4:
+            raise ValueError("map context act must be an integer from 1 to 4")
+        rows = reply.get("rows")
+        if type(rows) is not list:
+            raise ValueError("map rows must be a list")
+
+        nodes = {}
+        current_nodes = []
+        node_count = 0
+        for row_nodes in rows:
+            if type(row_nodes) is not list:
+                raise ValueError("each map row must be a list")
+            node_count += len(row_nodes)
+            if node_count > 256:
+                raise ValueError("map contains more than 256 nodes")
+            for node in row_nodes:
+                if type(node) is not dict:
+                    raise ValueError("map node must be an object")
+                col, row = node.get("col"), node.get("row")
+                if type(col) is not int or type(row) is not int:
+                    raise ValueError("map node coordinates must be integers")
+                coord = (col, row)
+                if coord in nodes:
+                    raise ValueError("map node coordinates must be unique")
+                if type(node.get("type")) is not str:
+                    raise ValueError("map node type must be a string")
+                if type(node.get("visited")) is not bool:
+                    raise ValueError("map node visited marker must be a boolean")
+                if type(node.get("current")) is not bool:
+                    raise ValueError("map node current marker must be a boolean")
+                children = node.get("children")
+                if type(children) is not list:
+                    raise ValueError("map node children must be a list")
+                for child in children:
+                    if type(child) is not dict:
+                        raise ValueError("map child must be an object")
+                    if (type(child.get("col")) is not int
+                            or type(child.get("row")) is not int):
+                        raise ValueError("map child coordinates must be integers")
+                nodes[coord] = node
+                if node["current"]:
+                    current_nodes.append(coord)
+
+        current = reply.get("current_coord")
+        if type(current) is not dict:
+            raise ValueError("map current_coord must be an object")
+        col, row = current.get("col"), current.get("row")
+        if type(col) is not int or type(row) is not int:
+            raise ValueError("map current_coord must contain integer coordinates")
+        current_coord = (col, row)
+        if current_coord not in nodes:
+            raise ValueError("map current_coord is absent from rows")
+        if current_nodes != [current_coord]:
+            raise ValueError("map current marker is inconsistent with current_coord")
+        boss = reply.get("boss")
+        if (type(boss) is not dict
+                or type(boss.get("col")) is not int
+                or type(boss.get("row")) is not int
+                or type(boss.get("type")) is not str):
+            raise ValueError("map boss must contain integer coordinates and a type")
+        try:
+            raw_map = json.loads(json.dumps(reply, ensure_ascii=False, allow_nan=False))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("map reply is not JSON-safe") from exc
+        return act, raw_map, current_coord, nodes[current_coord]
+
+    def _capture_run_map_state(self, state: dict):
+        """Capture evaluation map observability without affecting gameplay."""
+        self._update_buffered_node_inventory(state)
+        if not self._capture_run_maps:
+            return
+        try:
+            reply = self._send({"cmd": "get_map"})
+            act, raw_map, (col, row), current_node = self._validated_map_reply(reply)
+            captured_at = time.time()
+            if (type(captured_at) not in (int, float)
+                    or not math.isfinite(captured_at)):
+                raise ValueError("map capture timestamp must be finite")
+            snapshot = self._run_map_snapshots.get(act)
+            if snapshot is None:
+                snapshot = {
+                    "map": raw_map,
+                    "visited_nodes": [],
+                    "_coord_lookup": {},
+                    "ts": captured_at,
+                }
+                self._run_map_snapshots[act] = snapshot
+            else:
+                snapshot["map"] = raw_map
+                snapshot["ts"] = captured_at
+
+            coord_lookup = snapshot["_coord_lookup"]
+            node = coord_lookup.get((col, row))
+            if node is None:
+                node = {
+                    "type": current_node["type"],
+                    "col": col,
+                    "row": row,
+                }
+                coord_lookup[(col, row)] = node
+                snapshot["visited_nodes"].append(node)
+            self._run_current_map_coord = (act, col, row)
+            self._update_buffered_node_inventory(state)
+        except Exception as exc:
+            self._report_run_logging_error("map capture failed", exc)
+
+    def _serialized_run_map_snapshots(self) -> list[dict]:
+        rows = []
+        for act in sorted(self._run_map_snapshots):
+            snapshot = self._run_map_snapshots[act]
+            rows.append({
+                **self._run_metadata_row("map_snapshot"),
+                "act": act,
+                "map": json.loads(json.dumps(
+                    snapshot["map"], ensure_ascii=False, allow_nan=False
+                )),
+                "visited_nodes": json.loads(json.dumps(
+                    snapshot["visited_nodes"], ensure_ascii=False, allow_nan=False
+                )),
+                "ts": snapshot["ts"],
+            })
+        return rows
 
     def _emit_run_start(self):
         if not self._deck_history_path or self._run_start_emitted:
@@ -1414,6 +1617,7 @@ class CombatEnv(gym.Env):
         """Flush buffered milestone + card_pick records to disk with the final
         outcome appended. Called once per run from terminal paths (game_over,
         crash, etc.)."""
+        self._update_buffered_node_inventory(state)
         self._track_run_floor(state)
         if self._run_outcome_emitted:
             return
@@ -1440,8 +1644,11 @@ class CombatEnv(gym.Env):
                         **self._run_metadata_row("run_start"),
                         "ts": self._run_started_at,
                     })
-                rows.extend(self._run_milestone_records)
-                rows.extend(self._run_card_pick_records)
+                rows.extend(self._serialized_run_map_snapshots())
+                rows.extend({**row, "is_multiplayer": False}
+                            for row in self._run_milestone_records)
+                rows.extend({**row, "is_multiplayer": False}
+                            for row in self._run_card_pick_records)
                 rows.append(outcome)
                 payload = "".join(
                     json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
@@ -1515,6 +1722,7 @@ class CombatEnv(gym.Env):
                 if target_type == "anyenemy":
                     args["target_index"] = 0
                 new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
+                self._capture_run_map_state(new_state)
                 if new_state is None:
                     self._game_alive = False
                     break
@@ -1640,6 +1848,7 @@ class CombatEnv(gym.Env):
                 "target_index": target_index if target_index is not None else 0,
             }
             new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
+            self._capture_run_map_state(new_state)
             if new_state is None:
                 self._game_alive = False
                 break
@@ -1647,6 +1856,7 @@ class CombatEnv(gym.Env):
             for _ in range(10):
                 if new_state.get("decision") == "card_select":
                     new_state = self._send(greedy_action(new_state))
+                    self._capture_run_map_state(new_state)
                 elif new_state.get("decision") in ("combat_play", "game_over"):
                     break
                 else:
@@ -1667,11 +1877,14 @@ class CombatEnv(gym.Env):
         for _ in range(200):
             if state is None:
                 return None
+            self._capture_run_map_state(state)
             self._track_run_floor(state)
             if state.get("decision") == "game_over":
                 return state
             if state.get("decision") == "combat_play":
-                return self._greedy_use_potions(state)
+                state = self._greedy_use_potions(state)
+                self._capture_run_map_state(state)
+                return state
             cmd = None
             # STS2_MAP_PLANNER=1 (Jun 11): full-map path planning — maximize
             # expected HP at boss entry over the whole act DAG instead of the
@@ -1691,6 +1904,7 @@ class CombatEnv(gym.Env):
             if state.get("decision") == "card_reward":
                 self._buffer_card_pick(state, cmd)
             state = self._send(cmd)
+            self._capture_run_map_state(state)
             if state is None:
                 return None
         return {

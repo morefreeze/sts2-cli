@@ -380,14 +380,18 @@ class _VerboseCombatEnv(CombatEnv):
         for _ in range(200):
             if state is None:
                 return {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
+            self._capture_run_map_state(state)
             if state.get("decision") == "combat_play":
-                return self._greedy_use_potions(state)
+                state = self._greedy_use_potions(state)
+                self._capture_run_map_state(state)
+                return state
             if state.get("decision") == "game_over":
                 return state
             dec = state.get("decision", "")
             self._log_room(state, dec)
             cmd = greedy_action(state)
             state = self._send(cmd)
+            self._capture_run_map_state(state)
         return state or {"decision": "game_over", "victory": False, "player": {"hp": 0, "max_hp": 80}}
 
     def _log_room(self, state: dict, dec: str):
@@ -540,6 +544,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             "scenario": effective_scenario,
             "game_version": game_version,
             "game_version_source": game_version_source,
+            "capture_map": True,
         }
         if native_save_path:
             run_context["seed"] = game_seed
