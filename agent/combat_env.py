@@ -2031,9 +2031,16 @@ class CombatEnv(gym.Env):
         self._read_buf = b""
         self._pending_read_only_replies = 0
 
-    def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True):
+    def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True,
+                   return_frame_outcome: bool = False,
+                   stop_on_malformed: bool = False):
+        def result(outcome, payload=None):
+            if return_frame_outcome:
+                return outcome, payload
+            return payload
+
         if self._proc is None:
-            return None
+            return result("no_complete_frame")
         try:
             fileno = self._proc.stdout.fileno()
             deadline = time.monotonic() + timeout_sec
@@ -2051,18 +2058,31 @@ class CombatEnv(gym.Env):
                 while b"\n" in self._read_buf:
                     line, self._read_buf = self._read_buf.split(b"\n", 1)
                     line = line.strip()
-                    if line.startswith(b"{"):
-                        try:
-                            return json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+                    if not line:
+                        continue
+                    if not line.startswith(b"{"):
+                        if stop_on_malformed:
+                            return result("malformed_consumed")
+                        continue
+                    try:
+                        return result("valid", json.loads(line))
+                    except json.JSONDecodeError:
+                        if stop_on_malformed:
+                            return result("malformed_consumed")
+                        continue
+                    except Exception:
+                        if stop_on_malformed:
+                            return result("malformed_consumed")
+                        if kill_on_failure:
+                            self._kill_proc()
+                        return result("no_complete_frame")
             if kill_on_failure:
                 self._kill_proc()
-            return None
+            return result("no_complete_frame")
         except Exception:
             if kill_on_failure:
                 self._kill_proc()
-            return None
+            return result("no_complete_frame")
 
     def _send_read_only(self, cmd: dict, *, timeout_sec: float = 5.0):
         """Send one observational command without terminating gameplay on failure.
@@ -2081,11 +2101,13 @@ class CombatEnv(gym.Env):
             self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
             command_buffered = True
             self._proc.stdin.flush()
-            reply = self._read_json(
+            frame_outcome, reply = self._read_json(
                 timeout_sec=timeout_sec,
                 kill_on_failure=False,
+                return_frame_outcome=True,
+                stop_on_malformed=True,
             )
-            if reply is None:
+            if frame_outcome == "no_complete_frame":
                 self._pending_read_only_replies += 1
             return reply
         except Exception:

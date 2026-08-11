@@ -394,7 +394,11 @@ def test_read_only_map_error_reply_warns_without_mutating_gameplay(monkeypatch, 
     monkeypatch.setattr(
         env,
         "_read_json",
-        lambda **kwargs: {"type": "error", "message": "map unavailable"},
+        lambda **kwargs: (
+            ("valid", {"type": "error", "message": "map unavailable"})
+            if kwargs.get("return_frame_outcome")
+            else {"type": "error", "message": "map unavailable"}
+        ),
     )
 
     with pytest.warns(RuntimeWarning, match="map capture failed"):
@@ -402,7 +406,52 @@ def test_read_only_map_error_reply_warns_without_mutating_gameplay(monkeypatch, 
 
     assert env._proc is proc
     assert env._game_alive is True
+    assert env._pending_read_only_replies == 0
     assert env._run_map_snapshots == {}
+
+
+@pytest.mark.parametrize("malformed_frame", [b"{not-json}\n", b"{\xff}\n"])
+def test_malformed_map_frame_does_not_discard_next_gameplay_response(
+    monkeypatch, malformed_frame
+):
+    env = CombatEnv(
+        cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
+    )
+    read_fd, write_fd = os.pipe()
+    terminated = []
+    proc = SimpleNamespace(
+        stdin=_FakeProtocolInput(),
+        stdout=SimpleNamespace(fileno=lambda: read_fd),
+        terminate=lambda: terminated.append("terminate"),
+        wait=lambda timeout=None: None,
+        kill=lambda: terminated.append("kill"),
+    )
+    env._proc = proc
+    env._game_alive = True
+    real_read_json = env._read_json
+
+    def fast_read_json(timeout_sec=5.0, **kwargs):
+        return real_read_json(timeout_sec=0.03, **kwargs)
+
+    monkeypatch.setattr(env, "_read_json", fast_read_json)
+    try:
+        os.write(write_fd, malformed_frame)
+
+        assert env._send_read_only({"cmd": "get_map"}) is None
+        assert env._pending_read_only_replies == 0
+
+        combat = {"decision": "combat_play", "round": 2}
+        os.write(write_fd, (json.dumps(combat) + "\n").encode())
+
+        assert env._send({"cmd": "action", "action": "end_turn"}) == combat
+        assert env._proc is proc
+        assert env._game_alive is True
+        assert terminated == []
+        assert all(b'"cmd":"quit"' not in payload.replace(b" ", b"")
+                   for payload in proc.stdin.payloads)
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
 
 
 def _set_map_reply(monkeypatch, env, reply):
