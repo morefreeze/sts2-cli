@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 import json
@@ -120,6 +121,38 @@ def _map_fixture() -> dict:
         }
     ]
     return run
+
+
+def _branched_recorded_snapshot(
+    run_id: str,
+    *,
+    act: int,
+    ts: int | float,
+) -> dict:
+    snapshot = _recorded_map_route_snapshot(
+        run_id,
+        act=act,
+        ts=ts,
+        route_length=3,
+    )
+    snapshot["game_version"] = "v0.107.1"
+    boss = snapshot["map"]["boss"]
+    snapshot["map"]["rows"][0][0]["children"].append({"col": 1, "row": 1})
+    snapshot["map"]["rows"][1].append(
+        {
+            "col": 1,
+            "row": 1,
+            "type": "Shop",
+            "children": [{"col": boss["col"], "row": boss["row"]}],
+            "visited": False,
+            "current": False,
+        }
+    )
+    changed = snapshot["visited_nodes"][1]
+    changed["exit_player"] = deepcopy(changed["entry_player"])
+    changed["exit_player"].update(hp=73, gold=25)
+    changed["exit_player"]["deck"].append({"id": "CARD.BASH"})
+    return snapshot
 
 
 def test_catalog_source_run_cohort_and_metrics_http_contracts(tmp_path: Path):
@@ -435,6 +468,294 @@ def test_supported_native_run_map_returns_full_graph_route_art_and_visited_delta
     assert visited[-1]["terminal"] is True
     assert visited[-1]["terminal_status"] == "dead"
     assert all(node["terminal"] is False for node in visited[:-1])
+
+
+def test_recorded_maps_are_authoritative_across_sparse_acts_without_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "recorded-v01071-sparse-acts"
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(run_id, act=1, ts=1),
+            _branched_recorded_snapshot(run_id, act=3, ts=2),
+            {
+                "event": "outcome",
+                "run_id": run_id,
+                "game_version": "v0.107.1",
+                "status": "dead",
+                "max_global_floor": 37,
+            },
+        ],
+    )
+
+    class CountingCatalog:
+        def __init__(self, catalog: RunCatalog) -> None:
+            self.catalog = catalog
+            self.get_run_calls = 0
+
+        def get_run(self, requested_run_id: str) -> dict:
+            self.get_run_calls += 1
+            return self.catalog.get_run(requested_run_id)
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    parser_calls: list[list[dict]] = []
+    original_latest_recorded_acts = viewer.latest_recorded_acts
+
+    def counted_latest_recorded_acts(rows):
+        inspected = list(rows)
+        parser_calls.append(inspected)
+        assert all(row["event"] == "map_snapshot" for row in inspected)
+        assert all(
+            row["_workbench_evidence_kind"] == "deck_history_event"
+            for row in inspected
+        )
+        assert all(
+            any(
+                item.get("source_kind") == "deck_history"
+                for item in row["_workbench_provenance"]
+            )
+            for row in inspected
+        )
+        return original_latest_recorded_acts(iter(inspected))
+
+    monkeypatch.setattr(
+        viewer,
+        "latest_recorded_acts",
+        counted_latest_recorded_acts,
+    )
+    catalog = CountingCatalog(RunCatalog([tmp_path], replay_parser=_replay_parser))
+    with _server(catalog, map_service=MustNotGenerate()) as base:
+        first_status, first = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        third_status, third = _request(
+            base, f"/api/run/map?id={run_id}&act=2"
+        )
+        missing_status, missing = _request(
+            base, f"/api/run/map?id={run_id}&act=1"
+        )
+
+    assert first_status == third_status == 200
+    assert missing_status == 404
+    assert "no act 1" in missing["error"]
+    assert catalog.get_run_calls == 3
+    assert len(parser_calls) == 2
+    assert all(len(rows) == 2 for rows in parser_calls)
+    expected_keys = {
+        "act_id",
+        "full_map",
+        "visited_route",
+        "fallback_reason",
+        "nodes",
+        "edges",
+        "alignment",
+        "run_id",
+        "act",
+        "acts",
+        "summary",
+    }
+    assert set(first) == set(third) == expected_keys
+    assert first["run_id"] == third["run_id"] == run_id
+    assert first["full_map"] is third["full_map"] is True
+    assert first["visited_route"] is third["visited_route"] is True
+    assert first["fallback_reason"] is third["fallback_reason"] is None
+    assert first["summary"]["node_count"] == third["summary"]["node_count"] == 5
+    assert first["summary"]["edge_count"] == third["summary"]["edge_count"] == 5
+    assert first["summary"]["visited_count"] == third["summary"]["visited_count"] == 3
+    assert [
+        (act["index"], act["act_id"], act["available"], act["visited_count"])
+        for act in first["acts"]
+    ] == [
+        (0, "RECORDED.ACT.1", True, 3),
+        (2, "RECORDED.ACT.3", True, 3),
+    ]
+    assert first["acts"] == third["acts"]
+    assert first["act"]["index"] == 0
+    assert third["act"]["index"] == 2
+
+    first_visited = sorted(
+        (node for node in first["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    third_visited = sorted(
+        (node for node in third["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert [node["path_index"] for node in first_visited] == [0, 1, 2]
+    assert [node["recorded_node_id"] for node in first_visited] == [
+        "a0:n0",
+        "a0:n1",
+        "a0:n2",
+    ]
+    assert first_visited[1]["deltas"]["hp_change"] == {
+        "value": -7,
+        "quality": "derived",
+    }
+    assert first_visited[1]["deltas"]["gold_change"] == {
+        "value": 15,
+        "quality": "derived",
+    }
+    assert first_visited[1]["deltas"]["cards_gained"] == {
+        "value": [{"id": "CARD.BASH"}],
+        "quality": "derived",
+    }
+    assert any(not node["visited"] for node in first["nodes"])
+    assert all(
+        "deltas" not in node and "recorded_node_id" not in node
+        for node in first["nodes"]
+        if not node["visited"]
+    )
+    assert all("art" in node for node in first["nodes"] + third["nodes"])
+    assert first["summary"]["terminal_node_id"] is None
+    assert all(node["terminal"] is False for node in first["nodes"])
+    terminal = [node for node in third_visited if node["terminal"]]
+    assert len(terminal) == 1
+    assert terminal[0]["path_index"] == 2
+    assert terminal[0]["recorded_node_id"] == "a2:n2"
+    assert terminal[0]["terminal_status"] == "dead"
+    assert third["summary"]["terminal_node_id"] == terminal[0]["id"]
+
+
+def test_recorded_map_uses_valid_older_snapshot_when_newest_is_malformed(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-valid-before-malformed"
+    valid = _branched_recorded_snapshot(run_id, act=1, ts=1)
+    malformed = deepcopy(valid)
+    malformed["ts"] = 2
+    malformed["map"].pop("type")
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            valid,
+            malformed,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=MustNotGenerate(),
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert payload["full_map"] is True
+    assert payload["visited_route"] is True
+    assert payload["fallback_reason"] is None
+    assert payload["summary"]["node_count"] == 5
+    assert payload["summary"]["edge_count"] == 5
+    assert "warnings" not in payload
+    assert "errors" not in payload
+
+
+def test_entirely_malformed_recorded_maps_keep_existing_route_fallback(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    run["run_id"] = "malformed-recorded-map-fallback"
+    run["build_id"] = "v0.107.1"
+    (tmp_path / "native.run").write_text(json.dumps(run), encoding="utf-8")
+    malformed = _branched_recorded_snapshot(run["run_id"], act=1, ts=1)
+    malformed["map"].pop("type")
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            malformed,
+            {"event": "outcome", "run_id": run["run_id"], "status": "dead"},
+        ],
+    )
+
+    class CapturingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="captured fallback")
+
+    service = CapturingFallbackService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert service.requests[0].game_version == "v0.107.1"
+    assert payload["full_map"] is False
+    assert payload["visited_route"] is True
+    assert payload["fallback_reason"] == "captured fallback"
+    assert "warnings" not in payload
+    assert "errors" not in payload
+
+
+@pytest.mark.parametrize("invalid_authority", ["coordinate", "path-length", "provenance"])
+def test_recorded_map_authority_mismatch_or_untrusted_provenance_falls_back(
+    tmp_path: Path,
+    invalid_authority: str,
+) -> None:
+    run_id = f"recorded-authority-{invalid_authority}"
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(run_id, act=1, ts=1),
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+    canonical = RunCatalog([tmp_path], replay_parser=_replay_parser).get_run(run_id)
+    route_nodes = [
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+    ]
+    raw_map = next(
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("event") == "map_snapshot"
+    )
+    if invalid_authority == "coordinate":
+        route_nodes[1]["col"] = 6
+    elif invalid_authority == "path-length":
+        canonical["run"]["nodes"].remove(route_nodes[-1])
+    else:
+        raw_map["_workbench_provenance"] = [
+            {"source_id": "spoofed", "source_kind": "replay_jsonl"}
+        ]
+
+    class StaticCatalog:
+        def get_run(self, requested_run_id: str) -> dict:
+            assert requested_run_id == run_id
+            return deepcopy(canonical)
+
+    class CapturingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="authority rejected")
+
+    service = CapturingFallbackService()
+    with _server(StaticCatalog(), map_service=service) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert payload["full_map"] is False
+    assert payload["fallback_reason"] == "authority rejected"
 
 
 def test_act_descriptors_prefer_explicit_bounded_indices_and_ignore_identityless_acts(

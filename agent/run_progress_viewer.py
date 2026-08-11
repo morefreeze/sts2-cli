@@ -43,6 +43,10 @@ from agent.run_workbench.map_service import (
     MapSubprocessError,
     visited_route_map,
 )
+from agent.run_workbench.recorded_maps import (
+    RecordedActSnapshot,
+    latest_recorded_acts,
+)
 from agent.run_workbench.replay import (
     format_room_label,
     parse_game_progress,
@@ -238,6 +242,96 @@ def _map_service_fallback_reason(error: MapServiceError) -> str:
     return "Map reconstruction could not complete; showing the recorded route only."
 
 
+def _trusted_recorded_map_rows(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep only adapter-authenticated raw deck-history map evidence."""
+
+    rows: list[dict[str, Any]] = []
+    nodes = run.get("nodes")
+    if not isinstance(nodes, list):
+        return rows
+    for node in nodes:
+        if (
+            not isinstance(node, dict)
+            or node.get("event") != "map_snapshot"
+            or node.get("_workbench_evidence_kind") != "deck_history_event"
+        ):
+            continue
+        provenance = node.get("_workbench_provenance")
+        if not isinstance(provenance, list) or not any(
+            isinstance(item, dict)
+            and item.get("source_kind") == "deck_history"
+            for item in provenance
+        ):
+            continue
+        rows.append(node)
+    return rows
+
+
+def _recorded_map_matches_canonical_route(
+    recorded: RecordedActSnapshot,
+    canonical_nodes: list[dict[str, Any]],
+) -> bool:
+    """Require an exact path pairing before copying canonical node details."""
+
+    act_map = recorded.act_map
+    path_ids = act_map.alignment.path_node_ids
+    route_nodes = recorded.route_nodes
+    if (
+        not act_map.full_map
+        or not act_map.alignment.ok
+        or act_map.alignment.ambiguous
+        or len(path_ids) != len(canonical_nodes)
+        or len(route_nodes) != len(canonical_nodes)
+    ):
+        return False
+    nodes_by_id = {node.id: node for node in act_map.nodes}
+    if len(nodes_by_id) != len(act_map.nodes):
+        return False
+    visited_nodes = [node for node in act_map.nodes if node.visited]
+    if len(visited_nodes) != len(path_ids):
+        return False
+    for path_index, (path_id, route_node, canonical_node) in enumerate(
+        zip(path_ids, route_nodes, canonical_nodes)
+    ):
+        map_node = nodes_by_id.get(path_id)
+        canonical_col = canonical_node.get("col")
+        canonical_row = canonical_node.get("row")
+        if (
+            map_node is None
+            or not map_node.visited
+            or map_node.path_index != path_index
+            or type(canonical_col) is not int
+            or type(canonical_row) is not int
+            or route_node.get("col") != canonical_col
+            or route_node.get("row") != canonical_row
+            or map_node.col != canonical_col
+            or map_node.row != canonical_row
+        ):
+            return False
+    return True
+
+
+def _authoritative_recorded_act(
+    run: dict[str, Any],
+    act_index: int,
+    canonical_nodes: list[dict[str, Any]],
+) -> RecordedActSnapshot | None:
+    """Select one validated recorded map without exposing parser failures."""
+
+    try:
+        recorded_acts, _parser_errors = latest_recorded_acts(
+            iter(_trusted_recorded_map_rows(run))
+        )
+        recorded = recorded_acts.get(act_index)
+        if recorded is None or not _recorded_map_matches_canonical_route(
+            recorded, canonical_nodes
+        ):
+            return None
+        return recorded
+    except Exception:
+        return None
+
+
 def _run_map_payload(
     catalog: RunCatalog,
     map_service: MapService,
@@ -270,42 +364,54 @@ def _run_map_payload(
         else None
     )
     run_won = outcome.get("status") == "win" or outcome.get("victory") is True
-    request = MapRequest(
-        run_id=run_id,
-        act_id=descriptor.get("act_id") or "",
-        act_index=act_index,
-        seed=metadata.get("seed") if isinstance(metadata.get("seed"), str) else None,
-        game_version=(
-            metadata.get("game_version")
-            if isinstance(metadata.get("game_version"), str)
-            else None
-        ),
-        ascension=(
-            metadata.get("ascension")
-            if isinstance(metadata.get("ascension"), int)
-            and not isinstance(metadata.get("ascension"), bool)
-            else None
-        ),
-        modifiers=tuple(
-            value for value in modifiers if isinstance(value, str)
-        ) if isinstance(modifiers, list) else (),
-        is_multiplayer=(
-            metadata.get("is_multiplayer")
-            if type(metadata.get("is_multiplayer")) is bool
-            else None
-        ),
-        visited=tuple(_map_visited_entry(node) for node in recorded_nodes),
-        allow_partial_path=(
-            not run_won and act_index == final_recorded_act_index
-        ),
+    authoritative_recorded = _authoritative_recorded_act(
+        run,
+        act_index,
+        recorded_nodes,
     )
-    try:
-        act_map = map_service.generate(request)
-    except MapServiceError as error:
-        act_map = visited_route_map(
-            request,
-            reason=_map_service_fallback_reason(error),
+    if authoritative_recorded is not None:
+        act_map = authoritative_recorded.act_map
+    else:
+        request = MapRequest(
+            run_id=run_id,
+            act_id=descriptor.get("act_id") or "",
+            act_index=act_index,
+            seed=(
+                metadata.get("seed")
+                if isinstance(metadata.get("seed"), str)
+                else None
+            ),
+            game_version=(
+                metadata.get("game_version")
+                if isinstance(metadata.get("game_version"), str)
+                else None
+            ),
+            ascension=(
+                metadata.get("ascension")
+                if isinstance(metadata.get("ascension"), int)
+                and not isinstance(metadata.get("ascension"), bool)
+                else None
+            ),
+            modifiers=tuple(
+                value for value in modifiers if isinstance(value, str)
+            ) if isinstance(modifiers, list) else (),
+            is_multiplayer=(
+                metadata.get("is_multiplayer")
+                if type(metadata.get("is_multiplayer")) is bool
+                else None
+            ),
+            visited=tuple(_map_visited_entry(node) for node in recorded_nodes),
+            allow_partial_path=(
+                not run_won and act_index == final_recorded_act_index
+            ),
         )
+        try:
+            act_map = map_service.generate(request)
+        except MapServiceError as error:
+            act_map = visited_route_map(
+                request,
+                reason=_map_service_fallback_reason(error),
+            )
     payload = act_map.to_dict()
     path_ids = payload["alignment"].get("path_node_ids") or [
         node["id"]
