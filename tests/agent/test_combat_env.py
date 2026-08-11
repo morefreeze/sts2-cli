@@ -192,6 +192,35 @@ def _map_state(*, hp=80, deck=None, relics=None, potions=None):
     }
 
 
+def _csharp_boss_current_map_reply(*, boss_type="Boss", boss_id="TEST_BOSS"):
+    """Exact GetFullMap shape at the terminal boss coordinate."""
+    reply = _map_reply()
+    for row in reply["rows"]:
+        for node in row:
+            node["current"] = False
+    reply["boss"] = {
+        "col": 0,
+        "row": 2,
+        "type": boss_type,
+        "id": boss_id,
+        "name": "Test Boss",
+    }
+    reply["current_coord"] = {"col": 0, "row": 2}
+    return reply
+
+
+def _task1_serialized_boss_map_snapshot(monkeypatch, tmp_path, *, entry_hp=55):
+    """Focused raw Task1 fixture for downstream map_snapshot consumers."""
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    monkeypatch.setattr(
+        env, "_send_read_only", lambda command: _csharp_boss_current_map_reply()
+    )
+    env._capture_run_map_state(_map_state(hp=entry_hp))
+    return env, env._serialized_run_map_snapshots()[0]
+
+
 def test_default_combat_env_never_requests_authoritative_map(monkeypatch):
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
     commands = []
@@ -1027,9 +1056,112 @@ def test_capture_sanitizes_map_allowlist_and_omits_oversized_optional_labels(
         "col", "row", "type", "children", "visited", "current",
     }
     assert set(raw_map["rows"][0][0]["children"][0]) == {"col", "row"}
-    assert raw_map["boss"] == {"col": 0, "row": 2, "type": "Boss"}
+    assert raw_map["boss"] == {
+        "col": 0,
+        "row": 2,
+        "type": "Boss",
+        "visited": False,
+        "current": False,
+    }
     assert raw_map["current_coord"] == {"col": 0, "row": 0}
     assert len(json.dumps(raw_map)) < 10_000
+
+
+def test_csharp_boss_current_map_is_accepted_and_serializes_boss_inventory(
+    monkeypatch, tmp_path
+):
+    reply = _csharp_boss_current_map_reply()
+
+    act, raw_map, current_coord, current_node, graph_coords = (
+        CombatEnv._validated_map_reply(reply)
+    )
+
+    assert act == 1
+    assert current_coord == (0, 2)
+    assert current_node == {
+        "col": 0,
+        "row": 2,
+        "type": "Boss",
+        "id": "TEST_BOSS",
+        "name": "Test Boss",
+        "visited": True,
+        "current": True,
+    }
+    assert (0, 2) in graph_coords
+    assert all(
+        node["current"] is False
+        for row in raw_map["rows"]
+        for node in row
+    )
+    assert raw_map["boss"]["visited"] is True
+    assert raw_map["boss"]["current"] is True
+
+    env, snapshot = _task1_serialized_boss_map_snapshot(
+        monkeypatch, tmp_path, entry_hp=55
+    )
+    env._update_buffered_node_inventory(_map_state(hp=31))
+    snapshot = env._serialized_run_map_snapshots()[0]
+    boss_visit = snapshot["visited_nodes"][0]
+    assert snapshot["event"] == "map_snapshot"
+    assert snapshot["map"]["boss"]["current"] is True
+    assert (boss_visit["col"], boss_visit["row"]) == (0, 2)
+    assert boss_visit["type"] == "Boss"
+    assert boss_visit["id"] == "TEST_BOSS"
+    assert boss_visit["entry_player"]["hp"] == 55
+    assert boss_visit["exit_player"]["hp"] == 31
+
+
+def test_nonboss_current_infers_false_boss_markers_and_ignores_producer_values():
+    reply = _map_reply(current=(0, 0))
+    reply["boss"].update({"visited": True, "current": True})
+
+    _, raw_map, current_coord, current_node, graph_coords = (
+        CombatEnv._validated_map_reply(reply)
+    )
+
+    assert current_coord == (0, 0)
+    assert current_node["type"] == "Ancient"
+    assert (0, 2) in graph_coords
+    assert raw_map["boss"]["visited"] is False
+    assert raw_map["boss"]["current"] is False
+
+
+@pytest.mark.parametrize("case", ["row_and_boss_current", "missing_current"])
+def test_map_rejects_inconsistent_current_coord_across_rows_and_boss(case):
+    if case == "row_and_boss_current":
+        reply = _map_reply(current=(0, 0))
+        reply["current_coord"] = {"col": 0, "row": 2}
+    else:
+        reply = _csharp_boss_current_map_reply()
+        reply["current_coord"] = {"col": 99, "row": 99}
+
+    with pytest.raises(ValueError):
+        CombatEnv._validated_map_reply(reply)
+
+
+def test_same_act_replacement_preserves_boss_visit_when_current_moves_to_row(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    replies = iter([
+        _csharp_boss_current_map_reply(),
+        _map_reply(current=(0, 0), ancient_type="AncientUpdated"),
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
+
+    env._capture_run_map_state(_map_state(hp=55))
+    env._capture_run_map_state(_map_state(hp=44))
+
+    snapshot = env._run_map_snapshots[1]
+    assert [(node["col"], node["row"]) for node in snapshot["visited_nodes"]] == [
+        (0, 2),
+        (0, 0),
+    ]
+    assert snapshot["visited_nodes"][0]["entry_player"]["hp"] == 55
+    assert snapshot["visited_nodes"][0]["exit_player"]["hp"] == 44
+    assert (0, 2) in snapshot["_coord_lookup"]
 
 
 def test_same_act_graph_replacement_drops_stale_visits_and_preserves_survivors(

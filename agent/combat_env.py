@@ -1637,10 +1637,6 @@ class CombatEnv(gym.Env):
         if not is_map_int(col) or not is_map_int(row):
             raise ValueError("map current_coord must contain integer coordinates")
         current_coord = (col, row)
-        if current_coord not in nodes:
-            raise ValueError("map current_coord is absent from rows")
-        if current_nodes != [current_coord]:
-            raise ValueError("map current marker is inconsistent with current_coord")
         boss = reply.get("boss")
         if (type(boss) is not dict
                 or not is_map_int(boss.get("col"))
@@ -1648,10 +1644,16 @@ class CombatEnv(gym.Env):
                 or type(boss.get("type")) is not str
                 or len(boss["type"]) > 64):
             raise ValueError("map boss must contain integer coordinates and a type")
+        boss_coord = (boss["col"], boss["row"])
+        if boss_coord in nodes:
+            raise ValueError("map boss coordinates overlap ordinary rows")
+        boss_is_current = current_coord == boss_coord
         safe_boss = {
             "col": boss["col"],
             "row": boss["row"],
             "type": boss["type"],
+            "visited": boss_is_current,
+            "current": boss_is_current,
         }
         boss_id = boss.get("id")
         boss_name = boss.get("name")
@@ -1659,6 +1661,20 @@ class CombatEnv(gym.Env):
             safe_boss["id"] = boss_id
         if type(boss_name) is str and len(boss_name) <= 256:
             safe_boss["name"] = boss_name
+        if boss_is_current:
+            if current_nodes:
+                raise ValueError(
+                    "ordinary row current marker conflicts with boss current_coord"
+                )
+            current_node = safe_boss
+        else:
+            if current_coord not in nodes:
+                raise ValueError("map current_coord is absent from rows and boss")
+            if current_nodes != [current_coord]:
+                raise ValueError(
+                    "map current marker is inconsistent with current_coord"
+                )
+            current_node = nodes[current_coord]
         raw_map = {
             "type": "map",
             "context": safe_context,
@@ -1666,7 +1682,13 @@ class CombatEnv(gym.Env):
             "boss": safe_boss,
             "current_coord": {"col": col, "row": row},
         }
-        return act, raw_map, current_coord, nodes[current_coord], set(nodes)
+        return (
+            act,
+            raw_map,
+            current_coord,
+            current_node,
+            set(nodes) | {boss_coord},
+        )
 
     def _ingest_run_map_reply(self, reply: object, state: dict) -> None:
         """Validate and ingest one already-received map reply without polling."""
@@ -1710,6 +1732,8 @@ class CombatEnv(gym.Env):
                 "col": col,
                 "row": row,
             }
+            if "id" in current_node:
+                node["id"] = current_node["id"]
             coord_lookup[(col, row)] = node
             snapshot["visited_nodes"].append(node)
         self._run_current_map_coord = (act, col, row)
