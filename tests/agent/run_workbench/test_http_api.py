@@ -740,6 +740,20 @@ def test_canonical_route_nodes_prefer_native_per_act_and_drop_invalid_acts(
     ]
 
 
+def test_final_canonical_act_index_uses_maximum_valid_act_not_node_order(
+) -> None:
+    nodes = [
+        {"id": "a0:n0"},
+        {"id": "a2:n0"},
+        {"id": "a1:n0"},
+        {"id": "a9:n0"},
+        {"id": "custom"},
+        {"id": "a1:n1", "act_index": 0},
+    ]
+
+    assert viewer._final_canonical_act_index(nodes) == 2
+
+
 def test_joined_native_and_recorded_routes_prefer_authority_per_act(
     tmp_path: Path,
 ) -> None:
@@ -812,6 +826,102 @@ def test_joined_native_and_recorded_routes_prefer_authority_per_act(
     assert second["summary"]["terminal_node_id"] == second_visited[-1]["id"]
     assert second_visited[-1]["terminal"] is True
     assert second_visited[-1]["terminal_status"] == "dead"
+
+
+@pytest.mark.parametrize(
+    ("status_value", "expected_terminal_status", "expected_partial"),
+    [
+        ("dead", "dead", True),
+        ("win", "win", False),
+        ("in_progress", "in_progress", True),
+    ],
+    ids=["dead", "win", "current"],
+)
+def test_terminal_uses_highest_act_when_mixed_sources_are_out_of_order(
+    tmp_path: Path,
+    status_value: str,
+    expected_terminal_status: str,
+    expected_partial: bool,
+) -> None:
+    run_id = f"out-of-order-terminal-{status_value}"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    act_one_route = native["map_point_history"]
+    native.update(
+        status=status_value,
+        acts=[{"id": "ACT.ONE"}, {}, {"id": "ACT.THREE"}],
+        map_point_history=[
+            act_one_route,
+            [],
+            deepcopy(act_one_route),
+        ],
+    )
+    if status_value == "win":
+        native["victory"] = True
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    outcome = {
+        "event": "outcome",
+        "run_id": run_id,
+        "game_version": "v0.107.1",
+        "status": status_value,
+    }
+    if status_value == "win":
+        outcome["victory"] = True
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(run_id, act=2, ts=1),
+            outcome,
+        ],
+    )
+
+    class CapturingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="native act fallback")
+
+    service = CapturingFallbackService()
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    canonical = catalog.get_run(run_id)["run"]
+    assert [
+        viewer._canonical_route_node_act_index(node)
+        for node in viewer._canonical_route_nodes(canonical)
+    ] == [0, 0, 0, 2, 2, 2, 1, 1, 1]
+
+    with _server(catalog, map_service=service) as base:
+        first_status, first = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        second_status, second = _request(
+            base, f"/api/run/map?id={run_id}&act=1"
+        )
+        third_status, third = _request(
+            base, f"/api/run/map?id={run_id}&act=2"
+        )
+
+    assert first_status == second_status == third_status == 200
+    assert [request.act_index for request in service.requests] == [0, 2]
+    assert service.requests[0].allow_partial_path is False
+    assert service.requests[1].allow_partial_path is expected_partial
+    assert [
+        (act["index"], act["available"], act["visited_count"])
+        for act in third["acts"]
+    ] == [(0, True, 3), (1, True, 3), (2, True, 3)]
+    assert first["summary"]["terminal_node_id"] is None
+    assert second["summary"]["terminal_node_id"] is None
+    assert all(node["terminal"] is False for node in first["nodes"])
+    assert all(node["terminal"] is False for node in second["nodes"])
+    terminal = [node for node in third["nodes"] if node["terminal"]]
+    assert len(terminal) == 1
+    assert terminal[0]["path_index"] == 2
+    assert terminal[0]["recorded_node_id"] == "a2:n2"
+    assert terminal[0]["terminal_status"] == expected_terminal_status
+    assert third["summary"]["terminal_node_id"] == terminal[0]["id"]
 
 
 def test_recorded_map_uses_valid_older_snapshot_when_newest_is_malformed(

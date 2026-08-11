@@ -160,6 +160,18 @@ def _canonical_route_nodes(run: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _final_canonical_act_index(nodes: list[dict[str, Any]]) -> int | None:
+    """Return the highest valid act without changing canonical node order."""
+
+    act_indices = [
+        act_index
+        for node in nodes
+        if isinstance(node, dict)
+        and (act_index := _canonical_route_node_act_index(node)) is not None
+    ]
+    return max(act_indices, default=None)
+
+
 def _act_identifier(act: dict[str, Any] | None) -> str:
     if not isinstance(act, dict):
         return ""
@@ -414,11 +426,7 @@ def _run_map_payload(
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
     modifiers = metadata.get("modifiers")
-    final_recorded_act_index = (
-        _canonical_node_act_index(all_recorded_nodes[-1])
-        if all_recorded_nodes
-        else None
-    )
+    final_recorded_act_index = _final_canonical_act_index(all_recorded_nodes)
     run_won = outcome.get("status") == "win" or outcome.get("victory") is True
     authoritative_recorded = _authoritative_recorded_act(
         run,
@@ -478,8 +486,7 @@ def _run_map_payload(
     ]
     contains_global_terminal = bool(
         recorded_nodes
-        and all_recorded_nodes
-        and recorded_nodes[-1] is all_recorded_nodes[-1]
+        and act_index == final_recorded_act_index
     )
     terminal_node_id = (
         path_ids[-1] if path_ids and contains_global_terminal else None
