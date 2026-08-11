@@ -170,18 +170,53 @@ function populateAxisFilter(id, key, allLabel) {
   setSelectOptions(select, values.map((value) => ({ value, label: value })), allLabel, previous);
 }
 
+function cohortsForSelectedVersion() {
+  if (!Array.isArray(state.cohorts)) return [];
+  const version = byId('versionFilter').value;
+  return state.cohorts.filter((cohort) => {
+    if (!cohort || typeof cohort !== 'object') return false;
+    try {
+      return !version || filterValue(cohort, 'game_version') === version;
+    } catch (error) {
+      return false;
+    }
+  });
+}
+
+function updateCharacterFilterOptions() {
+  const select = byId('characterFilter');
+  const previous = select.value;
+  const values = [];
+  cohortsForSelectedVersion().forEach((cohort) => {
+    try {
+      values.push(filterValue(cohort, 'character'));
+    } catch (error) {
+      // Ignore malformed descriptors so they cannot widen the available roles.
+    }
+  });
+  const uniqueValues = Array.from(new Set(values)).sort();
+  setSelectOptions(
+    select,
+    uniqueValues.map((value) => ({ value, label: value })),
+    '全部角色',
+    previous,
+  );
+}
+
 function filteredCohorts() {
   const character = byId('characterFilter').value;
-  const version = byId('versionFilter').value;
   const validity = byId('validityFilter').value;
-  return state.cohorts.filter((cohort) => {
-    if (character && filterValue(cohort, 'character') !== character) return false;
-    if (version && filterValue(cohort, 'game_version') !== version) return false;
-    const technical = Number(cohort.technical_count || 0);
-    const gameplay = Number(cohort.run_count || 0) - technical;
-    if (validity === 'valid' && gameplay <= 0) return false;
-    if (validity === 'technical' && technical <= 0) return false;
-    return true;
+  return cohortsForSelectedVersion().filter((cohort) => {
+    try {
+      if (character && filterValue(cohort, 'character') !== character) return false;
+      const technical = Number(cohort.technical_count || 0);
+      const gameplay = Number(cohort.run_count || 0) - technical;
+      if (validity === 'valid' && gameplay <= 0) return false;
+      if (validity === 'technical' && technical <= 0) return false;
+      return true;
+    } catch (error) {
+      return false;
+    }
   });
 }
 
@@ -1272,8 +1307,8 @@ async function bootstrap() {
     const [{ cohorts }, { sources }] = await Promise.all([getJSON('/api/cohorts'), getJSON('/api/catalog')]);
     state.cohorts = Array.isArray(cohorts) ? cohorts : [];
     state.sources = Array.isArray(sources) ? sources : [];
-    populateAxisFilter('characterFilter', 'character', '全部角色');
     populateAxisFilter('versionFilter', 'game_version', '全部版本');
+    updateCharacterFilterOptions();
     updateCohortOptions({ chooseDefaults: true });
     renderCatalog();
     renderAnomalies(null);
@@ -1295,8 +1330,14 @@ function filterChanged() {
   refreshMetrics();
 }
 
+function versionFilterChanged() {
+  updateCharacterFilterOptions();
+  updateCohortOptions({ chooseDefaults: true });
+  refreshMetrics();
+}
+
 byId('characterFilter').addEventListener('change', filterChanged);
-byId('versionFilter').addEventListener('change', filterChanged);
+byId('versionFilter').addEventListener('change', versionFilterChanged);
 byId('validityFilter').addEventListener('change', filterChanged);
 byId('currentCohort').addEventListener('change', () => {
   updateCohortOptions({ currentChanged: true });

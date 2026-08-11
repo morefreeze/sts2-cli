@@ -794,6 +794,152 @@ def test_cohort_options_preserve_manual_choice_and_only_default_on_current_chang
     assert payload["filteredServerDefault"] == ""
 
 
+def test_version_filter_cascades_character_and_cohort_candidates():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    filters = _javascript_section(
+        script, "function setSelectOptions", "function defaultBaselineCohortId"
+    )
+    cohort_options = _javascript_section(
+        script, "function updateCohortOptions", "function resetMetrics"
+    )
+    bootstrap = _javascript_section(script, "async function bootstrap", "function filterChanged")
+    listeners = _javascript_section(script, "function filterChanged", "bootstrap();")
+
+    assert bootstrap.index("populateAxisFilter('versionFilter'") < bootstrap.index(
+        "updateCharacterFilterOptions()"
+    ) < bootstrap.index("updateCohortOptions({ chooseDefaults: true })")
+    version_handler = _javascript_section(
+        listeners, "function versionFilterChanged", "byId('characterFilter')"
+    )
+    assert version_handler.index("updateCharacterFilterOptions()") < version_handler.index(
+        "updateCohortOptions({ chooseDefaults: true })"
+    ) < version_handler.index("refreshMetrics()")
+    assert (
+        "byId('versionFilter').addEventListener('change', versionFilterChanged);"
+        in listeners
+    )
+    assert "byId('characterFilter').addEventListener('change', filterChanged);" in listeners
+    assert "byId('validityFilter').addEventListener('change', filterChanged);" in listeners
+
+    payload = _run_node_json(
+        f"""
+        function makeSelect(value = '') {{
+          return {{
+            value,
+            children: [],
+            replaceChildren() {{ this.children = []; this.value = ''; }},
+            append(option) {{
+              this.children.push(option);
+              if (this.children.length === 1) this.value = option.value;
+            }},
+          }};
+        }}
+        const nodes = {{
+          versionFilter: makeSelect(),
+          characterFilter: makeSelect(),
+          validityFilter: makeSelect(),
+          currentCohort: makeSelect(),
+          baselineCohort: makeSelect(),
+        }};
+        const byId = (id) => nodes[id];
+        const clear = (node) => node.replaceChildren();
+        const element = (tag, options = {{}}) => ({{
+          tag,
+          textContent: options.text === undefined ? '' : String(options.text),
+          value: String(options.attrs.value),
+        }});
+        const formatTime = (value) => `time-${{value}}`;
+        const updateCohortHelp = () => {{}};
+        const defaultBaselineCohortId = () => '';
+        const state = {{ cohorts: [] }};
+        {filters}
+        {cohort_options}
+
+        const cohort = (id, version, character, technical = 0) => ({{
+          cohort_id: id,
+          label: id,
+          run_count: 2,
+          technical_count: technical,
+          latest_at: id.length,
+          filters: {{ game_version: version, character }},
+        }});
+        state.cohorts = [
+          cohort('v1-iron', 'v1', 'Ironclad'),
+          cohort('v1-necro', 'v1', 'Necrobinder'),
+          cohort('v2-iron', 'v2', 'Ironclad'),
+        ];
+
+        nodes.versionFilter.value = 'v1';
+        nodes.characterFilter.value = 'Necrobinder';
+        updateCharacterFilterOptions();
+        const v1 = {{
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          character: nodes.characterFilter.value,
+        }};
+
+        nodes.versionFilter.value = 'v2';
+        updateCharacterFilterOptions();
+        const v2 = {{
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          character: nodes.characterFilter.value,
+        }};
+        updateCohortOptions({{ chooseDefaults: true }});
+        const selectedV2 = {{
+          currentOptions: nodes.currentCohort.children.map((option) => option.value),
+          current: nodes.currentCohort.value,
+        }};
+
+        nodes.versionFilter.value = '';
+        updateCharacterFilterOptions();
+        const allVersions = {{
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          character: nodes.characterFilter.value,
+        }};
+
+        nodes.versionFilter.value = 'v2';
+        nodes.validityFilter.value = 'technical';
+        updateCharacterFilterOptions();
+        updateCohortOptions({{ chooseDefaults: true }});
+        const empty = {{
+          currentOptions: nodes.currentCohort.children.map((option) => option.value),
+          current: nodes.currentCohort.value,
+          baseline: nodes.baselineCohort.value,
+        }};
+
+        state.cohorts = null;
+        updateCharacterFilterOptions();
+        const malformed = {{
+          versionCandidates: cohortsForSelectedVersion().length,
+          characterOptions: nodes.characterFilter.children.map((option) => option.value),
+          character: nodes.characterFilter.value,
+          filteredCandidates: filteredCohorts().length,
+        }};
+
+        console.log(JSON.stringify({{ v1, v2, selectedV2, allVersions, empty, malformed }}));
+        """
+    )
+
+    assert payload == {
+        "v1": {
+            "characterOptions": ["", "Ironclad", "Necrobinder"],
+            "character": "Necrobinder",
+        },
+        "v2": {"characterOptions": ["", "Ironclad"], "character": ""},
+        "selectedV2": {"currentOptions": ["v2-iron"], "current": "v2-iron"},
+        "allVersions": {
+            "characterOptions": ["", "Ironclad", "Necrobinder"],
+            "character": "",
+        },
+        "empty": {"currentOptions": [""], "current": "", "baseline": ""},
+        "malformed": {
+            "versionCandidates": 0,
+            "characterOptions": [""],
+            "character": "",
+            "filteredCandidates": 0,
+        },
+    }
+
+
 def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     comparison = _javascript_section(
