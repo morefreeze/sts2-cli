@@ -62,6 +62,7 @@ ADVISOR_URL = "https://ing-gom.github.io/sts2-card-advisor/"
 TRANSLATION_CACHE_TTL_SECONDS = 24 * 60 * 60
 PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024
 _TRANSLATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_ACT_COUNT = 4
 
 
 def _canonical_node_act_index(node: dict[str, Any]) -> int:
@@ -126,20 +127,45 @@ def _act_identifier(act: dict[str, Any] | None) -> str:
     return ""
 
 
+def _descriptor_act_index(act: dict[str, Any], position: int) -> int | None:
+    act_index = act.get("act_index")
+    if type(act_index) is int and 0 <= act_index < _ACT_COUNT:
+        return act_index
+    act_number = act.get("act")
+    if type(act_number) is int and 1 <= act_number <= _ACT_COUNT:
+        return act_number - 1
+    if _act_identifier(act) and 0 <= position < _ACT_COUNT:
+        return position
+    return None
+
+
 def _act_descriptors(run: dict[str, Any]) -> list[dict[str, Any]]:
     acts = run.get("acts") if isinstance(run.get("acts"), list) else []
     nodes = _canonical_route_nodes(run)
+    acts_by_index: dict[int, dict[str, Any]] = {}
+    for position, act in enumerate(acts):
+        if not isinstance(act, dict):
+            continue
+        act_index = _descriptor_act_index(act, position)
+        if act_index is None:
+            continue
+        selected = acts_by_index.get(act_index)
+        if selected is None or (
+            not _act_identifier(selected) and _act_identifier(act)
+        ):
+            acts_by_index[act_index] = act
     node_indices = {
-        _canonical_node_act_index(node)
+        act_index
         for node in nodes
         if isinstance(node, dict)
+        and 0 <= (act_index := _canonical_node_act_index(node)) < _ACT_COUNT
     }
-    indices = sorted(set(range(len(acts))) | node_indices)
+    indices = sorted(set(acts_by_index) | node_indices)
     if not indices:
         indices = [0]
     descriptors: list[dict[str, Any]] = []
     for index in indices:
-        act = acts[index] if index < len(acts) and isinstance(acts[index], dict) else {}
+        act = acts_by_index.get(index, {})
         act_id = _act_identifier(act)
         visited_count = sum(
             1

@@ -2962,6 +2962,48 @@ def test_recorded_map_latest_per_act_matches_for_511_and_513_sources(
         assert exact["coverage"]["last_recorded_floor"] == expected_max_floor
 
 
+def test_recorded_map_top_level_floor_matches_for_511_and_513_sources(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-map-top-level-floor"
+    snapshot = _recorded_map_route_snapshot(
+        run_id,
+        act=1,
+        ts=1,
+        route_length=1,
+    )
+    snapshot["floor"] = 9
+    core = [
+        snapshot,
+        {"event": "outcome", "run_id": run_id, "status": "dead"},
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": run_id}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-recorded-map-top-level-floor"
+    large_root = tmp_path / "large-recorded-map-top-level-floor"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+
+    assert small_run.outcome.max_global_floor == 9
+    assert large_run.outcome.max_global_floor == 9
+    assert small_run.coverage.last_recorded_floor == 9
+    assert large_run.coverage.last_recorded_floor == 9
+    assert small_run.capabilities == large_run.capabilities
+    assert small.get_run(run_id)["run"]["outcome"]["max_global_floor"] == 9
+    assert large.get_run(run_id)["run"]["outcome"]["max_global_floor"] == 9
+
+
 def test_malformed_recorded_map_cannot_raise_compact_capabilities(
     tmp_path: Path,
 ) -> None:

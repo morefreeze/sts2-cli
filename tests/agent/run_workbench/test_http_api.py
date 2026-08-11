@@ -22,6 +22,7 @@ from agent.run_workbench.map_service import (
 
 from .test_catalog import (
     _native,
+    _recorded_map_route_snapshot,
     _replay,
     _replay_parser,
     _write_duplicate_version_source_eval_files,
@@ -434,6 +435,102 @@ def test_supported_native_run_map_returns_full_graph_route_art_and_visited_delta
     assert visited[-1]["terminal"] is True
     assert visited[-1]["terminal_status"] == "dead"
     assert all(node["terminal"] is False for node in visited[:-1])
+
+
+def test_act_descriptors_prefer_explicit_bounded_indices_and_ignore_identityless_acts(
+) -> None:
+    descriptors = viewer._act_descriptors(
+        {
+            "acts": [
+                {"id": "NATIVE.ACT.1"},
+                {"act_index": 1},
+                {},
+                {"act": 2, "id": "RECORDED.ACT.2"},
+                {"act_index": 1, "id": "LATER.ACT.2"},
+                {},
+            ],
+            "nodes": [
+                {
+                    "id": "a3:n0",
+                    "_workbench_evidence_kind": "route_node",
+                }
+            ],
+        }
+    )
+
+    assert descriptors == [
+        {
+            "index": 0,
+            "act_id": "NATIVE.ACT.1",
+            "label": "第 1 幕",
+            "available": False,
+            "visited_count": 0,
+        },
+        {
+            "index": 1,
+            "act_id": "RECORDED.ACT.2",
+            "label": "第 2 幕",
+            "available": False,
+            "visited_count": 0,
+        },
+        {
+            "index": 3,
+            "act_id": None,
+            "label": "第 4 幕",
+            "available": True,
+            "visited_count": 1,
+        },
+    ]
+
+
+def test_mixed_native_and_duplicate_sparse_recorded_acts_keep_http_tabs_aligned(
+    tmp_path: Path,
+) -> None:
+    run = _map_fixture()
+    run["run_id"] = "mixed-sparse-recorded-acts"
+    (tmp_path / "native.run").write_text(json.dumps(run), encoding="utf-8")
+    recorded_rows = [
+        _recorded_map_route_snapshot(
+            run["run_id"],
+            act=2,
+            ts=1,
+            route_length=1,
+        ),
+        {
+            "event": "outcome",
+            "run_id": run["run_id"],
+            "status": "dead",
+        },
+    ]
+    _write_jsonl(tmp_path / "recorded-a.jsonl", recorded_rows)
+    _write_jsonl(tmp_path / "recorded-b.jsonl", recorded_rows)
+
+    class CapturingMapService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="captured request")
+
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+    service = CapturingMapService()
+    with _server(catalog, map_service=service) as base:
+        status, payload = _request(
+            base, f"/api/run/map?id={run['run_id']}&act=0"
+        )
+
+    assert status == 200
+    assert [
+        (act["index"], act["act_id"], act["available"])
+        for act in payload["acts"]
+    ] == [
+        (0, "ACT.OVERGROWTH", True),
+        (1, "RECORDED.ACT.2", False),
+    ]
+    assert len(service.requests) == 1
+    assert service.requests[0].act_id == "ACT.OVERGROWTH"
+    assert service.requests[0].act_index == 0
 
 
 def test_historical_replay_map_falls_back_to_recorded_route_with_reason(

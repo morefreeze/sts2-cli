@@ -1532,10 +1532,9 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
     _update_compact_metadata(compact, record)
     timestamp = _update_compact_timestamp_range(compact, record)
     event = record.get("event")
-    if event != "map_snapshot":
-        _update_observed_floor(
-            compact, _first_integral_int(record, "floor_crossed", "floor")
-        )
+    _update_observed_floor(
+        compact, _first_integral_int(record, "floor_crossed", "floor")
+    )
     compact.has_card_pick = compact.has_card_pick or event == "card_pick"
     if event == "map_snapshot":
         map_ordinal = compact.recorded_map_count
