@@ -41,6 +41,8 @@ from agent.run_workbench.map_service import (
     MapServiceError,
     MapServiceTimeoutError,
     MapSubprocessError,
+    _normalize_generated_room_type,
+    _normalize_visited_room_type,
     visited_route_map,
 )
 from agent.run_workbench.recorded_maps import (
@@ -296,6 +298,15 @@ def _recorded_map_matches_canonical_route(
         map_node = nodes_by_id.get(path_id)
         canonical_col = canonical_node.get("col")
         canonical_row = canonical_node.get("row")
+        canonical_room_type = _normalize_visited_room_type(canonical_node)
+        route_room_type = _normalize_visited_room_type(route_node)
+        map_room_type = (
+            _normalize_generated_room_type(map_node.room_type)
+            if map_node is not None
+            else None
+        )
+        canonical_model_id = _node_model_id(canonical_node)
+        route_model_id = _node_model_id(route_node)
         if (
             map_node is None
             or not map_node.visited
@@ -306,6 +317,14 @@ def _recorded_map_matches_canonical_route(
             or route_node.get("row") != canonical_row
             or map_node.col != canonical_col
             or map_node.row != canonical_row
+            or canonical_room_type is None
+            or route_room_type != canonical_room_type
+            or map_room_type != canonical_room_type
+            or (
+                canonical_model_id is not None
+                and route_model_id is not None
+                and canonical_model_id != route_model_id
+            )
         ):
             return False
     return True

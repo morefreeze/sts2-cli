@@ -128,6 +128,7 @@ def _branched_recorded_snapshot(
     *,
     act: int,
     ts: int | float,
+    visit_boss: bool = False,
 ) -> dict:
     snapshot = _recorded_map_route_snapshot(
         run_id,
@@ -152,7 +153,75 @@ def _branched_recorded_snapshot(
     changed["exit_player"] = deepcopy(changed["entry_player"])
     changed["exit_player"].update(hp=73, gold=25)
     changed["exit_player"]["deck"].append({"id": "CARD.BASH"})
+    if visit_boss:
+        snapshot["map"]["rows"][2][0]["current"] = False
+        boss.update(visited=True, current=True)
+        snapshot["map"]["current_coord"] = {
+            "col": boss["col"],
+            "row": boss["row"],
+        }
+        player = deepcopy(snapshot["visited_nodes"][-1]["exit_player"])
+        snapshot["visited_nodes"].append(
+            {
+                "col": boss["col"],
+                "row": boss["row"],
+                "type": "Boss",
+                "entry_player": deepcopy(player),
+                "exit_player": player,
+            }
+        )
     return snapshot
+
+
+def _native_route_matching_recorded_coordinates(
+    run_id: str,
+    *,
+    middle_room_type: str,
+    boss_model_id: str | None = None,
+) -> dict:
+    player_stats = [{"current_hp": 80, "max_hp": 80, "current_gold": 10}]
+    route = [
+        {
+            "map_point_type": " ancient ",
+            "col": 0,
+            "row": 0,
+            "player_stats": deepcopy(player_stats),
+        },
+        {
+            "map_point_type": middle_room_type,
+            "col": 0,
+            "row": 1,
+            "player_stats": deepcopy(player_stats),
+        },
+        {
+            "map_point_type": "MONSTER",
+            "col": 0,
+            "row": 2,
+            "player_stats": deepcopy(player_stats),
+        },
+    ]
+    if boss_model_id is not None:
+        route.append(
+            {
+                "map_point_type": "boss",
+                "col": 0,
+                "row": 16,
+                "rooms": [{"model_id": boss_model_id}],
+                "player_stats": deepcopy(player_stats),
+            }
+        )
+    return {
+        "run_id": run_id,
+        "build_id": "v0.107.1",
+        "seed": "joined-native-recorded",
+        "ascension": 0,
+        "modifiers": [],
+        "is_multiplayer": False,
+        "status": "dead",
+        "players": [{"character": "IRONCLAD"}],
+        "acts": [{"id": "ACT.OVERGROWTH"}],
+        "map_point_history": route,
+    }
 
 
 def test_catalog_source_run_cohort_and_metrics_http_contracts(tmp_path: Path):
@@ -756,6 +825,125 @@ def test_recorded_map_authority_mismatch_or_untrusted_provenance_falls_back(
     assert len(service.requests) == 1
     assert payload["full_map"] is False
     assert payload["fallback_reason"] == "authority rejected"
+
+
+def test_joined_native_room_type_mismatch_rejects_recorded_map_authority(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-authority-room-type-mismatch"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="shop",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(run_id, act=1, ts=1),
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class CountingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="room authority rejected")
+
+    service = CountingFallbackService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert service.requests[0].visited[1]["map_point_type"] == "shop"
+    assert payload["full_map"] is False
+    assert payload["fallback_reason"] == "room authority rejected"
+    assert payload["nodes"][1]["room_type"] == "Shop"
+
+
+def test_joined_native_room_type_aliases_keep_recorded_map_authority(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-authority-normalized-room-type"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="  mOnStEr  ",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(run_id, act=1, ts=1),
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=MustNotGenerate(),
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert payload["full_map"] is True
+    assert payload["fallback_reason"] is None
+
+
+def test_joined_native_model_id_conflict_rejects_recorded_map_authority(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-authority-model-id-mismatch"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+        boss_model_id="BOSS.NATIVE",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(
+                run_id,
+                act=1,
+                ts=1,
+                visit_boss=True,
+            ),
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class CountingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="model authority rejected")
+
+    service = CountingFallbackService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert service.requests[0].visited[-1]["rooms"] == [
+        {"model_id": "BOSS.NATIVE"}
+    ]
+    assert payload["full_map"] is False
+    assert payload["fallback_reason"] == "model authority rejected"
 
 
 def test_act_descriptors_prefer_explicit_bounded_indices_and_ignore_identityless_acts(
