@@ -948,6 +948,56 @@ def test_version_filter_cascades_character_and_cohort_candidates():
     }
 
 
+def test_filter_values_sort_game_versions_by_numeric_segments_descending():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    filters = _javascript_section(
+        script, "function setSelectOptions", "function defaultBaselineCohortId"
+    )
+
+    payload = _run_node_json(
+        f"""
+        const versions = [
+          'v0.99.10', 'v1.9.2', 'nightly', 'v0.107.1', 'V2.0',
+          'v0.9.12', 'v1.10.0', 'v0.103.2', '2', 'v0.10.0',
+          'v1.9.12', undefined, 'v2.0', 'v1.10',
+        ];
+        const characters = ['Watcher', 'Ironclad', 'Necrobinder'];
+        const state = {{ cohorts: versions.map((version, index) => ({{
+          cohort_id: `cohort-${{index}}`,
+          filters: {{
+            game_version: version,
+            character: characters[index % characters.length],
+          }},
+        }})) }};
+        {filters}
+        console.log(JSON.stringify({{
+          versions: filterValuesFromCohorts(state.cohorts, 'game_version'),
+          characters: filterValuesFromCohorts(state.cohorts, 'character'),
+        }}));
+        """
+    )
+
+    assert payload == {
+        "versions": [
+            "2",
+            "V2.0",
+            "v2.0",
+            "v1.10",
+            "v1.10.0",
+            "v1.9.12",
+            "v1.9.2",
+            "v0.107.1",
+            "v0.103.2",
+            "v0.99.10",
+            "v0.10.0",
+            "v0.9.12",
+            "nightly",
+            "未标注",
+        ],
+        "characters": ["Ironclad", "Necrobinder", "Watcher"],
+    }
+
+
 def test_axis_helpers_skip_malformed_cohorts_without_losing_valid_values():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     filters = _javascript_section(

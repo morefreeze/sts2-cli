@@ -173,6 +173,46 @@ function safeCohortId(cohort) {
   }
 }
 
+function gameVersionSegments(value) {
+  if (typeof value !== 'string' || !/^[vV]?\d+(?:\.\d+)*$/.test(value)) return null;
+  return value.replace(/^[vV]/, '').split('.');
+}
+
+function compareDecimalSegmentsDescending(left, right) {
+  const normalizedLeft = left.replace(/^0+(?=\d)/, '');
+  const normalizedRight = right.replace(/^0+(?=\d)/, '');
+  if (normalizedLeft.length !== normalizedRight.length) {
+    return normalizedRight.length - normalizedLeft.length;
+  }
+  if (normalizedLeft === normalizedRight) return 0;
+  return normalizedLeft > normalizedRight ? -1 : 1;
+}
+
+function compareGameVersionsDescending(left, right) {
+  const leftSegments = gameVersionSegments(left);
+  const rightSegments = gameVersionSegments(right);
+  if (!leftSegments || !rightSegments) {
+    if (leftSegments) return -1;
+    if (rightSegments) return 1;
+  } else {
+    const segmentCount = Math.max(leftSegments.length, rightSegments.length);
+    for (let index = 0; index < segmentCount; index += 1) {
+      const result = compareDecimalSegmentsDescending(
+        leftSegments[index] || '0',
+        rightSegments[index] || '0',
+      );
+      if (result) return result;
+    }
+  }
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function sortFilterValues(values, key) {
+  const sorted = [...values];
+  return key === 'game_version' ? sorted.sort(compareGameVersionsDescending) : sorted.sort();
+}
+
 function filterValuesFromCohorts(cohorts, key) {
   if (!Array.isArray(cohorts)) return [];
   const values = [];
@@ -184,7 +224,7 @@ function filterValuesFromCohorts(cohorts, key) {
       // Ignore malformed descriptors without discarding the remaining cohorts.
     }
   });
-  return Array.from(new Set(values)).sort();
+  return sortFilterValues(Array.from(new Set(values)), key);
 }
 
 function populateAxisFilter(id, key, allLabel) {
