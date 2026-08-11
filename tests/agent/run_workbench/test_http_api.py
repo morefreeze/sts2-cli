@@ -690,6 +690,130 @@ def test_recorded_maps_are_authoritative_across_sparse_acts_without_generation(
     assert third["summary"]["terminal_node_id"] == terminal[0]["id"]
 
 
+def test_canonical_route_nodes_prefer_native_per_act_and_drop_invalid_acts(
+) -> None:
+    def route_node(
+        token: str,
+        node_id: str,
+        source_kind: str,
+        **fields: object,
+    ) -> dict:
+        return {
+            "token": token,
+            "id": node_id,
+            "_workbench_evidence_kind": "route_node",
+            "_workbench_provenance": [
+                {"source_id": token, "source_kind": source_kind}
+            ],
+            **fields,
+        }
+
+    native_act_one = route_node("native-a0", "a0:n0", "native_run")
+    recorded_act_one = route_node(
+        "recorded-a0", "a0:n0", "deck_history", act=1, act_index=0
+    )
+    recorded_act_two = route_node(
+        "recorded-a1", "a1:n0", "deck_history", act=2, act_index=1
+    )
+    unknown_act = route_node("unknown", "custom", "deck_history")
+    out_of_range_act = route_node("out-of-range", "a9:n0", "deck_history")
+    conflicting_act = route_node(
+        "conflicting", "a2:n0", "deck_history", act_index=1
+    )
+
+    selected = viewer._canonical_route_nodes(
+        {
+            "nodes": [
+                native_act_one,
+                recorded_act_one,
+                recorded_act_two,
+                unknown_act,
+                out_of_range_act,
+                conflicting_act,
+            ]
+        }
+    )
+
+    assert [node["token"] for node in selected] == [
+        "native-a0",
+        "recorded-a1",
+    ]
+
+
+def test_joined_native_and_recorded_routes_prefer_authority_per_act(
+    tmp_path: Path,
+) -> None:
+    run_id = "native-act-one-recorded-act-two"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            _branched_recorded_snapshot(run_id, act=2, ts=1),
+            {
+                "event": "outcome",
+                "run_id": run_id,
+                "game_version": "v0.107.1",
+                "status": "dead",
+            },
+        ],
+    )
+
+    class CapturingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="native act fallback")
+
+    service = CapturingFallbackService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        first_status, first = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        second_status, second = _request(
+            base, f"/api/run/map?id={run_id}&act=1"
+        )
+
+    assert first_status == second_status == 200
+    assert [request.act_index for request in service.requests] == [0]
+    assert len(service.requests[0].visited) == 3
+    assert first["full_map"] is False
+    assert first["visited_route"] is True
+    assert first["fallback_reason"] == "native act fallback"
+    assert second["full_map"] is True
+    assert second["visited_route"] is True
+    assert second["fallback_reason"] is None
+    assert [
+        (act["index"], act["available"], act["visited_count"])
+        for act in first["acts"]
+    ] == [(0, True, 3), (1, True, 3)]
+    assert first["acts"] == second["acts"]
+    assert first["summary"]["visited_count"] == 3
+    assert second["summary"]["visited_count"] == 3
+    assert first["summary"]["terminal_node_id"] is None
+    assert all(node["terminal"] is False for node in first["nodes"])
+    second_visited = sorted(
+        (node for node in second["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert [node["recorded_node_id"] for node in second_visited] == [
+        "a1:n0",
+        "a1:n1",
+        "a1:n2",
+    ]
+    assert second["summary"]["terminal_node_id"] == second_visited[-1]["id"]
+    assert second_visited[-1]["terminal"] is True
+    assert second_visited[-1]["terminal_status"] == "dead"
+
+
 def test_recorded_map_uses_valid_older_snapshot_when_newest_is_malformed(
     tmp_path: Path,
 ) -> None:
@@ -1035,7 +1159,7 @@ def test_mixed_native_and_duplicate_sparse_recorded_acts_keep_http_tabs_aligned(
         for act in payload["acts"]
     ] == [
         (0, "ACT.OVERGROWTH", True),
-        (1, "RECORDED.ACT.2", False),
+        (1, "RECORDED.ACT.2", True),
     ]
     assert len(service.requests) == 1
     assert service.requests[0].act_id == "ACT.OVERGROWTH"

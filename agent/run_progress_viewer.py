@@ -109,18 +109,55 @@ def _route_node_source_kinds(node: dict[str, Any]) -> set[str]:
     }
 
 
+def _canonical_route_node_act_index(node: dict[str, Any]) -> int | None:
+    """Return one consistent bounded act identity or fail closed."""
+
+    candidates: list[int] = []
+    raw_id = node.get("id")
+    if isinstance(raw_id, str):
+        match = re.match(r"^a(\d+):n\d+$", raw_id)
+        if match:
+            act_index = int(match.group(1))
+            if not 0 <= act_index < _ACT_COUNT:
+                return None
+            candidates.append(act_index)
+    for key, minimum, maximum, offset in (
+        ("act_index", 0, _ACT_COUNT - 1, 0),
+        ("act", 1, _ACT_COUNT, -1),
+        ("global_floor", 1, _ACT_COUNT * 17, -1),
+    ):
+        if key not in node:
+            continue
+        value = node[key]
+        if type(value) is not int or not minimum <= value <= maximum:
+            return None
+        candidates.append(
+            (value - 1) // 17 if key == "global_floor" else value + offset
+        )
+    if not candidates or any(value != candidates[0] for value in candidates[1:]):
+        return None
+    return candidates[0]
+
+
 def _canonical_route_nodes(run: dict[str, Any]) -> list[dict[str, Any]]:
-    nodes = [
-        node
+    indexed_nodes = [
+        (node, act_index)
         for node in (run.get("nodes") if isinstance(run.get("nodes"), list) else [])
-        if isinstance(node, dict) and _is_canonical_route_node(node)
+        if isinstance(node, dict)
+        and _is_canonical_route_node(node)
+        and (act_index := _canonical_route_node_act_index(node)) is not None
     ]
-    native_nodes = [
-        node
-        for node in nodes
+    native_acts = {
+        act_index
+        for node, act_index in indexed_nodes
         if "native_run" in _route_node_source_kinds(node)
+    }
+    return [
+        node
+        for node, act_index in indexed_nodes
+        if act_index not in native_acts
+        or "native_run" in _route_node_source_kinds(node)
     ]
-    return native_nodes or nodes
 
 
 def _act_identifier(act: dict[str, Any] | None) -> str:
