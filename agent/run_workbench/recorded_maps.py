@@ -24,12 +24,16 @@ _MAX_ERROR_CHARS = 160
 _MAX_INPUT_ROWS = 100_000
 _MAX_ROUTE_NODES = 17
 _MAX_MAP_COL = 6
-_MAX_ORDINARY_ROW = 15
-_BOSS_ROW = 16
+_MAX_MAP_ROW = 16
+_MAX_ROOT_KEYS = 32
+_MAX_UNTRUSTED_DEPTH = 8
+_MAX_UNTRUSTED_NODES = 1_000_000
+_MAX_UNTRUSTED_LIST_ITEMS = 4096
+_MAX_UNTRUSTED_OBJECT_KEYS = 512
+_BOSS_ROW_BY_ACT = {1: 16, 2: 16, 3: 15, 4: 14}
 _ROOT_KEYS = (
     "event", "act", "is_multiplayer", "ts", "map", "visited_nodes",
 )
-_MISSING = object()
 
 _ROOM_TYPES = {
     "ancient": "Ancient",
@@ -78,6 +82,10 @@ class RecordedMapError(ValueError):
 
 class _RecordedMapValidationError(ValueError):
     """An internal-only marker for intentional, safe validator failures."""
+
+
+class _UntrustedRecordedMapError(ValueError):
+    """An internal marker whose details are never exposed publicly."""
 
 
 @dataclass(frozen=True)
@@ -134,7 +142,7 @@ def _coordinate(value: Any, *, label: str) -> tuple[int, int]:
         _map_int(value.get("col"), label=f"{label} col"),
         _map_int(value.get("row"), label=f"{label} row"),
     )
-    if not 0 <= coord[0] <= _MAX_MAP_COL or not 0 <= coord[1] <= _BOSS_ROW:
+    if not 0 <= coord[0] <= _MAX_MAP_COL or not 0 <= coord[1] <= _MAX_MAP_ROW:
         raise _error(f"{label} is outside recorded map bounds")
     return coord
 
@@ -277,6 +285,7 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
     coordinates: set[tuple[int, int]] = set()
     current_markers: list[tuple[int, int]] = []
     ancient_coords: list[tuple[int, int]] = []
+    boss_row = _BOSS_ROW_BY_ACT[act]
     edge_count = 0
     for row_container in rows:
         if type(row_container) is not list:
@@ -287,7 +296,7 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
             if type(raw_node) is not dict:
                 raise _error("recorded map node must be an object")
             coord = _coordinate(raw_node, label="recorded map node coordinate")
-            if coord[1] > _MAX_ORDINARY_ROW:
+            if coord[1] >= boss_row:
                 raise _error("recorded map ordinary node must be below boss row")
             if coord in coordinates:
                 raise _error("recorded map node coordinates must be unique")
@@ -329,8 +338,8 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
     if type(boss) is not dict:
         raise _error("recorded map boss must be an object")
     boss_coord = _coordinate(boss, label="recorded map boss coordinate")
-    if boss_coord[1] != _BOSS_ROW:
-        raise _error("recorded map boss must be on row 16")
+    if boss_coord[1] != boss_row:
+        raise _error("recorded map boss row is inconsistent with its act")
     if boss_coord in coordinates:
         raise _error("recorded map boss coordinate must be unique")
     boss_id = boss.get("id")
@@ -431,20 +440,71 @@ def _visited_type(value: dict[str, Any]) -> str:
     return normalized[0]
 
 
+def _snapshot_untrusted_value(
+    value: Any, *, depth: int, count: list[int]
+) -> Any:
+    """Copy one bounded value without retaining attacker-controlled containers."""
+
+    count[0] += 1
+    if depth > _MAX_UNTRUSTED_DEPTH or count[0] > _MAX_UNTRUSTED_NODES:
+        raise _UntrustedRecordedMapError
+    if value is None or type(value) in (bool, int, float, str):
+        return value
+    if type(value) is list:
+        if len(value) > _MAX_UNTRUSTED_LIST_ITEMS:
+            raise _UntrustedRecordedMapError
+        return [
+            _snapshot_untrusted_value(item, depth=depth + 1, count=count)
+            for item in value
+        ]
+    if type(value) is dict:
+        if len(value) > _MAX_UNTRUSTED_OBJECT_KEYS:
+            raise _UntrustedRecordedMapError
+        detached = {}
+        for key, item in value.items():
+            count[0] += 1
+            if count[0] > _MAX_UNTRUSTED_NODES or type(key) is not str:
+                raise _UntrustedRecordedMapError
+            detached[key] = _snapshot_untrusted_value(
+                item, depth=depth + 1, count=count
+            )
+        return detached
+    raise _UntrustedRecordedMapError
+
+
 def _normalize_root_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract only parser-owned root fields from an untrusted Mapping."""
+    """Bound and detach all parser-owned input before schema validation."""
 
     try:
         if not isinstance(row, Mapping):
             raise TypeError("root is not a mapping")
+        root_size = len(row)
+        if root_size > _MAX_ROOT_KEYS:
+            raise _UntrustedRecordedMapError
+        iterator = iter(row)
+        root_keys = []
+        for _index in range(_MAX_ROOT_KEYS + 1):
+            try:
+                key = next(iterator)
+            except StopIteration:
+                break
+            if type(key) is not str:
+                raise _UntrustedRecordedMapError
+            root_keys.append(key)
+        else:
+            raise _UntrustedRecordedMapError
+        if len(root_keys) != root_size or len(set(root_keys)) != len(root_keys):
+            raise _UntrustedRecordedMapError
         normalized = {}
-        for key in _ROOT_KEYS:
-            value = row.get(key, _MISSING)
-            if value is not _MISSING:
-                normalized[key] = value
+        count = [0]
+        for key in root_keys:
+            if key in _ROOT_KEYS:
+                normalized[key] = _snapshot_untrusted_value(
+                    row[key], depth=0, count=count
+                )
         return normalized
     except Exception:
-        raise _error("invalid recorded map row") from None
+        raise _UntrustedRecordedMapError from None
 
 
 def _parse_recorded_row(
@@ -580,6 +640,9 @@ def _parse_public_row(
 
     try:
         normalized = _normalize_root_mapping(row)
+    except Exception:
+        raise RecordedMapError("invalid recorded map row") from None
+    try:
         return _parse_recorded_row(normalized)
     except _RecordedMapValidationError as exc:
         raise RecordedMapError(str(exc)) from None
@@ -606,12 +669,15 @@ def latest_recorded_acts(
     except Exception:
         return {}, ("invalid recorded map rows iterable",)
 
+    exhausted = False
     for index in range(_MAX_INPUT_ROWS):
         try:
             row = next(iterator)
         except StopIteration:
+            exhausted = True
             break
         except Exception:
+            exhausted = True
             if len(errors) < _MAX_ERRORS:
                 errors.append(
                     f"row {index}: invalid recorded map row iterator"[
@@ -634,6 +700,17 @@ def latest_recorded_acts(
         retained = selected.get(snapshot.act_index)
         if retained is None or timestamp >= retained[0]:
             selected[snapshot.act_index] = (timestamp, snapshot)
+    if not exhausted:
+        try:
+            next(iterator)
+        except StopIteration:
+            pass
+        except Exception:
+            if len(errors) < _MAX_ERRORS:
+                errors.append("invalid recorded map row iterator")
+        else:
+            if len(errors) < _MAX_ERRORS:
+                errors.append("recorded map row scan limit reached")
     return (
         {
             act_index: selected[act_index][1]

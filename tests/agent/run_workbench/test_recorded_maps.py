@@ -7,11 +7,15 @@ import importlib
 import json
 import math
 import operator
+from types import MappingProxyType
 from typing import Any, Callable
 
 import pytest
 
 from agent.combat_env import CombatEnv
+
+
+_BOSS_ROW_BY_ACT = {1: 16, 2: 16, 3: 15, 4: 14}
 
 
 def _api():
@@ -121,11 +125,12 @@ def _boss_route_row(*, boss_id: str = "BOSS.TEST"):
     return row
 
 
-def _linear_full_act_row(*, act: int = 1):
+def _linear_full_act_row(*, act: int = 1, boss_row: int | None = None):
     player = _player()
+    boss_row = _BOSS_ROW_BY_ACT[act] if boss_row is None else boss_row
     ordinary = []
     visited_nodes = []
-    for row_index in range(16):
+    for row_index in range(boss_row):
         room_type = "Ancient" if row_index == 0 else "Monster"
         ordinary.append([{
             "col": 0,
@@ -138,7 +143,7 @@ def _linear_full_act_row(*, act: int = 1):
         visited_nodes.append(
             _route_node(0, row_index, room_type, player, player)
         )
-    visited_nodes.append(_route_node(0, 16, "Boss", player, player))
+    visited_nodes.append(_route_node(0, boss_row, "Boss", player, player))
     return {
         "event": "map_snapshot",
         "act": act,
@@ -150,13 +155,13 @@ def _linear_full_act_row(*, act: int = 1):
             "rows": ordinary,
             "boss": {
                 "col": 0,
-                "row": 16,
+                "row": boss_row,
                 "type": "Boss",
                 "id": "BOSS.LINEAR",
                 "visited": True,
                 "current": True,
             },
-            "current_coord": {"col": 0, "row": 16},
+            "current_coord": {"col": 0, "row": boss_row},
         },
         "visited_nodes": visited_nodes,
     }
@@ -241,17 +246,37 @@ def test_parse_recorded_map_row_builds_existing_map_and_delta_contracts() -> Non
     )
 
 
-@pytest.mark.parametrize("act", [1, 2, 3, 4])
-def test_full_seventeen_floor_route_is_accepted_with_act_global_floors(act: int) -> None:
+@pytest.mark.parametrize(
+    ("act", "route_length", "boss_row"),
+    [(1, 17, 16), (2, 17, 16), (3, 16, 15), (4, 15, 14)],
+)
+def test_act_geometry_preserves_canonical_global_floor_slots(
+    act: int, route_length: int, boss_row: int
+) -> None:
     api = _api()
 
     parsed = api.parse_recorded_map_row(_linear_full_act_row(act=act))
 
-    assert len(parsed.route_nodes) == 17
+    assert len(parsed.route_nodes) == route_length
     assert parsed.route_nodes[0]["global_floor"] == (act - 1) * 17 + 1
-    assert parsed.route_nodes[-1]["global_floor"] == act * 17
-    assert parsed.route_nodes[-1]["row"] == 16
+    assert parsed.route_nodes[-1]["global_floor"] == (act - 1) * 17 + route_length
+    assert parsed.route_nodes[-1]["row"] == boss_row
     assert parsed.route_nodes[-1]["model_id"] == "BOSS.LINEAR"
+
+
+@pytest.mark.parametrize(
+    ("act", "wrong_boss_row"),
+    [(1, 15), (2, 15), (3, 16), (4, 15)],
+)
+def test_act_geometry_rejects_a_coherent_graph_with_the_wrong_boss_row(
+    act: int, wrong_boss_row: int
+) -> None:
+    api = _api()
+
+    with pytest.raises(api.RecordedMapError):
+        api.parse_recorded_map_row(
+            _linear_full_act_row(act=act, boss_row=wrong_boss_row)
+        )
 
 
 def test_eighteen_node_route_is_rejected_before_it_can_claim_alignment() -> None:
@@ -498,12 +523,13 @@ def test_task1_partial_player_sanitizer_output_roundtrips() -> None:
     assert parsed.route_nodes[0]["deltas"]["cards_gained"]["quality"] == "unknown"
 
 
-def _producer_full_act_reply(*, current_row: int) -> dict[str, Any]:
+def _producer_full_act_reply(*, act: int, current_row: int) -> dict[str, Any]:
     """Exact Task 1 input shape, including marker-free boss metadata."""
 
-    boss_current = current_row == 16
+    boss_row = _BOSS_ROW_BY_ACT[act]
+    boss_current = current_row == boss_row
     rows = []
-    for row_index in range(16):
+    for row_index in range(boss_row):
         rows.append([{
             "col": 0,
             "row": row_index,
@@ -514,11 +540,11 @@ def _producer_full_act_reply(*, current_row: int) -> dict[str, Any]:
         }])
     return {
         "type": "map",
-        "context": {"act": 1},
+        "context": {"act": act},
         "rows": rows,
         "boss": {
             "col": 0,
-            "row": 16,
+            "row": boss_row,
             "type": "BossRoom",
             "id": "BOSS.PRODUCER",
             "name": "Producer Boss",
@@ -527,16 +553,22 @@ def _producer_full_act_reply(*, current_row: int) -> dict[str, Any]:
     }
 
 
-def test_task1_real_full_capture_roundtrips_boss_and_partial_players() -> None:
+@pytest.mark.parametrize(
+    ("act", "boss_row", "route_length"),
+    [(1, 16, 17), (2, 16, 17), (3, 15, 16), (4, 14, 15)],
+)
+def test_task1_real_full_capture_roundtrips_act_geometry_boss_and_partial_players(
+    act: int, boss_row: int, route_length: int
+) -> None:
     api = _api()
     env = CombatEnv(dry_run=True, run_context={"capture_map": True})
     replies = iter(
-        _producer_full_act_reply(current_row=row_index)
-        for row_index in range(17)
+        _producer_full_act_reply(act=act, current_row=row_index)
+        for row_index in range(boss_row + 1)
     )
     env._send_read_only = lambda _command: next(replies)
 
-    for row_index in range(17):
+    for row_index in range(boss_row + 1):
         assert env._capture_run_map_state({
             "player": {
                 "hp": 80 - row_index,
@@ -546,17 +578,20 @@ def test_task1_real_full_capture_roundtrips_boss_and_partial_players() -> None:
         }) is True
 
     recorded_row = env._serialized_run_map_snapshots()[0]
-    assert "visited" not in _producer_full_act_reply(current_row=16)["boss"]
+    assert "visited" not in _producer_full_act_reply(
+        act=act, current_row=boss_row
+    )["boss"]
     assert recorded_row["map"]["boss"]["visited"] is True
     assert recorded_row["map"]["boss"]["current"] is True
 
     parsed = api.parse_recorded_map_row(recorded_row)
 
-    assert len(parsed.route_nodes) == 17
+    assert len(parsed.route_nodes) == route_length
+    assert parsed.route_nodes[-1]["row"] == boss_row
     assert parsed.route_nodes[-1]["model_id"] == "BOSS.PRODUCER"
     assert parsed.route_nodes[-1]["start_player"] == {
-        "hp": 64,
-        "gold": 36,
+        "hp": 80 - boss_row,
+        "gold": 20 + boss_row,
         "deck": [{"name": "Identityless"}],
     }
     assert parsed.route_nodes[-1]["deltas"]["cards_gained"]["quality"] == "unknown"
@@ -874,6 +909,105 @@ def test_nested_forged_public_errors_are_always_generic(location: str) -> None:
     assert "/private/inventory" not in combined
 
 
+def _private_collision_row(location: str, error_type) -> dict[Any, Any]:
+    row = _valid_row()
+    if location == "root":
+        return {_CollidingNestedKey("event", error_type): "map_snapshot"}
+    if location == "player":
+        row["visited_nodes"][0]["entry_player"] = {
+            _CollidingNestedKey("hp", error_type): 80,
+        }
+    elif location == "map":
+        row["map"] = {_CollidingNestedKey("type", error_type): "map"}
+    elif location == "context":
+        row["map"]["context"] = {
+            _CollidingNestedKey("act", error_type): 1,
+        }
+    elif location == "child":
+        row["map"]["rows"][0][0]["children"][0] = {
+            _CollidingNestedKey("col", error_type): 0,
+            "row": 1,
+        }
+    elif location == "inventory":
+        row["visited_nodes"][0]["entry_player"]["deck"] = [{
+            _CollidingNestedKey("id", error_type): "STRIKE",
+        }]
+    else:  # pragma: no cover - guards the test helper itself
+        raise AssertionError(location)
+    return row
+
+
+@pytest.mark.parametrize(
+    "location", ["root", "player", "map", "context", "child", "inventory"]
+)
+def test_imported_private_validation_error_cannot_be_forged_by_input(
+    location: str,
+) -> None:
+    api = _api()
+    secret = "FORGED_PRIVATE /private/inventory" + "x" * 300
+    hostile = _private_collision_row(
+        location,
+        lambda _message: api._RecordedMapValidationError(secret),
+    )
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(hostile)
+    snapshots, errors = api.latest_recorded_acts(iter((hostile,)))
+
+    assert str(raised.value) == "invalid recorded map row"
+    assert len(str(raised.value)) <= 160
+    assert snapshots == {}
+    assert errors == ("row 0: invalid recorded map row",)
+    assert "FORGED_PRIVATE" not in str(raised.value) + repr(errors)
+    assert "/private/inventory" not in str(raised.value) + repr(errors)
+
+
+class _NonExactString(str):
+    pass
+
+
+def _non_exact_string_key_row(location: str) -> dict[Any, Any]:
+    row = _valid_row()
+    if location == "root":
+        value = row.pop("event")
+        row[_NonExactString("event")] = value
+    elif location == "player":
+        player = row["visited_nodes"][0]["entry_player"]
+        value = player.pop("hp")
+        player[_NonExactString("hp")] = value
+    elif location == "map":
+        raw_map = row["map"]
+        value = raw_map.pop("type")
+        raw_map[_NonExactString("type")] = value
+    elif location == "context":
+        context = row["map"]["context"]
+        value = context.pop("act")
+        context[_NonExactString("act")] = value
+    elif location == "child":
+        child = row["map"]["rows"][0][0]["children"][0]
+        value = child.pop("col")
+        child[_NonExactString("col")] = value
+    elif location == "inventory":
+        identity = row["visited_nodes"][0]["entry_player"]["deck"][0]
+        value = identity.pop("id")
+        identity[_NonExactString("id")] = value
+    else:  # pragma: no cover - guards the test helper itself
+        raise AssertionError(location)
+    return row
+
+
+@pytest.mark.parametrize(
+    "location", ["root", "player", "map", "context", "child", "inventory"]
+)
+def test_all_untrusted_object_keys_must_be_exact_strings(location: str) -> None:
+    api = _api()
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(_non_exact_string_key_row(location))
+
+    assert str(raised.value) == "invalid recorded map row"
+
+
 def test_parse_recorded_map_row_normalizes_known_variants_and_bounded_unknowns() -> None:
     api = _api()
     row = _valid_row()
@@ -1039,6 +1173,8 @@ class _KnownGetOnlyMapping(Mapping):
     def __init__(self, row):
         self._row = row
         self.get_calls = 0
+        self.iter_calls = 0
+        self.items_calls = 0
 
     def get(self, key, default=None):
         self.get_calls += 1
@@ -1048,23 +1184,36 @@ class _KnownGetOnlyMapping(Mapping):
         raise RuntimeError("SECRET full mapping access")
 
     def __iter__(self):
+        self.iter_calls += 1
         raise RuntimeError("SECRET full mapping iteration")
 
     def __len__(self):
         return 200_000
 
     def items(self):
+        self.items_calls += 1
         raise RuntimeError("SECRET full mapping items")
 
 
-def test_root_normalization_extracts_only_bounded_known_keys() -> None:
+def test_oversized_root_is_rejected_before_any_iteration_or_lookup() -> None:
     api = _api()
     hostile = _KnownGetOnlyMapping(_valid_row())
 
-    parsed = api.parse_recorded_map_row(hostile)
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(hostile)
+
+    assert str(raised.value) == "invalid recorded map row"
+    assert hostile.get_calls == 0
+    assert hostile.iter_calls == 0
+    assert hostile.items_calls == 0
+
+
+def test_bounded_read_only_root_mapping_remains_supported() -> None:
+    api = _api()
+
+    parsed = api.parse_recorded_map_row(MappingProxyType(_valid_row()))
 
     assert parsed.act_id == "RECORDED.ACT.1"
-    assert hostile.get_calls <= 6
 
 
 class _CountingIrrelevantRows:
@@ -1133,3 +1282,47 @@ def test_latest_recorded_acts_contains_iter_failure() -> None:
     assert len(errors) == 1
     assert "SECRET" not in errors[0]
     assert "/private/iter" not in errors[0]
+
+
+class _RowsPastCap:
+    def __init__(self, row, *, explode_at_sentinel: bool = False):
+        self.row = row
+        self.explode_at_sentinel = explode_at_sentinel
+        self.calls = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.calls += 1
+        if self.explode_at_sentinel and self.calls == 4:
+            raise RuntimeError("SECRET /private/cap-sentinel")
+        return self.row
+
+
+def test_latest_recorded_acts_checks_one_sentinel_after_scan_cap(monkeypatch) -> None:
+    api = _api()
+    monkeypatch.setattr(api, "_MAX_INPUT_ROWS", 3)
+    rows = _RowsPastCap(_valid_row())
+
+    snapshots, errors = api.latest_recorded_acts(rows)
+
+    assert set(snapshots) == {0}
+    assert rows.calls == 4
+    assert errors == ("recorded map row scan limit reached",)
+
+
+def test_latest_recorded_acts_contains_exception_from_cap_sentinel(
+    monkeypatch,
+) -> None:
+    api = _api()
+    monkeypatch.setattr(api, "_MAX_INPUT_ROWS", 3)
+    rows = _RowsPastCap(_valid_row(), explode_at_sentinel=True)
+
+    snapshots, errors = api.latest_recorded_acts(rows)
+
+    assert set(snapshots) == {0}
+    assert rows.calls == 4
+    assert errors == ("invalid recorded map row iterator",)
+    assert "SECRET" not in repr(errors)
+    assert "/private/cap-sentinel" not in repr(errors)
