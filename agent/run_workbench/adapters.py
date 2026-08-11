@@ -487,10 +487,12 @@ def _adapt_deck_run(
         for row in records
     ]
     nodes = [*route_nodes, *raw_nodes]
-    acts = [
-        {"id": snapshot.act_id, "act_index": snapshot.act_index}
-        for snapshot in recorded_acts.values()
-    ]
+    acts = [{} for _ in range(max(recorded_acts, default=-1) + 1)]
+    for snapshot in recorded_acts.values():
+        acts[snapshot.act_index] = {
+            "id": snapshot.act_id,
+            "act_index": snapshot.act_index,
+        }
     return RunRecord(
         run_id=run_id,
         source_id=resolved_source_id,

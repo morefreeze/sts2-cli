@@ -1301,6 +1301,79 @@ def test_deck_history_exposes_only_validated_recorded_acts_and_route_nodes() -> 
     )
 
 
+@pytest.mark.parametrize(
+    ("act_numbers", "expected_acts", "expected_route_ids"),
+    [
+        (
+            [2],
+            [{}, {"id": "RECORDED.ACT.2", "act_index": 1}],
+            ["a1:n0"],
+        ),
+        (
+            [1, 3],
+            [
+                {"id": "RECORDED.ACT.1", "act_index": 0},
+                {},
+                {"id": "RECORDED.ACT.3", "act_index": 2},
+            ],
+            ["a0:n0", "a2:n0"],
+        ),
+        (
+            [4],
+            [
+                {},
+                {},
+                {},
+                {"id": "RECORDED.ACT.4", "act_index": 3},
+            ],
+            ["a3:n0"],
+        ),
+    ],
+    ids=["act-two-only", "acts-one-and-three", "act-four-only"],
+)
+def test_deck_history_preserves_sparse_recorded_act_positions(
+    act_numbers: list[int],
+    expected_acts: list[dict],
+    expected_route_ids: list[str],
+) -> None:
+    player = {
+        "hp": 80,
+        "max_hp": 80,
+        "gold": 10,
+        "deck": [],
+        "relics": [],
+        "potions": [],
+    }
+    records = [
+        _recorded_map_row(
+            act=act,
+            ts=index + 1,
+            snapshots=[(player, player)],
+        )
+        for index, act in enumerate(act_numbers)
+    ]
+    records.append(
+        {
+            "event": "outcome",
+            "run_id": "recorded-run",
+            "status": "dead",
+        }
+    )
+
+    run = adapt_records("sparse-recorded-deck.jsonl", records).runs[0]
+    route_nodes = [
+        node
+        for node in run.nodes
+        if node["_workbench_evidence_kind"] == "route_node"
+    ]
+
+    assert run.acts == expected_acts
+    assert [node["id"] for node in route_nodes] == expected_route_ids
+    assert [node["act_index"] for node in route_nodes] == [
+        act - 1 for act in act_numbers
+    ]
+
+
 def test_deck_history_without_map_preserves_empty_warnings() -> None:
     run = adapt_records(
         "no-map-deck.jsonl",

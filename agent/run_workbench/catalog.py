@@ -175,6 +175,9 @@ class _CompactRun:
     has_card_pick: bool = False
     has_valid_recorded_map: bool = False
     recorded_map_count: int = 0
+    latest_recorded_act_floors: dict[int, tuple[int | float, int]] = field(
+        default_factory=dict
+    )
     has_replay_action: bool = False
     has_replay_state: bool = False
     replay_parser_succeeded: bool = False
@@ -1528,10 +1531,11 @@ def _update_compact_eval(compact: _CompactRun, record: dict[str, Any]) -> None:
 def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
     _update_compact_metadata(compact, record)
     timestamp = _update_compact_timestamp_range(compact, record)
-    _update_observed_floor(
-        compact, _first_integral_int(record, "floor_crossed", "floor")
-    )
     event = record.get("event")
+    if event != "map_snapshot":
+        _update_observed_floor(
+            compact, _first_integral_int(record, "floor_crossed", "floor")
+        )
     compact.has_card_pick = compact.has_card_pick or event == "card_pick"
     if event == "map_snapshot":
         map_ordinal = compact.recorded_map_count
@@ -1545,9 +1549,13 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
                 ]
                 compact.warnings = (*compact.warnings, warning)
             return
-        for node in snapshot.route_nodes:
-            _update_observed_floor(
-                compact, _first_integral_int(node, "global_floor")
+        recorded_timestamp = record["ts"]
+        last_route_floor = snapshot.route_nodes[-1]["global_floor"]
+        retained = compact.latest_recorded_act_floors.get(snapshot.act_index)
+        if retained is None or recorded_timestamp >= retained[0]:
+            compact.latest_recorded_act_floors[snapshot.act_index] = (
+                recorded_timestamp,
+                last_route_floor,
             )
         compact.has_valid_recorded_map = True
         return
@@ -1635,6 +1643,11 @@ def _update_compact_replay(
 
 def _finalize_compact(compact: _CompactRun) -> None:
     if compact.source_kind is SourceKind.DECK_HISTORY:
+        for act_index, (_timestamp, last_floor) in (
+            compact.latest_recorded_act_floors.items()
+        ):
+            _update_observed_floor(compact, act_index * 17 + 1)
+            _update_observed_floor(compact, last_floor)
         compact.max_global_floor = (
             compact.outcome_max_floor
             if compact.outcome_max_floor is not None

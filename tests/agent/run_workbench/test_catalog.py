@@ -133,6 +133,61 @@ def _recorded_map_snapshot(run_id: str = "recorded") -> dict:
     }
 
 
+def _recorded_map_route_snapshot(
+    run_id: str,
+    *,
+    act: int,
+    ts: int | float,
+    route_length: int,
+) -> dict:
+    snapshot = _recorded_map_snapshot(run_id)
+    player = snapshot["visited_nodes"][0]["entry_player"]
+    boss_row = {1: 16, 2: 16, 3: 15, 4: 14}[act]
+    snapshot.update(act=act, ts=ts)
+    snapshot["map"]["context"]["act"] = act
+    snapshot["map"]["boss"].update(
+        row=boss_row,
+        id=f"BOSS.CATALOG.ACT.{act}",
+    )
+    snapshot["map"]["rows"] = [
+        [
+            {
+                "col": 0,
+                "row": path_index,
+                "type": "Ancient" if path_index == 0 else "Monster",
+                "children": [
+                    {
+                        "col": 0,
+                        "row": (
+                            path_index + 1
+                            if path_index + 1 < route_length
+                            else boss_row
+                        ),
+                    }
+                ],
+                "visited": True,
+                "current": path_index == route_length - 1,
+            }
+        ]
+        for path_index in range(route_length)
+    ]
+    snapshot["map"]["current_coord"] = {
+        "col": 0,
+        "row": route_length - 1,
+    }
+    snapshot["visited_nodes"] = [
+        {
+            "col": 0,
+            "row": path_index,
+            "type": "Ancient" if path_index == 0 else "Monster",
+            "entry_player": deepcopy(player),
+            "exit_player": deepcopy(player),
+        }
+        for path_index in range(route_length)
+    ]
+    return snapshot
+
+
 def _replay(run_id: str, *, floor: int = 4) -> list[dict]:
     return [
         {
@@ -2810,6 +2865,101 @@ def test_valid_recorded_map_capabilities_match_for_511_and_513_sources(
     assert exact["acts"] == [{"id": "RECORDED.ACT.1", "act_index": 0}]
     assert exact["nodes"][0]["id"] == "a0:n0"
     assert exact["nodes"][0]["_workbench_evidence_kind"] == "route_node"
+
+
+@pytest.mark.parametrize(
+    ("snapshot_specs", "ordinary_floor", "expected_max_floor"),
+    [
+        ([(1, 1, 5, False), (1, 2, 1, False)], None, 1),
+        ([(1, 1, 5, False), (1, 1, 1, False)], None, 1),
+        (
+            [
+                (1, 2**53 + 1, 1, False),
+                (1, float(2**53), 5, False),
+            ],
+            None,
+            1,
+        ),
+        ([(1, 1, 5, False), (1, 2, 1, True)], None, 5),
+        ([(1, 1, 9, False), (1, 2, 1, False)], 7, 7),
+        (
+            [
+                (1, 1, 2, False),
+                (2, 2, 5, False),
+                (2, 3, 1, False),
+            ],
+            None,
+            18,
+        ),
+    ],
+    ids=[
+        "newer-timestamp-wins",
+        "same-timestamp-last-wins",
+        "exact-timestamp-is-not-rounded",
+        "invalid-newer-does-not-erase",
+        "ordinary-floor-is-retained",
+        "acts-select-independently",
+    ],
+)
+def test_recorded_map_latest_per_act_matches_for_511_and_513_sources(
+    tmp_path: Path,
+    snapshot_specs: list[tuple[int, int | float, int, bool]],
+    ordinary_floor: int | None,
+    expected_max_floor: int,
+) -> None:
+    run_id = "latest-recorded-map"
+    snapshots = []
+    for act, ts, route_length, malformed in snapshot_specs:
+        snapshot = _recorded_map_route_snapshot(
+            run_id,
+            act=act,
+            ts=ts,
+            route_length=route_length,
+        )
+        if malformed:
+            snapshot["map"].pop("type")
+        snapshots.append(snapshot)
+    core = [
+        *snapshots,
+        {
+            "event": "card_pick",
+            "run_id": run_id,
+            **({"floor": ordinary_floor} if ordinary_floor is not None else {}),
+        },
+        {"event": "outcome", "run_id": run_id, "status": "dead"},
+    ]
+
+    def rows(count: int) -> list[dict]:
+        return core + [
+            {"event": "milestone", "run_id": run_id}
+            for _ in range(count - len(core))
+        ]
+
+    small_root = tmp_path / "small-latest-recorded-map"
+    large_root = tmp_path / "large-latest-recorded-map"
+    small_root.mkdir()
+    large_root.mkdir()
+    _write_jsonl(small_root / "deck.jsonl", rows(511))
+    _write_jsonl(large_root / "deck.jsonl", rows(513))
+    small = RunCatalog([small_root], replay_parser=_replay_parser)
+    large = RunCatalog([large_root], replay_parser=_replay_parser)
+    small_run = small.get_cohort_records(small.list_cohorts()[0]["cohort_id"])[0]
+    large_run = large.get_cohort_records(large.list_cohorts()[0]["cohort_id"])[0]
+
+    assert small_run.outcome.max_global_floor == expected_max_floor
+    assert large_run.outcome.max_global_floor == expected_max_floor
+    assert small_run.coverage.last_recorded_floor == expected_max_floor
+    assert large_run.coverage.last_recorded_floor == expected_max_floor
+    assert small_run.capabilities == large_run.capabilities
+    assert large_run.capabilities.full_map is True
+    assert large_run.capabilities.visited_route is True
+    assert large_run.capabilities.node_rewards is True
+    assert large_run.capabilities.decisions is True
+    assert small_run.warnings == large_run.warnings
+    for catalog in (small, large):
+        exact = catalog.get_run(run_id)["run"]
+        assert exact["outcome"]["max_global_floor"] == expected_max_floor
+        assert exact["coverage"]["last_recorded_floor"] == expected_max_floor
 
 
 def test_malformed_recorded_map_cannot_raise_compact_capabilities(
