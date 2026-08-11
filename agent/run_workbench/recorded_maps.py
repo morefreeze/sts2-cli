@@ -21,6 +21,15 @@ _MAX_GRAPH_STRING = 64
 _MAX_PLAYER_BYTES = 64 * 1024
 _MAX_ERRORS = 32
 _MAX_ERROR_CHARS = 160
+_MAX_INPUT_ROWS = 100_000
+_MAX_ROUTE_NODES = 17
+_MAX_MAP_COL = 6
+_MAX_ORDINARY_ROW = 15
+_BOSS_ROW = 16
+_ROOT_KEYS = (
+    "event", "act", "is_multiplayer", "ts", "map", "visited_nodes",
+)
+_MISSING = object()
 
 _ROOM_TYPES = {
     "ancient": "Ancient",
@@ -58,7 +67,6 @@ _ROOM_TYPES = {
     "questionmark": "Unknown",
 }
 _PLAYER_FIELDS = frozenset({"hp", "max_hp", "gold", "deck", "relics", "potions"})
-_IDENTITY_KEYS = ("id", "card_id", "relic_id", "potion_id", "model_id")
 _PRODUCER_STRIPPED_KEYS = frozenset({
     "description", "description_raw", "flavor", "flavor_text", "text",
 })
@@ -122,10 +130,13 @@ def _map_int(value: Any, *, label: str) -> int:
 def _coordinate(value: Any, *, label: str) -> tuple[int, int]:
     if type(value) is not dict:
         raise _error(f"{label} must be an object")
-    return (
+    coord = (
         _map_int(value.get("col"), label=f"{label} col"),
         _map_int(value.get("row"), label=f"{label} row"),
     )
+    if not 0 <= coord[0] <= _MAX_MAP_COL or not 0 <= coord[1] <= _BOSS_ROW:
+        raise _error(f"{label} is outside recorded map bounds")
+    return coord
 
 
 def _bounded_graph_string(value: Any, *, label: str) -> str:
@@ -200,38 +211,21 @@ def _json_value(value: Any, *, depth: int, count: list[int]) -> Any:
     raise _error("recorded player inventory is not JSON-safe")
 
 
-def _identity_value(value: Any, *, depth: int = 0) -> bool:
-    if depth > 4 or type(value) is bool:
-        return False
-    if type(value) is str:
-        return bool(value.strip()) and len(value) <= 256
-    if type(value) is int:
-        return _INT64_MIN <= value <= _INT64_MAX
-    if type(value) is dict:
-        return any(
-            key in value and _identity_value(value[key], depth=depth + 1)
-            for key in (*_IDENTITY_KEYS, "key", "value", "text_key", "TextKey", "en")
-        )
-    return False
-
-
 def _inventory_list(value: Any, *, label: str) -> list[Any]:
     if type(value) is not list:
         raise _error(f"recorded player {label} must be a list")
-    detached = _json_value(value, depth=0, count=[0])
-    for item in detached:
-        if type(item) is not dict or not any(
-            key in item and _identity_value(item[key]) for key in _IDENTITY_KEYS
-        ):
-            raise _error(f"recorded player {label} item lacks a bounded identity")
-    return detached
+    return _json_value(value, depth=0, count=[0])
 
 
 def _player_snapshot(value: Any) -> dict[str, Any]:
-    if type(value) is not dict or set(value) != _PLAYER_FIELDS:
+    if type(value) is not dict:
+        raise _error("recorded player snapshot has an invalid shape")
+    if any(key not in _PLAYER_FIELDS for key in value):
         raise _error("recorded player snapshot has an invalid shape")
     detached: dict[str, Any] = {}
     for field in ("hp", "max_hp", "gold"):
+        if field not in value:
+            continue
         number = value[field]
         if type(number) is int:
             valid_number = _INT64_MIN <= number <= _INT64_MAX
@@ -243,7 +237,8 @@ def _player_snapshot(value: Any) -> dict[str, Any]:
             raise _error("recorded player snapshot contains an invalid number")
         detached[field] = number
     for field in ("deck", "relics", "potions"):
-        detached[field] = _inventory_list(value[field], label=field)
+        if field in value:
+            detached[field] = _inventory_list(value[field], label=field)
     try:
         encoded = json.dumps(
             detached, ensure_ascii=False, allow_nan=False
@@ -281,6 +276,7 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
     graph: list[_GraphNode] = []
     coordinates: set[tuple[int, int]] = set()
     current_markers: list[tuple[int, int]] = []
+    ancient_coords: list[tuple[int, int]] = []
     edge_count = 0
     for row_container in rows:
         if type(row_container) is not list:
@@ -291,6 +287,8 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
             if type(raw_node) is not dict:
                 raise _error("recorded map node must be an object")
             coord = _coordinate(raw_node, label="recorded map node coordinate")
+            if coord[1] > _MAX_ORDINARY_ROW:
+                raise _error("recorded map ordinary node must be below boss row")
             if coord in coordinates:
                 raise _error("recorded map node coordinates must be unique")
             visited = raw_node.get("visited")
@@ -309,9 +307,16 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
                 _coordinate(child, label="recorded map child coordinate")
                 for child in children
             )
+            room_type = _room_type(
+                raw_node.get("type"), label="recorded map room type"
+            )
+            if room_type == "Boss":
+                raise _error("recorded map ordinary node cannot be a boss")
+            if room_type == "Ancient":
+                ancient_coords.append(coord)
             graph.append(_GraphNode(
                 coord=coord,
-                room_type=_room_type(raw_node.get("type"), label="recorded map room type"),
+                room_type=room_type,
                 children=child_coords,
                 visited=visited,
                 current=current,
@@ -324,6 +329,8 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
     if type(boss) is not dict:
         raise _error("recorded map boss must be an object")
     boss_coord = _coordinate(boss, label="recorded map boss coordinate")
+    if boss_coord[1] != _BOSS_ROW:
+        raise _error("recorded map boss must be on row 16")
     if boss_coord in coordinates:
         raise _error("recorded map boss coordinate must be unique")
     boss_id = boss.get("id")
@@ -339,9 +346,12 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
         raise _error("recorded map boss visited marker must be boolean")
     if type(boss_current) is not bool:
         raise _error("recorded map boss current marker must be boolean")
+    boss_room_type = _room_type(boss.get("type"), label="recorded map boss type")
+    if boss_room_type != "Boss":
+        raise _error("recorded map boss must have boss room type")
     graph.append(_GraphNode(
         coord=boss_coord,
-        room_type=_room_type(boss.get("type"), label="recorded map boss type"),
+        room_type=boss_room_type,
         children=(),
         visited=boss_visited,
         current=boss_current,
@@ -367,9 +377,43 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
                 raise _error("recorded map edge points outside the graph")
             if child == node.coord:
                 raise _error("recorded map self edges are not allowed")
+            if child[1] <= node.coord[1]:
+                raise _error("recorded map edges must move forward by row")
             if edge in edge_set:
                 raise _error("recorded map edges must be unique")
             edge_set.add(edge)
+
+    if len(ancient_coords) != 1 or ancient_coords[0][1] != 0:
+        raise _error("recorded map must have one row-zero Ancient node")
+    children_by_coord = {
+        node.coord: node.children for node in graph
+    }
+    reachable = {ancient_coords[0]}
+    frontier = [ancient_coords[0]]
+    while frontier:
+        parent = frontier.pop()
+        for child in children_by_coord[parent]:
+            if child not in reachable:
+                reachable.add(child)
+                frontier.append(child)
+    if reachable != coordinates:
+        raise _error("recorded map contains nodes unreachable from Ancient")
+
+    parents_by_coord: dict[tuple[int, int], list[tuple[int, int]]] = {
+        coord: [] for coord in coordinates
+    }
+    for parent, child in edge_set:
+        parents_by_coord[child].append(parent)
+    reaches_boss = {boss_coord}
+    frontier = [boss_coord]
+    while frontier:
+        child = frontier.pop()
+        for parent in parents_by_coord[child]:
+            if parent not in reaches_boss:
+                reaches_boss.add(parent)
+                frontier.append(parent)
+    if reaches_boss != coordinates:
+        raise _error("recorded map contains a route that cannot reach the boss")
 
     raw_visited = frozenset(node.coord for node in graph if node.visited)
     return tuple(graph), raw_visited, current_coord, frozenset(edge_set)
@@ -388,17 +432,16 @@ def _visited_type(value: dict[str, Any]) -> str:
 
 
 def _normalize_root_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy an untrusted root Mapping without preserving attacker exceptions."""
+    """Extract only parser-owned root fields from an untrusted Mapping."""
 
     try:
-        if type(row) is dict:
-            normalized = dict(row)
-        else:
-            if not isinstance(row, Mapping):
-                raise TypeError("root is not a mapping")
-            normalized = dict(row.items())
-        if any(type(key) is not str for key in normalized):
-            raise TypeError("root mapping keys must be strings")
+        if not isinstance(row, Mapping):
+            raise TypeError("root is not a mapping")
+        normalized = {}
+        for key in _ROOT_KEYS:
+            value = row.get(key, _MISSING)
+            if value is not _MISSING:
+                normalized[key] = value
         return normalized
     except Exception:
         raise _error("invalid recorded map row") from None
@@ -424,8 +467,8 @@ def _parse_recorded_row(
         raise _error("recorded visited route must be a list")
     if not raw_route:
         raise _error("recorded visited route must not be empty")
-    if len(raw_route) > _MAX_GRAPH_NODES:
-        raise _error("recorded visited route exceeds the node limit")
+    if len(raw_route) > _MAX_ROUTE_NODES:
+        raise _error("recorded visited route exceeds 17 floors")
     route_coordinates: list[tuple[int, int]] = []
     route_nodes: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
@@ -469,6 +512,8 @@ def _parse_recorded_row(
         raise _error("recorded route does not match graph visited markers")
     if not route_coordinates or route_coordinates[-1] != current_coord:
         raise _error("recorded route does not end at the current coordinate")
+    if by_coord[route_coordinates[0]].room_type != "Ancient":
+        raise _error("recorded route must start at the Ancient node")
     for previous, current in zip(route_coordinates, route_coordinates[1:]):
         if (previous, current) not in edge_set:
             raise _error("recorded route is not connected in order")
@@ -556,7 +601,24 @@ def latest_recorded_acts(
 
     selected: dict[int, tuple[int | float, RecordedActSnapshot]] = {}
     errors: list[str] = []
-    for index, row in enumerate(rows):
+    try:
+        iterator = iter(rows)
+    except Exception:
+        return {}, ("invalid recorded map rows iterable",)
+
+    for index in range(_MAX_INPUT_ROWS):
+        try:
+            row = next(iterator)
+        except StopIteration:
+            break
+        except Exception:
+            if len(errors) < _MAX_ERRORS:
+                errors.append(
+                    f"row {index}: invalid recorded map row iterator"[
+                        :_MAX_ERROR_CHARS
+                    ]
+                )
+            break
         try:
             snapshot, timestamp = _parse_public_row(row)
         except RecordedMapError as exc:

@@ -156,7 +156,7 @@ def _map_reply(*, act=1, current=(0, 0), ancient_type="Ancient"):
             "col": 0,
             "row": 1,
             "type": "Monster",
-            "children": [],
+            "children": [{"col": 0, "row": 16}],
             "visited": current == (0, 1),
             "current": current == (0, 1),
         },
@@ -164,7 +164,7 @@ def _map_reply(*, act=1, current=(0, 0), ancient_type="Ancient"):
             "col": 1,
             "row": 1,
             "type": "Shop",
-            "children": [],
+            "children": [{"col": 0, "row": 16}],
             "visited": current == (1, 1),
             "current": current == (1, 1),
         },
@@ -173,7 +173,7 @@ def _map_reply(*, act=1, current=(0, 0), ancient_type="Ancient"):
         "type": "map",
         "context": {"act": act},
         "rows": [[nodes[0]], nodes[1:]],
-        "boss": {"col": 0, "row": 2, "type": "Boss", "id": "TEST_BOSS"},
+        "boss": {"col": 0, "row": 16, "type": "Boss", "id": "TEST_BOSS"},
         "current_coord": {"col": current[0], "row": current[1]},
     }
 
@@ -201,16 +201,16 @@ def _csharp_boss_current_map_reply(*, boss_type="Boss", boss_id="TEST_BOSS"):
             node["current"] = False
     reply["rows"][0][0]["visited"] = True
     reply["rows"][1][0]["visited"] = True
-    reply["rows"][1][0]["children"] = [{"col": 0, "row": 2}]
+    reply["rows"][1][0]["children"] = [{"col": 0, "row": 16}]
     reply["rows"][1][1]["visited"] = False
     reply["boss"] = {
         "col": 0,
-        "row": 2,
+        "row": 16,
         "type": boss_type,
         "id": boss_id,
         "name": "Test Boss",
     }
-    reply["current_coord"] = {"col": 0, "row": 2}
+    reply["current_coord"] = {"col": 0, "row": 16}
     return reply
 
 
@@ -1068,7 +1068,7 @@ def test_capture_sanitizes_map_allowlist_and_omits_oversized_optional_labels(
     assert set(raw_map["rows"][0][0]["children"][0]) == {"col", "row"}
     assert raw_map["boss"] == {
         "col": 0,
-        "row": 2,
+        "row": 16,
         "type": "Boss",
         "visited": False,
         "current": False,
@@ -1087,17 +1087,17 @@ def test_csharp_boss_current_map_is_accepted_and_serializes_boss_inventory(
     )
 
     assert act == 1
-    assert current_coord == (0, 2)
+    assert current_coord == (0, 16)
     assert current_node == {
         "col": 0,
-        "row": 2,
+        "row": 16,
         "type": "Boss",
         "id": "TEST_BOSS",
         "name": "Test Boss",
         "visited": True,
         "current": True,
     }
-    assert (0, 2) in graph_coords
+    assert (0, 16) in graph_coords
     assert all(
         node["current"] is False
         for row in raw_map["rows"]
@@ -1114,7 +1114,7 @@ def test_csharp_boss_current_map_is_accepted_and_serializes_boss_inventory(
     boss_visit = snapshot["visited_nodes"][-1]
     assert snapshot["event"] == "map_snapshot"
     assert snapshot["map"]["boss"]["current"] is True
-    assert (boss_visit["col"], boss_visit["row"]) == (0, 2)
+    assert (boss_visit["col"], boss_visit["row"]) == (0, 16)
     assert boss_visit["type"] == "Boss"
     assert boss_visit["id"] == "TEST_BOSS"
     assert boss_visit["entry_player"]["hp"] == 55
@@ -1154,7 +1154,7 @@ def test_nonboss_current_infers_false_boss_markers_and_ignores_producer_values()
 
     assert current_coord == (0, 0)
     assert current_node["type"] == "Ancient"
-    assert (0, 2) in graph_coords
+    assert (0, 16) in graph_coords
     assert raw_map["boss"]["visited"] is False
     assert raw_map["boss"]["current"] is False
 
@@ -1163,7 +1163,7 @@ def test_nonboss_current_infers_false_boss_markers_and_ignores_producer_values()
 def test_map_rejects_inconsistent_current_coord_across_rows_and_boss(case):
     if case == "row_and_boss_current":
         reply = _map_reply(current=(0, 0))
-        reply["current_coord"] = {"col": 0, "row": 2}
+        reply["current_coord"] = {"col": 0, "row": 16}
     else:
         reply = _csharp_boss_current_map_reply()
         reply["current_coord"] = {"col": 99, "row": 99}
@@ -1181,7 +1181,7 @@ def test_same_act_forward_route_reconciles_markers_and_remains_parseable(
     middle = _map_reply(current=(0, 1))
     boss = _csharp_boss_current_map_reply()
     for reply in (middle, boss):
-        reply["rows"][1][0]["children"] = [{"col": 0, "row": 2}]
+        reply["rows"][1][0]["children"] = [{"col": 0, "row": 16}]
     replies = iter([
         _map_reply(current=(0, 0)),
         middle,
@@ -1197,12 +1197,12 @@ def test_same_act_forward_route_reconciles_markers_and_remains_parseable(
     assert [(node["col"], node["row"]) for node in snapshot["visited_nodes"]] == [
         (0, 0),
         (0, 1),
-        (0, 2),
+        (0, 16),
     ]
     assert snapshot["visited_nodes"][0]["entry_player"]["hp"] == 55
     assert snapshot["visited_nodes"][1]["entry_player"]["hp"] == 50
     assert snapshot["visited_nodes"][2]["entry_player"]["hp"] == 44
-    assert (0, 2) in snapshot["_coord_lookup"]
+    assert (0, 16) in snapshot["_coord_lookup"]
     serialized = env._serialized_run_map_snapshots()[0]
     assert serialized["map"]["rows"][1][0]["visited"] is True
     assert serialized["map"]["boss"]["visited"] is True
@@ -1237,7 +1237,7 @@ def test_boss_to_ordinary_refresh_fails_closed_without_mutating_prior_snapshot(
     serialized = env._serialized_run_map_snapshots()[0]
     assert accepted is False
     assert serialized == before
-    assert env._run_current_map_coord == (1, 0, 2)
+    assert env._run_current_map_coord == (1, 0, 16)
     assert serialized["visited_nodes"][-1]["exit_player"]["hp"] == 55
     assert "children" not in serialized["map"]["boss"]
     assert parse_recorded_map_row(serialized).route_nodes[-1]["model_id"] == (
