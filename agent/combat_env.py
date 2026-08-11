@@ -604,6 +604,7 @@ class CombatEnv(gym.Env):
         self._current_floor = 1
         self._game_alive = False
         self._read_buf = b""
+        self._pending_read_only_replies = 0
         self._combat_steps = 0
         self._dealt_damage_this_turn = False  # tracked for intent-block anti-stall gate
         self.max_combat_steps = 1000  # 200→1000 (May 9): boss/elite fights legitimately take
@@ -1462,7 +1463,12 @@ class CombatEnv(gym.Env):
         node["exit_player"] = player
 
     @staticmethod
-    def _validated_map_reply(reply: object) -> tuple[int, dict, tuple[int, int], dict]:
+    def _validated_map_reply(
+        reply: object,
+    ) -> tuple[int, dict, tuple[int, int], dict, set[tuple[int, int]]]:
+        def is_map_int(value):
+            return type(value) is int and -(2**31) <= value < 2**31
+
         if type(reply) is not dict or reply.get("type") != "map":
             raise ValueError("get_map did not return type=map")
         context = reply.get("context")
@@ -1471,52 +1477,101 @@ class CombatEnv(gym.Env):
         act = context.get("act")
         if type(act) is not int or not 1 <= act <= 4:
             raise ValueError("map context act must be an integer from 1 to 4")
+        safe_context = {"act": act}
+        act_name = context.get("act_name")
+        if type(act_name) is str and len(act_name) <= 256:
+            safe_context["act_name"] = act_name
+        floor = context.get("floor")
+        if type(floor) is int and -(2**31) <= floor < 2**31:
+            safe_context["floor"] = floor
+        room_type = context.get("room_type")
+        if room_type is None and "room_type" in context:
+            safe_context["room_type"] = None
+        elif type(room_type) is str and len(room_type) <= 64:
+            safe_context["room_type"] = room_type
+        context_boss = context.get("boss")
+        if type(context_boss) is dict:
+            safe_context_boss = {}
+            boss_id = context_boss.get("id")
+            boss_name = context_boss.get("name")
+            if type(boss_id) is str and len(boss_id) <= 64:
+                safe_context_boss["id"] = boss_id
+            if type(boss_name) is str and len(boss_name) <= 256:
+                safe_context_boss["name"] = boss_name
+            if safe_context_boss:
+                safe_context["boss"] = safe_context_boss
         rows = reply.get("rows")
         if type(rows) is not list:
             raise ValueError("map rows must be a list")
+        if len(rows) > 256:
+            raise ValueError("map contains more than 256 row containers")
 
         nodes = {}
         current_nodes = []
         node_count = 0
+        edge_count = 0
+        safe_rows = []
         for row_nodes in rows:
             if type(row_nodes) is not list:
                 raise ValueError("each map row must be a list")
             node_count += len(row_nodes)
             if node_count > 256:
                 raise ValueError("map contains more than 256 nodes")
+            safe_row = []
             for node in row_nodes:
                 if type(node) is not dict:
                     raise ValueError("map node must be an object")
                 col, row = node.get("col"), node.get("row")
-                if type(col) is not int or type(row) is not int:
+                if not is_map_int(col) or not is_map_int(row):
                     raise ValueError("map node coordinates must be integers")
                 coord = (col, row)
                 if coord in nodes:
                     raise ValueError("map node coordinates must be unique")
-                if type(node.get("type")) is not str:
+                node_type = node.get("type")
+                if type(node_type) is not str or len(node_type) > 64:
                     raise ValueError("map node type must be a string")
-                if type(node.get("visited")) is not bool:
+                visited = node.get("visited")
+                current_marker = node.get("current")
+                if type(visited) is not bool:
                     raise ValueError("map node visited marker must be a boolean")
-                if type(node.get("current")) is not bool:
+                if type(current_marker) is not bool:
                     raise ValueError("map node current marker must be a boolean")
                 children = node.get("children")
                 if type(children) is not list:
                     raise ValueError("map node children must be a list")
+                edge_count += len(children)
+                if edge_count > 2048:
+                    raise ValueError("map contains more than 2048 child edges")
+                safe_children = []
                 for child in children:
                     if type(child) is not dict:
                         raise ValueError("map child must be an object")
-                    if (type(child.get("col")) is not int
-                            or type(child.get("row")) is not int):
+                    if (not is_map_int(child.get("col"))
+                            or not is_map_int(child.get("row"))):
                         raise ValueError("map child coordinates must be integers")
-                nodes[coord] = node
-                if node["current"]:
+                    safe_children.append({
+                        "col": child["col"],
+                        "row": child["row"],
+                    })
+                safe_node = {
+                    "col": col,
+                    "row": row,
+                    "type": node_type,
+                    "children": safe_children,
+                    "visited": visited,
+                    "current": current_marker,
+                }
+                nodes[coord] = safe_node
+                safe_row.append(safe_node)
+                if current_marker:
                     current_nodes.append(coord)
+            safe_rows.append(safe_row)
 
         current = reply.get("current_coord")
         if type(current) is not dict:
             raise ValueError("map current_coord must be an object")
         col, row = current.get("col"), current.get("row")
-        if type(col) is not int or type(row) is not int:
+        if not is_map_int(col) or not is_map_int(row):
             raise ValueError("map current_coord must contain integer coordinates")
         current_coord = (col, row)
         if current_coord not in nodes:
@@ -1525,15 +1580,30 @@ class CombatEnv(gym.Env):
             raise ValueError("map current marker is inconsistent with current_coord")
         boss = reply.get("boss")
         if (type(boss) is not dict
-                or type(boss.get("col")) is not int
-                or type(boss.get("row")) is not int
-                or type(boss.get("type")) is not str):
+                or not is_map_int(boss.get("col"))
+                or not is_map_int(boss.get("row"))
+                or type(boss.get("type")) is not str
+                or len(boss["type"]) > 64):
             raise ValueError("map boss must contain integer coordinates and a type")
-        try:
-            raw_map = json.loads(json.dumps(reply, ensure_ascii=False, allow_nan=False))
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("map reply is not JSON-safe") from exc
-        return act, raw_map, current_coord, nodes[current_coord]
+        safe_boss = {
+            "col": boss["col"],
+            "row": boss["row"],
+            "type": boss["type"],
+        }
+        boss_id = boss.get("id")
+        boss_name = boss.get("name")
+        if type(boss_id) is str and len(boss_id) <= 64:
+            safe_boss["id"] = boss_id
+        if type(boss_name) is str and len(boss_name) <= 256:
+            safe_boss["name"] = boss_name
+        raw_map = {
+            "type": "map",
+            "context": safe_context,
+            "rows": safe_rows,
+            "boss": safe_boss,
+            "current_coord": {"col": col, "row": row},
+        }
+        return act, raw_map, current_coord, nodes[current_coord], set(nodes)
 
     def _capture_run_map_state(self, state: dict):
         """Capture evaluation map observability without affecting gameplay."""
@@ -1541,8 +1611,10 @@ class CombatEnv(gym.Env):
         if not self._capture_run_maps:
             return
         try:
-            reply = self._send({"cmd": "get_map"})
-            act, raw_map, (col, row), current_node = self._validated_map_reply(reply)
+            reply = self._send_read_only({"cmd": "get_map"})
+            act, raw_map, (col, row), current_node, graph_coords = (
+                self._validated_map_reply(reply)
+            )
             captured_at = time.time()
             if (type(captured_at) not in (int, float)
                     or not math.isfinite(captured_at)):
@@ -1557,6 +1629,18 @@ class CombatEnv(gym.Env):
                 }
                 self._run_map_snapshots[act] = snapshot
             else:
+                survivors = [
+                    node for node in snapshot["visited_nodes"]
+                    if (node["col"], node["row"]) in graph_coords
+                ]
+                snapshot["visited_nodes"] = survivors
+                snapshot["_coord_lookup"] = {
+                    (node["col"], node["row"]): node for node in survivors
+                }
+                if (self._run_current_map_coord is not None
+                        and self._run_current_map_coord[0] == act
+                        and self._run_current_map_coord[1:] not in graph_coords):
+                    self._run_current_map_coord = None
                 snapshot["map"] = raw_map
                 snapshot["ts"] = captured_at
 
@@ -1945,8 +2029,9 @@ class CombatEnv(gym.Env):
             self._proc = None
         self._game_alive = False
         self._read_buf = b""
+        self._pending_read_only_replies = 0
 
-    def _read_json(self, timeout_sec: float = 5.0):
+    def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True):
         if self._proc is None:
             return None
         try:
@@ -1971,10 +2056,41 @@ class CombatEnv(gym.Env):
                             return json.loads(line)
                         except json.JSONDecodeError:
                             continue
-            self._kill_proc()
+            if kill_on_failure:
+                self._kill_proc()
             return None
         except Exception:
-            self._kill_proc()
+            if kill_on_failure:
+                self._kill_proc()
+            return None
+
+    def _send_read_only(self, cmd: dict, *, timeout_sec: float = 5.0):
+        """Send one observational command without terminating gameplay on failure.
+
+        The C# command loop is synchronous and emits one reply per get_map
+        command before reading the next command. If this bounded read times out,
+        remember that one FIFO reply remains outstanding so the next gameplay
+        send can drain it before returning its own response.
+        """
+        if type(cmd) is not dict or cmd.get("cmd") != "get_map":
+            raise ValueError("read-only protocol path only accepts get_map")
+        if self._proc is None or self._pending_read_only_replies > 0:
+            return None
+        command_buffered = False
+        try:
+            self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
+            command_buffered = True
+            self._proc.stdin.flush()
+            reply = self._read_json(
+                timeout_sec=timeout_sec,
+                kill_on_failure=False,
+            )
+            if reply is None:
+                self._pending_read_only_replies += 1
+            return reply
+        except Exception:
+            if command_buffered:
+                self._pending_read_only_replies += 1
             return None
 
     def _send(self, cmd: dict):
@@ -1985,6 +2101,11 @@ class CombatEnv(gym.Env):
             self._proc.stdin.flush()
             # DoEndTurn takes ~3-15s; killing blow triggers DetectPostCombatState
             # which can take up to ~10s for reward generation. Use 60s to be safe.
+            while self._pending_read_only_replies > 0:
+                pending_reply = self._read_json(timeout_sec=60.0)
+                if pending_reply is None:
+                    return None
+                self._pending_read_only_replies -= 1
             return self._read_json(timeout_sec=60.0)
         except Exception:
             self._kill_proc()

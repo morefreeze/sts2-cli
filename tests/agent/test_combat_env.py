@@ -3,6 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import json
 import math
+from types import SimpleNamespace
 import pytest
 import agent.combat_env as combat_env
 from agent.combat_env import CombatEnv, greedy_action
@@ -192,6 +193,9 @@ def test_default_combat_env_never_requests_authoritative_map(monkeypatch):
     env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
     commands = []
     monkeypatch.setattr(env, "_send", lambda command: commands.append(command))
+    monkeypatch.setattr(
+        env, "_send_read_only", lambda command: commands.append(command)
+    )
 
     env._capture_run_map_state(_map_state())
 
@@ -219,6 +223,7 @@ def test_capture_replaces_graph_and_tracks_detached_ordered_node_inventories(
         return next(replies)
 
     monkeypatch.setattr(env, "_send", fake_send)
+    monkeypatch.setattr(env, "_send_read_only", fake_send)
     original_first = json.loads(json.dumps(first))
 
     env._capture_run_map_state(first)
@@ -279,7 +284,7 @@ def test_capture_rejects_invalid_acts_and_malformed_maps_with_warning(
         _map_reply(act=5),
         malformed,
     ])
-    monkeypatch.setattr(env, "_send", lambda command: next(replies))
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
 
     with pytest.warns(RuntimeWarning) as warnings_seen:
         for _ in range(6):
@@ -307,12 +312,201 @@ def test_capture_bounds_map_nodes(monkeypatch, tmp_path):
         }
         for index in range(257)
     ]]
-    monkeypatch.setattr(env, "_send", lambda command: oversized)
+    monkeypatch.setattr(env, "_send_read_only", lambda command: oversized)
 
     with pytest.warns(RuntimeWarning, match="map capture failed"):
         env._capture_run_map_state(_map_state())
 
     assert env._run_map_snapshots == {}
+
+
+class _FakeProtocolInput:
+    def __init__(self, *, write_error=None):
+        self.payloads = []
+        self.write_error = write_error
+
+    def write(self, payload):
+        if self.write_error is not None:
+            raise self.write_error
+        self.payloads.append(payload)
+        return len(payload)
+
+    def flush(self):
+        return None
+
+
+def _fake_protocol_process(*, write_error=None):
+    return SimpleNamespace(
+        stdin=_FakeProtocolInput(write_error=write_error),
+        stdout=SimpleNamespace(fileno=lambda: 123),
+    )
+
+
+def test_read_only_map_timeout_preserves_process_and_drains_before_next_action(
+    monkeypatch
+):
+    env = CombatEnv(
+        cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
+    )
+    proc = _fake_protocol_process()
+    env._proc = proc
+    env._game_alive = True
+
+    assert env._send_read_only({"cmd": "get_map"}, timeout_sec=0) is None
+    assert env._proc is proc
+    assert env._game_alive is True
+    assert env._send_read_only({"cmd": "get_map"}, timeout_sec=0) is None
+    assert len(proc.stdin.payloads) == 1
+    assert env._pending_read_only_replies == 1
+
+    replies = iter([_map_reply(), {"decision": "combat_play", "round": 2}])
+    monkeypatch.setattr(env, "_read_json", lambda **kwargs: next(replies))
+
+    result = env._send({"cmd": "action", "action": "end_turn"})
+
+    assert result == {"decision": "combat_play", "round": 2}
+    assert [json.loads(payload) for payload in proc.stdin.payloads] == [
+        {"cmd": "get_map"},
+        {"cmd": "action", "action": "end_turn"},
+    ]
+
+
+def test_read_only_map_write_exception_preserves_process_and_gameplay():
+    env = CombatEnv(
+        cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
+    )
+    proc = _fake_protocol_process(write_error=OSError("map write unavailable"))
+    env._proc = proc
+    env._game_alive = True
+
+    assert env._send_read_only({"cmd": "get_map"}) is None
+    assert env._proc is proc
+    assert env._game_alive is True
+
+
+def test_read_only_map_error_reply_warns_without_mutating_gameplay(monkeypatch, tmp_path):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    proc = _fake_protocol_process()
+    env._proc = proc
+    env._game_alive = True
+    monkeypatch.setattr(
+        env,
+        "_read_json",
+        lambda **kwargs: {"type": "error", "message": "map unavailable"},
+    )
+
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._capture_run_map_state(_map_state())
+
+    assert env._proc is proc
+    assert env._game_alive is True
+    assert env._run_map_snapshots == {}
+
+
+def _set_map_reply(monkeypatch, env, reply):
+    monkeypatch.setattr(env, "_send", lambda command: reply)
+    monkeypatch.setattr(env, "_send_read_only", lambda command: reply, raising=False)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda reply: reply["rows"][0][0].update({
+            "children": [{"col": index, "row": 1} for index in range(2049)]
+        }),
+        lambda reply: reply["rows"][0][0].update({"type": "x" * 100_000}),
+        lambda reply: reply["boss"].update({"type": "x" * 100_000}),
+        lambda reply: reply.update({"rows": ([[] for _ in range(257)] + reply["rows"]) }),
+        lambda reply: (
+            reply["rows"][0][0].update({"col": 10**100_000}),
+            reply["current_coord"].update({"col": 10**100_000}),
+        ),
+    ],
+)
+def test_capture_rejects_unbounded_raw_map_shapes(monkeypatch, tmp_path, mutate):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    reply = _map_reply()
+    mutate(reply)
+    _set_map_reply(monkeypatch, env, reply)
+
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._capture_run_map_state(_map_state())
+
+    assert env._run_map_snapshots == {}
+
+
+def test_capture_sanitizes_map_allowlist_and_omits_oversized_optional_labels(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    reply = _map_reply()
+    reply["arbitrary"] = {"nested": ["x" * 100_000]}
+    reply["context"].update({
+        "floor": 1,
+        "room_type": "Ancient",
+        "arbitrary": {"nested": True},
+    })
+    reply["rows"][0][0]["arbitrary"] = ["x" * 100_000]
+    reply["rows"][0][0]["children"][0]["arbitrary"] = "x" * 100_000
+    reply["boss"].update({
+        "id": "x" * 100_000,
+        "name": "x" * 100_000,
+        "arbitrary": {"nested": True},
+    })
+    reply["current_coord"]["arbitrary"] = "x" * 100_000
+    _set_map_reply(monkeypatch, env, reply)
+
+    env._capture_run_map_state(_map_state())
+
+    raw_map = env._run_map_snapshots[1]["map"]
+    assert set(raw_map) == {"type", "context", "rows", "boss", "current_coord"}
+    assert set(raw_map["context"]) == {"act", "floor", "room_type"}
+    assert set(raw_map["rows"][0][0]) == {
+        "col", "row", "type", "children", "visited", "current",
+    }
+    assert set(raw_map["rows"][0][0]["children"][0]) == {"col", "row"}
+    assert raw_map["boss"] == {"col": 0, "row": 2, "type": "Boss"}
+    assert raw_map["current_coord"] == {"col": 0, "row": 0}
+    assert len(json.dumps(raw_map)) < 10_000
+
+
+def test_same_act_graph_replacement_drops_stale_visits_and_preserves_survivors(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    third_reply = _map_reply(current=(1, 1))
+    third_reply["rows"] = [third_reply["rows"][1]]
+    replies = iter([
+        _map_reply(current=(0, 0)),
+        _map_reply(current=(0, 1)),
+        third_reply,
+    ])
+    monkeypatch.setattr(env, "_send", lambda command: next(replies))
+    monkeypatch.setattr(
+        env, "_send_read_only", lambda command: next(replies), raising=False
+    )
+
+    env._capture_run_map_state(_map_state(hp=80))
+    env._capture_run_map_state(_map_state(hp=70))
+    env._capture_run_map_state(_map_state(hp=60))
+
+    snapshot = env._run_map_snapshots[1]
+    assert [(node["col"], node["row"]) for node in snapshot["visited_nodes"]] == [
+        (0, 1),
+        (1, 1),
+    ]
+    assert set(snapshot["_coord_lookup"]) == {(0, 1), (1, 1)}
+    assert snapshot["visited_nodes"][0]["entry_player"]["hp"] == 70
+    assert snapshot["visited_nodes"][0]["exit_player"]["hp"] == 60
+    assert env._run_current_map_coord == (1, 1, 1)
 
 
 @pytest.mark.parametrize(
@@ -325,7 +519,7 @@ def test_terminal_outcome_flushes_maps_before_decisions_without_subprocess(
         monkeypatch, tmp_path, run_context={"capture_map": True}
     )
     replies = iter([_map_reply(act=2), _map_reply(act=1)])
-    monkeypatch.setattr(env, "_send", lambda command: next(replies))
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
     env._capture_run_map_state(_map_state(hp=80))
     env._capture_run_map_state(_map_state(hp=70))
     env._run_milestone_records = [{"event": "milestone", "floor": 7}]
