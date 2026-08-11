@@ -1727,15 +1727,8 @@ class CombatEnv(gym.Env):
                 or not math.isfinite(captured_at)):
             raise ValueError("map capture timestamp must be finite")
         snapshot = self._run_map_snapshots.get(act)
-        if snapshot is None:
-            snapshot = {
-                "map": raw_map,
-                "visited_nodes": [],
-                "_coord_lookup": {},
-                "ts": captured_at,
-            }
-            self._run_map_snapshots[act] = snapshot
-        else:
+        survivors = []
+        if snapshot is not None:
             previous_map = snapshot["map"]
             previous_boss = previous_map["boss"]
             previous_boss_coord = (
@@ -1752,6 +1745,34 @@ class CombatEnv(gym.Env):
                 node for node in snapshot["visited_nodes"]
                 if (node["col"], node["row"]) in graph_coords
             ]
+        authoritative_visited = {
+            (raw_node["col"], raw_node["row"])
+            for raw_row in raw_map["rows"]
+            for raw_node in raw_row
+            if raw_node["visited"]
+        }
+        raw_boss = raw_map["boss"]
+        if raw_boss["visited"]:
+            authoritative_visited.add((raw_boss["col"], raw_boss["row"]))
+        candidate_visited = {
+            (visited["col"], visited["row"])
+            for visited in survivors
+        }
+        candidate_visited.add((col, row))
+        if candidate_visited != authoritative_visited:
+            raise _RunMapTransitionError(
+                "map authoritative visits do not match buffered inventories"
+            )
+
+        if snapshot is None:
+            snapshot = {
+                "map": raw_map,
+                "visited_nodes": [],
+                "_coord_lookup": {},
+                "ts": captured_at,
+            }
+            self._run_map_snapshots[act] = snapshot
+        else:
             snapshot["visited_nodes"] = survivors
             snapshot["_coord_lookup"] = {
                 (node["col"], node["row"]): node for node in survivors
@@ -1775,20 +1796,6 @@ class CombatEnv(gym.Env):
                 node["id"] = current_node["id"]
             coord_lookup[(col, row)] = node
             snapshot["visited_nodes"].append(node)
-        visited_coords = {
-            (visited["col"], visited["row"])
-            for visited in snapshot["visited_nodes"]
-        }
-        current_coord = (col, row)
-        for raw_row in snapshot["map"]["rows"]:
-            for raw_node in raw_row:
-                raw_coord = (raw_node["col"], raw_node["row"])
-                raw_node["visited"] = raw_coord in visited_coords
-                raw_node["current"] = raw_coord == current_coord
-        raw_boss = snapshot["map"]["boss"]
-        boss_coord = (raw_boss["col"], raw_boss["row"])
-        raw_boss["visited"] = boss_coord in visited_coords
-        raw_boss["current"] = boss_coord == current_coord
         self._run_current_map_coord = (act, col, row)
         self._update_buffered_node_inventory(state)
         self._run_map_capture_failure_active = False

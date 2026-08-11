@@ -199,6 +199,10 @@ def _csharp_boss_current_map_reply(*, boss_type="Boss", boss_id="TEST_BOSS"):
     for row in reply["rows"]:
         for node in row:
             node["current"] = False
+    reply["rows"][0][0]["visited"] = True
+    reply["rows"][1][0]["visited"] = True
+    reply["rows"][1][0]["children"] = [{"col": 0, "row": 2}]
+    reply["rows"][1][1]["visited"] = False
     reply["boss"] = {
         "col": 0,
         "row": 2,
@@ -215,9 +219,14 @@ def _task1_serialized_boss_map_snapshot(monkeypatch, tmp_path, *, entry_hp=55):
     env, _ = _recording_env(
         monkeypatch, tmp_path, run_context={"capture_map": True}
     )
-    monkeypatch.setattr(
-        env, "_send_read_only", lambda command: _csharp_boss_current_map_reply()
-    )
+    replies = iter([
+        _map_reply(current=(0, 0)),
+        _map_reply(current=(0, 1)),
+        _csharp_boss_current_map_reply(),
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
+    env._capture_run_map_state(_map_state(hp=entry_hp + 10))
+    env._capture_run_map_state(_map_state(hp=entry_hp + 5))
     env._capture_run_map_state(_map_state(hp=entry_hp))
     return env, env._serialized_run_map_snapshots()[0]
 
@@ -881,11 +890,11 @@ def test_late_valid_map_is_ingested_with_detached_entry_before_gameplay(
         with pytest.warns(RuntimeWarning, match="map capture failed"):
             env._poll_run_map_state_once(state)
         state["player"]["hp"] = 12
-        os.write(write_fd, (json.dumps(_map_reply(current=(0, 1))) + "\n").encode())
+        os.write(write_fd, (json.dumps(_map_reply(current=(0, 0))) + "\n").encode())
 
         assert env._send({"cmd": "action", "action": "end_turn"}) == combat
         node = env._run_map_snapshots[1]["visited_nodes"][0]
-        assert (node["col"], node["row"]) == (0, 1)
+        assert (node["col"], node["row"]) == (0, 0)
         assert node["entry_player"]["hp"] == 61
         assert env._run_last_map_poll_state_id == id(state)
         assert env._run_pending_map_capture is None
@@ -1102,7 +1111,7 @@ def test_csharp_boss_current_map_is_accepted_and_serializes_boss_inventory(
     )
     env._update_buffered_node_inventory(_map_state(hp=31))
     snapshot = env._serialized_run_map_snapshots()[0]
-    boss_visit = snapshot["visited_nodes"][0]
+    boss_visit = snapshot["visited_nodes"][-1]
     assert snapshot["event"] == "map_snapshot"
     assert snapshot["map"]["boss"]["current"] is True
     assert (boss_visit["col"], boss_visit["row"]) == (0, 2)
@@ -1110,6 +1119,29 @@ def test_csharp_boss_current_map_is_accepted_and_serializes_boss_inventory(
     assert boss_visit["id"] == "TEST_BOSS"
     assert boss_visit["entry_player"]["hp"] == 55
     assert boss_visit["exit_player"]["hp"] == 31
+
+
+def test_first_successful_poll_at_boss_does_not_erase_authoritative_prior_visits(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    replies = iter([
+        {"type": "error", "message": "temporary"},
+        {"type": "error", "message": "temporary"},
+        _csharp_boss_current_map_reply(),
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
+
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        assert env._capture_run_map_state(_map_state(hp=70)) is False
+    assert env._capture_run_map_state(_map_state(hp=65)) is False
+    accepted = env._capture_run_map_state(_map_state(hp=55))
+
+    assert accepted is False
+    assert env._run_map_snapshots == {}
+    assert env._serialized_run_map_snapshots() == []
 
 
 def test_nonboss_current_infers_false_boss_markers_and_ignores_producer_values():
@@ -1186,11 +1218,15 @@ def test_boss_to_ordinary_refresh_fails_closed_without_mutating_prior_snapshot(
         monkeypatch, tmp_path, run_context={"capture_map": True}
     )
     replies = iter([
+        _map_reply(current=(0, 0)),
+        _map_reply(current=(0, 1)),
         _csharp_boss_current_map_reply(),
         _map_reply(current=(0, 0)),
     ])
     monkeypatch.setattr(env, "_send_read_only", lambda command: next(replies))
 
+    env._capture_run_map_state(_map_state(hp=65))
+    env._capture_run_map_state(_map_state(hp=60))
     env._capture_run_map_state(_map_state(hp=55))
     before = env._serialized_run_map_snapshots()[0]
     assert parse_recorded_map_row(before).route_nodes[-1]["model_id"] == "TEST_BOSS"
@@ -1202,7 +1238,7 @@ def test_boss_to_ordinary_refresh_fails_closed_without_mutating_prior_snapshot(
     assert accepted is False
     assert serialized == before
     assert env._run_current_map_coord == (1, 0, 2)
-    assert serialized["visited_nodes"][0]["exit_player"]["hp"] == 55
+    assert serialized["visited_nodes"][-1]["exit_player"]["hp"] == 55
     assert "children" not in serialized["map"]["boss"]
     assert parse_recorded_map_row(serialized).route_nodes[-1]["model_id"] == (
         "TEST_BOSS"
@@ -1217,6 +1253,7 @@ def test_same_act_graph_replacement_drops_stale_visits_and_preserves_survivors(
     )
     third_reply = _map_reply(current=(1, 1))
     third_reply["rows"][1][0]["children"] = [{"col": 1, "row": 1}]
+    third_reply["rows"][1][0]["visited"] = True
     third_reply["rows"] = [third_reply["rows"][1]]
     replies = iter([
         _map_reply(current=(0, 0)),
