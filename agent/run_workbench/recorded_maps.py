@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 from typing import Any, Iterable, Mapping
@@ -68,12 +68,38 @@ class RecordedMapError(ValueError):
     """A bounded validation error for one untrusted recorded map row."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class RecordedActSnapshot:
     act_index: int
     act_id: str
     act_map: ActMap
-    route_nodes: tuple[dict[str, Any], ...]
+    _route_nodes_json: str = field(repr=False)
+
+    def __init__(
+        self,
+        *,
+        act_index: int,
+        act_id: str,
+        act_map: ActMap,
+        route_nodes: tuple[dict[str, Any], ...],
+    ) -> None:
+        encoded = json.dumps(
+            route_nodes,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        encoded.encode("utf-8")
+        object.__setattr__(self, "act_index", act_index)
+        object.__setattr__(self, "act_id", act_id)
+        object.__setattr__(self, "act_map", act_map)
+        object.__setattr__(self, "_route_nodes_json", encoded)
+
+    @property
+    def route_nodes(self) -> tuple[dict[str, Any], ...]:
+        """Return a fresh ordinary-JSON view of the immutable route data."""
+
+        return tuple(json.loads(self._route_nodes_json))
 
 
 @dataclass(frozen=True)
@@ -108,6 +134,10 @@ def _coordinate(value: Any, *, label: str) -> tuple[int, int]:
 def _bounded_graph_string(value: Any, *, label: str) -> str:
     if type(value) is not str or not value or len(value) > _MAX_GRAPH_STRING:
         raise _error(f"{label} must be a non-empty bounded string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _error(f"{label} must contain valid Unicode") from None
     return value
 
 
@@ -117,7 +147,7 @@ def _room_type(value: Any, *, label: str) -> str:
     return _ROOM_TYPES.get(key, "Unknown")
 
 
-def _finite_timestamp(value: Any) -> float:
+def _finite_timestamp(value: Any) -> int | float:
     if type(value) is int:
         if not _INT64_MIN <= value <= _INT64_MAX:
             raise _error("recorded map timestamp must be finite")
@@ -126,7 +156,7 @@ def _finite_timestamp(value: Any) -> float:
             raise _error("recorded map timestamp must be finite")
     else:
         raise _error("recorded map timestamp must be finite")
-    return float(value)
+    return value
 
 
 def _json_value(value: Any, *, depth: int, count: list[int]) -> Any:
@@ -146,6 +176,10 @@ def _json_value(value: Any, *, depth: int, count: list[int]) -> Any:
     if type(value) is str:
         if len(value) > 256:
             raise _error("recorded player inventory contains an oversized string")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise _error("recorded player inventory contains invalid Unicode") from None
         return value
     if type(value) is list:
         if len(value) > 256:
@@ -226,7 +260,10 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
     tuple[int, int],
     frozenset[tuple[tuple[int, int], tuple[int, int]]],
 ]:
-    if type(raw_map) is not dict or raw_map.get("type") != "map":
+    if type(raw_map) is not dict:
+        raise _error("recorded map payload must have type map")
+    map_type = raw_map.get("type")
+    if type(map_type) is not str or map_type != "map":
         raise _error("recorded map payload must have type map")
     context = raw_map.get("context")
     if type(context) is not dict:
@@ -291,6 +328,10 @@ def _parse_graph(raw_map: Any, *, act: int) -> tuple[
     boss_id = boss.get("id")
     if boss_id is not None:
         boss_id = _bounded_graph_string(boss_id, label="recorded map boss id")
+    if "children" in boss:
+        boss_children = boss["children"]
+        if type(boss_children) is not list or boss_children:
+            raise _error("recorded map boss children must be an empty list")
     boss_visited = boss.get("visited", False)
     boss_current = boss.get("current", False)
     if type(boss_visited) is not bool:
@@ -347,10 +388,11 @@ def _visited_type(value: dict[str, Any]) -> str:
 
 def _parse_recorded_row(
     row: Mapping[str, Any],
-) -> tuple[RecordedActSnapshot, float]:
+) -> tuple[RecordedActSnapshot, int | float]:
     if not isinstance(row, Mapping):
         raise _error("recorded map row must be an object")
-    if row.get("event") != "map_snapshot":
+    event = row.get("event")
+    if type(event) is not str or event != "map_snapshot":
         raise _error("recorded map row has an invalid event")
     act = row.get("act")
     if type(act) is not int or not 1 <= act <= 4:
@@ -364,6 +406,8 @@ def _parse_recorded_row(
     raw_route = row.get("visited_nodes")
     if type(raw_route) is not list:
         raise _error("recorded visited route must be a list")
+    if not raw_route:
+        raise _error("recorded visited route must not be empty")
     if len(raw_route) > _MAX_GRAPH_NODES:
         raise _error("recorded visited route exceeds the node limit")
     route_coordinates: list[tuple[int, int]] = []
@@ -471,8 +515,13 @@ def _parse_recorded_row(
 def parse_recorded_map_row(row: Mapping[str, Any]) -> RecordedActSnapshot:
     """Validate and detach one persisted ``map_snapshot`` row."""
 
-    snapshot, _timestamp = _parse_recorded_row(row)
-    return snapshot
+    try:
+        snapshot, _timestamp = _parse_recorded_row(row)
+        return snapshot
+    except RecordedMapError:
+        raise
+    except Exception:
+        raise _error("invalid recorded map row") from None
 
 
 def latest_recorded_acts(
@@ -480,7 +529,7 @@ def latest_recorded_acts(
 ) -> tuple[dict[int, RecordedActSnapshot], tuple[str, ...]]:
     """Consume rows once and keep the latest valid snapshot for each act."""
 
-    selected: dict[int, tuple[float, RecordedActSnapshot]] = {}
+    selected: dict[int, tuple[int | float, RecordedActSnapshot]] = {}
     errors: list[str] = []
     for index, row in enumerate(rows):
         try:

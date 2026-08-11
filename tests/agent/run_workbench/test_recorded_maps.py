@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 import importlib
 import json
 import math
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import pytest
@@ -103,6 +104,18 @@ def _valid_row(*, act: int = 1, ts: float = 10.0):
             _route_node(1, 2, "Elite", after, after),
         ],
     }
+
+
+def _boss_route_row(*, boss_id: str = "BOSS.TEST"):
+    row = _valid_row()
+    row["map"]["rows"][2][0]["current"] = False
+    row["map"]["boss"].update(id=boss_id, visited=True, current=True)
+    row["map"]["current_coord"] = {"col": 1, "row": 3}
+    previous = row["visited_nodes"][-1]["exit_player"]
+    row["visited_nodes"].append(
+        _route_node(1, 3, "Boss", previous, previous)
+    )
+    return row
 
 
 def test_parse_recorded_map_row_builds_existing_map_and_delta_contracts() -> None:
@@ -284,6 +297,80 @@ def test_parse_recorded_map_row_detaches_input_and_has_frozen_outer_contract() -
         parsed.act_index = 2
 
 
+def test_route_nodes_property_returns_fresh_deep_defensive_copies() -> None:
+    api = _api()
+    parsed = api.parse_recorded_map_row(_valid_row())
+    first_view = parsed.route_nodes
+
+    first_view[0]["start_player"]["deck"][0]["id"] = "MUTATED"
+    first_view[0]["deltas"]["cards_gained"]["value"][0]["id"] = "MUTATED"
+
+    second_view = parsed.route_nodes
+    assert second_view is not first_view
+    assert second_view[0] is not first_view[0]
+    assert second_view[0]["start_player"]["deck"][0]["id"] == "STRIKE"
+    assert second_view[0]["deltas"]["cards_gained"]["value"][0]["id"] == "BASH"
+    json.dumps(second_view, ensure_ascii=False, allow_nan=False)
+
+
+@pytest.mark.parametrize("route_state", ["absent", "empty"])
+def test_parse_recorded_map_row_rejects_absent_or_empty_route(route_state: str) -> None:
+    api = _api()
+    row = _valid_row()
+    if route_state == "absent":
+        row.pop("visited_nodes")
+    else:
+        row["visited_nodes"] = []
+
+    with pytest.raises(api.RecordedMapError):
+        api.parse_recorded_map_row(row)
+
+
+class _SpoofLiteral:
+    def __eq__(self, _other):
+        return True
+
+    def __ne__(self, _other):
+        return False
+
+
+@pytest.mark.parametrize("field", ["event", "map.type"])
+def test_parse_recorded_map_row_requires_exact_string_discriminators(field: str) -> None:
+    api = _api()
+    row = _valid_row()
+    if field == "event":
+        row["event"] = _SpoofLiteral()
+    else:
+        row["map"]["type"] = _SpoofLiteral()
+
+    with pytest.raises(api.RecordedMapError):
+        api.parse_recorded_map_row(row)
+
+
+class _BadGet(Mapping):
+    def __getitem__(self, _key):
+        raise RuntimeError("PRIVATE /local/path inventory")
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
+
+    def get(self, _key, _default=None):
+        raise RuntimeError("PRIVATE /local/path inventory")
+
+
+def test_public_parser_contains_hostile_root_mapping_exceptions() -> None:
+    api = _api()
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(_BadGet())
+
+    assert str(raised.value) == "invalid recorded map row"
+    assert "PRIVATE" not in str(raised.value)
+
+
 def test_parse_recorded_map_row_normalizes_known_variants_and_bounded_unknowns() -> None:
     api = _api()
     row = _valid_row()
@@ -300,20 +387,73 @@ def test_parse_recorded_map_row_normalizes_known_variants_and_bounded_unknowns()
 
 def test_parse_recorded_map_row_preserves_model_id_for_explicit_boss_visit() -> None:
     api = _api()
-    row = _valid_row()
-    row["map"]["rows"][2][0]["current"] = False
-    row["map"]["boss"].update(visited=True, current=True)
-    row["map"]["current_coord"] = {"col": 1, "row": 3}
-    previous = row["visited_nodes"][-1]["exit_player"]
-    row["visited_nodes"].append(
-        _route_node(1, 3, "Boss", previous, previous)
-    )
-
-    parsed = api.parse_recorded_map_row(row)
+    parsed = api.parse_recorded_map_row(_boss_route_row())
 
     assert parsed.act_map.nodes[-1].visited is True
     assert parsed.act_map.nodes[-1].path_index == 3
     assert parsed.route_nodes[-1]["model_id"] == "BOSS.TEST"
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda r: r["map"]["boss"].update(id="\ud800"),
+        lambda r: r["map"]["boss"].update(type="\ud800"),
+        lambda r: r["map"]["rows"][0][0].update(type="\ud800"),
+        lambda r: r["visited_nodes"][0]["entry_player"]["deck"][0].update(id="\ud800"),
+    ],
+    ids=["boss-id", "boss-type", "room-type", "inventory-id"],
+)
+def test_parse_recorded_map_row_rejects_lone_surrogates(mutator) -> None:
+    api = _api()
+    row = _boss_route_row()
+    mutator(row)
+
+    with pytest.raises(api.RecordedMapError):
+        api.parse_recorded_map_row(row)
+
+
+def test_parse_recorded_map_row_preserves_ordinary_unicode() -> None:
+    api = _api()
+    row = _boss_route_row(boss_id="首领.测试")
+    row["visited_nodes"][0]["entry_player"]["deck"][0]["id"] = "打击"
+
+    parsed = api.parse_recorded_map_row(row)
+
+    assert parsed.route_nodes[-1]["model_id"] == "首领.测试"
+    assert parsed.route_nodes[0]["start_player"]["deck"][0]["id"] == "打击"
+    json.dumps(parsed.route_nodes, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "children",
+    [
+        {},
+        [{"col": 1, "row": 3}],
+        [{"col": 0}],
+        [{"col": 0, "row": 0}, {"col": 0, "row": 0}],
+        [{"col": 99, "row": 99}],
+    ],
+    ids=["non-list", "self", "invalid", "duplicate", "dangling"],
+)
+def test_parse_recorded_map_row_rejects_boss_children(children) -> None:
+    api = _api()
+    row = _valid_row()
+    row["map"]["boss"]["children"] = children
+
+    with pytest.raises(api.RecordedMapError):
+        api.parse_recorded_map_row(row)
+
+
+def test_parse_recorded_map_row_accepts_absent_or_exact_empty_boss_children() -> None:
+    api = _api()
+    absent = api.parse_recorded_map_row(_valid_row())
+    with_empty = _valid_row()
+    with_empty["map"]["boss"]["children"] = []
+
+    empty = api.parse_recorded_map_row(with_empty)
+
+    assert absent.act_map == empty.act_map
 
 
 def test_latest_recorded_acts_consumes_once_and_selects_latest_valid_per_act() -> None:
@@ -350,9 +490,36 @@ def test_latest_recorded_acts_keeps_valid_snapshot_after_invalid_later_row() -> 
     assert len(errors) == 1
 
 
+def test_latest_recorded_acts_preserves_integer_timestamp_order_above_float_precision() -> None:
+    api = _api()
+    later_timestamp = _valid_row(ts=2**53 + 1)
+    later_timestamp["visited_nodes"][0]["exit_player"]["hp"] = 71
+    earlier_timestamp = _valid_row(ts=2**53)
+    earlier_timestamp["visited_nodes"][0]["exit_player"]["hp"] = 62
+
+    snapshots, errors = api.latest_recorded_acts(
+        iter((later_timestamp, earlier_timestamp))
+    )
+
+    assert errors == ()
+    assert snapshots[0].route_nodes[0]["end_player"]["hp"] == 71
+
+
+def test_latest_recorded_acts_uses_last_row_for_exact_timestamp_ties() -> None:
+    api = _api()
+    first = _valid_row(ts=100)
+    second = _valid_row(ts=100)
+    second["visited_nodes"][0]["exit_player"]["hp"] = 61
+
+    snapshots, errors = api.latest_recorded_acts(iter((first, second)))
+
+    assert errors == ()
+    assert snapshots[0].route_nodes[0]["end_player"]["hp"] == 61
+
+
 def test_latest_recorded_acts_bounds_deterministic_errors_and_never_throws() -> None:
     api = _api()
-    malformed = [None, 1, {}, {"event": "not-a-map"}] * 100
+    malformed = [None, 1, {}, {"event": "not-a-map"}, _BadGet()] * 100
 
     first = api.latest_recorded_acts(iter(malformed))
     second = api.latest_recorded_acts(iter(deepcopy(malformed)))
@@ -362,3 +529,4 @@ def test_latest_recorded_acts_bounds_deterministic_errors_and_never_throws() -> 
     assert 0 < len(first[1]) <= 32
     assert all(0 < len(error) <= 160 for error in first[1])
     assert all("None" not in error and "not-a-map" not in error for error in first[1])
+    assert all("PRIVATE" not in error and "/local/path" not in error for error in first[1])
