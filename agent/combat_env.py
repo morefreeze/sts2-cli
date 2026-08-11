@@ -625,6 +625,8 @@ class CombatEnv(gym.Env):
         self._run_map_snapshots: dict[int, dict] = {}
         self._run_current_map_coord: tuple[int, int, int] | None = None
         self._run_last_map_poll_state_id: int | None = None
+        self._run_pending_map_capture: dict | None = None
+        self._run_map_retry_state: dict | None = None
         self._run_seed = self._seed
         self._run_id = str(
             self._run_context.get("run_id")
@@ -727,6 +729,8 @@ class CombatEnv(gym.Env):
         self._run_map_snapshots = {}
         self._run_current_map_coord = None
         self._run_last_map_poll_state_id = None
+        self._run_pending_map_capture = None
+        self._run_map_retry_state = None
         self._run_logging_errors = []
         self._run_map_capture_failure_active = False
         self._run_boss_id = None  # act boss from state.context.boss (set on first sight)
@@ -833,6 +837,7 @@ class CombatEnv(gym.Env):
         # Capture pre-action state so end_turn intent-aware shaping can read
         # the block/intents the agent committed to before the enemy turn fires.
         pre_state = self._current_state
+        self._retry_run_map_poll_before_gameplay()
         state = self._send(cmd)
         self._update_buffered_node_inventory(state)
 
@@ -1663,64 +1668,83 @@ class CombatEnv(gym.Env):
         }
         return act, raw_map, current_coord, nodes[current_coord], set(nodes)
 
-    def _capture_run_map_state(self, state: dict):
+    def _ingest_run_map_reply(self, reply: object, state: dict) -> None:
+        """Validate and ingest one already-received map reply without polling."""
+        act, raw_map, (col, row), current_node, graph_coords = (
+            self._validated_map_reply(reply)
+        )
+        captured_at = time.time()
+        if (type(captured_at) not in (int, float)
+                or not math.isfinite(captured_at)):
+            raise ValueError("map capture timestamp must be finite")
+        snapshot = self._run_map_snapshots.get(act)
+        if snapshot is None:
+            snapshot = {
+                "map": raw_map,
+                "visited_nodes": [],
+                "_coord_lookup": {},
+                "ts": captured_at,
+            }
+            self._run_map_snapshots[act] = snapshot
+        else:
+            survivors = [
+                node for node in snapshot["visited_nodes"]
+                if (node["col"], node["row"]) in graph_coords
+            ]
+            snapshot["visited_nodes"] = survivors
+            snapshot["_coord_lookup"] = {
+                (node["col"], node["row"]): node for node in survivors
+            }
+            if (self._run_current_map_coord is not None
+                    and self._run_current_map_coord[0] == act
+                    and self._run_current_map_coord[1:] not in graph_coords):
+                self._run_current_map_coord = None
+            snapshot["map"] = raw_map
+            snapshot["ts"] = captured_at
+
+        coord_lookup = snapshot["_coord_lookup"]
+        node = coord_lookup.get((col, row))
+        if node is None:
+            node = {
+                "type": current_node["type"],
+                "col": col,
+                "row": row,
+            }
+            coord_lookup[(col, row)] = node
+            snapshot["visited_nodes"].append(node)
+        self._run_current_map_coord = (act, col, row)
+        self._update_buffered_node_inventory(state)
+        self._run_map_capture_failure_active = False
+
+    def _detached_run_map_poll_state(self, state: dict, state_id: int | None = None):
+        return {
+            "state_id": id(state) if state_id is None else state_id,
+            "state": {"player": self._bounded_player_snapshot(state)},
+        }
+
+    def _capture_run_map_state(
+        self, state: dict, *, poll_state_id: int | None = None
+    ) -> bool:
         """Capture evaluation map observability without affecting gameplay."""
         self._update_buffered_node_inventory(state)
         if not self._capture_run_maps:
-            return
+            return True
         if self._pending_read_only_replies > 0:
-            return
+            return False
+        effective_state_id = id(state) if poll_state_id is None else poll_state_id
         try:
             reply = self._send_read_only({"cmd": "get_map"})
-            act, raw_map, (col, row), current_node, graph_coords = (
-                self._validated_map_reply(reply)
-            )
-            captured_at = time.time()
-            if (type(captured_at) not in (int, float)
-                    or not math.isfinite(captured_at)):
-                raise ValueError("map capture timestamp must be finite")
-            snapshot = self._run_map_snapshots.get(act)
-            if snapshot is None:
-                snapshot = {
-                    "map": raw_map,
-                    "visited_nodes": [],
-                    "_coord_lookup": {},
-                    "ts": captured_at,
-                }
-                self._run_map_snapshots[act] = snapshot
-            else:
-                survivors = [
-                    node for node in snapshot["visited_nodes"]
-                    if (node["col"], node["row"]) in graph_coords
-                ]
-                snapshot["visited_nodes"] = survivors
-                snapshot["_coord_lookup"] = {
-                    (node["col"], node["row"]): node for node in survivors
-                }
-                if (self._run_current_map_coord is not None
-                        and self._run_current_map_coord[0] == act
-                        and self._run_current_map_coord[1:] not in graph_coords):
-                    self._run_current_map_coord = None
-                snapshot["map"] = raw_map
-                snapshot["ts"] = captured_at
-
-            coord_lookup = snapshot["_coord_lookup"]
-            node = coord_lookup.get((col, row))
-            if node is None:
-                node = {
-                    "type": current_node["type"],
-                    "col": col,
-                    "row": row,
-                }
-                coord_lookup[(col, row)] = node
-                snapshot["visited_nodes"].append(node)
-            self._run_current_map_coord = (act, col, row)
-            self._update_buffered_node_inventory(state)
-            self._run_map_capture_failure_active = False
+            if self._pending_read_only_replies > 0:
+                self._run_pending_map_capture = self._detached_run_map_poll_state(
+                    state, effective_state_id
+                )
+            self._ingest_run_map_reply(reply, state)
+            return True
         except Exception as exc:
             if not self._run_map_capture_failure_active:
                 self._report_run_logging_error("map capture failed", exc)
                 self._run_map_capture_failure_active = True
+            return False
 
     def _poll_run_map_state_once(self, state: dict):
         self._update_buffered_node_inventory(state)
@@ -1729,8 +1753,29 @@ class CombatEnv(gym.Env):
         state_id = id(state)
         if self._run_last_map_poll_state_id == state_id:
             return
-        self._run_last_map_poll_state_id = state_id
-        self._capture_run_map_state(state)
+        if (self._run_pending_map_capture is not None
+                and self._run_pending_map_capture["state_id"] == state_id):
+            return
+        if (self._run_map_retry_state is not None
+                and self._run_map_retry_state["state_id"] == state_id):
+            return
+        if self._capture_run_map_state(state):
+            self._run_last_map_poll_state_id = state_id
+            self._run_map_retry_state = None
+        elif self._pending_read_only_replies == 0:
+            self._run_map_retry_state = self._detached_run_map_poll_state(
+                state, state_id
+            )
+
+    def _retry_run_map_poll_before_gameplay(self):
+        retained = self._run_map_retry_state
+        if retained is None or self._pending_read_only_replies > 0:
+            return
+        self._run_map_retry_state = None
+        if self._capture_run_map_state(
+            retained["state"], poll_state_id=retained["state_id"]
+        ):
+            self._run_last_map_poll_state_id = retained["state_id"]
 
     def _serialized_run_map_snapshots(self) -> list[dict]:
         rows = []
@@ -2126,6 +2171,8 @@ class CombatEnv(gym.Env):
         )
         self._read_buf = b""
         self._pending_read_only_replies = 0
+        self._run_pending_map_capture = None
+        self._run_map_retry_state = None
         ready = self._read_json(timeout_sec=15.0)
         if ready is None:
             # Game process failed to produce ready message — kill it now
@@ -2149,6 +2196,8 @@ class CombatEnv(gym.Env):
         self._game_alive = False
         self._read_buf = b""
         self._pending_read_only_replies = 0
+        self._run_pending_map_capture = None
+        self._run_map_retry_state = None
 
     def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True,
                    return_frame_outcome: bool = False,
@@ -2214,6 +2263,36 @@ class CombatEnv(gym.Env):
                 self._kill_proc()
             return result("no_complete_frame")
 
+    def _write_read_only_frame(self, frame: bytes, timeout_sec: float) -> bool:
+        """Atomically deliver one small observation frame directly to the pipe."""
+        if self._proc is None:
+            return False
+        fd = self._proc.stdin.fileno()
+        pipe_buf = os.fpathconf(fd, "PC_PIPE_BUF")
+        if len(frame) > pipe_buf:
+            raise ValueError("read-only protocol frame exceeds PIPE_BUF")
+        # Every ordinary _send() flushes its BufferedWriter before reading a
+        # reply, and kills the process if that flush fails.  Therefore a live
+        # process has no older Python-buffered bytes for this direct write to
+        # overtake.  POSIX pipe writes <= PIPE_BUF are delivered atomically.
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _, writable, _ = select.select([], [fd], [], remaining)
+            if not writable:
+                return False
+            try:
+                written = os.write(fd, frame)
+            except BlockingIOError:
+                continue
+            if written != len(frame):
+                raise OSError(
+                    f"short atomic pipe write: {written} of {len(frame)} bytes"
+                )
+            return True
+
     def _send_read_only(self, cmd: dict, *, timeout_sec: float = 5.0):
         """Send one observational command without terminating gameplay on failure.
 
@@ -2226,11 +2305,10 @@ class CombatEnv(gym.Env):
             raise ValueError("read-only protocol path only accepts get_map")
         if self._proc is None or self._pending_read_only_replies > 0:
             return None
-        command_buffered = False
         try:
-            self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
-            command_buffered = True
-            self._proc.stdin.flush()
+            frame = (json.dumps(cmd) + "\n").encode()
+            if not self._write_read_only_frame(frame, timeout_sec):
+                return None
             frame_outcome, reply = self._read_json(
                 timeout_sec=timeout_sec,
                 kill_on_failure=False,
@@ -2241,16 +2319,16 @@ class CombatEnv(gym.Env):
                 self._pending_read_only_replies += 1
             return reply
         except Exception:
-            if command_buffered:
-                self._pending_read_only_replies += 1
             return None
 
     def _send(self, cmd: dict):
         if self._proc is None:
             return None
         try:
+            self._retry_run_map_poll_before_gameplay()
             while self._pending_read_only_replies > 0:
-                frame_outcome, _ = self._read_json(
+                retained_capture = self._run_pending_map_capture
+                frame_outcome, pending_reply = self._read_json(
                     timeout_sec=60.0,
                     return_frame_outcome=True,
                     stop_on_malformed=True,
@@ -2258,6 +2336,25 @@ class CombatEnv(gym.Env):
                 if frame_outcome not in {"valid", "malformed_consumed"}:
                     return None
                 self._pending_read_only_replies -= 1
+                self._run_pending_map_capture = None
+                if retained_capture is not None and frame_outcome == "valid":
+                    try:
+                        self._ingest_run_map_reply(
+                            pending_reply, retained_capture["state"]
+                        )
+                        self._run_last_map_poll_state_id = (
+                            retained_capture["state_id"]
+                        )
+                        self._run_map_retry_state = None
+                    except Exception as exc:
+                        if not self._run_map_capture_failure_active:
+                            self._report_run_logging_error(
+                                "map capture failed", exc
+                            )
+                            self._run_map_capture_failure_active = True
+                        self._run_map_retry_state = retained_capture
+                elif retained_capture is not None:
+                    self._run_map_retry_state = retained_capture
             if self._proc is None:
                 return None
             self._proc.stdin.write((json.dumps(cmd) + "\n").encode())

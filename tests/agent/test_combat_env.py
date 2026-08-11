@@ -448,6 +448,11 @@ def test_read_only_map_timeout_preserves_process_and_drains_before_next_action(
     proc = _fake_protocol_process()
     env._proc = proc
     env._game_alive = True
+    monkeypatch.setattr(
+        env,
+        "_write_read_only_frame",
+        lambda frame, timeout: proc.stdin.write(frame) == len(frame),
+    )
 
     assert env._send_read_only({"cmd": "get_map"}, timeout_sec=0) is None
     assert env._proc is proc
@@ -471,17 +476,73 @@ def test_read_only_map_timeout_preserves_process_and_drains_before_next_action(
     ]
 
 
-def test_read_only_map_write_exception_preserves_process_and_gameplay():
+def test_read_only_map_write_exception_preserves_process_and_gameplay(monkeypatch):
     env = CombatEnv(
         cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
     )
     proc = _fake_protocol_process(write_error=OSError("map write unavailable"))
     env._proc = proc
     env._game_alive = True
+    monkeypatch.setattr(
+        env,
+        "_write_read_only_frame",
+        lambda frame, timeout: (_ for _ in ()).throw(
+            OSError("map write unavailable")
+        ),
+    )
 
     assert env._send_read_only({"cmd": "get_map"}) is None
     assert env._proc is proc
     assert env._game_alive is True
+
+
+def test_read_only_pipe_delivery_failure_does_not_create_phantom_pending_or_block_action(
+    monkeypatch,
+):
+    env = CombatEnv(
+        cards_json=CARDS_JSON, dry_run=True, run_context={"capture_map": True}
+    )
+    input_read_fd, input_write_fd = os.pipe()
+    output_read_fd, output_write_fd = os.pipe()
+    os.set_blocking(input_write_fd, False)
+    while True:
+        try:
+            os.write(input_write_fd, b"x" * 4096)
+        except BlockingIOError:
+            break
+    protocol_input = os.fdopen(input_write_fd, "wb", buffering=4096)
+    proc = _pipe_process(output_read_fd, protocol_input)
+    env._proc = proc
+    env._game_alive = True
+    _fast_pipe_reads(monkeypatch, env)
+    try:
+        assert env._send_read_only({"cmd": "get_map"}, timeout_sec=0.01) is None
+        assert env._pending_read_only_replies == 0
+        assert env._proc is proc
+        assert env._game_alive is True
+
+        os.set_blocking(input_read_fd, False)
+        while True:
+            try:
+                os.read(input_read_fd, 4096)
+            except BlockingIOError:
+                break
+        combat = {"decision": "combat_play", "round": 7}
+        os.write(output_write_fd, (json.dumps(combat) + "\n").encode())
+
+        assert env._send({"cmd": "action", "action": "end_turn"}) == combat
+        delivered = os.read(input_read_fd, 4096)
+        assert json.loads(delivered) == {"cmd": "action", "action": "end_turn"}
+        assert env._proc is proc
+        assert env._game_alive is True
+    finally:
+        try:
+            protocol_input.close()
+        except OSError:
+            pass
+        os.close(input_read_fd)
+        os.close(output_write_fd)
+        os.close(output_read_fd)
 
 
 def test_read_only_map_error_reply_warns_without_mutating_gameplay(monkeypatch, tmp_path):
@@ -491,6 +552,7 @@ def test_read_only_map_error_reply_warns_without_mutating_gameplay(monkeypatch, 
     proc = _fake_protocol_process()
     env._proc = proc
     env._game_alive = True
+    monkeypatch.setattr(env, "_write_read_only_frame", lambda frame, timeout: True)
     monkeypatch.setattr(
         env,
         "_read_json",
@@ -528,6 +590,7 @@ def test_malformed_map_frame_does_not_discard_next_gameplay_response(
     )
     env._proc = proc
     env._game_alive = True
+    monkeypatch.setattr(env, "_write_read_only_frame", lambda frame, timeout: True)
     real_read_json = env._read_json
 
     def fast_read_json(timeout_sec=5.0, **kwargs):
@@ -744,6 +807,8 @@ def test_start_proc_clears_pending_protocol_state(monkeypatch):
     fake_proc = _fake_protocol_process()
     env._pending_read_only_replies = 1
     env._read_buf = b"stale\n"
+    env._run_pending_map_capture = {"state_id": 1, "state": {"player": {}}}
+    env._run_map_retry_state = {"state_id": 2, "state": {"player": {}}}
     monkeypatch.setattr(combat_env.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
     monkeypatch.setattr(
         combat_env, "open", lambda *args, **kwargs: SimpleNamespace(), raising=False
@@ -754,6 +819,146 @@ def test_start_proc_clears_pending_protocol_state(monkeypatch):
 
     assert env._pending_read_only_replies == 0
     assert env._read_buf == b""
+    assert env._run_pending_map_capture is None
+    assert env._run_map_retry_state is None
+
+
+def test_late_valid_map_is_ingested_with_detached_entry_before_gameplay(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    state = {**_map_state(hp=61), "decision": "combat_play"}
+    read_fd, write_fd = os.pipe()
+    combat = {**state, "round": 2}
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            os.write(write_fd, (json.dumps(combat) + "\n").encode())
+
+    proc = _pipe_process(read_fd, _FakeProtocolInput(on_write=reply_to_action))
+    env._proc = proc
+    env._game_alive = True
+    _fast_pipe_reads(monkeypatch, env)
+
+    def timeout_after_delivery(command, **kwargs):
+        env._pending_read_only_replies = 1
+        return None
+
+    monkeypatch.setattr(env, "_send_read_only", timeout_after_delivery)
+    try:
+        with pytest.warns(RuntimeWarning, match="map capture failed"):
+            env._poll_run_map_state_once(state)
+        state["player"]["hp"] = 12
+        os.write(write_fd, (json.dumps(_map_reply(current=(0, 1))) + "\n").encode())
+
+        assert env._send({"cmd": "action", "action": "end_turn"}) == combat
+        node = env._run_map_snapshots[1]["visited_nodes"][0]
+        assert (node["col"], node["row"]) == (0, 1)
+        assert node["entry_player"]["hp"] == 61
+        assert env._run_last_map_poll_state_id == id(state)
+        assert env._run_pending_map_capture is None
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_immediate_map_error_retries_once_at_first_gameplay_boundary(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    env.dry_run = False
+    current = combat_env._dummy_combat_state()
+    current["context"] = {"act": 1, "floor": 1, "room_type": "Monster"}
+    current["player"].update({
+        "gold": 50,
+        "deck": [{"id": "STRIKE"}],
+        "relics": [{"id": "BURNING_BLOOD"}],
+        "potions": [],
+    })
+    next_state = json.loads(json.dumps(current))
+    next_state["round"] = 2
+    env._current_state = current
+    env._game_alive = True
+    replies = iter([
+        {"type": "error", "message": "temporary"},
+        _map_reply(),
+    ])
+    map_calls = []
+
+    def map_reply(command, **kwargs):
+        map_calls.append(command)
+        return next(replies)
+
+    monkeypatch.setattr(env, "_send_read_only", map_reply)
+    monkeypatch.setattr(env.enc, "decode", lambda action, state: {"action": "play_card"})
+    monkeypatch.setattr(env, "_send", lambda command: next_state)
+    monkeypatch.setattr(env, "_shaping_reward", lambda state: 0.0)
+
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._poll_run_map_state_once(current)
+    env.step(0)
+
+    assert map_calls == [{"cmd": "get_map"}, {"cmd": "get_map"}]
+    assert env._run_last_map_poll_state_id == id(current)
+    assert env._run_map_snapshots[1]["visited_nodes"][0]["entry_player"]["hp"] == 80
+
+
+def test_late_new_coord_terminal_inventory_is_not_attributed_to_old_coord(
+    monkeypatch, tmp_path
+):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    old_state = _map_state(hp=80)
+    new_state = {**_map_state(hp=55), "decision": "combat_play"}
+    monkeypatch.setattr(env, "_send_read_only", lambda command: _map_reply())
+    env._poll_run_map_state_once(old_state)
+
+    def timeout_after_delivery(command, **kwargs):
+        env._pending_read_only_replies = 1
+        return None
+
+    monkeypatch.setattr(env, "_send_read_only", timeout_after_delivery)
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._poll_run_map_state_once(new_state)
+
+    read_fd, write_fd = os.pipe()
+    terminal = {
+        "decision": "game_over",
+        "victory": False,
+        "player": {"hp": 0, "max_hp": 80, "gold": 50, "deck": [],
+                   "relics": [], "potions": []},
+    }
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            os.write(write_fd, (json.dumps(terminal) + "\n").encode())
+
+    env._proc = _pipe_process(
+        read_fd, _FakeProtocolInput(on_write=reply_to_action)
+    )
+    env._game_alive = True
+    _fast_pipe_reads(monkeypatch, env)
+    try:
+        os.write(write_fd, (json.dumps(_map_reply(current=(0, 1))) + "\n").encode())
+        result = env._send({"cmd": "action", "action": "end_turn"})
+        env._emit_run_outcome(result, victory=False, status="dead")
+
+        rows = _read_history_rows(history_path)
+        snapshot = next(row for row in rows if row["event"] == "map_snapshot")
+        old_node, new_node = snapshot["visited_nodes"]
+        assert (old_node["col"], old_node["row"]) == (0, 0)
+        assert old_node["exit_player"]["hp"] == 55
+        assert (new_node["col"], new_node["row"]) == (0, 1)
+        assert new_node["entry_player"]["hp"] == 55
+        assert new_node["exit_player"]["hp"] == 0
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
 
 
 def _set_map_reply(monkeypatch, env, reply):
@@ -921,6 +1126,8 @@ def test_fresh_run_resets_logging_error_state(monkeypatch, tmp_path):
     env.dry_run = False
     env._run_logging_errors = ["old failure"]
     env._run_map_capture_failure_active = True
+    env._run_pending_map_capture = {"state_id": 1, "state": {"player": {}}}
+    env._run_map_retry_state = {"state_id": 2, "state": {"player": {}}}
     state = combat_env._dummy_combat_state()
     monkeypatch.setattr(env, "_kill_proc", lambda: None)
     monkeypatch.setattr(env, "_start_proc", lambda: None)
@@ -931,6 +1138,8 @@ def test_fresh_run_resets_logging_error_state(monkeypatch, tmp_path):
 
     assert env._run_logging_errors == []
     assert env._run_map_capture_failure_active is False
+    assert env._run_pending_map_capture is None
+    assert env._run_map_retry_state is None
 
 
 @pytest.mark.parametrize(
