@@ -292,54 +292,87 @@ def test_parse_recorded_map_row_detaches_input_and_has_frozen_outer_contract() -
 
     assert parsed.route_nodes[0]["start_player"]["deck"][0]["id"] == "STRIKE"
     assert len(parsed.act_map.edges) == 5
-    with pytest.raises(TypeError):
-        parsed.route_nodes[1]["start_player"]["deck"][0]["id"] = "OUTPUT_MUTATION"
+    output_view = parsed.route_nodes
+    output_view[1]["start_player"]["deck"][0]["id"] = "OUTPUT_MUTATION"
     assert parsed.route_nodes[1]["end_player"]["deck"][0]["id"] == "STRIKE"
+    assert parsed.route_nodes[1]["start_player"]["deck"][0]["id"] == "STRIKE"
     with pytest.raises(FrozenInstanceError):
         parsed.act_index = 2
 
 
-def test_route_nodes_field_is_deeply_immutable_and_json_serializable() -> None:
+def test_route_nodes_field_returns_fresh_ordinary_defensive_views() -> None:
     api = _api()
     parsed = api.parse_recorded_map_row(_valid_row())
-    route = parsed.route_nodes
-    node = route[0]
-    deck = node["start_player"]["deck"]
-    card = deck[0]
+    pristine = api.parse_recorded_map_row(_valid_row())
+    first_view = parsed.route_nodes
+    second_view = parsed.route_nodes
+
+    assert first_view is not second_view
+    assert type(first_view[0]) is dict
+    assert type(first_view[0]["start_player"]) is dict
+    assert type(first_view[0]["start_player"]["deck"]) is list
+    assert type(first_view[0]["start_player"]["deck"][0]) is dict
 
     dict_mutators = [
-        lambda: operator.setitem(node, "extra", True),
-        lambda: operator.delitem(node, "id"),
-        lambda: node.update({"extra": True}),
-        lambda: node.setdefault("extra", True),
-        lambda: node.pop("id"),
-        lambda: node.popitem(),
-        lambda: node.clear(),
-        lambda: operator.ior(node, {"extra": True}),
-        lambda: operator.setitem(card, "id", "MUTATED"),
+        lambda node: operator.setitem(node, "extra", True),
+        lambda node: operator.delitem(node, "id"),
+        lambda node: node.update({"extra": True}),
+        lambda node: node.setdefault("extra", True),
+        lambda node: node.pop("id"),
+        lambda node: node.popitem(),
+        lambda node: node.clear(),
+        lambda node: operator.ior(node, {"extra": True}),
     ]
     list_mutators = [
-        lambda: deck.append({"id": "NEW"}),
-        lambda: deck.extend([{"id": "NEW"}]),
-        lambda: deck.insert(0, {"id": "NEW"}),
-        lambda: deck.pop(),
-        lambda: deck.remove(card),
-        lambda: deck.clear(),
-        lambda: deck.sort(key=lambda item: item["id"]),
-        lambda: deck.reverse(),
-        lambda: operator.setitem(deck, 0, {"id": "NEW"}),
-        lambda: operator.delitem(deck, 0),
-        lambda: operator.iadd(deck, [{"id": "NEW"}]),
-        lambda: operator.imul(deck, 2),
+        lambda deck: deck.append({"id": "NEW"}),
+        lambda deck: deck.extend([{"id": "NEW"}]),
+        lambda deck: deck.insert(0, {"id": "NEW"}),
+        lambda deck: deck.pop(),
+        lambda deck: deck.remove(deck[0]),
+        lambda deck: deck.clear(),
+        lambda deck: deck.sort(key=lambda item: item["id"]),
+        lambda deck: deck.reverse(),
+        lambda deck: operator.setitem(deck, 0, {"id": "NEW"}),
+        lambda deck: operator.delitem(deck, 0),
+        lambda deck: operator.iadd(deck, [{"id": "NEW"}]),
+        lambda deck: operator.imul(deck, 2),
     ]
-    for mutate in (*dict_mutators, *list_mutators):
-        with pytest.raises(TypeError):
-            mutate()
+    for mutate in dict_mutators:
+        mutate(parsed.route_nodes[0])
+        assert parsed == pristine
+    for mutate in list_mutators:
+        mutate(parsed.route_nodes[0]["start_player"]["deck"])
+        assert parsed == pristine
 
-    assert parsed.route_nodes is route
     assert parsed.route_nodes[0]["start_player"]["deck"][0]["id"] == "STRIKE"
     assert parsed.route_nodes[0]["deltas"]["cards_gained"]["value"][0]["id"] == "BASH"
     json.dumps(parsed.route_nodes, ensure_ascii=False, allow_nan=False)
+
+
+def test_builtin_base_descriptors_cannot_reach_recorded_snapshot_storage() -> None:
+    api = _api()
+    parsed = api.parse_recorded_map_row(_valid_row())
+    pristine = api.parse_recorded_map_row(_valid_row())
+    route = parsed.route_nodes
+
+    dict.__setitem__(route[0], "id", "ROOT_MUTATION")
+    dict.update(route[0]["start_player"], {"hp": 1})
+    list.append(route[0]["start_player"]["deck"], {"id": "APPENDED"})
+    list.__setitem__(route[0]["start_player"]["deck"], 0, {"id": "REPLACED"})
+    dict.__setitem__(route[0]["deltas"], "hp_before", {"value": 1})
+    dict.update(route[0]["deltas"]["cards_gained"], {"quality": "exact"})
+    list.append(route[0]["deltas"]["cards_gained"]["value"], {"id": "APPENDED"})
+    dict.__setitem__(
+        route[0]["deltas"]["cards_gained"]["value"][0],
+        "id",
+        "NESTED_MUTATION",
+    )
+
+    assert parsed == pristine
+    assert parsed.route_nodes == pristine.route_nodes
+    assert parsed.route_nodes[0]["id"] == "a0:n0"
+    assert parsed.route_nodes[0]["start_player"]["hp"] == 80
+    assert parsed.route_nodes[0]["start_player"]["deck"] == [{"id": "STRIKE"}]
 
 
 def test_recorded_snapshot_preserves_exact_standard_dataclass_api() -> None:
@@ -367,10 +400,16 @@ def test_recorded_snapshot_preserves_exact_standard_dataclass_api() -> None:
     assert set(serialized) == {"act_index", "act_id", "act_map", "route_nodes"}
     assert "_route_nodes_json" not in serialized
     assert deep_copied == parsed
-    with pytest.raises(TypeError):
-        operator.setitem(serialized["route_nodes"][0], "extra", True)
-    with pytest.raises(TypeError):
-        operator.setitem(deep_copied.route_nodes[0], "extra", True)
+    assert "route_nodes=" in repr(parsed)
+    assert type(serialized["route_nodes"][0]) is dict
+    operator.setitem(serialized["route_nodes"][0], "extra", True)
+    operator.setitem(deep_copied.route_nodes[0], "extra", True)
+    operator.setitem(replaced.route_nodes[0], "extra", True)
+    assert parsed == positional
+    assert deep_copied == parsed
+    assert "extra" not in parsed.route_nodes[0]
+    assert "extra" not in deep_copied.route_nodes[0]
+    assert "extra" not in replaced.route_nodes[0]
     json.dumps(serialized, ensure_ascii=False, allow_nan=False)
 
 
@@ -470,6 +509,32 @@ def test_public_parser_normalizes_forged_recorded_map_errors_from_hostile_mappin
     assert snapshots == {}
     assert errors == ("row 0: invalid recorded map row",)
     assert "SECRET" not in str(raised.value) + repr(errors)
+    assert "/private/inventory" not in str(raised.value) + repr(errors)
+
+
+class _CollidingRootKey:
+    def __init__(self, error_type):
+        self._error = error_type("INJECTED /private/inventory" + "x" * 300)
+
+    def __hash__(self):
+        return hash("event")
+
+    def __eq__(self, _other):
+        raise self._error
+
+
+def test_root_normalization_rejects_hostile_nonstring_keys_before_lookup() -> None:
+    api = _api()
+    hostile = {_CollidingRootKey(api.RecordedMapError): "map_snapshot"}
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(hostile)
+    snapshots, errors = api.latest_recorded_acts(iter((hostile,)))
+
+    assert str(raised.value) == "invalid recorded map row"
+    assert snapshots == {}
+    assert errors == ("row 0: invalid recorded map row",)
+    assert "INJECTED" not in str(raised.value) + repr(errors)
     assert "/private/inventory" not in str(raised.value) + repr(errors)
 
 
