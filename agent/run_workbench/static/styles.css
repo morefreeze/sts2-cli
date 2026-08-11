@@ -1061,6 +1061,10 @@ pre {
     padding: 15px;
   }
 
+  .filter-field-validity {
+    grid-column: span 6;
+  }
+
   .metric-card {
     grid-column: span 6;
     min-height: 128px;

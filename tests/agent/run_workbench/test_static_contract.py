@@ -177,6 +177,40 @@ def test_filter_panel_orders_scope_before_cohorts():
     assert positions == sorted(positions)
 
 
+def test_filter_panel_uses_semantic_grid_spans_at_responsive_breakpoints():
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    desktop = css[: css.index("@media")]
+    tablet_start = css.index("@media (max-width: 760px)")
+    tablet = css[tablet_start : css.index("@media", tablet_start + 1)]
+    mobile_start = css.index("@media (max-width: 480px)")
+    mobile = css[mobile_start:]
+
+    assert re.search(
+        r"\.filter-field-scope,\s*\.filter-field-cohort\s*"
+        r"\{[^}]*grid-column:\s*span 6;",
+        desktop,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.filter-field-validity\s*"
+        r"\{[^}]*grid-column:\s*span 3;",
+        desktop,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.filter-field-validity\s*"
+        r"\{[^}]*grid-column:\s*span 6;",
+        tablet,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.filter-grid\s+\.filter-field\s*(?:,\s*[^{}]+)?\s*"
+        r"\{[^}]*grid-column:\s*1\s*/\s*-1;",
+        mobile,
+        re.DOTALL,
+    )
+
+
 def test_existing_direct_script_entrypoint_still_imports_package():
     script = Path(viewer.__file__)
 
