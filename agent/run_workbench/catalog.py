@@ -48,13 +48,11 @@ REPLAY_WARNING_ID_LIMIT = 16
 RUN_ID_LENGTH_LIMIT = MAX_RUN_ID_LENGTH
 ERROR_DETAIL_LIMIT = 32
 _WORKBENCH_JSON_PROBE_BYTES = 64 * 1024
-_WORKBENCH_JSON_MARKERS = (
-    b'"players"',
-    b'"map_point_history"',
-    b'"event"',
-    b'"type"',
-    b'"run_id"',
-    b'"rooms"',
+_WORKBENCH_JSON_MARKER_GROUPS = (
+    (b'"players"', b'"map_point_history"'),
+    (b'"event"', b'"run_id"'),
+    (b'"type"', b'"run_id"'),
+    (b'"rooms"', b'"run_id"'),
 )
 _BOSS_DECK_JSON_MARKERS = (
     b'"checkpoint"',
@@ -64,13 +62,10 @@ _BOSS_DECK_JSON_MARKERS = (
 )
 _WORKBENCH_FILENAME_TOKENS = frozenset(
     {
-        "boss",
         "checkpoint",
         "cohort",
-        "deck",
         "eval",
         "evaluation",
-        "history",
         "replay",
         "run",
         "runs",
@@ -1893,9 +1888,10 @@ def _looks_like_workbench_json(path: Path) -> bool:
             prefix = handle.read(_WORKBENCH_JSON_PROBE_BYTES)
     except OSError:
         return True
-    if any(marker in prefix for marker in _WORKBENCH_JSON_MARKERS) or all(
-        marker in prefix for marker in _BOSS_DECK_JSON_MARKERS
-    ):
+    if any(
+        all(marker in prefix for marker in group)
+        for group in _WORKBENCH_JSON_MARKER_GROUPS
+    ) or all(marker in prefix for marker in _BOSS_DECK_JSON_MARKERS):
         return True
     filename_tokens = {
         token

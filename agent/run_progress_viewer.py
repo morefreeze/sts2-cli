@@ -773,7 +773,7 @@ def serve(
     catalog = RunCatalog(
         roots,
         replay_parser=parse_game_progress,
-        include_policy="workbench" if source_roots is None else "all",
+        include_policy="workbench",
     )
     art_resolver = NodeArtResolver(
         explicit_roots=[map_assets_dir] if map_assets_dir is not None else ()

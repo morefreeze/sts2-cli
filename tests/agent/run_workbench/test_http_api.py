@@ -907,6 +907,45 @@ def test_map_assets_cli_option_is_passed_to_the_server(
     ]
 
 
+def test_explicit_source_roots_keep_workbench_discovery_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_calls: list[dict] = []
+
+    class FakeCatalog:
+        def __init__(self, roots, replay_parser=None, *, include_policy="all"):
+            catalog_calls.append(
+                {
+                    "roots": list(roots),
+                    "replay_parser": replay_parser,
+                    "include_policy": include_policy,
+                }
+            )
+
+    class FakeHTTPServer:
+        server_address = ("127.0.0.1", 61123)
+
+        def __init__(self, address, handler):
+            self.address = address
+            self.handler = handler
+
+        def serve_forever(self):
+            return None
+
+    monkeypatch.setattr(viewer, "RunCatalog", FakeCatalog)
+    monkeypatch.setattr(viewer, "ThreadingHTTPServer", FakeHTTPServer)
+
+    viewer.serve("127.0.0.1", 0, source_roots=[tmp_path])
+
+    assert catalog_calls == [
+        {
+            "roots": [tmp_path],
+            "replay_parser": viewer.parse_game_progress,
+            "include_policy": "workbench",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("path", "status", "message"),
     [

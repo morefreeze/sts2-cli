@@ -1526,7 +1526,23 @@ def test_workbench_json_filter_keeps_boss_summary_and_likely_training_errors(
         encoding="utf-8",
     )
     (tmp_path / "card_metadata.json").write_text(
-        json.dumps({"cards": [{"id": "BASH"}]}), encoding="utf-8"
+        json.dumps({"cards": [{"id": "BASH", "type": "Attack"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "advisor_card_ratings.json").write_text(
+        json.dumps({"BASH": {"rating": 3, "type": "Attack"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "advisor_card_tags.json").write_text(
+        json.dumps({"BASH": ["starter"]}), encoding="utf-8"
+    )
+    (tmp_path / "deck_stats.json").write_text(
+        json.dumps({"cards": [{"id": "BASH", "type": "Attack"}]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "boss_retry_1.json").write_text(
+        json.dumps([{"snapshot": "boss.save", "meta": {"checkpoint": "m"}}]),
+        encoding="utf-8",
     )
     catalog = RunCatalog(
         [tmp_path], replay_parser=_replay_parser, include_policy="workbench"
