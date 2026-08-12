@@ -570,6 +570,61 @@ def test_run_decision_state_fingerprint_fails_closed_without_hooks(mutate):
     assert CombatEnv._run_decision_state_fingerprint(state) is None
 
 
+def test_run_decision_retain_explicit_invalid_fingerprint_never_recomputes(
+    monkeypatch,
+):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_decision_state()
+    env._run_last_map_poll_state_id = 123
+    env._run_last_map_poll_state_ref = state
+    env._run_last_map_poll_state_fingerprint = "stale"
+    monkeypatch.setattr(
+        env,
+        "_run_decision_state_fingerprint",
+        lambda _state: pytest.fail("explicit invalid fingerprint was recomputed"),
+    )
+
+    assert env._retain_run_last_map_poll_state(state, None) is False
+    assert env._run_last_map_poll_state_id is None
+    assert env._run_last_map_poll_state_ref is None
+    assert env._run_last_map_poll_state_fingerprint is None
+
+
+def test_run_decision_retain_explicit_valid_fingerprint_without_recompute(
+    monkeypatch,
+):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_decision_state()
+    fingerprint = "a" * 64
+    monkeypatch.setattr(
+        env,
+        "_run_decision_state_fingerprint",
+        lambda _state: pytest.fail("explicit valid fingerprint was recomputed"),
+    )
+
+    assert env._retain_run_last_map_poll_state(state, fingerprint) is True
+    assert env._run_last_map_poll_state_ref is state
+    assert env._run_last_map_poll_state_fingerprint == fingerprint
+
+
+def test_run_decision_retain_omitted_fingerprint_recomputes(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_decision_state()
+    fingerprint = "b" * 64
+    observed = []
+
+    def fingerprint_state(candidate):
+        observed.append(candidate)
+        return fingerprint
+
+    monkeypatch.setattr(env, "_run_decision_state_fingerprint", fingerprint_state)
+
+    assert env._retain_run_last_map_poll_state(state) is True
+    assert observed == [state]
+    assert env._run_last_map_poll_state_ref is state
+    assert env._run_last_map_poll_state_fingerprint == fingerprint
+
+
 def test_run_decision_delayed_valid_map_retry_targets_new_validated_coord(
     monkeypatch, tmp_path
 ):
@@ -654,6 +709,66 @@ def test_run_decision_delayed_reply_during_retry_retains_original_poll_state(
         assert env._run_last_map_poll_state_ref is event_state
         assert "decisions" not in _node_at(env, (1, 0, 0))
         assert _node_at(env, (1, 0, 1))["decisions"][0]["selected_id"] == "RETRIED"
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+@pytest.mark.parametrize("unsafe_kind", ["oversized", "hostile-key"])
+def test_run_decision_pending_invalid_fingerprint_never_recomputes_after_mutation(
+    monkeypatch, tmp_path, unsafe_kind
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    state = _event_decision_state(floor=2, option_id="UNSAFE")
+    if unsafe_kind == "oversized":
+        state["transient"] = "x" * 600_000
+    else:
+        state["transient"] = {_HostileReplyKey("unsafe"): True}
+
+    def timeout_map(_command, **_kwargs):
+        env._pending_read_only_replies = 1
+        return None
+
+    monkeypatch.setattr(env, "_send_read_only", timeout_map)
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._poll_run_map_state_once(state)
+    assert env._run_pending_map_capture["state_ref"] is state
+    assert env._run_pending_map_capture["state_fingerprint"] is None
+    del state["transient"]
+
+    read_fd, write_fd = os.pipe()
+    action_reply = {"type": "decision", "decision": "map_select"}
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            os.write(write_fd, (json.dumps(action_reply) + "\n").encode())
+
+    env._proc = _pipe_process(
+        read_fd, _FakeProtocolInput(on_write=reply_to_action)
+    )
+    env._game_alive = True
+    _fast_pipe_reads(monkeypatch, env)
+    try:
+        os.write(
+            write_fd,
+            (json.dumps(_map_reply(floor=2, current=(0, 0))) + "\n").encode(),
+        )
+        reply = env._send_with_run_decision(
+            state,
+            {
+                "cmd": "action",
+                "action": "choose_option",
+                "args": {"option_index": 0},
+            },
+        )
+
+        assert reply == action_reply
+        assert env._run_last_map_poll_state_id is None
+        assert env._run_last_map_poll_state_ref is None
+        assert env._run_last_map_poll_state_fingerprint is None
+        assert "decisions" not in _node_at(env, (1, 0, 0))
     finally:
         os.close(write_fd)
         os.close(read_fd)

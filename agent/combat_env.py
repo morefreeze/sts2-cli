@@ -35,6 +35,7 @@ _RUN_DECISION_STATE_MAX_LIST_ITEMS = 4_096
 _RUN_DECISION_STATE_MAX_KEY_CHARS = 256
 _RUN_DECISION_STATE_MAX_STRING_CHARS = 16_384
 _RUN_DECISION_STATE_MAX_BYTES = 512 * 1024
+_RUN_DECISION_FINGERPRINT_OMITTED = object()
 
 
 class _RunMapTransitionError(ValueError):
@@ -1636,12 +1637,14 @@ class CombatEnv(gym.Env):
         self._run_last_map_poll_state_fingerprint = None
 
     def _retain_run_last_map_poll_state(
-        self, state: object, fingerprint: object = None
+        self,
+        state: object,
+        fingerprint: object = _RUN_DECISION_FINGERPRINT_OMITTED,
     ) -> bool:
         if type(state) is not dict:
             self._clear_run_last_map_poll_state()
             return False
-        if fingerprint is None:
+        if fingerprint is _RUN_DECISION_FINGERPRINT_OMITTED:
             fingerprint = self._run_decision_state_fingerprint(state)
         if type(fingerprint) is not str or len(fingerprint) != 64:
             self._clear_run_last_map_poll_state()
@@ -1968,11 +1971,11 @@ class CombatEnv(gym.Env):
         inventory_checkpoint=None,
         *,
         state_ref: object = None,
-        state_fingerprint: object = None,
+        state_fingerprint: object = _RUN_DECISION_FINGERPRINT_OMITTED,
     ):
         if state_ref is None:
             state_ref = state
-        if state_fingerprint is None:
+        if state_fingerprint is _RUN_DECISION_FINGERPRINT_OMITTED:
             state_fingerprint = self._run_decision_state_fingerprint(state_ref)
         detached_state = {"player": self._bounded_player_snapshot(state)}
         room_identity = self._bounded_run_room_identity(state)
@@ -1997,7 +2000,7 @@ class CombatEnv(gym.Env):
         *,
         poll_state_id: int | None = None,
         poll_state_ref: object = None,
-        poll_state_fingerprint: object = None,
+        poll_state_fingerprint: object = _RUN_DECISION_FINGERPRINT_OMITTED,
     ) -> bool:
         """Capture evaluation map observability without affecting gameplay."""
         inventory_checkpoint = self._buffered_inventory_checkpoint()
@@ -2049,12 +2052,19 @@ class CombatEnv(gym.Env):
         if (self._run_map_retry_state is not None
                 and self._run_map_retry_state.get("state_ref") is state):
             return
-        if self._capture_run_map_state(state):
+        if self._capture_run_map_state(
+            state,
+            poll_state_ref=state,
+            poll_state_fingerprint=state_fingerprint,
+        ):
             self._retain_run_last_map_poll_state(state, state_fingerprint)
             self._run_map_retry_state = None
         elif self._pending_read_only_replies == 0:
             self._run_map_retry_state = self._detached_run_map_poll_state(
-                state, state_id
+                state,
+                state_id,
+                state_ref=state,
+                state_fingerprint=state_fingerprint,
             )
 
     def _retry_run_map_poll_before_gameplay(self):
@@ -2066,10 +2076,15 @@ class CombatEnv(gym.Env):
             retained["state"],
             poll_state_id=retained["state_id"],
             poll_state_ref=retained.get("state_ref"),
-            poll_state_fingerprint=retained.get("state_fingerprint"),
+            poll_state_fingerprint=retained.get(
+                "state_fingerprint", _RUN_DECISION_FINGERPRINT_OMITTED
+            ),
         ):
             self._retain_run_last_map_poll_state(
-                retained.get("state_ref"), retained.get("state_fingerprint")
+                retained.get("state_ref"),
+                retained.get(
+                    "state_fingerprint", _RUN_DECISION_FINGERPRINT_OMITTED
+                ),
             )
 
     def _run_decision_target(
@@ -2709,7 +2724,10 @@ class CombatEnv(gym.Env):
                         )
                         self._retain_run_last_map_poll_state(
                             retained_capture.get("state_ref"),
-                            retained_capture.get("state_fingerprint"),
+                            retained_capture.get(
+                                "state_fingerprint",
+                                _RUN_DECISION_FINGERPRINT_OMITTED,
+                            ),
                         )
                         self._run_map_retry_state = None
                     except _RunMapTransitionError as exc:
