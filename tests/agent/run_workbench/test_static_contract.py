@@ -85,6 +85,22 @@ def _run_node_json(source: str):
     return json.loads(result.stdout)
 
 
+def _recorded_decisions_fixture() -> list[dict]:
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "recorded_decisions.jsonl"
+    )
+    rows = [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines()]
+    snapshot = next(row for row in rows if row.get("event") == "map_snapshot")
+    return [
+        decision
+        for node in snapshot["visited_nodes"]
+        for decision in node.get("decisions", [])
+    ]
+
+
 def test_shell_uses_external_assets_and_stable_landmark_order():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     parser = _ShellParser()
@@ -604,6 +620,59 @@ def test_map_decision_summary_prefers_recorded_newest_and_fails_closed_for_unkno
     assert "[object Object]" not in json.dumps(result)
 
 
+def test_recorded_decisions_fixture_renders_all_six_one_line_grey_summaries():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    decisions = _recorded_decisions_fixture()
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderDecisionSummary"
+    )
+    renderer = _javascript_section(
+        script, "function renderDecisionSummary", "function usableDecisionAnchor"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        const decisions = {json.dumps(decisions, ensure_ascii=True)};
+        console.log(JSON.stringify(decisions.map((decision) =>
+          nodeDecisionSummary({{ visited: true, decisions: [decision] }}))));
+        """
+    )
+
+    assert [summary["prefix"] for summary in result] == [
+        "事件", "卡", "药水", "遗物", "商店", "休息",
+    ]
+    assert [summary["label"] for summary in result] == [
+        decision["selected_label"] for decision in decisions
+    ]
+    assert [summary["effect"] for summary in result] == [
+        next(option["effect"] for option in decision["options"] if option["selected"])
+        for decision in decisions
+    ]
+    assert all(summary["recorded"] is True and summary["overflow"] == 0 for summary in result)
+    assert renderer.count("createSvg('text'") == 1
+    assert "createSvg('tspan', { class: 'map-decision-effect' })" in renderer
+    assert re.search(
+        r"\.map-decision-summary\s+\.map-decision-effect\s*"
+        r"\{[^}]*fill:\s*var\(--slate-500\);",
+        css,
+        re.DOTALL,
+    )
+    for selector in ("map-decision-selected-effect", "map-decision-option-effect"):
+        assert re.search(
+            rf"\.{selector}\s*\{{[^}}]*color:\s*var\(--slate-500\);",
+            css,
+            re.DOTALL,
+        )
+
+
 def test_map_decision_validator_rejects_malformed_or_unbounded_recorded_evidence():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     constants = "\n".join(
@@ -935,6 +1004,7 @@ def test_map_decision_byte_limit_matches_python_default_json_encoding():
 
 def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    decisions = _recorded_decisions_fixture()
     constants = "\n".join(
         line.strip()
         for line in script.splitlines()
@@ -1004,13 +1074,8 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
         function treeText(node) {{
           return [node.textContent, ...node.children.flatMap(treeText)].filter(Boolean);
         }}
-        function decision(kind, prefix) {{
-          const first = {{ id: `${{prefix}}-1`, label: `${{prefix}} 选项一`, effect: `${{prefix}} 效果一`, selected: true }};
-          const second = {{ id: `${{prefix}}-2`, label: `${{prefix}} 选项二`, effect: `${{prefix}} 效果二`, selected: false }};
-          return {{ kind, selected_id: first.id, selected_label: first.label, options: [first, second], evidence: 'recorded' }};
-        }}
         {helpers}
-        const node = {{ visited: true, decisions: [decision('event', '事件'), decision('card_reward', '卡牌')] }};
+        const node = {{ visited: true, decisions: {json.dumps(decisions, ensure_ascii=True)} }};
         const anchor = new FakeNode('g', 'anchor');
         bindDecisionPopover(anchor, node);
         anchor.dispatch('mouseenter');
@@ -1075,17 +1140,22 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
         """
     )
 
-    for expected in (
-        "事件：事件 选项一",
-        "事件 效果一",
-        "事件 选项一",
-        "事件 选项二",
-        "卡：卡牌 选项一",
-        "卡牌 效果一",
-        "卡牌 选项一",
-        "卡牌 选项二",
-    ):
-        assert any(expected in text for text in result["allText"])
+    labels = {
+        "event": "事件",
+        "card_reward": "卡",
+        "potion": "药水",
+        "relic": "遗物",
+        "shop": "商店",
+        "rest": "休息",
+    }
+    for decision in decisions:
+        selected = next(option for option in decision["options"] if option["selected"])
+        for expected in (
+            f"{labels[decision['kind']]}：{decision['selected_label']}",
+            selected["effect"],
+            *(text for option in decision["options"] for text in (option["label"], option["effect"])),
+        ):
+            assert any(expected in text for text in result["allText"])
     assert result["openWhileFocused"] is True
     assert result["closedAfterBlur"] is True
     assert result["openWhileHovered"] is True

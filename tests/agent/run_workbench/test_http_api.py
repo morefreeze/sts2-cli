@@ -990,6 +990,115 @@ def test_recorded_map_uses_valid_older_snapshot_when_newest_is_malformed(
     assert "errors" not in payload
 
 
+def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
+    tmp_path: Path,
+) -> None:
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "recorded_decisions.jsonl"
+    )
+    source_root = tmp_path / "fixture-source"
+    source_root.mkdir()
+    (source_root / fixture.name).write_bytes(fixture.read_bytes())
+    run_id = "recorded-decisions-e2e"
+
+    class MustNotGenerate:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    service = MustNotGenerate()
+    catalog = RunCatalog(
+        [source_root], replay_parser=viewer.parse_game_progress
+    )
+    with _server(catalog, map_service=service) as base:
+        run_status, run_payload = _request(base, f"/api/run?id={run_id}")
+        map_status, map_payload = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+
+    assert run_status == map_status == 200
+    assert run_payload["run"]["run_id"] == run_id
+    assert run_payload["run"]["coverage"]["complete_run"] is True
+    assert run_payload["run"]["capabilities"]["decisions"] is True
+    assert run_payload["run"]["metadata"] == {
+        "character": "Ironclad",
+        "seed": "RECORDED-DECISIONS-SEED",
+        "game_version": "v0.107.1",
+        "checkpoint": "ppo_ironclad_13200k.zip",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 100,
+        "modifiers": [],
+        "is_multiplayer": False,
+        "started_at": 1,
+        "ended_at": 3,
+        "game_version_source": "cli",
+    }
+    assert service.requests == []
+    assert map_payload["full_map"] is True
+    assert map_payload["visited_route"] is True
+    assert map_payload["fallback_reason"] is None
+    assert map_payload["summary"] == {
+        "node_count": 6,
+        "edge_count": 5,
+        "visited_count": 5,
+        "terminal_node_id": "recorded:0:4",
+    }
+
+    visited = sorted(
+        (node for node in map_payload["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert [node["room_type"] for node in visited] == [
+        "Ancient",
+        "Monster",
+        "Unknown",
+        "Shop",
+        "RestSite",
+    ]
+    decisions = [
+        decision
+        for node in visited
+        for decision in node.get("decisions", [])
+    ]
+    assert [decision["kind"] for decision in decisions] == [
+        "event",
+        "card_reward",
+        "potion",
+        "relic",
+        "shop",
+        "rest",
+    ]
+    assert [decision["selected_label"] for decision in decisions] == [
+        "献血换取金币",
+        "剑柄打击",
+        "使用火焰药水",
+        "拾取金色神像",
+        "购买耸肩无视",
+        "休息",
+    ]
+    assert all(
+        decision["evidence"] == "recorded"
+        and len(decision["options"]) >= 2
+        and sum(option["selected"] for option in decision["options"]) == 1
+        and all(type(option["effect"]) is str and option["effect"].strip()
+                for option in decision["options"])
+        for decision in decisions
+    )
+    decision_json = json.dumps(
+        decisions, ensure_ascii=False, allow_nan=False
+    )
+    assert "/Users/" not in decision_json
+    assert "<" not in decision_json and ">" not in decision_json
+    assert json.loads(json.dumps(map_payload, allow_nan=False)) == map_payload
+
+
 def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
