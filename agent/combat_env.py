@@ -1566,14 +1566,25 @@ class CombatEnv(gym.Env):
         if type(context) is not dict:
             return None
         act = context.get("act")
-        if "floor" in state and state.get("floor") is not None:
-            floor = state.get("floor")
-        else:
-            floor = context.get("floor")
         if type(act) is not int or not 1 <= act <= 4:
             return None
-        if type(floor) is not int or not 1 <= floor <= 17:
+        state_has_floor = "floor" in state
+        context_has_floor = "floor" in context
+        if not state_has_floor and not context_has_floor:
             return None
+        state_floor = state.get("floor") if state_has_floor else None
+        context_floor = context.get("floor") if context_has_floor else None
+        if state_has_floor and (
+            type(state_floor) is not int or not 1 <= state_floor <= 17
+        ):
+            return None
+        if context_has_floor and (
+            type(context_floor) is not int or not 1 <= context_floor <= 17
+        ):
+            return None
+        if state_has_floor and context_has_floor and state_floor != context_floor:
+            return None
+        floor = state_floor if state_has_floor else context_floor
         return act, floor
 
     @staticmethod
@@ -1955,9 +1966,10 @@ class CombatEnv(gym.Env):
         reply = self._send(command)
         if decision is None or type(reply) is not dict:
             return reply
-        reply_type = reply.get("type")
-        if type(reply_type) is str and reply_type == "error":
-            return reply
+        if "type" in reply:
+            reply_type = reply.get("type")
+            if type(reply_type) is not str or reply_type == "error":
+                return reply
         if target is None:
             target = self._run_decision_target(state, decision)
         if target is not None:

@@ -295,6 +295,22 @@ def _node_at(env, coord):
     return env._run_map_snapshots[act]["_coord_lookup"][(col, row)]
 
 
+class _HostileReplyType(str):
+    __hash__ = str.__hash__
+
+    def __eq__(self, other):
+        raise AssertionError("hostile reply type comparison executed")
+
+
+class _HostileReplyMapping(dict):
+    def __eq__(self, other):
+        raise AssertionError("hostile reply mapping comparison executed")
+
+
+class _ReplyDictSubclass(dict):
+    pass
+
+
 def _csharp_boss_current_map_reply(*, boss_type="Boss", boss_id="TEST_BOSS"):
     """Exact GetFullMap shape at the terminal boss coordinate."""
     reply = _map_reply()
@@ -387,6 +403,52 @@ def test_run_decision_send_none_or_error_never_attaches(monkeypatch, tmp_path):
     assert env._send_with_run_decision(state, command) is None
     assert env._send_with_run_decision(state, command)["type"] == "error"
     assert "decisions" not in _node_at(env, (1, 0, 0))
+
+
+@pytest.mark.parametrize(
+    ("reply", "attaches"),
+    [
+        ({"decision": "map_select"}, True),
+        ({"type": "combat_play"}, True),
+        ({"type": "map_select"}, True),
+        ({"type": "error"}, False),
+        ({"type": _HostileReplyType("error")}, False),
+        ({"type": 1}, False),
+        ({"type": True}, False),
+        ({"type": _HostileReplyMapping(error=True)}, False),
+        (_ReplyDictSubclass({"type": "map_select"}), False),
+    ],
+    ids=[
+        "missing-type",
+        "combat-play",
+        "map-select",
+        "exact-error",
+        "hostile-str-subclass",
+        "integer-type",
+        "bool-type",
+        "mapping-type",
+        "reply-dict-subclass",
+    ],
+)
+def test_run_decision_reply_success_gate_fails_closed(
+    monkeypatch, tmp_path, reply, attaches
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    state = _event_decision_state()
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(state)
+    monkeypatch.setattr(env, "_send", lambda _command: reply)
+
+    result = env._send_with_run_decision(
+        state,
+        {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}},
+    )
+
+    assert result is reply
+    node = _node_at(env, (1, 0, 0))
+    assert ("decisions" in node) is attaches
 
 
 def test_run_decision_requires_exact_poll_and_cannot_pollute_stale_coord(
@@ -623,7 +685,12 @@ def test_run_decision_combat_potion_rejects_missing_room_identity(
     ("state", "expected"),
     [
         ({"context": {"act": 1, "floor": 2}}, (1, 2)),
-        ({"floor": 17, "context": {"act": 4, "floor": 1}}, (4, 17)),
+        ({"floor": 17, "context": {"act": 4}}, (4, 17)),
+        ({"floor": 2, "context": {"act": 1, "floor": 2}}, (1, 2)),
+        ({"floor": 2, "context": {"act": 1, "floor": 3}}, None),
+        ({"floor": True, "context": {"act": 1, "floor": 2}}, None),
+        ({"floor": 2, "context": {"act": 1, "floor": None}}, None),
+        ({"floor": None, "context": {"act": 1, "floor": 2}}, None),
         ({"context": {"act": True, "floor": 2}}, None),
         ({"context": {"act": 1, "floor": False}}, None),
         ({"context": {"act": 0, "floor": 2}}, None),
@@ -635,6 +702,28 @@ def test_run_decision_combat_potion_rejects_missing_room_identity(
 )
 def test_run_decision_room_identity_is_exact_and_bounded(state, expected):
     assert CombatEnv._bounded_run_room_identity(state) == expected
+
+
+def test_run_decision_conflicting_floor_sources_cannot_attach_combat_potion(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    captured_state = _combat_potion_state(floor=2)
+    conflicting_state = _combat_potion_state(floor=3)
+    conflicting_state["floor"] = 2
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(captured_state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "combat_play"})
+
+    env._send_with_run_decision(
+        conflicting_state,
+        {"cmd": "action", "action": "use_potion", "args": {"potion_index": 0}},
+    )
+
+    assert CombatEnv._bounded_run_room_identity(conflicting_state) is None
+    assert "decisions" not in _node_at(env, (1, 0, 0))
 
 
 def test_run_decision_process_kill_clears_coord_and_room_identity():
