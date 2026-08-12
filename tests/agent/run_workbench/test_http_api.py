@@ -173,6 +173,34 @@ def _branched_recorded_snapshot(
     return snapshot
 
 
+def _recorded_decision(
+    selected_label: str,
+    *,
+    selected_id: str = "EVENT.TRUSTED",
+    effect: str = "失去 6 点生命，获得一张牌",
+) -> dict:
+    return {
+        "kind": "event",
+        "selected_id": selected_id,
+        "selected_label": selected_label,
+        "options": [
+            {
+                "id": selected_id,
+                "label": selected_label,
+                "effect": effect,
+                "selected": True,
+            },
+            {
+                "id": "EVENT.LEAVE",
+                "label": "离开",
+                "effect": "不获得任何奖励",
+                "selected": False,
+            },
+        ],
+        "evidence": "recorded",
+    }
+
+
 def _native_route_matching_recorded_coordinates(
     run_id: str,
     *,
@@ -959,6 +987,315 @@ def test_recorded_map_uses_valid_older_snapshot_when_newest_is_malformed(
     assert payload["summary"]["edge_count"] == 5
     assert "warnings" not in payload
     assert "errors" not in payload
+
+
+def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "recorded-decision-authoritative-only"
+    trusted = [_recorded_decision("可信选择")]
+    forged = [_recorded_decision("伪造选择", selected_id="EVENT.FORGED")]
+    snapshot = _branched_recorded_snapshot(run_id, act=1, ts=1)
+    snapshot["visited_nodes"][0]["decisions"] = []
+    snapshot["visited_nodes"][1]["decisions"] = deepcopy(trusted)
+    snapshot["map"]["rows"][1][1].update(
+        decisions=deepcopy(forged),
+        options=deepcopy(forged[0]["options"]),
+        choices=deepcopy(forged[0]["options"]),
+    )
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            snapshot,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+    canonical = RunCatalog(
+        [tmp_path], replay_parser=_replay_parser
+    ).get_run(run_id)
+    canonical_route = [
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+    ]
+    canonical_route[1]["decisions"] = deepcopy(forged)
+    raw_snapshot = next(
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("event") == "map_snapshot"
+    )
+    raw_snapshot.update(
+        decisions=deepcopy(forged),
+        options=deepcopy(forged[0]["options"]),
+        choices=deepcopy(forged[0]["options"]),
+    )
+
+    class StaticCatalog:
+        def get_run(self, requested_run_id: str) -> dict:
+            assert requested_run_id == run_id
+            return canonical
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    parsed_snapshots = []
+    original_latest_recorded_acts = viewer.latest_recorded_acts
+
+    def captured_latest_recorded_acts(rows):
+        result = original_latest_recorded_acts(rows)
+        parsed_snapshots.extend(result[0].values())
+        return result
+
+    monkeypatch.setattr(
+        viewer,
+        "latest_recorded_acts",
+        captured_latest_recorded_acts,
+    )
+    with _server(StaticCatalog(), map_service=MustNotGenerate()) as base:
+        status, first = _request(base, f"/api/run/map?id={run_id}&act=0")
+        visited = sorted(
+            (node for node in first["nodes"] if node["visited"]),
+            key=lambda node: node["path_index"],
+        )
+        assert status == 200
+        assert "decisions" not in visited[0]
+        assert visited[1]["decisions"] == trusted
+        assert all(
+            "decisions" not in node
+            and "options" not in node
+            and "choices" not in node
+            for node in first["nodes"]
+            if not node["visited"]
+        )
+
+        visited[1]["decisions"][0]["selected_label"] = "响应篡改"
+        second_status, second = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+
+    second_visited = sorted(
+        (node for node in second["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert second_status == 200
+    assert second_visited[1]["decisions"] == trusted
+    assert canonical_route[1]["decisions"] == forged
+    assert all(
+        parsed.route_nodes[1]["decisions"] == trusted
+        for parsed in parsed_snapshots
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_authority",
+    [
+        "malformed",
+        "route-mismatch",
+        "room-type-mismatch",
+        "model-id-mismatch",
+        "act-mismatch",
+        "duplicate-coordinate",
+        "path-conflict",
+    ],
+)
+def test_recorded_decision_rejected_authority_never_leaks_forged_fields(
+    tmp_path: Path,
+    invalid_authority: str,
+) -> None:
+    run_id = f"recorded-decision-rejected-{invalid_authority}"
+    include_boss = invalid_authority == "model-id-mismatch"
+    middle_room_type = (
+        "shop" if invalid_authority == "room-type-mismatch" else "monster"
+    )
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type=middle_room_type,
+        boss_model_id="BOSS.NATIVE" if include_boss else None,
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    snapshot = _branched_recorded_snapshot(
+        run_id,
+        act=1,
+        ts=1,
+        visit_boss=include_boss,
+    )
+    snapshot["visited_nodes"][1]["decisions"] = [
+        _recorded_decision("原始可信选择")
+    ]
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            snapshot,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+    canonical = RunCatalog(
+        [tmp_path], replay_parser=_replay_parser
+    ).get_run(run_id)
+    route_nodes = [
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+        and any(
+            item.get("source_kind") == "native_run"
+            for item in node.get("_workbench_provenance", [])
+        )
+    ]
+    raw_snapshot = next(
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("event") == "map_snapshot"
+    )
+    forged = [_recorded_decision("伪造选择", selected_id="EVENT.FORGED")]
+    route_nodes[1].update(
+        decisions=deepcopy(forged),
+        options=deepcopy(forged[0]["options"]),
+        choices=deepcopy(forged[0]["options"]),
+    )
+    raw_snapshot.update(
+        decisions=deepcopy(forged),
+        options=deepcopy(forged[0]["options"]),
+        choices=deepcopy(forged[0]["options"]),
+    )
+
+    if invalid_authority == "malformed":
+        raw_snapshot["map"].pop("type")
+    elif invalid_authority == "route-mismatch":
+        route_nodes[1]["col"] = 6
+    elif invalid_authority == "act-mismatch":
+        raw_snapshot["act"] = 2
+        raw_snapshot["map"]["context"]["act"] = 2
+    elif invalid_authority == "duplicate-coordinate":
+        raw_snapshot["map"]["rows"][1].append(
+            deepcopy(raw_snapshot["map"]["rows"][1][0])
+        )
+    elif invalid_authority == "path-conflict":
+        raw_snapshot["map"]["rows"][0][0]["children"] = [
+            {"col": 1, "row": 1}
+        ]
+
+    class StaticCatalog:
+        def get_run(self, requested_run_id: str) -> dict:
+            assert requested_run_id == run_id
+            return deepcopy(canonical)
+
+    class CapturingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="recorded decision rejected")
+
+    service = CapturingFallbackService()
+    with _server(StaticCatalog(), map_service=service) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert payload["fallback_reason"] == "recorded decision rejected"
+    assert all(
+        "decisions" not in node
+        and "options" not in node
+        and "choices" not in node
+        for node in payload["nodes"]
+    )
+
+
+def test_recorded_decision_mixed_native_deltas_map_by_trusted_path_index(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-mixed-native"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    native["map_point_history"][1]["player_stats"][0]["cards_gained"] = [
+        "CARD.NATIVE.EXACT"
+    ]
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    snapshot = _branched_recorded_snapshot(run_id, act=1, ts=1)
+    trusted = [_recorded_decision("路径 1 的可信选择")]
+    snapshot["visited_nodes"][1]["decisions"] = deepcopy(trusted)
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            snapshot,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=MustNotGenerate(),
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    visited = sorted(
+        (node for node in payload["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert status == 200
+    assert visited[1]["decisions"] == trusted
+    assert visited[1]["deltas"]["cards_gained"] == {
+        "value": ["CARD.NATIVE.EXACT"],
+        "quality": "exact",
+    }
+
+
+def test_recorded_decision_multi_act_selects_only_the_requested_act(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-multi-act"
+    act_one = _branched_recorded_snapshot(run_id, act=1, ts=1)
+    act_three = _branched_recorded_snapshot(run_id, act=3, ts=2)
+    first_decision = [_recorded_decision("第一幕选择", selected_id="EVENT.ACT1")]
+    third_decision = [_recorded_decision("第三幕选择", selected_id="EVENT.ACT3")]
+    act_one["visited_nodes"][1]["decisions"] = deepcopy(first_decision)
+    act_three["visited_nodes"][2]["decisions"] = deepcopy(third_decision)
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            act_one,
+            act_three,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=MustNotGenerate(),
+    ) as base:
+        first_status, first = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        third_status, third = _request(
+            base, f"/api/run/map?id={run_id}&act=2"
+        )
+
+    first_visited = sorted(
+        (node for node in first["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    third_visited = sorted(
+        (node for node in third["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert first_status == third_status == 200
+    assert first_visited[1]["decisions"] == first_decision
+    assert all("decisions" not in node for node in first_visited[2:])
+    assert third_visited[2]["decisions"] == third_decision
+    assert all("decisions" not in node for node in third_visited[:2])
 
 
 def test_entirely_malformed_recorded_maps_keep_existing_route_fallback(

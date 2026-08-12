@@ -433,6 +433,11 @@ def _run_map_payload(
         act_index,
         recorded_nodes,
     )
+    trusted_recorded_route = (
+        authoritative_recorded.route_nodes
+        if authoritative_recorded is not None
+        else ()
+    )
     if authoritative_recorded is not None:
         act_map = authoritative_recorded.act_map
     else:
@@ -500,6 +505,11 @@ def _run_map_payload(
                 source_node = recorded_nodes[path_index]
                 node["deltas"] = deepcopy(source_node.get("deltas") or {})
                 node["recorded_node_id"] = source_node.get("id")
+            if 0 <= path_index < len(trusted_recorded_route):
+                trusted_route_node = trusted_recorded_route[path_index]
+                trusted_decisions = trusted_route_node.get("decisions")
+                if type(trusted_decisions) is list and trusted_decisions:
+                    node["decisions"] = deepcopy(trusted_decisions)
         model_id = _node_model_id(source_node or {})
         try:
             art = art_resolver.resolve(node["room_type"], model_id=model_id)
