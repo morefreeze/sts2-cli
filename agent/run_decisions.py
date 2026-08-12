@@ -255,9 +255,12 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
     action = command.get("action")
     if type(action) is not str:
         return None
+    state_decision = state.get("decision")
+    if type(state_decision) is not str:
+        return None
 
     if action == "select_card_reward":
-        if state.get("decision") != "card_reward":
+        if state_decision != "card_reward":
             return None
         options = _source_options(
             state.get("cards"), _command_arg(command, "card_index")
@@ -272,7 +275,7 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
 
     if action == "skip_card_reward":
         if (
-            state.get("decision") != "card_reward"
+            state_decision != "card_reward"
             or type(state.get("cards")) is not list
         ):
             return None
@@ -302,12 +305,11 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
         return _decision("card_reward", options)
 
     if action == "choose_option":
-        decision = state.get("decision")
         kind = (
             "rest"
-            if decision == "rest_site"
+            if state_decision == "rest_site"
             else "event"
-            if decision == "event_choice"
+            if state_decision == "event_choice"
             else None
         )
         if kind is None:
@@ -339,20 +341,19 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
         )
 
     if action == "remove_card":
-        if state.get("decision") != "shop":
+        if state_decision != "shop":
             return None
         return _synthetic("shop", "REMOVE_CARD", "移除卡牌")
 
     if action == "leave_room":
-        decision = state.get("decision")
-        if decision == "event_choice":
+        if state_decision == "event_choice":
             return _synthetic("event", "LEAVE_ROOM", "离开房间")
-        if decision == "shop":
+        if state_decision == "shop":
             return _synthetic("shop", "LEAVE_ROOM", "离开房间")
         return None
 
-    if action == "card_select":
-        if state.get("decision") != "card_select":
+    if action == "select_cards":
+        if state_decision != "card_select":
             return None
         kind = _room_kind(state)
         if kind is None:
@@ -494,7 +495,6 @@ def validate_run_decisions(value: object) -> list[dict]:
             decisions,
             ensure_ascii=False,
             allow_nan=False,
-            separators=(",", ":"),
         ).encode("utf-8", errors="strict")
     except (TypeError, ValueError, UnicodeEncodeError):
         raise _error("run decisions are not strict JSON") from None

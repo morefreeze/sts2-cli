@@ -299,13 +299,22 @@ def test_card_select_requires_one_valid_index_and_noncombat_room(
         ],
     }
 
-    result = capture_run_decision(state, _command("card_select", indices="6"))
+    result = capture_run_decision(state, _command("select_cards", indices="6"))
 
     assert result is not None
     assert result["kind"] == expected_kind
     assert result["selected_id"] == "BASH"
-    assert capture_run_decision(state, _command("card_select", indices="2,6")) is None
-    assert capture_run_decision(state, _command("card_select", indices="bogus")) is None
+    assert capture_run_decision(state, _command("select_cards", indices="2,6")) is None
+    assert capture_run_decision(state, _command("select_cards", indices="bogus")) is None
+
+
+def test_invented_card_select_action_is_not_captured() -> None:
+    state = {
+        "decision": "card_select",
+        "context": {"room_type": "RestSiteRoom"},
+        "cards": [{"index": 0, "id": "BASH", "name": "痛击"}],
+    }
+    assert capture_run_decision(state, _command("card_select", indices="0")) is None
 
 
 def test_combat_card_select_is_excluded() -> None:
@@ -314,7 +323,7 @@ def test_combat_card_select_is_excluded() -> None:
         "context": {"room_type": "Boss"},
         "cards": [{"index": 0, "id": "BASH", "name": "痛击"}],
     }
-    assert capture_run_decision(state, _command("card_select", indices="0")) is None
+    assert capture_run_decision(state, _command("select_cards", indices="0")) is None
 
 
 def test_capture_drops_candidates_without_identity_and_missing_selection() -> None:
@@ -396,6 +405,89 @@ class _StrSubclass(str):
     pass
 
 
+class _HostileStr(str):
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("VERY_SECRET_STATE")
+
+
+@pytest.mark.parametrize(
+    ("state", "command"),
+    [
+        (
+            {
+                "decision": _HostileStr("event_choice"),
+                "options": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            _command("choose_option", option_index=0),
+        ),
+        (
+            {
+                "decision": _HostileStr("card_reward"),
+                "cards": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            _command("select_card_reward", card_index=0),
+        ),
+        (
+            {
+                "decision": _HostileStr("card_reward"),
+                "cards": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            _command("skip_card_reward"),
+        ),
+        (
+            {
+                "decision": _HostileStr("combat_play"),
+                "player": {
+                    "potions": [{"index": 0, "id": "P", "label": "药水"}]
+                },
+            },
+            _command("use_potion", potion_index=0),
+        ),
+        (
+            {
+                "decision": _HostileStr("shop"),
+                "potions": [{"index": 0, "id": "P", "label": "药水"}],
+            },
+            _command("buy_potion", potion_index=0),
+        ),
+        (
+            {
+                "decision": _HostileStr("shop"),
+                "relics": [{"index": 0, "id": "R", "label": "遗物"}],
+            },
+            _command("buy_relic", relic_index=0),
+        ),
+        (
+            {
+                "decision": _HostileStr("shop"),
+                "cards": [{"index": 0, "id": "C", "label": "卡牌"}],
+            },
+            _command("buy_card", card_index=0),
+        ),
+        ({"decision": _HostileStr("shop")}, _command("remove_card")),
+        ({"decision": _HostileStr("event_choice")}, _command("leave_room")),
+        (
+            {
+                "decision": _HostileStr("card_select"),
+                "context": {"room_type": "RestSiteRoom"},
+                "cards": [{"index": 0, "id": "C", "label": "卡牌"}],
+            },
+            _command("select_cards", indices="0"),
+        ),
+    ],
+)
+def test_capture_rejects_hostile_decision_string_without_comparing_it(
+    state: dict, command: dict
+) -> None:
+    assert capture_run_decision(state, command) is None
+
+
+def test_capture_rejects_hostile_action_string_without_comparing_it() -> None:
+    state = {"decision": "event_choice"}
+    command = {"cmd": "action", "action": _HostileStr("leave_room"), "args": {}}
+    assert capture_run_decision(state, command) is None
+
+
 @pytest.mark.parametrize(
     "bad_value",
     [
@@ -475,6 +567,70 @@ def test_validation_rejects_payload_larger_than_32_kib() -> None:
 
     with pytest.raises(DecisionEvidenceError, match="payload limit"):
         validate_run_decisions(oversized)
+
+
+def test_validation_uses_actual_writer_encoding_for_payload_limit() -> None:
+    label = "x" * 254
+    effect = "y" * 254
+    options = [
+        _option(str(index), label, selected=index == 0, effect=effect)
+        for index in range(3)
+    ]
+    value = [
+        _decision(selected_id="0", selected_label=label, options=options)
+        for _ in range(MAX_DECISIONS_PER_NODE)
+    ]
+    compact = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    writer = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    assert len(compact) == 32305
+    assert len(writer) == 32832
+
+    with pytest.raises(DecisionEvidenceError, match="payload limit"):
+        validate_run_decisions(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _decision(
+            selected_id="i" * (MAX_ID_CHARS + 1),
+            options=[
+                _option("i" * (MAX_ID_CHARS + 1), "label", selected=True)
+            ],
+        ),
+        _decision(
+            selected_label="l" * (MAX_LABEL_CHARS + 1),
+            options=[
+                _option("id", "l" * (MAX_LABEL_CHARS + 1), selected=True)
+            ],
+        ),
+    ],
+    ids=["257-char-id", "257-char-label"],
+)
+def test_validation_rejects_257_character_ids_and_labels(value: dict) -> None:
+    with pytest.raises(DecisionEvidenceError):
+        validate_run_decisions([value])
+
+
+def test_validation_accepts_exactly_256_character_ids_and_labels() -> None:
+    option_id = "i" * MAX_ID_CHARS
+    label = "l" * MAX_LABEL_CHARS
+    result = validate_run_decisions(
+        [
+            _decision(
+                selected_id=option_id,
+                selected_label=label,
+                options=[_option(option_id, label, selected=True)],
+            )
+        ]
+    )
+    assert result[0]["selected_id"] == option_id
+    assert result[0]["selected_label"] == label
 
 
 def test_append_accepts_16_then_rejects_17_and_detaches_inputs() -> None:
