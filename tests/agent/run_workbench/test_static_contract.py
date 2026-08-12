@@ -692,7 +692,7 @@ def test_map_decision_validator_rejects_malformed_or_unbounded_recorded_evidence
     assert result["nodeGetterCalls"] == 0
 
 
-def test_map_derived_decision_accepts_only_safe_nonblank_string_values():
+def test_map_derived_decision_accepts_real_safe_shapes_for_all_six_fields():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     constants = "\n".join(
         line.strip()
@@ -707,15 +707,44 @@ def test_map_derived_decision_accepts_only_safe_nonblank_string_values():
         f"""
         {constants}
         {helpers}
-        function derived(value) {{
+        function derived(key, value, quality = 'derived') {{
           return nodeDecisionSummary({{
             visited: true,
-            deltas: {{ cards_gained: {{ quality: 'derived', value }} }},
+            deltas: {{ [key]: {{ quality, value }} }},
           }});
         }}
-        const emoji = derived([`${{'x'.repeat(40)}}😀${{'z'.repeat(80)}}`]);
-        const invalid = [0, -1, false, {{}}, null, '   ', '\\ud800'].map((value) => derived([value]));
+        const cases = [
+          derived('cards_gained', [{{ id: 'CARD.BASH', upgraded: false }}]),
+          derived('potions_gained', [{{ id: 'POTION.FIRE' }}], 'exact'),
+          derived('relics_gained', [{{ id: 'RELIC.ANCHOR' }}]),
+          derived('cards_upgraded', [{{ id: 'CARD.STRIKE', upgraded: true }}]),
+          derived('cards_removed', [{{ id: 'CARD.DEFEND' }}], 'exact'),
+          derived('cards_transformed', [{{ from: 'CARD.STRIKE', to: 'CARD.BASH' }}], 'exact'),
+          derived('relics_gained', [{{ choice: 'RELIC.MARBLE', was_picked: true }}], 'exact'),
+          derived('potions_gained', [{{ choice: 'POTION.BLOCK', was_picked: true }}], 'exact'),
+        ];
+        const direct = derived('cards_gained', ['CARD.DIRECT']);
+        const emoji = derived('cards_gained', [`${{'x'.repeat(40)}}😀${{'z'.repeat(80)}}`]);
+        function getterItem() {{
+          const item = {{}};
+          Object.defineProperty(item, 'id', {{ enumerable: true, get() {{ throw new Error('LEAK'); }} }});
+          return item;
+        }}
+        const invalidItems = [
+          0, -1, false, {{}}, null, '   ', '\\ud800',
+          {{ id: 7 }}, {{ id: '\\ud800' }}, {{ id: 'x'.repeat(513) }}, getterItem(),
+          Object.create({{ id: 'PROTO.SECRET' }}),
+        ];
+        const invalid = invalidItems.map((value) => derived('cards_gained', [value]));
+        const invalidTransformed = [
+          {{ from: 1, to: 'CARD.BASH' }},
+          {{ from: 'CARD.STRIKE', to: false }},
+          {{ from: {{ id: 'NESTED' }}, to: 'CARD.BASH' }},
+          Object.create({{ from: 'PROTO', to: 'SECRET' }}),
+        ].map((value) => derived('cards_transformed', [value]));
         console.log(JSON.stringify({{
+          cases,
+          direct,
           emoji,
           emojiScalars: Array.from(emoji.label).length,
           emojiValid: !Array.from(emoji.label).some((ch) => {{
@@ -723,15 +752,130 @@ def test_map_derived_decision_accepts_only_safe_nonblank_string_values():
             return code >= 0xD800 && code <= 0xDFFF;
           }}),
           invalid,
+          invalidTransformed,
         }}));
         """
     )
 
+    assert [case["label"] for case in result["cases"]] == [
+        "获得 CARD.BASH",
+        "获得 POTION.FIRE",
+        "获得 RELIC.ANCHOR",
+        "升级 CARD.STRIKE",
+        "移除 CARD.DEFEND",
+        "变化 CARD.STRIKE → CARD.BASH",
+        "获得 RELIC.MARBLE",
+        "获得 POTION.BLOCK",
+    ]
+    assert result["direct"]["label"] == "获得 CARD.DIRECT"
     assert result["emoji"]["prefix"] == "推导"
     assert result["emojiScalars"] <= 72
     assert result["emojiValid"] is True
     assert "😀" in result["emoji"]["label"]
-    assert result["invalid"] == [None] * 7
+    assert result["invalid"] == [None] * 12
+    assert result["invalidTransformed"] == [None] * 4
+
+
+def test_map_decision_byte_limit_matches_python_default_json_encoding():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderDecisionSummary"
+    )
+
+    def decisions(effect_lengths: list[int], *, special: str = "") -> list[dict]:
+        result: list[dict] = []
+        offset = 0
+        options_per_decision = len(effect_lengths) // 2
+        for decision_index in range(2):
+            options = []
+            for option_index in range(options_per_decision):
+                effect = "x" * effect_lengths[offset]
+                if special and decision_index == 0 and option_index == 0:
+                    effect = special
+                option_id = f"d{decision_index}-o{option_index}"
+                options.append(
+                    {
+                        "id": option_id,
+                        "label": f"label{decision_index}-{option_index}",
+                        "effect": effect,
+                        "selected": option_index == 0,
+                    }
+                )
+                offset += 1
+            result.append(
+                {
+                    "kind": "event",
+                    "selected_id": options[0]["id"],
+                    "selected_label": options[0]["label"],
+                    "options": options,
+                    "evidence": "recorded",
+                }
+            )
+        return result
+
+    reviewer = decisions([490] * 48 + [489] * 10)
+    accepted = decisions([488] * 58)
+    rejected = decisions([489] * 58)
+    escaped = decisions(
+        [1] * 58,
+        special='中文😀\\"\u2028\u0000\b\f\n\r\t',
+    )
+
+    def sizes(value: list[dict]) -> dict[str, int]:
+        return {
+            "python": len(
+                json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            ),
+            "compact": len(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ),
+        }
+
+    fixtures = {
+        "reviewer": reviewer,
+        "accepted": accepted,
+        "rejected": rejected,
+        "escaped": escaped,
+    }
+    expected = {name: sizes(value) for name, value in fixtures.items()}
+    assert expected["reviewer"] == {"compact": 32341, "python": 32822}
+    assert expected["accepted"]["python"] <= 32768
+    assert expected["rejected"]["python"] > 32768
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        const fixtures = {json.dumps(fixtures, ensure_ascii=True)};
+        const result = Object.fromEntries(Object.entries(fixtures).map(([name, value]) => [name, {{
+          accepted: validateRecordedDecisions(value) !== null,
+          pythonBytes: pythonDefaultJSONByteLength(value),
+          compactBytes: new TextEncoder().encode(JSON.stringify(value)).length,
+        }}]));
+        console.log(JSON.stringify(result));
+        """
+    )
+
+    assert result["reviewer"] == {
+        "accepted": False,
+        "pythonBytes": 32822,
+        "compactBytes": 32341,
+    }
+    assert result["accepted"]["accepted"] is True
+    assert result["rejected"]["accepted"] is False
+    for name in fixtures:
+        assert result[name]["pythonBytes"] == expected[name]["python"]
+        assert result[name]["compactBytes"] == expected[name]["compact"]
 
 
 def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():

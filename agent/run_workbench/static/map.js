@@ -343,13 +343,21 @@
     };
   }
 
+  function pythonDefaultJSONByteLength(decisions) {
+    const compactBytes = new TextEncoder().encode(JSON.stringify(decisions)).length;
+    if (!decisions.length) return compactBytes;
+    const optionCount = decisions.reduce((total, decision) => total + decision.options.length, 0);
+    const defaultSeparatorSpaces = 9 * decisions.length + 8 * optionCount - 1;
+    return compactBytes + defaultSeparatorSpaces;
+  }
+
   function validateRecordedDecisions(value) {
     const rawDecisions = ordinaryArrayValues(value, DECISION_MAX_COUNT);
     if (!rawDecisions) return null;
     const decisions = rawDecisions.map(validatedRecordedDecision);
     if (decisions.some((decision) => decision === null)) return null;
     try {
-      if (new TextEncoder().encode(JSON.stringify(decisions)).length > DECISION_MAX_BYTES) return null;
+      if (pythonDefaultJSONByteLength(decisions) > DECISION_MAX_BYTES) return null;
     } catch (_error) {
       return null;
     }
@@ -374,14 +382,69 @@
     }));
   }
 
-  function knownDeltaListLabels(items) {
+  function ordinaryDataDescriptors(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    let prototype;
+    let names;
+    let symbols;
+    try {
+      prototype = Object.getPrototypeOf(value);
+      names = Object.getOwnPropertyNames(value);
+      symbols = Object.getOwnPropertySymbols(value);
+    } catch (_error) {
+      return null;
+    }
+    if ((prototype !== Object.prototype && prototype !== null) || symbols.length
+      || names.includes('__proto__') || names.includes('constructor')) return null;
+    const descriptors = Object.create(null);
+    for (const name of names) {
+      let descriptor;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(value, name);
+      } catch (_error) {
+        return null;
+      }
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null;
+      descriptors[name] = descriptor.value;
+    }
+    return descriptors;
+  }
+
+  function stableDeltaIdentifier(value) {
+    return exactDecisionText(value, DECISION_MAX_ID_SCALARS);
+  }
+
+  function derivedDeltaItemLabel(fieldKey, item) {
+    const direct = stableDeltaIdentifier(item);
+    if (direct) return boundedDecisionText(direct, DELTA_ITEM_LABEL_LIMIT);
+    const record = ordinaryDataDescriptors(item);
+    if (!record) return '';
+
+    if (fieldKey === 'cards_transformed') {
+      const names = Object.keys(record);
+      if (names.length !== 2 || !names.includes('from') || !names.includes('to')) return '';
+      const from = stableDeltaIdentifier(record.from);
+      const to = stableDeltaIdentifier(record.to);
+      return from && to ? boundedTransformationLabel(from, to) : '';
+    }
+
+    const identifier = stableDeltaIdentifier(record.id);
+    if (identifier) return boundedDecisionText(identifier, DELTA_ITEM_LABEL_LIMIT);
+    if (fieldKey === 'relics_gained' || fieldKey === 'potions_gained') {
+      const names = Object.keys(record);
+      if (names.length === 2 && names.includes('choice') && names.includes('was_picked')
+        && record.was_picked === true) {
+        const choice = stableDeltaIdentifier(record.choice);
+        return choice ? boundedDecisionText(choice, DELTA_ITEM_LABEL_LIMIT) : '';
+      }
+    }
+    return '';
+  }
+
+  function knownDeltaListLabels(fieldKey, items) {
     const values = ordinaryArrayValues(items, DECISION_MAX_OPTIONS);
     if (!values || !values.length) return '';
-    const labels = values.map((item) => {
-      const scalars = unicodeScalarArray(item);
-      if (!scalars || !scalars.length || !item.trim() || scalars.length > DECISION_MAX_EFFECT_SCALARS) return '';
-      return boundedDecisionText(item, DELTA_ITEM_LABEL_LIMIT);
-    });
+    const labels = values.map((item) => derivedDeltaItemLabel(fieldKey, item));
     if (!labels.length || labels.some((label) => !label)) return '';
     const visible = labels.slice(0, DELTA_LIST_LABEL_LIMIT);
     const overflow = labels.length - visible.length;
@@ -415,7 +478,7 @@
       const measurement = node.deltas && node.deltas[field.key];
       if (!measurement || !['exact', 'derived'].includes(measurement.quality)) continue;
       if (!Array.isArray(measurement.value) || !measurement.value.length) continue;
-      const labels = knownDeltaListLabels(measurement.value);
+      const labels = knownDeltaListLabels(field.key, measurement.value);
       if (!labels) continue;
       return {
         prefix: '推导',
