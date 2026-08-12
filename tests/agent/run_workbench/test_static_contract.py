@@ -776,6 +776,61 @@ def test_map_derived_decision_accepts_real_safe_shapes_for_all_six_fields():
     assert result["invalidTransformed"] == [None] * 4
 
 
+def test_map_decision_transformed_delta_bounds_each_side_by_unicode_scalars():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderDecisionSummary"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        function transformed(from, to, next = null) {{
+          const deltas = {{
+            cards_transformed: {{ quality: 'derived', value: [{{ from, to }}] }},
+          }};
+          if (next !== null) deltas.potions_gained = {{ quality: 'exact', value: [next] }};
+          return nodeDecisionSummary({{ visited: true, deltas }});
+        }}
+        const reviewer = transformed(`${{'x'.repeat(20)}}😀z`, 'CARD.BASH');
+        const bothEmoji = transformed(`${{'f'.repeat(20)}}😀tail`, `${{'t'.repeat(21)}}😀tail`);
+        const exactBoundary = transformed(`${{'a'.repeat(21)}}😀`, `${{'界'.repeat(22)}}😀`);
+        const longChinese = transformed('前'.repeat(200), '后'.repeat(200));
+        const emptyFrom = transformed('', 'CARD.BASH');
+        const emptyTo = transformed('CARD.STRIKE', '   ');
+        const invalidTo = transformed('CARD.STRIKE', '\\ud800');
+        console.log(JSON.stringify({{
+          reviewer, bothEmoji, exactBoundary, longChinese,
+          emptyFrom, emptyTo, invalidTo,
+          scalarLengths: [reviewer, bothEmoji, exactBoundary, longChinese].map((summary) =>
+            Array.from(summary.label.replace(/^变化 /, '')).length),
+          validUnicode: [reviewer, bothEmoji, exactBoundary, longChinese].every((summary) =>
+            !Array.from(summary.label).some((scalar) => {{
+              const code = scalar.codePointAt(0);
+              return code >= 0xD800 && code <= 0xDFFF;
+            }})),
+        }}));
+        """
+    )
+
+    assert result["reviewer"]["label"] == "变化 " + "x" * 20 + "😀z → CARD.BASH"
+    assert "😀" in result["bothEmoji"]["label"].split(" → ")[0]
+    assert "😀" in result["bothEmoji"]["label"].split(" → ")[1]
+    assert result["exactBoundary"]["label"].count("😀") == 2
+    assert result["longChinese"]["label"].endswith("…")
+    assert all(length <= 48 for length in result["scalarLengths"])
+    assert result["validUnicode"] is True
+    assert result["emptyFrom"] is None
+    assert result["emptyTo"] is None
+    assert result["invalidTo"] is None
+
+
 def test_map_decision_byte_limit_matches_python_default_json_encoding():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     constants = "\n".join(

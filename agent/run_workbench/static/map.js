@@ -153,12 +153,34 @@
       : label;
   }
 
+  function unicodeScalarArray(value) {
+    if (typeof value !== 'string') return null;
+    const scalars = Array.from(value);
+    return scalars.some((scalar) => {
+      const codePoint = scalar.codePointAt(0);
+      return codePoint >= 0xD800 && codePoint <= 0xDFFF;
+    }) ? null : scalars;
+  }
+
+  function boundedDecisionText(value, limit = MAP_DECISION_LABEL_LIMIT) {
+    if (!Number.isInteger(limit) || limit < 1) return '';
+    const scalars = unicodeScalarArray(value && typeof value === 'string' ? value.trim() : value);
+    if (!scalars || !scalars.length) return '';
+    return scalars.length > limit
+      ? `${scalars.slice(0, Math.max(0, limit - 1)).join('')}…`
+      : scalars.join('');
+  }
+
   function boundedTransformationLabel(from, to) {
     const separator = ' → ';
     const available = DELTA_ITEM_LABEL_LIMIT - separator.length;
     const fromLimit = Math.floor(available / 2);
     const toLimit = available - fromLimit;
-    return `${boundedDeltaLabel(from, fromLimit)}${separator}${boundedDeltaLabel(to, toLimit)}`;
+    const boundedFrom = boundedDecisionText(from, fromLimit);
+    const boundedTo = boundedDecisionText(to, toLimit);
+    if (!boundedFrom || !boundedTo) return '';
+    const combined = `${boundedFrom}${separator}${boundedTo}`;
+    return Array.from(combined).length <= DELTA_ITEM_LABEL_LIMIT ? combined : '';
   }
 
   function localizedDeltaLabel(value) {
@@ -228,24 +250,6 @@
     if (!measurement || !['exact', 'derived'].includes(measurement.quality)) return false;
     if (field.kind === 'list') return Array.isArray(measurement.value) && measurement.value.length > 0;
     return typeof measurement.value === 'number' && Number.isFinite(measurement.value) && measurement.value !== 0;
-  }
-
-  function unicodeScalarArray(value) {
-    if (typeof value !== 'string') return null;
-    const scalars = Array.from(value);
-    return scalars.some((scalar) => {
-      const codePoint = scalar.codePointAt(0);
-      return codePoint >= 0xD800 && codePoint <= 0xDFFF;
-    }) ? null : scalars;
-  }
-
-  function boundedDecisionText(value, limit = MAP_DECISION_LABEL_LIMIT) {
-    if (!Number.isInteger(limit) || limit < 1) return '';
-    const scalars = unicodeScalarArray(value && typeof value === 'string' ? value.trim() : value);
-    if (!scalars || !scalars.length) return '';
-    return scalars.length > limit
-      ? `${scalars.slice(0, Math.max(0, limit - 1)).join('')}…`
-      : scalars.join('');
   }
 
   function exactDecisionText(value, limit) {
@@ -480,9 +484,11 @@
       if (!Array.isArray(measurement.value) || !measurement.value.length) continue;
       const labels = knownDeltaListLabels(field.key, measurement.value);
       if (!labels) continue;
+      const label = boundedDecisionText(`${field.verb} ${labels}`);
+      if (!label) continue;
       return {
         prefix: '推导',
-        label: boundedDecisionText(`${field.verb} ${labels}`),
+        label,
         effect: `${field.noun} · ${measurement.quality === 'derived' ? '相邻快照推导' : '精确记录'}`,
         overflow: 0,
         recorded: false,
