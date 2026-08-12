@@ -18,6 +18,8 @@ MAX_DECISIONS_BYTES = 32 * 1024
 
 _MAX_STRUCTURE_DEPTH = 4
 _MAX_STRUCTURE_NODES = 4096
+_MAX_CAPTURE_DICT_ITEMS = 256
+_MAX_CAPTURE_KEY_CHARS = 256
 _MAX_ERROR_CHARS = 160
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -46,14 +48,28 @@ def _unicode_text(value: object, maximum: int) -> str | None:
     return value
 
 
+def _capture_dict(value: object) -> dict | None:
+    if type(value) is not dict or len(value) > _MAX_CAPTURE_DICT_ITEMS:
+        return None
+    for key in value:
+        if type(key) is not str or len(key) > _MAX_CAPTURE_KEY_CHARS:
+            return None
+        try:
+            key.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return None
+    return value
+
+
 def _localized_text(value: object, maximum: int) -> str | None:
     direct = _unicode_text(value, maximum)
     if direct is not None:
         return direct
-    if type(value) is not dict:
+    localized_values = _capture_dict(value)
+    if localized_values is None:
         return None
     for locale in _LOCALIZED_KEYS:
-        localized = _unicode_text(value.get(locale), maximum)
+        localized = _unicode_text(localized_values.get(locale), maximum)
         if localized is not None:
             return localized
     return None
@@ -66,12 +82,20 @@ def _safe_int(value: object) -> int | None:
 
 
 def _candidate_index(candidate: dict) -> int | None:
-    return _safe_int(candidate.get("index"))
+    safe_candidate = _capture_dict(candidate)
+    return (
+        _safe_int(safe_candidate.get("index"))
+        if safe_candidate is not None
+        else None
+    )
 
 
 def _candidate_id(candidate: dict) -> str | None:
+    safe_candidate = _capture_dict(candidate)
+    if safe_candidate is None:
+        return None
     for key in ("id", "option_id"):
-        text = _unicode_text(candidate.get(key), MAX_ID_CHARS)
+        text = _unicode_text(safe_candidate.get(key), MAX_ID_CHARS)
         if text is not None:
             return text
     index = _candidate_index(candidate)
@@ -79,50 +103,63 @@ def _candidate_id(candidate: dict) -> str | None:
 
 
 def _candidate_label(candidate: dict, option_id: str) -> str | None:
-    label = _unicode_text(candidate.get("label"), MAX_LABEL_CHARS)
+    safe_candidate = _capture_dict(candidate)
+    if safe_candidate is None:
+        return None
+    label = _unicode_text(safe_candidate.get("label"), MAX_LABEL_CHARS)
     if label is not None:
         return label
-    label = _localized_text(candidate.get("name"), MAX_LABEL_CHARS)
+    label = _localized_text(safe_candidate.get("name"), MAX_LABEL_CHARS)
     if label is not None:
         return label
     for key in ("option_id", "id"):
-        label = _unicode_text(candidate.get(key), MAX_LABEL_CHARS)
+        label = _unicode_text(safe_candidate.get(key), MAX_LABEL_CHARS)
         if label is not None:
             return label
     return _unicode_text(option_id, MAX_LABEL_CHARS)
 
 
 def _candidate_effect(candidate: dict) -> str | None:
+    safe_candidate = _capture_dict(candidate)
+    if safe_candidate is None:
+        return None
     for key in ("description", "effect", "text"):
-        effect = _localized_text(candidate.get(key), MAX_EFFECT_CHARS)
+        effect = _localized_text(safe_candidate.get(key), MAX_EFFECT_CHARS)
         if effect is not None:
             return effect
     return None
 
 
 def _candidate_option(candidate: object, selected_index: int) -> dict | None:
-    if type(candidate) is not dict:
+    safe_candidate = _capture_dict(candidate)
+    if safe_candidate is None:
         return None
-    option_id = _candidate_id(candidate)
+    option_id = _candidate_id(safe_candidate)
     if option_id is None:
         return None
-    label = _candidate_label(candidate, option_id)
+    label = _candidate_label(safe_candidate, option_id)
     if label is None:
         return None
-    index = _candidate_index(candidate)
+    index = _candidate_index(safe_candidate)
     return {
         "id": option_id,
         "label": label,
-        "effect": _candidate_effect(candidate),
+        "effect": _candidate_effect(safe_candidate),
         "selected": index is not None and index == selected_index,
     }
 
 
 def _command_arg(command: dict, key: str) -> object:
-    args = command.get("args")
-    if type(args) is dict and key in args:
-        return args.get(key)
-    return command.get(key)
+    safe_command = _capture_dict(command)
+    if safe_command is None:
+        return None
+    args = safe_command.get("args")
+    if args is not None:
+        safe_args = _capture_dict(args)
+        if safe_args is None:
+            return None
+        return safe_args.get(key)
+    return safe_command.get(key)
 
 
 def _source_options(
@@ -136,6 +173,8 @@ def _source_options(
         return None
     options: list[dict] = []
     for candidate in candidates:
+        if _capture_dict(candidate) is None:
+            return None
         option = _candidate_option(candidate, index)
         if option is None:
             continue
@@ -191,8 +230,9 @@ def _capture_candidates(
         )
         selected_option = next(option for option in options if option["selected"])
         label = f"购买{selected_option['label']}"
-        if type(selected_candidate) is dict:
-            cost = _safe_int(selected_candidate.get("cost"))
+        safe_selected_candidate = _capture_dict(selected_candidate)
+        if safe_selected_candidate is not None:
+            cost = _safe_int(safe_selected_candidate.get("cost"))
             if cost is not None:
                 label = f"{label} · {cost} 金币"
         selected_label = _unicode_text(label, MAX_LABEL_CHARS)
@@ -203,8 +243,11 @@ def _capture_candidates(
 
 
 def _room_kind(state: dict) -> str | None:
-    context = state.get("context")
-    room_type = context.get("room_type") if type(context) is dict else None
+    safe_state = _capture_dict(state)
+    if safe_state is None:
+        return None
+    context = _capture_dict(safe_state.get("context"))
+    room_type = context.get("room_type") if context is not None else None
     if type(room_type) is not str or len(room_type) > 64:
         return None
     normalized = "".join(
@@ -250,7 +293,14 @@ def _synthetic(kind: str, option_id: str, label: str) -> dict | None:
 def capture_run_decision(state: dict, command: dict) -> dict | None:
     """Extract one confirmed, non-combat decision from a state/action pair."""
 
-    if type(state) is not dict or type(command) is not dict:
+    safe_state = _capture_dict(state)
+    safe_command = _capture_dict(command)
+    if safe_state is None or safe_command is None:
+        return None
+    state = safe_state
+    command = safe_command
+    command_kind = command.get("cmd")
+    if type(command_kind) is not str or command_kind != "action":
         return None
     action = command.get("action")
     if type(action) is not str:
@@ -283,8 +333,10 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
             return None
         options: list[dict] = []
         for candidate in state["cards"]:
-            if type(candidate) is not dict:
-                continue
+            safe_candidate = _capture_dict(candidate)
+            if safe_candidate is None:
+                return None
+            candidate = safe_candidate
             option_id = _candidate_id(candidate)
             if option_id is None:
                 continue
@@ -319,8 +371,10 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
         )
 
     if action == "use_potion":
-        player = state.get("player")
-        candidates = player.get("potions") if type(player) is dict else None
+        if state_decision != "combat_play":
+            return None
+        player = _capture_dict(state.get("player"))
+        candidates = player.get("potions") if player is not None else None
         return _capture_candidates(
             "potion", candidates, _command_arg(command, "potion_index")
         )
@@ -332,6 +386,8 @@ def capture_run_decision(state: dict, command: dict) -> dict | None:
     }
     purchase = purchase_actions.get(action)
     if purchase is not None:
+        if state_decision != "shop":
+            return None
         kind, source_key, index_key = purchase
         return _capture_candidates(
             kind,

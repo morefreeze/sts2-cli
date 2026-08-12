@@ -406,6 +406,8 @@ class _StrSubclass(str):
 
 
 class _HostileStr(str):
+    __hash__ = str.__hash__
+
     def __eq__(self, other: object) -> bool:
         raise RuntimeError("VERY_SECRET_STATE")
 
@@ -486,6 +488,133 @@ def test_capture_rejects_hostile_action_string_without_comparing_it() -> None:
     state = {"decision": "event_choice"}
     command = {"cmd": "action", "action": _HostileStr("leave_room"), "args": {}}
     assert capture_run_decision(state, command) is None
+
+
+@pytest.mark.parametrize(
+    ("state", "command"),
+    [
+        (
+            {
+                _HostileStr("decision"): "event_choice",
+                "options": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            _command("choose_option", option_index=0),
+        ),
+        (
+            {
+                "decision": "event_choice",
+                "options": [
+                    {"index": 0, _HostileStr("id"): "A", "label": "甲"}
+                ],
+            },
+            _command("choose_option", option_index=0),
+        ),
+        (
+            {
+                "decision": "event_choice",
+                "options": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            {
+                "cmd": "action",
+                "action": "choose_option",
+                "args": {_HostileStr("option_index"): 0},
+            },
+        ),
+    ],
+    ids=["state-key", "candidate-key", "args-key"],
+)
+def test_capture_rejects_hostile_dict_keys_without_comparing_them(
+    state: dict, command: dict
+) -> None:
+    assert capture_run_decision(state, command) is None
+
+
+@pytest.mark.parametrize(
+    ("state", "command"),
+    [
+        (
+            {
+                "decision": "event_choice",
+                "options": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            {
+                "cmd": "map",
+                "action": "choose_option",
+                "args": {"option_index": 0},
+            },
+        ),
+        (
+            {
+                "decision": "event_choice",
+                "potions": [{"index": 0, "id": "P", "label": "药水"}],
+            },
+            _command("buy_potion", potion_index=0),
+        ),
+        (
+            {
+                "decision": "shop",
+                "player": {
+                    "potions": [{"index": 0, "id": "P", "label": "药水"}]
+                },
+            },
+            _command("use_potion", potion_index=0),
+        ),
+    ],
+    ids=["non-action-command", "event-buy", "noncombat-use"],
+)
+def test_capture_rejects_mismatched_command_and_state_pairs(
+    state: dict, command: dict
+) -> None:
+    assert capture_run_decision(state, command) is None
+
+
+@pytest.mark.parametrize(
+    ("state", "command", "expected_kind"),
+    [
+        (
+            {
+                "decision": "event_choice",
+                "options": [{"index": 0, "id": "A", "label": "甲"}],
+            },
+            _command("choose_option", option_index=0),
+            "event",
+        ),
+        (
+            {
+                "decision": "shop",
+                "potions": [{"index": 0, "id": "P", "label": "药水"}],
+            },
+            _command("buy_potion", potion_index=0),
+            "potion",
+        ),
+        (
+            {
+                "decision": "combat_play",
+                "player": {
+                    "potions": [{"index": 0, "id": "P", "label": "药水"}]
+                },
+            },
+            _command("use_potion", potion_index=0),
+            "potion",
+        ),
+        (
+            {
+                "decision": "card_select",
+                "context": {"room_type": "RestSiteRoom"},
+                "cards": [{"index": 0, "id": "C", "label": "卡牌"}],
+            },
+            _command("select_cards", indices="0"),
+            "rest",
+        ),
+    ],
+    ids=["event-choice", "shop-buy", "combat-use", "rest-card-select"],
+)
+def test_capture_accepts_valid_command_and_state_pairs(
+    state: dict, command: dict, expected_kind: str
+) -> None:
+    result = capture_run_decision(state, command)
+    assert result is not None
+    assert result["kind"] == expected_kind
 
 
 @pytest.mark.parametrize(
