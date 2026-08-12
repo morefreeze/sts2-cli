@@ -1096,6 +1096,89 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
     assert result["invalidClosed"] == [True] * 5
 
 
+def test_map_decision_popover_ignores_internal_scroll_but_closes_on_external_scroll():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    handler = _javascript_section(
+        script, "function mapDecisionScroll", "function appendDefinition"
+    )
+
+    result = _run_node_json(
+        f"""
+        class FakeNode {{
+          constructor(id, parent = null) {{
+            this.id = id;
+            this.parent = parent;
+            this.children = [];
+            this.attributes = {{}};
+            this.hidden = false;
+            this.isConnected = true;
+            this.scrollTop = 0;
+            if (parent) parent.children.push(this);
+          }}
+          contains(candidate) {{
+            return candidate === this || this.children.some((child) => child.contains(candidate));
+          }}
+          closest(selector) {{
+            if (selector !== '#mapDecisionPopover') return null;
+            let candidate = this;
+            while (candidate) {{
+              if (candidate.id === 'mapDecisionPopover') return candidate;
+              candidate = candidate.parent;
+            }}
+            return null;
+          }}
+          setAttribute(name, value) {{ this.attributes[name] = String(value); }}
+          removeAttribute(name) {{ delete this.attributes[name]; }}
+          hasAttribute(name) {{ return Object.hasOwn(this.attributes, name); }}
+        }}
+        const popover = new FakeNode('mapDecisionPopover');
+        const child = new FakeNode('child', popover);
+        const anchor = new FakeNode('anchor');
+        const external = new FakeNode('map-scroll');
+        let activeDecisionAnchor = anchor;
+        anchor.setAttribute('aria-describedby', 'mapDecisionPopover');
+        popover.scrollTop = 137;
+        function byId(id) {{ if (id === 'mapDecisionPopover') return popover; throw new Error(id); }}
+        function hideDecisionPopover() {{
+          if (activeDecisionAnchor) activeDecisionAnchor.removeAttribute('aria-describedby');
+          popover.hidden = true;
+          activeDecisionAnchor = null;
+        }}
+        {handler}
+        function snapshot() {{
+          return {{
+            hidden: popover.hidden,
+            described: anchor.hasAttribute('aria-describedby'),
+            scrollTop: popover.scrollTop,
+          }};
+        }}
+        mapDecisionScroll({{ target: popover, composedPath() {{ return [popover]; }} }});
+        const own = snapshot();
+        mapDecisionScroll({{ target: child, composedPath() {{ return [child, popover]; }} }});
+        const descendant = snapshot();
+        mapDecisionScroll({{ target: child, composedPath() {{ throw new Error('HOSTILE'); }} }});
+        const hostilePathFallback = snapshot();
+        child.isConnected = false;
+        mapDecisionScroll({{ target: child }});
+        const disconnectedChild = snapshot();
+        mapDecisionScroll({{ target: external, composedPath() {{ return [external]; }} }});
+        const outside = snapshot();
+        console.log(JSON.stringify({{ own, descendant, hostilePathFallback, disconnectedChild, outside }}));
+        """
+    )
+
+    retained = {"hidden": False, "described": True, "scrollTop": 137}
+    assert result["own"] == retained
+    assert result["descendant"] == retained
+    assert result["hostilePathFallback"] == retained
+    assert result["disconnectedChild"] == retained
+    assert result["outside"] == {
+        "hidden": True,
+        "described": False,
+        "scrollTop": 137,
+    }
+
+
 def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -1125,7 +1208,7 @@ def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     assert "event.key === 'Escape'" in show
     assert "event.stopPropagation()" in show
     assert "window.addEventListener('resize'" in script
-    assert "window.addEventListener('scroll'" in script
+    assert "window.addEventListener('scroll', mapDecisionScroll, true)" in script
     assert load.index("hideDecisionPopover()") < load.index("clear(byId('mapSvg'))")
     assert "event.key === 'Enter' || event.key === ' '" in nodes
     assert "selectNode(node, group)" in nodes

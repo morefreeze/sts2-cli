@@ -655,6 +655,35 @@
     activeDecisionAnchor = null;
   }
 
+  function mapDecisionScroll(event) {
+    const popover = byId('mapDecisionPopover');
+    let path = [];
+    if (event && typeof event.composedPath === 'function') {
+      try {
+        const candidate = event.composedPath();
+        if (Array.isArray(candidate)) path = candidate;
+      } catch (_error) {
+        path = [];
+      }
+    }
+    if (path.includes(popover)) return;
+
+    const target = event && event.target;
+    if (target && typeof target === 'object') {
+      try {
+        if (typeof popover.contains === 'function' && popover.contains(target)) return;
+      } catch (_error) {
+        return;
+      }
+      try {
+        if (typeof target.closest === 'function' && target.closest('#mapDecisionPopover') === popover) return;
+      } catch (_error) {
+        return;
+      }
+    }
+    hideDecisionPopover();
+  }
+
   function bindDecisionPopover(anchor, node) {
     const state = { hovered: false, focused: false };
     anchor.addEventListener('mouseenter', () => {
@@ -977,7 +1006,7 @@
   byId('mapBackButton').addEventListener('click', closeMapPage);
   byId('actTabs').addEventListener('keydown', handleActTabKeydown);
   window.addEventListener('resize', () => hideDecisionPopover());
-  window.addEventListener('scroll', () => hideDecisionPopover(), true);
+  window.addEventListener('scroll', mapDecisionScroll, true);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !byId('runMapPage').hidden) {
       event.preventDefault();
