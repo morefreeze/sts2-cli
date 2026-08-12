@@ -1071,18 +1071,51 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "event",
         "card_reward",
         "potion",
-        "relic",
         "shop",
+        "relic",
         "rest",
+    ]
+    assert [decision["selected_id"] for decision in decisions] == [
+        "EVENT.BLOOD_FOR_GOLD",
+        "CARD.POMMEL_STRIKE",
+        "POTION.FIRE",
+        "CARD.SHRUG_IT_OFF",
+        "RELIC.ANCHOR",
+        "REST.SMITH",
     ]
     assert [decision["selected_label"] for decision in decisions] == [
         "献血换取金币",
         "剑柄打击",
         "使用火焰药水",
-        "拾取金色神像",
         "购买耸肩无视",
-        "休息",
+        "购买锚",
+        "锻造升级重击",
     ]
+    assert [decision["kind"] for decision in visited[2].get("decisions", [])] == []
+    assert [decision["kind"] for decision in visited[3]["decisions"]] == [
+        "shop",
+        "relic",
+    ]
+    assert visited[3]["deltas"]["gold_change"] == {
+        "value": -170,
+        "quality": "derived",
+    }
+    assert visited[3]["deltas"]["cards_gained"] == {
+        "value": [{"id": "CARD.SHRUG_IT_OFF", "upgraded": False}],
+        "quality": "derived",
+    }
+    assert visited[3]["deltas"]["relics_gained"] == {
+        "value": [{"id": "RELIC.ANCHOR"}],
+        "quality": "derived",
+    }
+    assert visited[4]["deltas"]["hp_change"] == {
+        "value": 0,
+        "quality": "derived",
+    }
+    assert visited[4]["deltas"]["cards_upgraded"] == {
+        "value": [{"id": "CARD.BASH", "upgraded": True}],
+        "quality": "derived",
+    }
     assert all(
         decision["evidence"] == "recorded"
         and len(decision["options"]) >= 2
