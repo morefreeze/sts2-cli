@@ -557,6 +557,40 @@
     return true;
   }
 
+  function positionDecisionPopover(anchor) {
+    if (!usableDecisionAnchor(anchor)) return false;
+    const popover = byId('mapDecisionPopover');
+    let anchorRect;
+    let popoverRect;
+    try {
+      anchorRect = anchor.getBoundingClientRect();
+      popoverRect = popover.getBoundingClientRect();
+    } catch (_error) {
+      return false;
+    }
+    const viewportWidth = Math.max(16, Number(window.innerWidth) || 0);
+    const viewportHeight = Math.max(16, Number(window.innerHeight) || 0);
+    const coordinateValues = [
+      anchorRect.left, anchorRect.right, anchorRect.top, anchorRect.bottom,
+    ];
+    const sizeValues = [popoverRect.width, popoverRect.height, viewportWidth, viewportHeight];
+    if (coordinateValues.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+      || sizeValues.some((value) => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+      return false;
+    }
+    const maxLeft = Math.max(8, viewportWidth - popoverRect.width - 8);
+    const left = Math.min(Math.max(8, anchorRect.right + 8), maxLeft);
+    const below = anchorRect.bottom + 8;
+    const preferredTop = below + popoverRect.height <= viewportHeight - 8
+      ? below
+      : anchorRect.top - popoverRect.height - 8;
+    const maxTop = Math.max(8, viewportHeight - popoverRect.height - 8);
+    const top = Math.min(Math.max(8, preferredTop), maxTop);
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+    return true;
+  }
+
   function showDecisionPopover(node, anchor) {
     if (!usableDecisionAnchor(anchor)) {
       hideDecisionPopover();
@@ -615,39 +649,7 @@
     activeDecisionAnchor = anchor;
     anchor.setAttribute('aria-describedby', 'mapDecisionPopover');
     popover.hidden = false;
-    let anchorRect;
-    let popoverRect;
-    try {
-      anchorRect = anchor.getBoundingClientRect();
-      popoverRect = popover.getBoundingClientRect();
-    } catch (_error) {
-      hideDecisionPopover();
-      return;
-    }
-    const viewportWidth = Math.max(16, Number(window.innerWidth) || 0);
-    const viewportHeight = Math.max(16, Number(window.innerHeight) || 0);
-    const coordinateValues = [
-      anchorRect.left, anchorRect.right, anchorRect.top, anchorRect.bottom,
-    ];
-    const sizeValues = [popoverRect.width, popoverRect.height, viewportWidth, viewportHeight];
-    if (coordinateValues.some((value) => typeof value !== 'number' || !Number.isFinite(value))
-      || sizeValues.some((value) => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
-      hideDecisionPopover();
-      return;
-    }
-    const maxLeft = Math.max(8, viewportWidth - popoverRect.width - 8);
-    const left = Math.min(
-      Math.max(8, anchorRect.right + 8),
-      maxLeft,
-    );
-    const below = anchorRect.bottom + 8;
-    const preferredTop = below + popoverRect.height <= viewportHeight - 8
-      ? below
-      : anchorRect.top - popoverRect.height - 8;
-    const maxTop = Math.max(8, viewportHeight - popoverRect.height - 8);
-    const top = Math.min(Math.max(8, preferredTop), maxTop);
-    popover.style.left = `${left}px`;
-    popover.style.top = `${top}px`;
+    if (!positionDecisionPopover(anchor)) hideDecisionPopover();
   }
 
   function hideDecisionPopover(anchor = null) {
@@ -723,32 +725,13 @@
     decisionPopoverBound = true;
   }
 
-  function mapDecisionScroll(event) {
+  function mapDecisionScroll() {
     const popover = byId('mapDecisionPopover');
-    let path = [];
-    if (event && typeof event.composedPath === 'function') {
-      try {
-        const candidate = event.composedPath();
-        if (Array.isArray(candidate)) path = candidate;
-      } catch (_error) {
-        path = [];
-      }
-    }
-    if (path.includes(popover)) return;
-
-    const target = event && event.target;
-    if (target && typeof target === 'object') {
-      try {
-        if (typeof popover.contains === 'function' && popover.contains(target)) return;
-      } catch (_error) {
-        return;
-      }
-      try {
-        if (typeof target.closest === 'function' && target.closest('#mapDecisionPopover') === popover) return;
-      } catch (_error) {
-        return;
-      }
-    }
+    if (popover.hidden) return;
+    const anchor = activeDecisionAnchor;
+    const state = anchor && decisionAnchorStates.get(anchor);
+    if (anchor && state && (state.hovered || state.focused || decisionPopoverHovered)
+      && positionDecisionPopover(anchor)) return;
     hideDecisionPopover();
   }
 
@@ -765,14 +748,19 @@
       if (targetInsideDecisionPopover(event.relatedTarget)) return;
       if (!state.focused) deferDecisionPopoverClose(anchor, state);
     });
-    anchor.addEventListener('focusin', () => {
+    const activateFocus = () => {
+      const alreadyVisible = state.focused
+        && activeDecisionAnchor === anchor
+        && !byId('mapDecisionPopover').hidden;
       state.focused = true;
-      showDecisionPopover(node, anchor);
-    });
+      if (!alreadyVisible) showDecisionPopover(node, anchor);
+    };
+    anchor.addEventListener('focus', activateFocus);
+    anchor.addEventListener('focusin', activateFocus);
     anchor.addEventListener('focusout', (event) => {
       if (anchor.contains(event.relatedTarget)) return;
       state.focused = false;
-      if (!state.hovered && !decisionPopoverHovered) hideDecisionPopover(anchor);
+      if (!state.hovered && !decisionPopoverHovered) deferDecisionPopoverClose(anchor, state);
     });
     anchor.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
@@ -1076,7 +1064,7 @@
 
   byId('mapBackButton').addEventListener('click', closeMapPage);
   byId('actTabs').addEventListener('keydown', handleActTabKeydown);
-  window.addEventListener('resize', () => hideDecisionPopover());
+  window.addEventListener('resize', mapDecisionScroll);
   window.addEventListener('scroll', mapDecisionScroll, true);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !byId('runMapPage').hidden) {

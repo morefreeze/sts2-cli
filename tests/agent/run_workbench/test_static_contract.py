@@ -1100,10 +1100,13 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
     assert result["invalidClosed"] == [True] * 5
 
 
-def test_map_decision_popover_ignores_internal_scroll_but_closes_on_external_scroll():
+def test_map_decision_popover_repositions_active_state_on_any_scroll_without_rebuilding():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    position = _javascript_section(
+        script, "function usableDecisionAnchor", "function showDecisionPopover"
+    )
     handler = _javascript_section(
-        script, "function mapDecisionScroll", "function appendDefinition"
+        script, "function mapDecisionScroll", "function bindDecisionPopover"
     )
 
     result = _run_node_json(
@@ -1117,6 +1120,8 @@ def test_map_decision_popover_ignores_internal_scroll_but_closes_on_external_scr
             this.hidden = false;
             this.isConnected = true;
             this.scrollTop = 0;
+            this.style = {{}};
+            this.rect = {{ left: 20, right: 76, top: 20, bottom: 76, width: 56, height: 56 }};
             if (parent) parent.children.push(this);
           }}
           contains(candidate) {{
@@ -1133,54 +1138,75 @@ def test_map_decision_popover_ignores_internal_scroll_but_closes_on_external_scr
           }}
           setAttribute(name, value) {{ this.attributes[name] = String(value); }}
           removeAttribute(name) {{ delete this.attributes[name]; }}
+          getAttribute(name) {{ return this.attributes[name] ?? null; }}
           hasAttribute(name) {{ return Object.hasOwn(this.attributes, name); }}
+          getBoundingClientRect() {{ return this.rect; }}
         }}
         const popover = new FakeNode('mapDecisionPopover');
         const child = new FakeNode('child', popover);
         const anchor = new FakeNode('anchor');
-        const external = new FakeNode('map-scroll');
+        const documentTarget = new FakeNode('document');
         let activeDecisionAnchor = anchor;
+        let decisionPopoverHovered = false;
+        const decisionAnchorStates = new WeakMap([[anchor, {{ hovered: false, focused: true }}]]);
         anchor.setAttribute('aria-describedby', 'mapDecisionPopover');
         popover.scrollTop = 137;
+        popover.rect = {{ left: 0, right: 300, top: 0, bottom: 200, width: 300, height: 200 }};
+        const bodyChild = new FakeNode('body-child', popover);
+        const originalChildren = popover.children.slice();
+        const window = {{ innerWidth: 500, innerHeight: 400 }};
         function byId(id) {{ if (id === 'mapDecisionPopover') return popover; throw new Error(id); }}
         function hideDecisionPopover() {{
           if (activeDecisionAnchor) activeDecisionAnchor.removeAttribute('aria-describedby');
           popover.hidden = true;
           activeDecisionAnchor = null;
         }}
+        {position}
         {handler}
         function snapshot() {{
           return {{
             hidden: popover.hidden,
             described: anchor.hasAttribute('aria-describedby'),
             scrollTop: popover.scrollTop,
+            left: popover.style.left,
+            top: popover.style.top,
+            sameChildren: popover.children.length === originalChildren.length
+              && popover.children.every((item, index) => item === originalChildren[index]),
           }};
         }}
-        mapDecisionScroll({{ target: popover, composedPath() {{ return [popover]; }} }});
-        const own = snapshot();
-        mapDecisionScroll({{ target: child, composedPath() {{ return [child, popover]; }} }});
-        const descendant = snapshot();
-        mapDecisionScroll({{ target: child, composedPath() {{ throw new Error('HOSTILE'); }} }});
-        const hostilePathFallback = snapshot();
-        child.isConnected = false;
+        anchor.rect = {{ left: 110, right: 166, top: 50, bottom: 106, width: 56, height: 56 }};
+        mapDecisionScroll({{ target: documentTarget }});
+        const afterDocumentScroll = snapshot();
+        anchor.rect = {{ left: 900, right: 956, top: 900, bottom: 956, width: 56, height: 56 }};
         mapDecisionScroll({{ target: child }});
-        const disconnectedChild = snapshot();
-        mapDecisionScroll({{ target: external, composedPath() {{ return [external]; }} }});
-        const outside = snapshot();
-        console.log(JSON.stringify({{ own, descendant, hostilePathFallback, disconnectedChild, outside }}));
+        const afterPopoverScroll = snapshot();
+        decisionAnchorStates.get(anchor).focused = false;
+        mapDecisionScroll({{ target: documentTarget }});
+        const inactive = snapshot();
+        console.log(JSON.stringify({{ afterDocumentScroll, afterPopoverScroll, inactive }}));
         """
     )
 
-    retained = {"hidden": False, "described": True, "scrollTop": 137}
-    assert result["own"] == retained
-    assert result["descendant"] == retained
-    assert result["hostilePathFallback"] == retained
-    assert result["disconnectedChild"] == retained
-    assert result["outside"] == {
-        "hidden": True,
-        "described": False,
+    assert result["afterDocumentScroll"] == {
+        "hidden": False,
+        "described": True,
         "scrollTop": 137,
+        "left": "174px",
+        "top": "114px",
+        "sameChildren": True,
     }
+    assert result["afterPopoverScroll"] == {
+        "hidden": False,
+        "described": True,
+        "scrollTop": 137,
+        "left": "192px",
+        "top": "192px",
+        "sameChildren": True,
+    }
+    assert result["inactive"]["hidden"] is True
+    assert result["inactive"]["described"] is False
+    assert result["inactive"]["scrollTop"] == 137
+    assert result["inactive"]["sameChildren"] is True
 
 
 def test_map_decision_popover_shares_pointer_lifecycle_with_active_anchor():
@@ -1293,6 +1319,17 @@ def test_map_decision_popover_shares_pointer_lifecycle_with_active_anchor():
         popover.dispatch('mouseleave', {{ relatedTarget: new FakeNode('div', 'outside') }});
         const leftOutside = popover.hidden && !first.hasAttribute('aria-describedby');
 
+        first.rect = {{ left: 300, right: 356, top: 40, bottom: 96, width: 56, height: 56 }};
+        first.dispatch('focus');
+        mapDecisionScroll({{ target: new FakeNode('div', 'document') }});
+        const programmaticFocusSurvivedScroll = !popover.hidden
+          && first.hasAttribute('aria-describedby')
+          && popover.style.left === '192px';
+        first.dispatch('focusout', {{ relatedTarget: new FakeNode('div', 'outside') }});
+        const focusoutDeferred = !popover.hidden && first.hasAttribute('aria-describedby');
+        flushMicrotasks();
+        const focusoutClosed = popover.hidden && !first.hasAttribute('aria-describedby');
+
         first.dispatch('mouseenter');
         first.dispatch('focusin');
         first.dispatch('mouseleave', {{ relatedTarget: popover }});
@@ -1330,6 +1367,7 @@ def test_map_decision_popover_shares_pointer_lifecycle_with_active_anchor():
 
         console.log(JSON.stringify({{
           deferredAtBoundary, inside, leftOutside,
+          programmaticFocusSurvivedScroll, focusoutDeferred, focusoutClosed,
           popoverHoverKeepsBlurredAnchor, closedAfterPopoverLeavesBlurredAnchor,
           returnedToAnchor,
           switched, escaped, stayedClosed, reopenedOnNewEnter,
@@ -1340,6 +1378,9 @@ def test_map_decision_popover_shares_pointer_lifecycle_with_active_anchor():
     assert result["deferredAtBoundary"] is True
     assert result["inside"] == {"hidden": False, "described": True, "scrollTop": 91}
     assert result["leftOutside"] is True
+    assert result["programmaticFocusSurvivedScroll"] is True
+    assert result["focusoutDeferred"] is True
+    assert result["focusoutClosed"] is True
     assert result["popoverHoverKeepsBlurredAnchor"] is True
     assert result["closedAfterPopoverLeavesBlurredAnchor"] is True
     assert result["returnedToAnchor"] is True
@@ -1356,6 +1397,9 @@ def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     show = _javascript_section(
         script, "function showDecisionPopover", "function renderNodeArt"
     )
+    position = _javascript_section(
+        script, "function positionDecisionPopover", "function showDecisionPopover"
+    )
     render = _javascript_section(
         script, "function renderDecisionSummary", "function showDecisionPopover"
     )
@@ -1368,16 +1412,16 @@ def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     assert "textContent" in show
     assert "innerHTML" not in script
     assert "该对局未记录备选项" in show
-    assert "getBoundingClientRect" in show
-    assert "window.innerWidth" in show and "window.innerHeight" in show
-    assert "Math.max(8" in show
+    assert "getBoundingClientRect" in position
+    assert "window.innerWidth" in position and "window.innerHeight" in position
+    assert "Math.max(8" in position
     assert "aria-describedby" in show
     for event_name in ("mouseenter", "mouseleave", "focusin", "focusout"):
         assert event_name in show
     assert "relatedTarget" in show
     assert "event.key === 'Escape'" in show
     assert "event.stopPropagation()" in show
-    assert "window.addEventListener('resize'" in script
+    assert "window.addEventListener('resize', mapDecisionScroll)" in script
     assert "window.addEventListener('scroll', mapDecisionScroll, true)" in script
     assert load.index("hideDecisionPopover()") < load.index("clear(byId('mapSvg'))")
     assert "event.key === 'Enter' || event.key === ' '" in nodes
