@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import json
 import math
@@ -447,7 +447,7 @@ class RunCatalog:
                 raise CatalogNotFoundError(
                     f"run id {run_id!r} was indexed but could not be normalized"
                 )
-            merged = join_records(matched)
+            merged = [_join_catalog_group(matched)]
             if len(merged) != 1:
                 raise CatalogError(f"ambiguous run id: {run_id}")
             payload = _scrub_paths(merged[0].to_dict(), path_ids)
@@ -690,7 +690,14 @@ class RunCatalog:
             if not errors:
                 errors.append(f"{path.name}: {descriptor.message}")
                 error_count += 1
-        elif errors and records_complete:
+        elif (
+            errors
+            and records_complete
+            and not (
+                descriptor.kind is SourceKind.DECK_HISTORY
+                and deck_outcomes
+            )
+        ):
             open_mode = "error"
         else:
             open_mode = "run"
@@ -820,8 +827,7 @@ class RunCatalog:
                     run_id, _GameVersionSourceEvidence()
                 )
                 evidence.observe(_item_metadata(record).game_version_source)
-        joined = join_records(records)
-        merged = _merge_compact_records(joined, compact_records)
+        merged = _merge_compact_records(records, compact_records)
         eligible: list[_CohortItem] = [
             record
             for record in merged
@@ -981,68 +987,120 @@ def _source_id(root: Path, relative: str) -> str:
     return f"src_{digest}"
 
 
+def _recorded_act_decision_states(
+    item: _CohortItem,
+) -> dict[int, tuple[int | float, bool]]:
+    if isinstance(item, _CompactRun):
+        return dict(item.latest_recorded_act_decisions)
+    if item.source_kind is not SourceKind.DECK_HISTORY:
+        return {}
+    selected: dict[int, tuple[int | float, bool]] = {}
+    for node in item.nodes:
+        if type(node) is not dict or node.get("event") != "map_snapshot":
+            continue
+        try:
+            snapshot = parse_recorded_map_row(node)
+        except RecordedMapError:
+            continue
+        timestamp = node["ts"]
+        has_decisions = any(
+            type(route_node) is dict
+            and type(route_node.get("decisions")) is list
+            and bool(route_node["decisions"])
+            for route_node in snapshot.route_nodes
+        )
+        retained = selected.get(snapshot.act_index)
+        if retained is None or timestamp >= retained[0]:
+            selected[snapshot.act_index] = (timestamp, has_decisions)
+    return selected
+
+
+def _catalog_item_key(item: _CohortItem) -> tuple[str, str]:
+    return item.source_id, type(item).__name__
+
+
+def _item_has_deck_card_pick(item: _CohortItem) -> bool:
+    if isinstance(item, _CompactRun):
+        return item.has_card_pick
+    return item.source_kind is SourceKind.DECK_HISTORY and any(
+        type(node) is dict and node.get("event") == "card_pick"
+        for node in item.nodes
+    )
+
+
+def _join_catalog_group(items: Iterable[_CohortItem]) -> RunRecord:
+    ordered = sorted(items, key=_catalog_item_key)
+    if not ordered:
+        raise CatalogError("cannot join an empty catalog group")
+
+    latest_by_act: dict[
+        int, tuple[int | float, int, bool]
+    ] = {}
+    for item_index, item in enumerate(ordered):
+        states = _recorded_act_decision_states(item)
+        for act_index, (timestamp, has_decisions) in states.items():
+            retained = latest_by_act.get(act_index)
+            if retained is None or timestamp >= retained[0]:
+                latest_by_act[act_index] = (
+                    timestamp,
+                    item_index,
+                    has_decisions,
+                )
+
+    deck_decisions = any(_item_has_deck_card_pick(item) for item in ordered) or any(
+        has_decisions
+        for _timestamp, _item_index, has_decisions in latest_by_act.values()
+    )
+    normalized: list[RunRecord] = []
+    for item_index, item in enumerate(ordered):
+        record = item.to_record() if isinstance(item, _CompactRun) else deepcopy(item)
+        if record.source_kind is SourceKind.DECK_HISTORY:
+            record.capabilities = replace(
+                record.capabilities,
+                decisions=deck_decisions,
+            )
+            record.nodes = [
+                node
+                for node in record.nodes
+                if not (
+                    type(node) is dict
+                    and node.get("_workbench_evidence_kind") == "route_node"
+                    and type(node.get("act_index")) is int
+                    and (
+                        node["act_index"] in latest_by_act
+                        and latest_by_act[node["act_index"]][1] != item_index
+                    )
+                )
+            ]
+        normalized.append(record)
+
+    joined = join_records(normalized)
+    if len(joined) != 1:
+        raise CatalogError("catalog group did not resolve to one run")
+    return joined[0]
+
+
 def _merge_compact_records(
     ordinary: list[RunRecord], compact: list[_CompactRun]
 ) -> list[_CohortItem]:
-    """Merge exact IDs while expanding only IDs that occur in multiple sources."""
+    """Merge exact IDs while retaining compact single-source records."""
 
-    ordinary_identified = sorted(
-        (record for record in ordinary if record.run_id),
-        key=lambda record: record.run_id,
-    )
-    compact_identified = sorted(
-        (record for record in compact if record.run_id),
-        key=lambda record: (record.run_id, record.source_id),
-    )
-    merged: list[_CohortItem] = []
-    ordinary_index = 0
-    compact_index = 0
-    while (
-        ordinary_index < len(ordinary_identified)
-        or compact_index < len(compact_identified)
-    ):
-        ordinary_run_id = (
-            ordinary_identified[ordinary_index].run_id
-            if ordinary_index < len(ordinary_identified)
-            else None
-        )
-        compact_run_id = (
-            compact_identified[compact_index].run_id
-            if compact_index < len(compact_identified)
-            else None
-        )
-        if compact_run_id is None or (
-            ordinary_run_id is not None and ordinary_run_id < compact_run_id
-        ):
-            merged.append(ordinary_identified[ordinary_index])
-            ordinary_index += 1
-            continue
-
-        compact_end = compact_index + 1
-        while (
-            compact_end < len(compact_identified)
-            and compact_identified[compact_end].run_id == compact_run_id
-        ):
-            compact_end += 1
-        compact_group = compact_identified[compact_index:compact_end]
-        if ordinary_run_id == compact_run_id:
-            merged.extend(
-                join_records(
-                    [
-                        ordinary_identified[ordinary_index],
-                        *(record.to_record() for record in compact_group),
-                    ]
-                )
-            )
-            ordinary_index += 1
-        elif len(compact_group) == 1:
-            merged.append(compact_group[0])
+    identified: dict[str, list[_CohortItem]] = {}
+    historical: list[_CohortItem] = []
+    for item in [*ordinary, *compact]:
+        if item.run_id:
+            identified.setdefault(item.run_id, []).append(item)
         else:
-            merged.extend(join_records(record.to_record() for record in compact_group))
-        compact_index = compact_end
+            historical.append(item)
 
-    merged.extend(record for record in ordinary if not record.run_id)
-    merged.extend(record for record in compact if not record.run_id)
+    merged: list[_CohortItem] = []
+    for run_id in sorted(identified):
+        group = identified[run_id]
+        if len(group) == 1 and isinstance(group[0], _CompactRun):
+            merged.append(group[0])
+        else:
+            merged.append(_join_catalog_group(group))
+    merged.extend(historical)
     return merged
 
 
@@ -1169,9 +1227,14 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                         f"{path.name}:{line_number}: invalid JSON: {error}"
                     )
                     continue
-                except json.JSONDecodeError as error:
+                except ValueError as error:
+                    detail = (
+                        error.msg
+                        if isinstance(error, json.JSONDecodeError)
+                        else "invalid numeric literal"
+                    )
                     error_budget.add(
-                        f"{path.name}:{line_number}: invalid JSON: {error.msg}"
+                        f"{path.name}:{line_number}: invalid JSON: {detail}"
                     )
                     continue
                 if not isinstance(record, dict):
@@ -1333,11 +1396,13 @@ def _scan_jsonl_run(
                     continue
                 try:
                     record = json.loads(line, parse_constant=_reject_scan_constant)
-                except (_ScanConstantError, json.JSONDecodeError) as error:
+                except ValueError as error:
                     detail = (
                         str(error)
                         if isinstance(error, _ScanConstantError)
                         else error.msg
+                        if isinstance(error, json.JSONDecodeError)
+                        else "invalid numeric literal"
                     )
                     error_budget.add(
                         f"{path.name}:{line_number}: invalid JSON: {detail}"
@@ -1708,7 +1773,7 @@ def _normalize_incomplete_replay(
                     record = json.loads(
                         line, parse_constant=_reject_scan_constant
                     )
-                except (_ScanConstantError, json.JSONDecodeError):
+                except ValueError:
                     continue
                 if not isinstance(record, dict):
                     continue

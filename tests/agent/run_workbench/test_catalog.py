@@ -26,6 +26,17 @@ def _write_jsonl(path: Path, records: list[dict]) -> Path:
     return path
 
 
+def _write_jsonl_with_raw_line(
+    path: Path,
+    records: list[dict],
+    raw_line: str,
+) -> Path:
+    encoded = [json.dumps(record) for record in records]
+    encoded.insert(1, raw_line)
+    path.write_text("\n".join(encoded) + "\n", encoding="utf-8")
+    return path
+
+
 def _write_duplicate_version_source_eval_files(
     root: Path, *, record_count: int
 ) -> None:
@@ -1600,6 +1611,133 @@ def test_recorded_decision_parity_uses_latest_valid_snapshot_per_act(
     )
     if specs == [(1, 1, True, False), (1, 2, False, False)]:
         assert route_nodes[0]["decisions"] == []
+
+
+@pytest.mark.parametrize(
+    ("older_count", "newer_count"),
+    [(511, 513), (513, 511)],
+)
+@pytest.mark.parametrize(
+    ("older_has_decisions", "newer_has_decisions"),
+    [(True, False), (False, True)],
+    ids=["newer-empty-clears", "newer-decision-enables"],
+)
+def test_recorded_decision_cross_source_join_uses_global_latest_valid_snapshot(
+    tmp_path: Path,
+    older_count: int,
+    newer_count: int,
+    older_has_decisions: bool,
+    newer_has_decisions: bool,
+) -> None:
+    _write_jsonl(
+        tmp_path / "older.jsonl",
+        _deck_decision_scenario_rows(
+            older_count,
+            [(1, 1, older_has_decisions, False)],
+        ),
+    )
+    _write_jsonl(
+        tmp_path / "newer.jsonl",
+        _deck_decision_scenario_rows(
+            newer_count,
+            [(1, 2, newer_has_decisions, False)],
+        ),
+    )
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    cohort = catalog.list_cohorts()[0]
+    record = catalog.get_cohort_records(cohort["cohort_id"])[0]
+    exact = catalog.get_run("decision-scenario")["run"]
+    route_nodes = [
+        node
+        for node in exact["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+    ]
+
+    assert record.capabilities.decisions is newer_has_decisions
+    assert len(route_nodes) == 1
+    assert bool(route_nodes[0].get("decisions")) is newer_has_decisions
+    if newer_has_decisions:
+        assert route_nodes[0]["decisions"][0]["selected_label"] == "献血"
+    else:
+        assert route_nodes[0]["decisions"] == []
+
+
+@pytest.mark.parametrize("record_count", [511, 513])
+def test_recorded_decision_giant_json_integer_is_a_bounded_scan_error(
+    tmp_path: Path,
+    record_count: int,
+) -> None:
+    root = tmp_path / str(record_count)
+    root.mkdir()
+    _write_jsonl_with_raw_line(
+        root / "deck.jsonl",
+        _deck_decision_scenario_rows(
+            record_count,
+            [(1, 1, True, False)],
+        ),
+        '{"event":"map_snapshot","run_id":"decision-scenario","ts":'
+        + "9" * 5000
+        + "}",
+    )
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+
+    source = catalog.list_sources()[0]
+    cohort = catalog.list_cohorts()[0]
+    record = catalog.get_cohort_records(cohort["cohort_id"])[0]
+    exact = catalog.get_run("decision-scenario")["run"]
+
+    assert source["source_kind"] == "deck_history"
+    assert source["open_mode"] == "run"
+    assert source["record_count"] == record_count
+    assert source["error_count"] == 1
+    assert len(source["errors"]) == 1
+    assert len(source["errors"][0]) <= 160
+    assert "9999999999" not in source["errors"][0]
+    assert record.capabilities.decisions is True
+    assert exact["capabilities"]["decisions"] is True
+
+
+@pytest.mark.parametrize("record_count", [511, 513])
+@pytest.mark.parametrize("constant", ["NaN", "Infinity"])
+def test_recorded_decision_nonfinite_timestamp_is_invalid_across_threshold(
+    tmp_path: Path,
+    record_count: int,
+    constant: str,
+) -> None:
+    root = tmp_path / f"{record_count}-{constant}"
+    root.mkdir()
+    records = _deck_decision_scenario_rows(
+        record_count,
+        [(1, 1, True, False)],
+    )
+    invalid_newer = _recorded_decision_snapshot(
+        "decision-scenario",
+        act=1,
+        ts=2,
+        has_decisions=False,
+    )
+    raw_invalid = json.dumps(invalid_newer).replace('"ts": 2', f'"ts": {constant}')
+    _write_jsonl_with_raw_line(root / "deck.jsonl", records, raw_invalid)
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+
+    source = catalog.list_sources()[0]
+    cohort = catalog.list_cohorts()[0]
+    record = catalog.get_cohort_records(cohort["cohort_id"])[0]
+    exact = catalog.get_run("decision-scenario")["run"]
+
+    assert source["source_kind"] == "deck_history"
+    assert source["open_mode"] == "run"
+    assert source["record_count"] == record_count
+    assert source["error_count"] == 1
+    assert record.capabilities.decisions is True
+    assert exact["capabilities"]["decisions"] is True
+    route_node = next(
+        node
+        for node in exact["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+    )
+    assert route_node["decisions"][0]["selected_label"] == "献血"
 
 
 def test_recorded_decision_compact_copy_cache_and_to_record_are_stable(
