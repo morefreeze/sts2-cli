@@ -34,6 +34,13 @@ from agent.run_workbench.catalog import (
 )
 from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
 from agent.run_workbench.map_service import (
+    MAX_ALIGNMENT_REASON_CHARS,
+    MAX_MAP_EDGES,
+    MAX_MAP_NODES,
+    MAX_NODE_ID_CHARS,
+    MAX_OUTPUT_BYTES,
+    MAX_ROOM_TYPE_CHARS,
+    MAX_VISITED_NODES,
     MapExecutableNotFoundError,
     MapOutputError,
     MapRequest,
@@ -92,6 +99,9 @@ _MAP_NODE_KEYS = (
 _MAP_EDGE_KEYS = ("from", "to")
 _MAP_ALIGNMENT_KEYS = ("ok", "ambiguous", "reason", "path_node_ids")
 _MAP_CHILD_KEYS = ("id", "col", "row")
+_MAP_JSON_MAX_DEPTH = 16
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
 
 
 def _plain_allowlisted_dict(
@@ -127,10 +137,28 @@ def _exact_dict_fields(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
 _UNSAFE_MAP_VALUE = object()
 
 
-def _plain_json_value(value: Any, *, depth: int = 0) -> Any:
-    if depth > 8:
+def _plain_json_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    count: list[int] | None = None,
+) -> Any:
+    if count is None:
+        count = [0]
+    count[0] += 1
+    if count[0] > MAX_OUTPUT_BYTES or depth > _MAP_JSON_MAX_DEPTH:
         return _UNSAFE_MAP_VALUE
-    if value is None or type(value) in (bool, int, str):
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        return value if _INT32_MIN <= value <= _INT32_MAX else _UNSAFE_MAP_VALUE
+    if type(value) is str:
+        if len(value) > MAX_ALIGNMENT_REASON_CHARS:
+            return _UNSAFE_MAP_VALUE
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return _UNSAFE_MAP_VALUE
         return value
     if type(value) is float:
         return (
@@ -139,23 +167,37 @@ def _plain_json_value(value: Any, *, depth: int = 0) -> Any:
             else _UNSAFE_MAP_VALUE
         )
     if type(value) is list:
-        if len(value) > 4096:
+        if len(value) > MAX_MAP_EDGES:
             return _UNSAFE_MAP_VALUE
         copied = []
         for item in value:
-            safe_item = _plain_json_value(item, depth=depth + 1)
+            safe_item = _plain_json_value(
+                item,
+                depth=depth + 1,
+                count=count,
+            )
             if safe_item is _UNSAFE_MAP_VALUE:
                 return _UNSAFE_MAP_VALUE
             copied.append(safe_item)
         return copied
     if type(value) is dict:
-        if len(value) > 512:
+        if len(value) > MAX_MAP_NODES:
             return _UNSAFE_MAP_VALUE
         copied_dict = {}
         for key, item in dict.items(value):
             if type(key) is not str:
                 continue
-            safe_item = _plain_json_value(item, depth=depth + 1)
+            if len(key) > MAX_NODE_ID_CHARS:
+                return _UNSAFE_MAP_VALUE
+            try:
+                key.encode("utf-8", errors="strict")
+            except UnicodeEncodeError:
+                return _UNSAFE_MAP_VALUE
+            safe_item = _plain_json_value(
+                item,
+                depth=depth + 1,
+                count=count,
+            )
             if safe_item is _UNSAFE_MAP_VALUE:
                 return _UNSAFE_MAP_VALUE
             copied_dict[key] = safe_item
@@ -167,46 +209,64 @@ def _browser_map_node(value: Any) -> dict[str, Any] | None:
     copied = _plain_allowlisted_dict(value, _MAP_NODE_KEYS)
     if (
         type(copied.get("id")) is not str
+        or not copied["id"]
+        or len(copied["id"]) > MAX_NODE_ID_CHARS
         or type(copied.get("col")) is not int
         or type(copied.get("row")) is not int
         or type(copied.get("room_type")) is not str
+        or not copied["room_type"]
+        or len(copied["room_type"]) > MAX_ROOM_TYPE_CHARS
         or type(copied.get("visited")) is not bool
         or (
             copied.get("path_index") is not None
             and type(copied.get("path_index")) is not int
         )
+        or (
+            type(copied.get("path_index")) is int
+            and not 0 <= copied["path_index"] < MAX_VISITED_NODES
+        )
+        or (copied["visited"] and copied.get("path_index") is None)
+        or (not copied["visited"] and copied.get("path_index") is not None)
     ):
         return None
     if "name" in copied and type(copied["name"]) is not str:
         copied.pop("name")
     if "current" in copied and type(copied["current"]) is not bool:
         copied.pop("current")
-    if "children" in copied:
-        copied["children"] = _plain_allowlisted_list(
-            copied["children"],
-            _MAP_CHILD_KEYS,
-        )
+    raw_children = _exact_dict_fields(value, ("children",)).get("children")
+    if raw_children is not None:
+        if type(raw_children) is not list or len(raw_children) > MAX_MAP_NODES:
+            return None
+        children = []
+        for raw_child in raw_children:
+            if type(raw_child) is not dict:
+                continue
+            child = _plain_allowlisted_dict(raw_child, _MAP_CHILD_KEYS)
+            if (
+                type(child.get("id")) is not str
+                or not child["id"]
+                or len(child["id"]) > MAX_NODE_ID_CHARS
+                or type(child.get("col")) is not int
+                or type(child.get("row")) is not int
+            ):
+                return None
+            children.append(child)
+        copied["children"] = children
     return copied
 
 
 def _browser_map_edge(value: Any) -> dict[str, str] | None:
     copied = _plain_allowlisted_dict(value, _MAP_EDGE_KEYS)
-    if type(copied.get("from")) is not str or type(copied.get("to")) is not str:
+    if (
+        type(copied.get("from")) is not str
+        or not copied["from"]
+        or len(copied["from"]) > MAX_NODE_ID_CHARS
+        or type(copied.get("to")) is not str
+        or not copied["to"]
+        or len(copied["to"]) > MAX_NODE_ID_CHARS
+    ):
         return None
     return copied
-
-
-def _plain_allowlisted_list(
-    value: Any,
-    keys: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    if type(value) is not list:
-        return []
-    return [
-        _plain_allowlisted_dict(item, keys)
-        for item in value
-        if type(item) is dict
-    ]
 
 
 def _browser_map_payload(act_map: Any) -> dict[str, Any]:
@@ -214,37 +274,46 @@ def _browser_map_payload(act_map: Any) -> dict[str, Any]:
 
     raw = act_map.to_dict()
     if type(raw) is not dict:
-        raise TypeError("map payload must be an ordinary object")
+        raise MapOutputError("map payload must be an ordinary object")
     payload = _plain_allowlisted_dict(raw, _MAP_ROOT_KEYS)
     structural = _exact_dict_fields(raw, ("nodes", "edges", "alignment"))
-    payload["nodes"] = [
-        copied
-        for item in (
-            structural.get("nodes")
-            if type(structural.get("nodes")) is list
-            else []
-        )
-        if (copied := _browser_map_node(item)) is not None
-    ]
-    payload["edges"] = [
-        copied
-        for item in (
-            structural.get("edges")
-            if type(structural.get("edges")) is list
-            else []
-        )
-        if (copied := _browser_map_edge(item)) is not None
-    ]
+    raw_nodes = structural.get("nodes")
+    raw_edges = structural.get("edges")
+    if type(raw_nodes) is not list or len(raw_nodes) > MAX_MAP_NODES:
+        raise MapOutputError("map payload nodes exceed the safe limit")
+    if type(raw_edges) is not list or len(raw_edges) > MAX_MAP_EDGES:
+        raise MapOutputError("map payload edges exceed the safe limit")
+    payload["nodes"] = []
+    for item in raw_nodes:
+        if type(item) is not dict:
+            continue
+        copied = _browser_map_node(item)
+        if copied is None:
+            raise MapOutputError("map payload contains an invalid node")
+        payload["nodes"].append(copied)
+    payload["edges"] = []
+    for item in raw_edges:
+        if type(item) is not dict:
+            continue
+        copied = _browser_map_edge(item)
+        if copied is None:
+            raise MapOutputError("map payload contains an invalid edge")
+        payload["edges"].append(copied)
     payload["alignment"] = _plain_allowlisted_dict(
         structural.get("alignment"), _MAP_ALIGNMENT_KEYS
     )
     if (
         type(payload.get("act_id")) is not str
+        or len(payload["act_id"]) > MAX_NODE_ID_CHARS
         or type(payload.get("full_map")) is not bool
         or type(payload.get("visited_route")) is not bool
         or (
             payload.get("fallback_reason") is not None
             and type(payload.get("fallback_reason")) is not str
+        )
+        or (
+            type(payload.get("fallback_reason")) is str
+            and len(payload["fallback_reason"]) > MAX_ALIGNMENT_REASON_CHARS
         )
         or type(payload["alignment"].get("ok")) is not bool
         or type(payload["alignment"].get("ambiguous")) is not bool
@@ -252,14 +321,42 @@ def _browser_map_payload(act_map: Any) -> dict[str, Any]:
             payload["alignment"].get("reason") is not None
             and type(payload["alignment"].get("reason")) is not str
         )
+        or (
+            type(payload["alignment"].get("reason")) is str
+            and len(payload["alignment"]["reason"])
+            > MAX_ALIGNMENT_REASON_CHARS
+        )
         or type(payload["alignment"].get("path_node_ids")) is not list
+        or len(payload["alignment"].get("path_node_ids", []))
+        > MAX_VISITED_NODES
         or not all(
             type(node_id) is str
+            and bool(node_id)
+            and len(node_id) <= MAX_NODE_ID_CHARS
             for node_id in payload["alignment"].get("path_node_ids", [])
         )
     ):
-        raise TypeError("map payload does not match the browser contract")
+        raise MapOutputError("map payload does not match the browser contract")
     return payload
+
+
+def _bounded_browser_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Detach and size-check one strict browser response before HTTP encoding."""
+
+    safe_payload = _plain_json_value(payload)
+    if safe_payload is _UNSAFE_MAP_VALUE or type(safe_payload) is not dict:
+        raise MapOutputError("map response exceeds structural limits")
+    try:
+        encoded = json.dumps(
+            safe_payload,
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise MapOutputError("map response is not strict JSON") from None
+    if len(encoded) > MAX_OUTPUT_BYTES:
+        raise MapOutputError("map response exceeds the output limit")
+    return safe_payload
 
 
 def _canonical_route_node_identity(raw_id: Any) -> tuple[int, int] | None:
@@ -714,8 +811,18 @@ def _run_map_payload(
         if node.get("visited") and isinstance(path_index, int):
             if 0 <= path_index < len(recorded_nodes):
                 source_node = recorded_nodes[path_index]
-                node["deltas"] = deepcopy(source_node.get("deltas") or {})
-                node["recorded_node_id"] = source_node.get("id")
+                safe_deltas = _plain_json_value(source_node.get("deltas") or {})
+                if safe_deltas is _UNSAFE_MAP_VALUE:
+                    raise MapOutputError(
+                        "map response deltas exceed structural limits"
+                    )
+                node["deltas"] = safe_deltas
+                recorded_node_id = _plain_json_value(source_node.get("id"))
+                if (
+                    type(recorded_node_id) is str
+                    and len(recorded_node_id) <= MAX_NODE_ID_CHARS
+                ):
+                    node["recorded_node_id"] = recorded_node_id
             if 0 <= path_index < len(trusted_recorded_route):
                 trusted_route_node = trusted_recorded_route[path_index]
                 trusted_decisions = trusted_route_node.get("decisions")
@@ -726,7 +833,10 @@ def _run_map_payload(
             art = art_resolver.resolve(node["room_type"], model_id=model_id)
         except InvalidNodeArtModelError:
             art = art_resolver.resolve(node["room_type"])
-        node["art"] = art.to_dict()
+        safe_art = _plain_json_value(art.to_dict())
+        if safe_art is _UNSAFE_MAP_VALUE or type(safe_art) is not dict:
+            raise MapOutputError("map response art exceeds structural limits")
+        node["art"] = safe_art
         node["terminal"] = node["id"] == terminal_node_id
         node["terminal_status"] = terminal_status if node["terminal"] else None
 
@@ -743,7 +853,7 @@ def _run_map_payload(
             },
         }
     )
-    return payload
+    return _bounded_browser_response(payload)
 
 
 def extract_js_assignment_object(source: str, assignment_name: str) -> dict[str, Any]:

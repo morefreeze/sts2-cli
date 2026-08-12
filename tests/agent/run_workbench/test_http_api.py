@@ -1671,6 +1671,313 @@ def test_recorded_decision_http_does_not_execute_hostile_map_keys(
 
 
 @pytest.mark.parametrize(
+    ("unsafe_case", "expected_status"),
+    [
+        ("oversized-name", 200),
+        ("too-many-nodes", 500),
+        ("too-many-edges", 500),
+        ("too-many-children", 500),
+        ("huge-integer", 500),
+        ("lone-surrogate", 200),
+    ],
+)
+def test_map_http_bounds_generator_payload_and_keeps_server_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_case: str,
+    expected_status: int,
+) -> None:
+    run_id = f"bounded-map-{unsafe_case}"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    original_to_dict = ActMap.to_dict
+    state = {"unsafe": True}
+
+    def unsafe_to_dict(act_map):
+        payload = original_to_dict(act_map)
+        if not state["unsafe"]:
+            return payload
+        if unsafe_case == "oversized-name":
+            payload["nodes"][0]["name"] = "N" * (2 * 1024 * 1024)
+        elif unsafe_case == "too-many-nodes":
+            template = payload["nodes"][0]
+            payload["nodes"] = [
+                {
+                    **template,
+                    "id": f"bounded-node-{index}",
+                    "visited": False,
+                    "path_index": None,
+                }
+                for index in range(257)
+            ]
+            payload["edges"] = []
+            payload["alignment"]["path_node_ids"] = []
+        elif unsafe_case == "too-many-edges":
+            edge = payload["edges"][0]
+            payload["edges"] = [deepcopy(edge) for _ in range(2049)]
+        elif unsafe_case == "too-many-children":
+            payload["nodes"][0]["children"] = [
+                {"id": f"child-{index}", "col": index, "row": 0}
+                for index in range(257)
+            ]
+        elif unsafe_case == "huge-integer":
+            payload["nodes"][0]["col"] = 1 << 200
+        elif unsafe_case == "lone-surrogate":
+            payload["nodes"][0]["name"] = "INVALID\ud800NAME"
+        return payload
+
+    monkeypatch.setattr(ActMap, "to_dict", unsafe_to_dict)
+
+    class FallbackService:
+        def generate(self, request: MapRequest):
+            return visited_route_map(request, reason="bounded fallback")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=FallbackService(),
+    ) as base:
+        status, _content_type, body = _binary_request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        state["unsafe"] = False
+        normal_status, normal_payload = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+
+    payload = json.loads(body)
+    assert status == expected_status
+    assert len(body) <= 1024 * 1024
+    if status == 500:
+        assert payload == {"error": "internal server error"}
+    else:
+        assert "name" not in payload["nodes"][0]
+        assert "INVALID" not in body.decode("utf-8")
+    assert normal_status == 200
+    assert normal_payload["summary"]["node_count"] == 3
+
+
+def test_map_http_accepts_exact_node_and_edge_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "bounded-map-exact-boundaries"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    original_to_dict = ActMap.to_dict
+
+    def boundary_to_dict(act_map):
+        payload = original_to_dict(act_map)
+        template = payload["nodes"][0]
+        payload["nodes"] = [
+            {
+                **template,
+                "id": f"n{index}",
+                "visited": False,
+                "path_index": None,
+            }
+            for index in range(256)
+        ]
+        payload["edges"] = [
+            {
+                "from": f"n{index // 255}",
+                "to": f"n{(index // 255 + index % 255 + 1) % 256}",
+            }
+            for index in range(2048)
+        ]
+        payload["alignment"]["path_node_ids"] = []
+        return payload
+
+    monkeypatch.setattr(ActMap, "to_dict", boundary_to_dict)
+
+    class FallbackService:
+        def generate(self, request: MapRequest):
+            return visited_route_map(request, reason="boundary fallback")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=FallbackService(),
+    ) as base:
+        status, _content_type, body = _binary_request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+
+    payload = json.loads(body)
+    assert status == 200
+    assert len(body) <= 1024 * 1024
+    assert payload["summary"]["node_count"] == 256
+    assert payload["summary"]["edge_count"] == 2048
+
+
+@pytest.mark.parametrize("unsafe_source", ["delta", "art"])
+def test_map_http_rejects_deep_nested_enrichment_and_recovers(
+    tmp_path: Path,
+    unsafe_source: str,
+) -> None:
+    run_id = f"bounded-map-deep-{unsafe_source}"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    canonical = RunCatalog(
+        [tmp_path], replay_parser=_replay_parser
+    ).get_run(run_id)
+    state = {"unsafe": True}
+    nested = "LEAF"
+    for _ in range(32):
+        nested = {"next": nested}
+    if unsafe_source == "delta":
+        route_node = next(
+            node
+            for node in canonical["run"]["nodes"]
+            if node.get("_workbench_evidence_kind") == "route_node"
+        )
+        route_node["deltas"] = {"deep": nested}
+
+    class StaticCatalog:
+        def get_run(self, requested_run_id: str) -> dict:
+            assert requested_run_id == run_id
+            result = deepcopy(canonical)
+            if not state["unsafe"] and unsafe_source == "delta":
+                for node in result["run"]["nodes"]:
+                    if node.get("_workbench_evidence_kind") == "route_node":
+                        node["deltas"] = {}
+            return result
+
+    class DeepArt:
+        def to_dict(self) -> dict:
+            return {"kind": "emoji", "deep": deepcopy(nested)}
+
+    class SwitchingArtResolver:
+        def __init__(self) -> None:
+            self.normal = NodeArtResolver()
+
+        def resolve(self, room_type: str, *, model_id: str | None = None):
+            if state["unsafe"] and unsafe_source == "art":
+                return DeepArt()
+            return self.normal.resolve(room_type, model_id=model_id)
+
+    class FallbackService:
+        def generate(self, request: MapRequest):
+            return visited_route_map(request, reason="deep fallback")
+
+    with _server(
+        StaticCatalog(),
+        map_service=FallbackService(),
+        art_resolver=SwitchingArtResolver(),
+    ) as base:
+        status, _content_type, body = _binary_request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        state["unsafe"] = False
+        normal_status, normal_payload = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+
+    assert status == 500
+    assert len(body) <= 1024 * 1024
+    assert json.loads(body) == {"error": "internal server error"}
+    assert normal_status == 200
+    assert normal_payload["summary"]["node_count"] == 3
+
+
+def test_recorded_decision_http_rejects_total_payload_over_one_mibibyte(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-total-output-limit"
+    snapshot = _recorded_map_route_snapshot(
+        run_id,
+        act=1,
+        ts=1,
+        route_length=16,
+    )
+    large_decision = _recorded_decision("可信选择", effect="🧪" * 220)
+    large_decision["options"][1]["effect"] = "🧪" * 220
+    for route_node in snapshot["visited_nodes"]:
+        route_node["decisions"] = [deepcopy(large_decision) for _ in range(16)]
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            snapshot,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+    normal_id = "recorded-decision-normal-after-limit"
+    normal = _native_route_matching_recorded_coordinates(
+        normal_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "normal.run").write_text(json.dumps(normal), encoding="utf-8")
+
+    class SelectiveService:
+        def generate(self, request: MapRequest):
+            if request.run_id == run_id:
+                raise AssertionError("valid recorded map must not call generator")
+            return visited_route_map(request, reason="normal fallback")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=SelectiveService(),
+    ) as base:
+        status, _content_type, body = _binary_request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        normal_status, normal_payload = _request(
+            base, f"/api/run/map?id={normal_id}&act=0"
+        )
+
+    assert status == 500
+    assert len(body) <= 1024 * 1024
+    assert json.loads(body) == {"error": "internal server error"}
+    assert "EVENT.TRUSTED" not in body.decode("utf-8")
+    assert normal_status == 200
+    assert normal_payload["run_id"] == normal_id
+
+
+def test_recorded_decision_http_accepts_sixteen_small_decisions(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-sixteen-boundary"
+    snapshot = _recorded_map_route_snapshot(
+        run_id,
+        act=1,
+        ts=1,
+        route_length=1,
+    )
+    snapshot["visited_nodes"][0]["decisions"] = [
+        _recorded_decision(f"可信选择 {index}", selected_id=f"EVENT.{index}")
+        for index in range(16)
+    ]
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            snapshot,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class MustNotGenerate:
+        def generate(self, request: MapRequest):
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=MustNotGenerate(),
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    visited = next(node for node in payload["nodes"] if node["visited"])
+    assert status == 200
+    assert len(visited["decisions"]) == 16
+
+
+@pytest.mark.parametrize(
     "identity_failure",
     [
         "gap",
