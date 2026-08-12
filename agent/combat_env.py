@@ -21,6 +21,7 @@ from agent.card_scoring import (score_card, score_card_in_deck, pick_best_card,
                                   pick_worst_card, deck_quality_score,
                                   is_act1_card_reward_eligible, _card_id_norm)
 from agent.decision_advisor import DecisionAdvisor
+from agent.run_decisions import append_run_decision, capture_run_decision
 
 # Swappable map strategy — change globally via set_map_strategy()
 _map_strategy: MapStrategy = HpAwareMapStrategy()
@@ -628,6 +629,7 @@ class CombatEnv(gym.Env):
         self._capture_run_maps = self._run_context.get("capture_map") is True
         self._run_map_snapshots: dict[int, dict] = {}
         self._run_current_map_coord: tuple[int, int, int] | None = None
+        self._run_current_map_room_identity: tuple[int, int] | None = None
         self._run_last_map_poll_state_id: int | None = None
         self._run_pending_map_capture: dict | None = None
         self._run_map_retry_state: dict | None = None
@@ -732,6 +734,7 @@ class CombatEnv(gym.Env):
         self._run_card_pick_records = []
         self._run_map_snapshots = {}
         self._run_current_map_coord = None
+        self._run_current_map_room_identity = None
         self._run_last_map_poll_state_id = None
         self._run_pending_map_capture = None
         self._run_map_retry_state = None
@@ -1553,6 +1556,27 @@ class CombatEnv(gym.Env):
         node["exit_player"] = player
 
     @staticmethod
+    def _bounded_run_room_identity(
+        state: object,
+    ) -> tuple[int, int] | None:
+        """Return the exact act-local room identity used to guard combat reuse."""
+        if type(state) is not dict:
+            return None
+        context = state.get("context")
+        if type(context) is not dict:
+            return None
+        act = context.get("act")
+        if "floor" in state and state.get("floor") is not None:
+            floor = state.get("floor")
+        else:
+            floor = context.get("floor")
+        if type(act) is not int or not 1 <= act <= 4:
+            return None
+        if type(floor) is not int or not 1 <= floor <= 17:
+            return None
+        return act, floor
+
+    @staticmethod
     def _validated_map_reply(
         reply: object,
     ) -> tuple[int, dict, tuple[int, int], dict, set[tuple[int, int]]]:
@@ -1722,6 +1746,9 @@ class CombatEnv(gym.Env):
         act, raw_map, (col, row), current_node, graph_coords = (
             self._validated_map_reply(reply)
         )
+        room_identity = self._bounded_run_room_identity(state)
+        if room_identity is not None and room_identity[0] != act:
+            room_identity = None
         captured_at = time.time()
         if (type(captured_at) not in (int, float)
                 or not math.isfinite(captured_at)):
@@ -1781,6 +1808,7 @@ class CombatEnv(gym.Env):
                     and self._run_current_map_coord[0] == act
                     and self._run_current_map_coord[1:] not in graph_coords):
                 self._run_current_map_coord = None
+                self._run_current_map_room_identity = None
             snapshot["map"] = raw_map
             snapshot["ts"] = captured_at
 
@@ -1797,15 +1825,23 @@ class CombatEnv(gym.Env):
             coord_lookup[(col, row)] = node
             snapshot["visited_nodes"].append(node)
         self._run_current_map_coord = (act, col, row)
+        self._run_current_map_room_identity = room_identity
         self._update_buffered_node_inventory(state)
         self._run_map_capture_failure_active = False
 
     def _detached_run_map_poll_state(
         self, state: dict, state_id: int | None = None, inventory_checkpoint=None
     ):
+        detached_state = {"player": self._bounded_player_snapshot(state)}
+        room_identity = self._bounded_run_room_identity(state)
+        if room_identity is not None:
+            detached_state["context"] = {
+                "act": room_identity[0],
+                "floor": room_identity[1],
+            }
         retained = {
             "state_id": id(state) if state_id is None else state_id,
-            "state": {"player": self._bounded_player_snapshot(state)},
+            "state": detached_state,
         }
         if inventory_checkpoint is not None:
             retained["inventory_checkpoint"] = inventory_checkpoint
@@ -1872,6 +1908,61 @@ class CombatEnv(gym.Env):
             retained["state"], poll_state_id=retained["state_id"]
         ):
             self._run_last_map_poll_state_id = retained["state_id"]
+
+    def _run_decision_target(
+        self, state: object, decision: object
+    ) -> tuple[int, int, int] | None:
+        if decision is None or type(state) is not dict:
+            return None
+        target = self._run_current_map_coord
+        if target is None:
+            return None
+        state_decision = state.get("decision")
+        if type(state_decision) is not str:
+            return None
+        if state_decision == "combat_play":
+            if (
+                self._run_current_map_room_identity is None
+                or self._bounded_run_room_identity(state)
+                    != self._run_current_map_room_identity
+            ):
+                return None
+        elif self._run_last_map_poll_state_id != id(state):
+            return None
+        return target
+
+    def _append_run_decision_to_node(
+        self, target: tuple[int, int, int], decision: dict
+    ) -> None:
+        try:
+            act, col, row = target
+            snapshot = self._run_map_snapshots.get(act)
+            if snapshot is None:
+                raise ValueError("decision target act is absent")
+            node = snapshot.get("_coord_lookup", {}).get((col, row))
+            if node is None:
+                raise ValueError("decision target coordinate is absent")
+            node["decisions"] = append_run_decision(
+                node.get("decisions", []), decision
+            )
+        except Exception as exc:
+            self._report_run_logging_error("run decision logging failed", exc)
+
+    def _send_with_run_decision(self, state: dict, command: dict):
+        decision = capture_run_decision(state, command)
+        self._retry_run_map_poll_before_gameplay()
+        target = self._run_decision_target(state, decision)
+        reply = self._send(command)
+        if decision is None or type(reply) is not dict:
+            return reply
+        reply_type = reply.get("type")
+        if type(reply_type) is str and reply_type == "error":
+            return reply
+        if target is None:
+            target = self._run_decision_target(state, decision)
+        if target is not None:
+            self._append_run_decision_to_node(target, decision)
+        return reply
 
     def _serialized_run_map_snapshots(self) -> list[dict]:
         rows = []
@@ -2063,7 +2154,10 @@ class CombatEnv(gym.Env):
                 args: dict = {"potion_index": pidx}
                 if target_type == "anyenemy":
                     args["target_index"] = 0
-                new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
+                new_state = self._send_with_run_decision(
+                    state,
+                    {"cmd": "action", "action": "use_potion", "args": args},
+                )
                 self._update_buffered_node_inventory(new_state)
                 if new_state is None:
                     self._game_alive = False
@@ -2189,7 +2283,10 @@ class CombatEnv(gym.Env):
                 "potion_index": pidx,
                 "target_index": target_index if target_index is not None else 0,
             }
-            new_state = self._send({"cmd": "action", "action": "use_potion", "args": args})
+            new_state = self._send_with_run_decision(
+                state,
+                {"cmd": "action", "action": "use_potion", "args": args},
+            )
             self._update_buffered_node_inventory(new_state)
             if new_state is None:
                 self._game_alive = False
@@ -2246,7 +2343,7 @@ class CombatEnv(gym.Env):
             # remain unchanged — this is a strictly-additive event stream.
             if state.get("decision") == "card_reward":
                 self._buffer_card_pick(state, cmd)
-            state = self._send(cmd)
+            state = self._send_with_run_decision(state, cmd)
             self._update_buffered_node_inventory(state)
             if state is None:
                 return None
@@ -2269,6 +2366,9 @@ class CombatEnv(gym.Env):
         self._pending_read_only_replies = 0
         self._run_pending_map_capture = None
         self._run_map_retry_state = None
+        self._run_current_map_coord = None
+        self._run_current_map_room_identity = None
+        self._run_last_map_poll_state_id = None
         ready = self._read_json(timeout_sec=15.0)
         if ready is None:
             # Game process failed to produce ready message — kill it now
@@ -2294,6 +2394,9 @@ class CombatEnv(gym.Env):
         self._pending_read_only_replies = 0
         self._run_pending_map_capture = None
         self._run_map_retry_state = None
+        self._run_current_map_coord = None
+        self._run_current_map_room_identity = None
+        self._run_last_map_poll_state_id = None
 
     def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True,
                    return_frame_outcome: bool = False,

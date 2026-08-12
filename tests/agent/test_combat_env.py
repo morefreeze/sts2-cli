@@ -249,6 +249,52 @@ def _map_state(*, hp=80, deck=None, relics=None, potions=None):
     }
 
 
+def _event_decision_state(*, act=1, floor=1, option_id="TAKE", label="拿走"):
+    state = _map_state()
+    state.update({
+        "decision": "event_choice",
+        "context": {"act": act, "floor": floor, "room_type": "Event"},
+        "options": [{
+            "index": 0,
+            "option_id": option_id,
+            "name": {"zh-CN": label},
+            "description": {"zh-CN": "获得 25 金币。"},
+        }],
+    })
+    return state
+
+
+def _combat_potion_state(*, act=1, floor=2, hp=20, potion_name="火焰药水",
+                         english_name="Fire Potion",
+                         description="对一名敌人造成 20 点伤害。",
+                         english_description="Deal 20 damage to an enemy."):
+    state = combat_env._dummy_combat_state()
+    state["context"] = {"act": act, "floor": floor, "room_type": "Elite"}
+    state["player"].update({
+        "hp": hp,
+        "max_hp": 80,
+        "gold": 99,
+        "deck": [{"id": "STRIKE"}],
+        "relics": [{"id": "BURNING_BLOOD"}],
+        "potions": [{
+            "index": 0,
+            "id": "TEST_POTION",
+            "name": {"zh-CN": potion_name, "en": english_name},
+            "description": {
+                "zh-CN": description,
+                "en": english_description,
+            },
+            "target_type": "AnyEnemy",
+        }],
+    })
+    return state
+
+
+def _node_at(env, coord):
+    act, col, row = coord
+    return env._run_map_snapshots[act]["_coord_lookup"][(col, row)]
+
+
 def _csharp_boss_current_map_reply(*, boss_type="Boss", boss_id="TEST_BOSS"):
     """Exact GetFullMap shape at the terminal boss coordinate."""
     reply = _map_reply()
@@ -285,6 +331,339 @@ def _task1_serialized_boss_map_snapshot(monkeypatch, tmp_path, *, entry_hp=55):
     env._capture_run_map_state(_map_state(hp=entry_hp + 5))
     env._capture_run_map_state(_map_state(hp=entry_hp))
     return env, env._serialized_run_map_snapshots()[0]
+
+
+def test_run_decision_event_after_ancient_transition_attaches_only_to_monster(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    start = _map_state()
+    event = _event_decision_state(floor=2)
+    terminal = {
+        "decision": "game_over",
+        "victory": False,
+        "player": {"hp": 0, "max_hp": 80},
+    }
+    map_replies = iter([
+        _map_reply(current=(0, 0)),
+        _map_reply(current=(0, 1)),
+    ])
+    gameplay_replies = iter([event, terminal])
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: next(map_replies))
+    monkeypatch.setattr(env, "_send", lambda _command: next(gameplay_replies))
+
+    def choose(state):
+        if state["decision"] == "map_select":
+            return {"cmd": "action", "action": "select_map_node", "args": {"index": 0}}
+        return {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}
+
+    monkeypatch.setattr(combat_env, "greedy_action", choose)
+
+    assert env._advance_to_combat(start) is terminal
+
+    ancient = _node_at(env, (1, 0, 0))
+    monster = _node_at(env, (1, 0, 1))
+    assert "decisions" not in ancient
+    assert [item["selected_id"] for item in monster["decisions"]] == ["TAKE"]
+
+
+def test_run_decision_send_none_or_error_never_attaches(monkeypatch, tmp_path):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    state = _event_decision_state()
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(state)
+    replies = iter([None, {"type": "error", "message": "rejected"}])
+    monkeypatch.setattr(env, "_send", lambda _command: next(replies))
+    command = {
+        "cmd": "action",
+        "action": "choose_option",
+        "args": {"option_index": 0},
+    }
+
+    assert env._send_with_run_decision(state, command) is None
+    assert env._send_with_run_decision(state, command)["type"] == "error"
+    assert "decisions" not in _node_at(env, (1, 0, 0))
+
+
+def test_run_decision_requires_exact_poll_and_cannot_pollute_stale_coord(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    old_state = _event_decision_state(option_id="OLD")
+    new_state = _event_decision_state(option_id="NEW")
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(old_state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "map_select"})
+
+    env._send_with_run_decision(
+        new_state,
+        {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}},
+    )
+
+    assert env._run_last_map_poll_state_id == id(old_state)
+    assert "decisions" not in _node_at(env, (1, 0, 0))
+
+
+def test_run_decision_delayed_valid_map_retry_targets_new_validated_coord(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    old_state = _event_decision_state(floor=1, option_id="OLD")
+    new_state = _event_decision_state(floor=2, option_id="NEW")
+    replies = iter([
+        _map_reply(current=(0, 0)),
+        {"type": "error", "message": "temporarily unavailable"},
+        _map_reply(current=(0, 1)),
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: next(replies))
+    env._poll_run_map_state_once(old_state)
+    with pytest.warns(RuntimeWarning, match="map capture failed"):
+        env._poll_run_map_state_once(new_state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "map_select"})
+
+    env._send_with_run_decision(
+        new_state,
+        {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}},
+    )
+
+    assert env._run_last_map_poll_state_id == id(new_state)
+    assert "decisions" not in _node_at(env, (1, 0, 0))
+    assert _node_at(env, (1, 0, 1))["decisions"][0]["selected_id"] == "NEW"
+
+
+def test_run_decision_same_act_replacement_preserves_survivor_and_drops_removed(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    ancient_state = _event_decision_state(floor=1, option_id="ANCIENT")
+    monster_state = _event_decision_state(floor=2, option_id="MONSTER")
+    replacement_state = _map_state(hp=65)
+    replacement_state["context"] = {"act": 1, "floor": 3}
+    replacement = _map_reply(current=(1, 1))
+    replacement["rows"][1][0]["children"] = [{"col": 1, "row": 1}]
+    replacement["rows"][1][0]["visited"] = True
+    replacement["rows"] = [replacement["rows"][1]]
+    replies = iter([
+        _map_reply(current=(0, 0)),
+        _map_reply(current=(0, 1)),
+        replacement,
+    ])
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: next(replies))
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "map_select"})
+    command = {
+        "cmd": "action",
+        "action": "choose_option",
+        "args": {"option_index": 0},
+    }
+
+    env._poll_run_map_state_once(ancient_state)
+    env._send_with_run_decision(ancient_state, command)
+    env._poll_run_map_state_once(monster_state)
+    env._send_with_run_decision(monster_state, command)
+    env._poll_run_map_state_once(replacement_state)
+
+    snapshot = env._run_map_snapshots[1]
+    assert set(snapshot["_coord_lookup"]) == {(0, 1), (1, 1)}
+    assert snapshot["_coord_lookup"][(0, 1)]["decisions"][0]["selected_id"] == (
+        "MONSTER"
+    )
+    assert all(
+        decision["selected_id"] != "ANCIENT"
+        for node in snapshot["visited_nodes"]
+        for decision in node.get("decisions", [])
+    )
+
+
+@pytest.mark.parametrize("helper_name", ["_greedy_use_potions", "_combat_check_heal"])
+def test_run_decision_potion_helpers_record_use_and_effect_only(
+    monkeypatch, tmp_path, helper_name
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    if helper_name == "_combat_check_heal":
+        state = _combat_potion_state(
+            potion_name="治疗药水",
+            english_name="Healing Potion",
+            description="回复 20 点生命。",
+            english_description="Heal 20 HP.",
+        )
+    else:
+        state = _combat_potion_state()
+    monkeypatch.setattr(
+        env, "_send_read_only", lambda _command: _map_reply(current=(0, 0))
+    )
+    env._poll_run_map_state_once(state)
+    after = json.loads(json.dumps(state))
+    after["round"] = 2
+    after["player"]["hp"] = 60
+    after["player"]["potions"] = []
+    monkeypatch.setattr(env, "_send", lambda _command: after)
+
+    assert getattr(env, helper_name)(state)["round"] == 2
+    node = _node_at(env, (1, 0, 0))
+    assert len(node["decisions"]) == 1
+    potion = node["decisions"][0]
+    assert potion["kind"] == "potion"
+    assert potion["selected_id"] == "TEST_POTION"
+    assert next(option for option in potion["options"] if option["selected"])[
+        "effect"
+    ] in {"对一名敌人造成 20 点伤害。", "回复 20 点生命。"}
+
+
+@pytest.mark.parametrize("action", ["play_card", "end_turn"])
+def test_run_decision_rl_combat_actions_do_not_use_wrapper(monkeypatch, action):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=False)
+    current = combat_env._dummy_combat_state()
+    current["context"] = {"act": 1, "floor": 2, "room_type": "Monster"}
+    current["round"] = 1
+    after = json.loads(json.dumps(current))
+    after["round"] = 2
+    env._current_state = current
+    env._game_alive = True
+    monkeypatch.setattr(
+        env.enc,
+        "decode",
+        lambda _action, _state: {"cmd": "action", "action": action, "args": {}},
+    )
+    monkeypatch.setattr(
+        env,
+        "_send_with_run_decision",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("RL action used wrapper")),
+        raising=False,
+    )
+    monkeypatch.setattr(env, "_send", lambda _command: after)
+    monkeypatch.setattr(env, "_retry_run_map_poll_before_gameplay", lambda: None)
+    monkeypatch.setattr(env, "_update_buffered_node_inventory", lambda _state: None)
+    monkeypatch.setattr(env, "_shaping_reward", lambda _state: 0.0)
+    monkeypatch.setattr(env, "_combat_check_heal", lambda state: state)
+
+    _, _, terminated, _, _ = env.step(0)
+
+    assert terminated is False
+
+
+def test_run_decision_combat_potion_rejects_room_identity_mismatch(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    captured_state = _combat_potion_state(floor=2)
+    mismatched_state = _combat_potion_state(floor=3)
+    monkeypatch.setattr(
+        env, "_send_read_only", lambda _command: _map_reply(current=(0, 0))
+    )
+    env._poll_run_map_state_once(captured_state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "combat_play"})
+
+    env._send_with_run_decision(
+        mismatched_state,
+        {"cmd": "action", "action": "use_potion", "args": {"potion_index": 0}},
+    )
+
+    assert "decisions" not in _node_at(env, (1, 0, 0))
+
+
+def test_run_decision_combat_potion_reuses_coord_for_same_unpolled_room_identity(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    captured_state = _combat_potion_state(floor=2)
+    later_state = json.loads(json.dumps(captured_state))
+    later_state["round"] = 4
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(captured_state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "combat_play"})
+
+    env._send_with_run_decision(
+        later_state,
+        {"cmd": "action", "action": "use_potion", "args": {"potion_index": 0}},
+    )
+
+    assert env._run_last_map_poll_state_id == id(captured_state)
+    assert env._run_last_map_poll_state_id != id(later_state)
+    assert _node_at(env, (1, 0, 0))["decisions"][0]["kind"] == "potion"
+
+
+def test_run_decision_combat_potion_rejects_missing_room_identity(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    state = _combat_potion_state()
+    state["context"] = {"room_type": "Elite"}
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "combat_play"})
+
+    env._send_with_run_decision(
+        state,
+        {"cmd": "action", "action": "use_potion", "args": {"potion_index": 0}},
+    )
+
+    assert env._run_current_map_room_identity is None
+    assert "decisions" not in _node_at(env, (1, 0, 0))
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ({"context": {"act": 1, "floor": 2}}, (1, 2)),
+        ({"floor": 17, "context": {"act": 4, "floor": 1}}, (4, 17)),
+        ({"context": {"act": True, "floor": 2}}, None),
+        ({"context": {"act": 1, "floor": False}}, None),
+        ({"context": {"act": 0, "floor": 2}}, None),
+        ({"context": {"act": 1, "floor": 18}}, None),
+        ({"context": {"act": 1.0, "floor": 2}}, None),
+        ({"context": {"act": 1, "floor": 2.0}}, None),
+        ({"context": []}, None),
+    ],
+)
+def test_run_decision_room_identity_is_exact_and_bounded(state, expected):
+    assert CombatEnv._bounded_run_room_identity(state) == expected
+
+
+def test_run_decision_process_kill_clears_coord_and_room_identity():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._run_current_map_coord = (1, 0, 1)
+    env._run_current_map_room_identity = (1, 2)
+
+    env._kill_proc()
+
+    assert env._run_current_map_coord is None
+    assert env._run_current_map_room_identity is None
+
+
+def test_run_decision_fresh_reset_clears_target_state(monkeypatch):
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=False)
+    env._run_current_map_coord = (1, 0, 1)
+    env._run_current_map_room_identity = (1, 2)
+    env._run_last_map_poll_state_id = 123
+    state = combat_env._dummy_combat_state()
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+    monkeypatch.setattr(env, "_start_proc", lambda: None)
+    monkeypatch.setattr(env, "_send", lambda _command: state)
+    monkeypatch.setattr(env, "_advance_to_combat", lambda current: current)
+
+    env.reset()
+
+    assert env._run_current_map_coord is None
+    assert env._run_current_map_room_identity is None
+    assert env._run_last_map_poll_state_id != 123
 
 
 def test_default_combat_env_never_requests_authoritative_map(monkeypatch):
@@ -1001,6 +1380,60 @@ def test_late_valid_map_is_ingested_with_detached_entry_before_gameplay(
         os.close(read_fd)
 
 
+def test_run_decision_late_pending_map_reply_targets_new_coord_before_gameplay(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    old_state = _map_state(hp=80)
+    event_state = _event_decision_state(floor=2, option_id="LATE")
+    env._ingest_run_map_reply(_map_reply(current=(0, 0)), old_state)
+    env._run_last_map_poll_state_id = id(old_state)
+    read_fd, write_fd = os.pipe()
+    result = {"decision": "map_select", "player": event_state["player"]}
+
+    def reply_to_action(payload):
+        if json.loads(payload).get("cmd") == "action":
+            os.write(write_fd, (json.dumps(result) + "\n").encode())
+
+    env._proc = _pipe_process(
+        read_fd, _FakeProtocolInput(on_write=reply_to_action)
+    )
+    env._game_alive = True
+    _fast_pipe_reads(monkeypatch, env)
+
+    def timeout_after_delivery(_command, **_kwargs):
+        env._pending_read_only_replies = 1
+        return None
+
+    monkeypatch.setattr(env, "_send_read_only", timeout_after_delivery)
+    try:
+        with pytest.warns(RuntimeWarning, match="map capture failed"):
+            env._poll_run_map_state_once(event_state)
+        os.write(
+            write_fd,
+            (json.dumps(_map_reply(current=(0, 1))) + "\n").encode(),
+        )
+
+        reply = env._send_with_run_decision(
+            event_state,
+            {
+                "cmd": "action",
+                "action": "choose_option",
+                "args": {"option_index": 0},
+            },
+        )
+
+        assert reply == result
+        assert env._run_last_map_poll_state_id == id(event_state)
+        assert "decisions" not in _node_at(env, (1, 0, 0))
+        assert _node_at(env, (1, 0, 1))["decisions"][0]["selected_id"] == "LATE"
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
 def test_immediate_map_error_retries_once_at_first_gameplay_boundary(
     monkeypatch, tmp_path
 ):
@@ -1514,7 +1947,11 @@ def test_advance_polls_each_distinct_state_once_without_post_potion_duplicate(mo
     combat = {**_map_state(hp=70), "decision": "combat_play"}
     post_potion = {**_map_state(hp=75), "decision": "combat_play"}
     captured = []
-    monkeypatch.setattr(env, "_capture_run_map_state", lambda state: captured.append(state))
+    monkeypatch.setattr(
+        env,
+        "_capture_run_map_state",
+        lambda state, **_kwargs: (captured.append(state) or True),
+    )
     monkeypatch.setattr(combat_env, "greedy_action", lambda state: {"cmd": "action"})
     monkeypatch.setattr(env, "_send", lambda command: combat)
     monkeypatch.setattr(env, "_greedy_use_potions", lambda state: post_potion)
@@ -1936,6 +2373,52 @@ class _CloseAfterFlushFile(_DelegatingAppendFile):
     def __exit__(self, exc_type, exc_value, traceback):
         self._file.__exit__(exc_type, exc_value, traceback)
         raise OSError("close after committed flush")
+
+
+def test_run_decision_flush_preserves_decisions_and_retries_atomic_failure(
+    monkeypatch, tmp_path
+):
+    env, history_path = _recording_env(
+        monkeypatch, tmp_path, run_context={"capture_map": True}
+    )
+    env._emit_run_start()
+    state = _event_decision_state()
+    monkeypatch.setattr(env, "_send_read_only", lambda _command: _map_reply())
+    env._poll_run_map_state_once(state)
+    monkeypatch.setattr(env, "_send", lambda _command: {"decision": "map_select"})
+    env._send_with_run_decision(
+        state,
+        {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}},
+    )
+    env._run_card_pick_records = [{"event": "card_pick", "picked": "BASH"}]
+    before = history_path.read_bytes()
+    real_open = open
+    wrapped = False
+
+    def failing_open(path, *args, **kwargs):
+        nonlocal wrapped
+        file_obj = real_open(path, *args, **kwargs)
+        if path == str(history_path) and not wrapped:
+            wrapped = True
+            return _PartialWriteFile(file_obj)
+        return file_obj
+
+    monkeypatch.setattr(combat_env, "open", failing_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="partial append"):
+        env._emit_run_outcome(state, victory=False, status="dead")
+
+    assert history_path.read_bytes() == before
+    assert env._run_outcome_emitted is False
+    assert _node_at(env, (1, 0, 0))["decisions"][0]["selected_id"] == "TAKE"
+
+    env._emit_run_outcome(state, victory=False, status="dead")
+
+    rows = _read_history_rows(history_path)
+    assert [row["event"] for row in rows] == [
+        "run_start", "map_snapshot", "card_pick", "outcome",
+    ]
+    assert rows[1]["visited_nodes"][0]["decisions"][0]["selected_id"] == "TAKE"
 
 
 def _terminal_batch_env(monkeypatch, tmp_path):
