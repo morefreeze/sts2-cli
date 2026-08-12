@@ -838,7 +838,7 @@ def test_recorded_decisions_fixture_renders_all_six_one_line_grey_summaries():
     )
 
     assert [summary["prefix"] for summary in result] == [
-        "事件", "卡", "药水", "商店", "遗物", "休息",
+        "事件", "卡", "药水", "商店", "遗物", "休息", "休息",
     ]
     assert [decision["selected_id"] for decision in decisions] == [
         "EVENT.BLOOD_FOR_GOLD",
@@ -847,6 +847,7 @@ def test_recorded_decisions_fixture_renders_all_six_one_line_grey_summaries():
         "CARD.SHRUG_IT_OFF",
         "RELIC.ANCHOR",
         "REST.SMITH",
+        "CARD.BASH",
     ]
     assert [summary["label"] for summary in result] == [
         decision["selected_label"] for decision in decisions

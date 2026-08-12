@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 import agent.run_progress_viewer as viewer
+from agent.run_decisions import capture_run_decision
 from agent.run_progress_viewer import make_viewer_handler
 from agent.run_workbench.assets import NodeArtResolver
 from agent.run_workbench.catalog import RunCatalog
@@ -1074,6 +1075,7 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "shop",
         "relic",
         "rest",
+        "rest",
     ]
     assert [decision["selected_id"] for decision in decisions] == [
         "EVENT.BLOOD_FOR_GOLD",
@@ -1082,14 +1084,16 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "CARD.SHRUG_IT_OFF",
         "RELIC.ANCHOR",
         "REST.SMITH",
+        "CARD.BASH",
     ]
     assert [decision["selected_label"] for decision in decisions] == [
         "献血换取金币",
         "剑柄打击",
-        "使用火焰药水",
-        "购买耸肩无视",
-        "购买锚",
-        "锻造升级重击",
+        "火焰药水",
+        "购买耸肩无视 · 50 金币",
+        "购买锚 · 120 金币",
+        "锻造",
+        "重击",
     ]
     assert [decision["kind"] for decision in visited[2].get("decisions", [])] == []
     assert [decision["kind"] for decision in visited[3]["decisions"]] == [
@@ -1130,6 +1134,212 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
     assert "/Users/" not in decision_json
     assert "<" not in decision_json and ">" not in decision_json
     assert json.loads(json.dumps(map_payload, allow_nan=False)) == map_payload
+
+
+def test_recorded_decisions_fixture_matches_real_capture_output_exactly() -> None:
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "run_workbench"
+        / "recorded_decisions.jsonl"
+    )
+    rows = [
+        json.loads(line)
+        for line in fixture.read_text(encoding="utf-8").splitlines()
+    ]
+    snapshot = next(row for row in rows if row.get("event") == "map_snapshot")
+
+    def command(action: str, **args: object) -> dict:
+        return {"cmd": "action", "action": action, "args": args}
+
+    capture_inputs = [
+        [
+            (
+                {
+                    "decision": "event_choice",
+                    "options": [
+                        {
+                            "index": 0,
+                            "option_id": "EVENT.BLOOD_FOR_GOLD",
+                            "name": "献血换取金币",
+                            "description": "失去 6 点生命，获得 90 金币",
+                        },
+                        {
+                            "index": 1,
+                            "option_id": "EVENT.LEAVE",
+                            "name": "离开",
+                            "description": "生命与金币保持不变",
+                        },
+                    ],
+                },
+                command("choose_option", option_index=0),
+            ),
+        ],
+        [
+            (
+                {
+                    "decision": "card_reward",
+                    "can_skip": False,
+                    "cards": [
+                        {
+                            "index": 0,
+                            "id": "CARD.POMMEL_STRIKE",
+                            "name": "剑柄打击",
+                            "description": "造成 9 点伤害，抽 1 张牌",
+                        },
+                        {
+                            "index": 1,
+                            "id": "CARD.CLEAVE",
+                            "name": "顺劈斩",
+                            "description": "对所有敌人造成 8 点伤害",
+                        },
+                        {
+                            "index": 2,
+                            "id": "CARD.IRON_WAVE",
+                            "name": "钢铁波浪",
+                            "description": "获得 5 点格挡并造成 5 点伤害",
+                        },
+                    ],
+                },
+                command("select_card_reward", card_index=0),
+            ),
+            (
+                {
+                    "decision": "combat_play",
+                    "context": {"room_type": "Monster"},
+                    "player": {
+                        "potions": [
+                            {
+                                "index": 0,
+                                "id": "POTION.FIRE",
+                                "name": "火焰药水",
+                                "description": "对一个敌人造成 20 点伤害",
+                            },
+                            {
+                                "index": 1,
+                                "id": "POTION.BLOCK",
+                                "name": "格挡药水",
+                                "description": "未来使用时获得 12 点格挡",
+                            },
+                        ]
+                    },
+                },
+                command("use_potion", potion_index=0),
+            ),
+        ],
+        [],
+        [
+            (
+                {
+                    "decision": "shop",
+                    "context": {"room_type": "Shop"},
+                    "cards": [
+                        {
+                            "index": 0,
+                            "id": "CARD.SHRUG_IT_OFF",
+                            "name": "耸肩无视",
+                            "cost": 50,
+                            "description": "获得 8 点格挡，抽 1 张牌",
+                        },
+                        {
+                            "index": 1,
+                            "id": "CARD.CLEAVE",
+                            "name": "顺劈斩",
+                            "cost": 55,
+                            "description": "对所有敌人造成 8 点伤害",
+                        },
+                    ],
+                },
+                command("buy_card", card_index=0),
+            ),
+            (
+                {
+                    "decision": "shop",
+                    "context": {"room_type": "Shop"},
+                    "relics": [
+                        {
+                            "index": 0,
+                            "id": "RELIC.ANCHOR",
+                            "name": "锚",
+                            "cost": 120,
+                            "description": "每场战斗开始时获得 10 点格挡",
+                        },
+                        {
+                            "index": 1,
+                            "id": "RELIC.BLUE_CANDLE",
+                            "name": "蓝蜡烛",
+                            "cost": 140,
+                            "description": "可以打出诅咒牌并失去 1 点生命",
+                        },
+                    ],
+                },
+                command("buy_relic", relic_index=0),
+            ),
+        ],
+        [
+            (
+                {
+                    "decision": "rest_site",
+                    "context": {"room_type": "RestSiteRoom"},
+                    "options": [
+                        {
+                            "index": 0,
+                            "option_id": "REST.SMITH",
+                            "name": "锻造",
+                            "description": "选择一张卡牌升级",
+                        },
+                        {
+                            "index": 1,
+                            "option_id": "REST.HEAL",
+                            "name": "休息",
+                            "description": "回复 12 点生命至 80 点",
+                        },
+                    ],
+                },
+                command("choose_option", option_index=0),
+            ),
+            (
+                {
+                    "decision": "card_select",
+                    "context": {"room_type": "RestSiteRoom"},
+                    "cards": [
+                        {
+                            "index": 0,
+                            "id": "CARD.BASH",
+                            "name": "重击",
+                            "description": "升级后伤害与易伤效果增强",
+                        },
+                        {
+                            "index": 1,
+                            "id": "CARD.STRIKE",
+                            "name": "打击",
+                            "description": "升级后造成更多伤害",
+                        },
+                    ],
+                },
+                command("select_cards", indices="0"),
+            ),
+        ],
+    ]
+    captured = [
+        [capture_run_decision(state, action) for state, action in node_inputs]
+        for node_inputs in capture_inputs
+    ]
+
+    assert all(decision is not None for decisions in captured for decision in decisions)
+    assert captured == [
+        node.get("decisions", []) for node in snapshot["visited_nodes"]
+    ]
+    potion_state = capture_inputs[1][1][0]
+    selected_potion_id = captured[1][1]["selected_id"]
+    assert any(
+        potion["id"] == selected_potion_id
+        for potion in potion_state["player"]["potions"]
+    )
+    assert snapshot["visited_nodes"][1]["entry_player"]["potions"] == [
+        {"id": selected_potion_id}
+    ]
+    assert snapshot["visited_nodes"][1]["exit_player"]["potions"] == []
 
 
 def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
