@@ -11,7 +11,7 @@ Design: simple 1:1 mapping — each env.step() = one game action (including
 end_turn). No auto-skip. Policy and value networks are separated in train.py
 to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import fcntl, json, math, os, subprocess, random, time, select, sys, warnings
+import fcntl, hashlib, json, math, os, subprocess, random, time, select, sys, warnings
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -26,6 +26,15 @@ from agent.run_decisions import append_run_decision, capture_run_decision
 # Swappable map strategy — change globally via set_map_strategy()
 _map_strategy: MapStrategy = HpAwareMapStrategy()
 _decision_advisor = DecisionAdvisor()
+
+_RUN_DECISION_REPLY_MAX_KEYS = 256
+_RUN_DECISION_STATE_MAX_DEPTH = 8
+_RUN_DECISION_STATE_MAX_NODES = 16_384
+_RUN_DECISION_STATE_MAX_DICT_ITEMS = 512
+_RUN_DECISION_STATE_MAX_LIST_ITEMS = 4_096
+_RUN_DECISION_STATE_MAX_KEY_CHARS = 256
+_RUN_DECISION_STATE_MAX_STRING_CHARS = 16_384
+_RUN_DECISION_STATE_MAX_BYTES = 512 * 1024
 
 
 class _RunMapTransitionError(ValueError):
@@ -631,6 +640,8 @@ class CombatEnv(gym.Env):
         self._run_current_map_coord: tuple[int, int, int] | None = None
         self._run_current_map_room_identity: tuple[int, int] | None = None
         self._run_last_map_poll_state_id: int | None = None
+        self._run_last_map_poll_state_ref: dict | None = None
+        self._run_last_map_poll_state_fingerprint: str | None = None
         self._run_pending_map_capture: dict | None = None
         self._run_map_retry_state: dict | None = None
         self._run_seed = self._seed
@@ -735,7 +746,7 @@ class CombatEnv(gym.Env):
         self._run_map_snapshots = {}
         self._run_current_map_coord = None
         self._run_current_map_room_identity = None
-        self._run_last_map_poll_state_id = None
+        self._clear_run_last_map_poll_state()
         self._run_pending_map_capture = None
         self._run_map_retry_state = None
         self._run_logging_errors = []
@@ -1556,6 +1567,105 @@ class CombatEnv(gym.Env):
         node["exit_player"] = player
 
     @staticmethod
+    def _run_decision_state_fingerprint(state: object) -> str | None:
+        """Return a bounded canonical fingerprint for one exact JSON state."""
+        if type(state) is not dict:
+            return None
+        count = [0]
+
+        def canonical(value: object, depth: int):
+            count[0] += 1
+            if (
+                depth > _RUN_DECISION_STATE_MAX_DEPTH
+                or count[0] > _RUN_DECISION_STATE_MAX_NODES
+            ):
+                raise ValueError("state fingerprint structure is too large")
+            if value is None or type(value) is bool:
+                return value
+            if type(value) is int:
+                if not -(2**63) <= value < 2**63:
+                    raise ValueError("state fingerprint integer is out of range")
+                return value
+            if type(value) is float:
+                if not math.isfinite(value):
+                    raise ValueError("state fingerprint number is not finite")
+                return value
+            if type(value) is str:
+                if len(value) > _RUN_DECISION_STATE_MAX_STRING_CHARS:
+                    raise ValueError("state fingerprint string is too large")
+                value.encode("utf-8", errors="strict")
+                return value
+            if type(value) is list:
+                if len(value) > _RUN_DECISION_STATE_MAX_LIST_ITEMS:
+                    raise ValueError("state fingerprint list is too large")
+                return ["list", [canonical(item, depth + 1) for item in value]]
+            if type(value) is dict:
+                if len(value) > _RUN_DECISION_STATE_MAX_DICT_ITEMS:
+                    raise ValueError("state fingerprint object is too large")
+                for key in value:
+                    if (
+                        type(key) is not str
+                        or len(key) > _RUN_DECISION_STATE_MAX_KEY_CHARS
+                    ):
+                        raise ValueError("state fingerprint object key is invalid")
+                    key.encode("utf-8", errors="strict")
+                items = [
+                    (key, canonical(item, depth + 1))
+                    for key, item in value.items()
+                ]
+                items.sort(key=lambda pair: pair[0])
+                return ["dict", items]
+            raise ValueError("state fingerprint contains a non-JSON value")
+
+        try:
+            encoded = json.dumps(
+                canonical(state, 0),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8", errors="strict")
+            if len(encoded) > _RUN_DECISION_STATE_MAX_BYTES:
+                return None
+            return hashlib.sha256(encoded).hexdigest()
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            return None
+
+    def _clear_run_last_map_poll_state(self) -> None:
+        self._run_last_map_poll_state_id = None
+        self._run_last_map_poll_state_ref = None
+        self._run_last_map_poll_state_fingerprint = None
+
+    def _retain_run_last_map_poll_state(
+        self, state: object, fingerprint: object = None
+    ) -> bool:
+        if type(state) is not dict:
+            self._clear_run_last_map_poll_state()
+            return False
+        if fingerprint is None:
+            fingerprint = self._run_decision_state_fingerprint(state)
+        if type(fingerprint) is not str or len(fingerprint) != 64:
+            self._clear_run_last_map_poll_state()
+            return False
+        self._run_last_map_poll_state_id = id(state)
+        self._run_last_map_poll_state_ref = state
+        self._run_last_map_poll_state_fingerprint = fingerprint
+        return True
+
+    @staticmethod
+    def _is_confirmed_run_decision_reply(reply: object) -> bool:
+        if type(reply) is not dict or len(reply) > _RUN_DECISION_REPLY_MAX_KEYS:
+            return False
+        for key in reply:
+            if type(key) is not str or len(key) > _RUN_DECISION_STATE_MAX_KEY_CHARS:
+                return False
+            try:
+                key.encode("utf-8", errors="strict")
+            except UnicodeEncodeError:
+                return False
+        reply_type = reply.get("type")
+        return type(reply_type) is str and reply_type == "decision"
+
+    @staticmethod
     def _bounded_run_room_identity(
         state: object,
     ) -> tuple[int, int] | None:
@@ -1757,9 +1867,18 @@ class CombatEnv(gym.Env):
         act, raw_map, (col, row), current_node, graph_coords = (
             self._validated_map_reply(reply)
         )
-        room_identity = self._bounded_run_room_identity(state)
-        if room_identity is not None and room_identity[0] != act:
-            room_identity = None
+        state_room_identity = self._bounded_run_room_identity(state)
+        map_floor = raw_map["context"].get("floor")
+        map_room_identity = (
+            (act, map_floor)
+            if type(map_floor) is int and 1 <= map_floor <= 17
+            else None
+        )
+        room_identity = (
+            state_room_identity
+            if state_room_identity == map_room_identity
+            else None
+        )
         captured_at = time.time()
         if (type(captured_at) not in (int, float)
                 or not math.isfinite(captured_at)):
@@ -1802,6 +1921,8 @@ class CombatEnv(gym.Env):
                 "map authoritative visits do not match buffered inventories"
             )
 
+        self._clear_run_last_map_poll_state()
+
         if snapshot is None:
             snapshot = {
                 "map": raw_map,
@@ -1841,8 +1962,18 @@ class CombatEnv(gym.Env):
         self._run_map_capture_failure_active = False
 
     def _detached_run_map_poll_state(
-        self, state: dict, state_id: int | None = None, inventory_checkpoint=None
+        self,
+        state: dict,
+        state_id: int | None = None,
+        inventory_checkpoint=None,
+        *,
+        state_ref: object = None,
+        state_fingerprint: object = None,
     ):
+        if state_ref is None:
+            state_ref = state
+        if state_fingerprint is None:
+            state_fingerprint = self._run_decision_state_fingerprint(state_ref)
         detached_state = {"player": self._bounded_player_snapshot(state)}
         room_identity = self._bounded_run_room_identity(state)
         if room_identity is not None:
@@ -1852,6 +1983,8 @@ class CombatEnv(gym.Env):
             }
         retained = {
             "state_id": id(state) if state_id is None else state_id,
+            "state_ref": state_ref,
+            "state_fingerprint": state_fingerprint,
             "state": detached_state,
         }
         if inventory_checkpoint is not None:
@@ -1859,7 +1992,12 @@ class CombatEnv(gym.Env):
         return retained
 
     def _capture_run_map_state(
-        self, state: dict, *, poll_state_id: int | None = None
+        self,
+        state: dict,
+        *,
+        poll_state_id: int | None = None,
+        poll_state_ref: object = None,
+        poll_state_fingerprint: object = None,
     ) -> bool:
         """Capture evaluation map observability without affecting gameplay."""
         inventory_checkpoint = self._buffered_inventory_checkpoint()
@@ -1873,7 +2011,11 @@ class CombatEnv(gym.Env):
             reply = self._send_read_only({"cmd": "get_map"})
             if self._pending_read_only_replies > 0:
                 self._run_pending_map_capture = self._detached_run_map_poll_state(
-                    state, effective_state_id, inventory_checkpoint
+                    state,
+                    effective_state_id,
+                    inventory_checkpoint,
+                    state_ref=poll_state_ref,
+                    state_fingerprint=poll_state_fingerprint,
                 )
             self._ingest_run_map_reply(reply, state)
             return True
@@ -1891,19 +2033,24 @@ class CombatEnv(gym.Env):
 
     def _poll_run_map_state_once(self, state: dict):
         self._update_buffered_node_inventory(state)
-        if type(state) is not dict:
+        if type(state) is not dict or not self._capture_run_maps:
             return
         state_id = id(state)
-        if self._run_last_map_poll_state_id == state_id:
+        state_fingerprint = self._run_decision_state_fingerprint(state)
+        if (
+            self._run_last_map_poll_state_ref is state
+            and state_fingerprint is not None
+            and self._run_last_map_poll_state_fingerprint == state_fingerprint
+        ):
             return
         if (self._run_pending_map_capture is not None
-                and self._run_pending_map_capture["state_id"] == state_id):
+                and self._run_pending_map_capture.get("state_ref") is state):
             return
         if (self._run_map_retry_state is not None
-                and self._run_map_retry_state["state_id"] == state_id):
+                and self._run_map_retry_state.get("state_ref") is state):
             return
         if self._capture_run_map_state(state):
-            self._run_last_map_poll_state_id = state_id
+            self._retain_run_last_map_poll_state(state, state_fingerprint)
             self._run_map_retry_state = None
         elif self._pending_read_only_replies == 0:
             self._run_map_retry_state = self._detached_run_map_poll_state(
@@ -1916,9 +2063,14 @@ class CombatEnv(gym.Env):
             return
         self._run_map_retry_state = None
         if self._capture_run_map_state(
-            retained["state"], poll_state_id=retained["state_id"]
+            retained["state"],
+            poll_state_id=retained["state_id"],
+            poll_state_ref=retained.get("state_ref"),
+            poll_state_fingerprint=retained.get("state_fingerprint"),
         ):
-            self._run_last_map_poll_state_id = retained["state_id"]
+            self._retain_run_last_map_poll_state(
+                retained.get("state_ref"), retained.get("state_fingerprint")
+            )
 
     def _run_decision_target(
         self, state: object, decision: object
@@ -1938,8 +2090,14 @@ class CombatEnv(gym.Env):
                     != self._run_current_map_room_identity
             ):
                 return None
-        elif self._run_last_map_poll_state_id != id(state):
-            return None
+        else:
+            fingerprint = self._run_decision_state_fingerprint(state)
+            if (
+                self._run_last_map_poll_state_ref is not state
+                or fingerprint is None
+                or fingerprint != self._run_last_map_poll_state_fingerprint
+            ):
+                return None
         return target
 
     def _append_run_decision_to_node(
@@ -1964,12 +2122,8 @@ class CombatEnv(gym.Env):
         self._retry_run_map_poll_before_gameplay()
         target = self._run_decision_target(state, decision)
         reply = self._send(command)
-        if decision is None or type(reply) is not dict:
+        if decision is None or not self._is_confirmed_run_decision_reply(reply):
             return reply
-        if "type" in reply:
-            reply_type = reply.get("type")
-            if type(reply_type) is not str or reply_type == "error":
-                return reply
         if target is None:
             target = self._run_decision_target(state, decision)
         if target is not None:
@@ -2380,7 +2534,7 @@ class CombatEnv(gym.Env):
         self._run_map_retry_state = None
         self._run_current_map_coord = None
         self._run_current_map_room_identity = None
-        self._run_last_map_poll_state_id = None
+        self._clear_run_last_map_poll_state()
         ready = self._read_json(timeout_sec=15.0)
         if ready is None:
             # Game process failed to produce ready message — kill it now
@@ -2408,7 +2562,7 @@ class CombatEnv(gym.Env):
         self._run_map_retry_state = None
         self._run_current_map_coord = None
         self._run_current_map_room_identity = None
-        self._run_last_map_poll_state_id = None
+        self._clear_run_last_map_poll_state()
 
     def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True,
                    return_frame_outcome: bool = False,
@@ -2553,8 +2707,9 @@ class CombatEnv(gym.Env):
                         self._ingest_run_map_reply(
                             pending_reply, retained_capture["state"]
                         )
-                        self._run_last_map_poll_state_id = (
-                            retained_capture["state_id"]
+                        self._retain_run_last_map_poll_state(
+                            retained_capture.get("state_ref"),
+                            retained_capture.get("state_fingerprint"),
                         )
                         self._run_map_retry_state = None
                     except _RunMapTransitionError as exc:
