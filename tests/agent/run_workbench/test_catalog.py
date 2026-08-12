@@ -133,6 +133,72 @@ def _recorded_map_snapshot(run_id: str = "recorded") -> dict:
     }
 
 
+def _recorded_event_decision(selected_label: str = "献血") -> dict:
+    return {
+        "kind": "event",
+        "selected_id": "EVENT.BLOOD",
+        "selected_label": selected_label,
+        "options": [
+            {
+                "id": "EVENT.BLOOD",
+                "label": selected_label,
+                "effect": "失去 6 点生命，获得一张牌",
+                "selected": True,
+            },
+            {
+                "id": "EVENT.LEAVE",
+                "label": "离开",
+                "effect": None,
+                "selected": False,
+            },
+        ],
+        "evidence": "recorded",
+    }
+
+
+def _deck_rows_with_recorded_decision(record_count: int) -> list[dict]:
+    older = _recorded_map_snapshot("decision-parity")
+    older["visited_nodes"][0]["decisions"] = [
+        _recorded_event_decision("旧选择")
+    ]
+    latest = deepcopy(older)
+    latest["ts"] = 2
+    latest["visited_nodes"][0]["decisions"] = [
+        _recorded_event_decision()
+    ]
+    malformed_newer = deepcopy(latest)
+    malformed_newer["ts"] = 3
+    malformed_newer["visited_nodes"][0]["decisions"][0]["options"][0][
+        "selected"
+    ] = False
+    act_two = _recorded_map_route_snapshot(
+        "decision-parity", act=2, ts=4, route_length=1
+    )
+    act_two["visited_nodes"][0]["decisions"] = []
+    outcome = {
+        "event": "outcome",
+        "run_id": "decision-parity",
+        "status": "dead",
+        "max_global_floor": 18,
+        "character": "Ironclad",
+        "game_version": "v1",
+        "checkpoint": "decision-model",
+        "evaluation_mode": "fixed",
+        "scenario": "standard",
+        "ascension": 0,
+        "seed": "decision-seed",
+        "ts": 5,
+    }
+    return [
+        older,
+        latest,
+        malformed_newer,
+        act_two,
+        outcome,
+        *({"ignored": index} for index in range(record_count - 5)),
+    ]
+
+
 def _recorded_map_route_snapshot(
     run_id: str,
     *,
@@ -1392,6 +1458,103 @@ def test_large_deck_history_uses_bounded_index_and_exact_streamed_outcomes(
     catalog.list_cohorts()
     catalog.get_metrics(cohort["cohort_id"])
     assert scan_calls == 1
+
+
+def test_recorded_decision_capability_matches_at_511_and_513_threshold(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "deck.jsonl"
+    views: list[dict] = []
+    capability_dicts: list[dict] = []
+    cohort_records = []
+
+    for record_count in (511, 513):
+        _write_jsonl(
+            source,
+            _deck_rows_with_recorded_decision(record_count),
+        )
+        catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+        cohort = catalog.list_cohorts()[0]
+        record = catalog.get_cohort_records(cohort["cohort_id"])[0]
+        view = catalog.get_run("decision-parity")["run"]
+
+        assert catalog.list_sources()[0]["record_count"] == record_count
+        assert record.capabilities.decisions is True
+        assert next(
+            node["decisions"][0]["selected_label"]
+            for node in view["nodes"]
+            if node.get("decisions")
+        ) == "献血"
+        capability_dicts.append(record.to_dict()["capabilities"])
+        cohort_records.append(record)
+        views.append(view)
+
+    assert capability_dicts[0] == capability_dicts[1]
+    assert views[0] == views[1]
+    assert cohort_records[0].capabilities == cohort_records[1].capabilities
+
+
+def test_recorded_decision_compact_copy_cache_and_to_record_are_stable(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "deck.jsonl"
+    _write_jsonl(source, _deck_rows_with_recorded_decision(513))
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    first_cohorts = catalog.list_cohorts()
+    second_cohorts = catalog.list_cohorts()
+    indexed = catalog._sources[catalog.list_sources()[0]["source_id"]]
+    compact = next(
+        item for item in indexed.deck_outcomes if item.run_id == "decision-parity"
+    )
+
+    first = compact.to_record().to_dict()
+    second = compact.to_record().to_dict()
+    copied = deepcopy(compact).to_record().to_dict()
+
+    assert compact.has_node_decisions is True
+    assert first == second == copied
+    assert first_cohorts == second_cohorts
+
+
+def test_recorded_decision_malformed_map_never_promotes_compact_capability(
+    tmp_path: Path,
+) -> None:
+    valid_empty = _recorded_map_snapshot("invalid-decision")
+    valid_empty["visited_nodes"][0]["decisions"] = []
+    malformed_newer = deepcopy(valid_empty)
+    malformed_newer["ts"] = 2
+    malformed_newer["visited_nodes"][0]["decisions"] = [
+        _recorded_event_decision()
+    ]
+    malformed_newer["visited_nodes"][0]["decisions"][0]["options"][0][
+        "selected"
+    ] = False
+    rows = [
+        valid_empty,
+        malformed_newer,
+        {
+            "event": "outcome",
+            "run_id": "invalid-decision",
+            "status": "dead",
+            "max_global_floor": 1,
+            "ts": 3,
+        },
+        *({"ignored": index} for index in range(510)),
+    ]
+    _write_jsonl(tmp_path / "deck.jsonl", rows)
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    cohort = catalog.list_cohorts()[0]
+    record = catalog.get_cohort_records(cohort["cohort_id"])[0]
+    run = catalog.get_run("invalid-decision")["run"]
+
+    assert record.capabilities.decisions is False
+    assert all(not node.get("decisions") for node in run["nodes"])
+    assert any(
+        "select exactly one option" in warning
+        for warning in run["warnings"]
+    )
 
 
 def test_workbench_discovery_ignores_unrelated_json_but_accepts_schema_markers(

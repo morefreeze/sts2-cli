@@ -75,6 +75,29 @@ def _recorded_map_row(
     }
 
 
+def _recorded_event_decision(selected_label: str = "献血") -> dict:
+    return {
+        "kind": "event",
+        "selected_id": "EVENT.BLOOD",
+        "selected_label": selected_label,
+        "options": [
+            {
+                "id": "EVENT.BLOOD",
+                "label": selected_label,
+                "effect": "失去 6 点生命，获得一张牌",
+                "selected": True,
+            },
+            {
+                "id": "EVENT.LEAVE",
+                "label": "离开",
+                "effect": None,
+                "selected": False,
+            },
+        ],
+        "evidence": "recorded",
+    }
+
+
 def test_native_run_preserves_identity_and_format_capabilities() -> None:
     adapted = adapt_path(FIXTURES / "native_run.json")
 
@@ -1299,6 +1322,124 @@ def test_deck_history_exposes_only_validated_recorded_acts_and_route_nodes() -> 
         run.node_origins(index) == expected_origin
         for index in range(len(run.nodes))
     )
+
+
+def test_recorded_decision_enables_deck_capability_without_card_pick() -> None:
+    player = {
+        "hp": 80,
+        "max_hp": 80,
+        "gold": 10,
+        "deck": [],
+        "relics": [],
+        "potions": [],
+    }
+    recorded_map = _recorded_map_row(
+        act=1,
+        ts=1,
+        snapshots=[(player, player)],
+    )
+    recorded_map["visited_nodes"][0]["decisions"] = [
+        _recorded_event_decision()
+    ]
+
+    run = adapt_records(
+        "recorded-decision.jsonl",
+        [
+            recorded_map,
+            {
+                "event": "outcome",
+                "run_id": "recorded-run",
+                "status": "dead",
+                "max_global_floor": 1,
+                "ts": 2,
+            },
+        ],
+    ).runs[0]
+
+    route_node = next(
+        node
+        for node in run.nodes
+        if node["_workbench_evidence_kind"] == "route_node"
+    )
+    assert run.capabilities.decisions is True
+    assert route_node["decisions"][0]["selected_label"] == "献血"
+
+
+def test_recorded_decision_empty_lists_do_not_enable_deck_capability() -> None:
+    player = {
+        "hp": 80,
+        "max_hp": 80,
+        "gold": 10,
+        "deck": [],
+        "relics": [],
+        "potions": [],
+    }
+    recorded_map = _recorded_map_row(
+        act=1,
+        ts=1,
+        snapshots=[(player, player)],
+    )
+    recorded_map["visited_nodes"][0]["decisions"] = []
+
+    run = adapt_records(
+        "empty-recorded-decisions.jsonl",
+        [
+            recorded_map,
+            {
+                "event": "outcome",
+                "run_id": "recorded-run",
+                "status": "dead",
+                "ts": 2,
+            },
+        ],
+    ).runs[0]
+
+    assert run.capabilities.decisions is False
+
+
+def test_recorded_decision_malformed_newer_map_does_not_erase_valid_older_act() -> None:
+    player = {
+        "hp": 80,
+        "max_hp": 80,
+        "gold": 10,
+        "deck": [],
+        "relics": [],
+        "potions": [],
+    }
+    older = _recorded_map_row(
+        act=1,
+        ts=1,
+        snapshots=[(player, player)],
+    )
+    older["visited_nodes"][0]["decisions"] = [_recorded_event_decision()]
+    malformed_newer = deepcopy(older)
+    malformed_newer["ts"] = 2
+    malformed_newer["visited_nodes"][0]["decisions"][0]["options"][0][
+        "selected"
+    ] = False
+
+    run = adapt_records(
+        "malformed-newer-recorded-decision.jsonl",
+        [
+            older,
+            malformed_newer,
+            {
+                "event": "outcome",
+                "run_id": "recorded-run",
+                "status": "dead",
+                "ts": 3,
+            },
+        ],
+    ).runs[0]
+
+    route_nodes = [
+        node
+        for node in run.nodes
+        if node["_workbench_evidence_kind"] == "route_node"
+    ]
+    assert run.capabilities.decisions is True
+    assert route_nodes[0]["decisions"][0]["selected_label"] == "献血"
+    assert any("select exactly one option" in warning for warning in run.warnings)
 
 
 @pytest.mark.parametrize(

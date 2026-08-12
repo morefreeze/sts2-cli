@@ -517,7 +517,15 @@ def _adapt_deck_run(
             node_rewards=any(
                 isinstance(node.get("deltas"), dict) for node in route_nodes
             ),
-            decisions=any(row.get("event") == "card_pick" for row in records),
+            decisions=(
+                any(row.get("event") == "card_pick" for row in records)
+                or any(
+                    type(node) is dict
+                    and type(node.get("decisions")) is list
+                    and bool(node["decisions"])
+                    for node in route_nodes
+                )
+            ),
         ),
         acts=acts,
         nodes=nodes,

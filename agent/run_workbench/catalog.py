@@ -273,7 +273,7 @@ class _CompactRun:
                 decisions=(
                     self.has_replay_action or self.has_node_decisions
                     if self.source_kind is SourceKind.REPLAY_JSONL
-                    else self.has_card_pick
+                    else self.has_card_pick or self.has_node_decisions
                 ),
                 turn_replay=(
                     self.replay_parser_succeeded
@@ -1548,6 +1548,12 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
                 ]
                 compact.warnings = (*compact.warnings, warning)
             return
+        compact.has_node_decisions = compact.has_node_decisions or any(
+            type(node) is dict
+            and type(node.get("decisions")) is list
+            and bool(node["decisions"])
+            for node in snapshot.route_nodes
+        )
         recorded_timestamp = record["ts"]
         last_route_floor = snapshot.route_nodes[-1]["global_floor"]
         retained = compact.latest_recorded_act_floors.get(snapshot.act_index)
