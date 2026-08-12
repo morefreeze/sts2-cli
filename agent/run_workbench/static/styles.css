@@ -406,6 +406,7 @@ input:disabled {
 .map-decision-popover {
   position: fixed;
   z-index: 30;
+  pointer-events: auto;
   width: min(360px, calc(100vw - 16px));
   max-height: min(480px, calc(100vh - 16px));
   overflow: auto;

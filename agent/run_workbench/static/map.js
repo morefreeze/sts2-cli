@@ -57,6 +57,9 @@
   };
   let activeDecisionAnchor = null;
   let decisionClipSerial = 0;
+  let decisionPopoverHovered = false;
+  let decisionPopoverBound = false;
+  const decisionAnchorStates = new WeakMap();
 
   function createSvg(tag, attrs = {}) {
     const node = document.createElementNS(MAP_NS, tag);
@@ -650,9 +653,74 @@
   function hideDecisionPopover(anchor = null) {
     if (anchor && activeDecisionAnchor && anchor !== activeDecisionAnchor) return;
     const target = anchor || activeDecisionAnchor;
-    if (target) target.removeAttribute('aria-describedby');
+    if (target) {
+      const state = decisionAnchorStates.get(target);
+      if (state) {
+        state.hovered = false;
+        state.focused = false;
+      }
+      target.removeAttribute('aria-describedby');
+    }
     byId('mapDecisionPopover').hidden = true;
     activeDecisionAnchor = null;
+    decisionPopoverHovered = false;
+  }
+
+  function targetInsideDecisionPopover(target) {
+    const popover = byId('mapDecisionPopover');
+    if (!target || typeof target !== 'object') return false;
+    try {
+      if (typeof popover.contains === 'function' && popover.contains(target)) return true;
+    } catch (_error) {
+      return false;
+    }
+    try {
+      return typeof target.closest === 'function'
+        && target.closest('#mapDecisionPopover') === popover;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function targetInsideDecisionAnchor(anchor, target) {
+    if (!anchor || !target || typeof target !== 'object') return false;
+    try {
+      return typeof anchor.contains === 'function' && anchor.contains(target);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function deferDecisionPopoverClose(anchor, state) {
+    queueMicrotask(() => {
+      if (activeDecisionAnchor === anchor
+        && !state.hovered && !state.focused && !decisionPopoverHovered) {
+        hideDecisionPopover(anchor);
+      }
+    });
+  }
+
+  function bindSharedDecisionPopover() {
+    if (decisionPopoverBound) return;
+    const popover = byId('mapDecisionPopover');
+    popover.addEventListener('mouseenter', () => {
+      if (!popover.hidden && activeDecisionAnchor) decisionPopoverHovered = true;
+    });
+    popover.addEventListener('mouseleave', (event) => {
+      if (popover.hidden || !activeDecisionAnchor) {
+        decisionPopoverHovered = false;
+        return;
+      }
+      decisionPopoverHovered = false;
+      const anchor = activeDecisionAnchor;
+      const state = decisionAnchorStates.get(anchor);
+      if (state && targetInsideDecisionAnchor(anchor, event.relatedTarget)) {
+        state.hovered = true;
+        return;
+      }
+      if (!state || (!state.hovered && !state.focused)) hideDecisionPopover(anchor);
+    });
+    decisionPopoverBound = true;
   }
 
   function mapDecisionScroll(event) {
@@ -686,13 +754,16 @@
 
   function bindDecisionPopover(anchor, node) {
     const state = { hovered: false, focused: false };
+    decisionAnchorStates.set(anchor, state);
+    bindSharedDecisionPopover();
     anchor.addEventListener('mouseenter', () => {
       state.hovered = true;
       showDecisionPopover(node, anchor);
     });
-    anchor.addEventListener('mouseleave', () => {
+    anchor.addEventListener('mouseleave', (event) => {
       state.hovered = false;
-      if (!state.focused) hideDecisionPopover(anchor);
+      if (targetInsideDecisionPopover(event.relatedTarget)) return;
+      if (!state.focused) deferDecisionPopoverClose(anchor, state);
     });
     anchor.addEventListener('focusin', () => {
       state.focused = true;
@@ -701,7 +772,7 @@
     anchor.addEventListener('focusout', (event) => {
       if (anchor.contains(event.relatedTarget)) return;
       state.focused = false;
-      if (!state.hovered) hideDecisionPopover(anchor);
+      if (!state.hovered && !decisionPopoverHovered) hideDecisionPopover(anchor);
     });
     anchor.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {

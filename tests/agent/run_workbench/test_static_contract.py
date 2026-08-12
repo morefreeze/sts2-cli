@@ -949,6 +949,9 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
         {constants}
         let activeDecisionAnchor = null;
         let decisionClipSerial = 0;
+        let decisionPopoverHovered = false;
+        let decisionPopoverBound = false;
+        const decisionAnchorStates = new WeakMap();
         class FakeNode {{
           constructor(tag, id = '') {{
             this.tag = tag;
@@ -997,6 +1000,7 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
           return node;
         }}
         const window = {{ innerWidth: 500, innerHeight: 400 }};
+        function queueMicrotask(callback) {{ callback(); }}
         function treeText(node) {{
           return [node.textContent, ...node.children.flatMap(treeText)].filter(Boolean);
         }}
@@ -1179,6 +1183,172 @@ def test_map_decision_popover_ignores_internal_scroll_but_closes_on_external_scr
     }
 
 
+def test_map_decision_popover_shares_pointer_lifecycle_with_active_anchor():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderNodeArt"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        let activeDecisionAnchor = null;
+        let decisionClipSerial = 0;
+        let decisionPopoverHovered = false;
+        let decisionPopoverBound = false;
+        const decisionAnchorStates = new WeakMap();
+        const microtasks = [];
+        function queueMicrotask(callback) {{ microtasks.push(callback); }}
+        function flushMicrotasks() {{ while (microtasks.length) microtasks.shift()(); }}
+        class FakeNode {{
+          constructor(tag, id = '', parent = null) {{
+            this.tag = tag;
+            this.id = id;
+            this.parent = parent;
+            this.children = [];
+            this.attributes = {{}};
+            this.listeners = {{}};
+            this.style = {{}};
+            this.className = '';
+            this.textContent = '';
+            this.hidden = false;
+            this.disabled = false;
+            this.inert = false;
+            this.isConnected = true;
+            this.scrollTop = 0;
+            this.rect = {{ left: 20, right: 76, top: 20, bottom: 76, width: 56, height: 56 }};
+            if (parent) parent.children.push(this);
+          }}
+          append(...children) {{
+            children.forEach((child) => {{ if (child && typeof child === 'object') child.parent = this; }});
+            this.children.push(...children);
+          }}
+          replaceChildren(...children) {{ this.children = []; this.append(...children); }}
+          setAttribute(name, value) {{ this.attributes[name] = String(value); }}
+          removeAttribute(name) {{ delete this.attributes[name]; }}
+          getAttribute(name) {{ return this.attributes[name] ?? null; }}
+          hasAttribute(name) {{ return Object.hasOwn(this.attributes, name); }}
+          addEventListener(name, listener) {{ (this.listeners[name] ||= []).push(listener); }}
+          dispatch(name, event = {{}}) {{
+            (this.listeners[name] || []).forEach((listener) => listener({{
+              preventDefault() {{}}, stopPropagation() {{}}, relatedTarget: null, target: this, ...event,
+            }}));
+          }}
+          contains(candidate) {{
+            return candidate === this || this.children.some((child) => child && child.contains && child.contains(candidate));
+          }}
+          closest(selector) {{
+            if (selector === '#mapDecisionPopover') {{
+              let candidate = this;
+              while (candidate) {{
+                if (candidate.id === 'mapDecisionPopover') return candidate;
+                candidate = candidate.parent;
+              }}
+            }}
+            return null;
+          }}
+          getBoundingClientRect() {{ return this.rect; }}
+        }}
+        const elements = new Map();
+        ['mapDecisionPopover', 'mapDecisionTitle', 'mapDecisionBody'].forEach((id) => elements.set(id, new FakeNode('div', id)));
+        const popover = elements.get('mapDecisionPopover');
+        popover.hidden = true;
+        popover.rect = {{ left: 0, right: 300, top: 0, bottom: 200, width: 300, height: 200 }};
+        const popoverChild = new FakeNode('div', 'popoverChild', popover);
+        function byId(id) {{ return elements.get(id); }}
+        function clear(node) {{ node.replaceChildren(); }}
+        function element(tag, options = {{}}) {{
+          const node = new FakeNode(tag);
+          if (options.className) node.className = options.className;
+          if (options.text !== undefined) node.textContent = String(options.text);
+          return node;
+        }}
+        const window = {{ innerWidth: 500, innerHeight: 400 }};
+        function decision(prefix) {{
+          const selected = {{ id: `${{prefix}}-1`, label: `${{prefix}}选择`, effect: `${{prefix}}效果`, selected: true }};
+          return {{ kind: 'event', selected_id: selected.id, selected_label: selected.label, options: [selected], evidence: 'recorded' }};
+        }}
+        {helpers}
+        const first = new FakeNode('g', 'first');
+        const second = new FakeNode('g', 'second');
+        const firstNode = {{ visited: true, decisions: [decision('第一')] }};
+        const secondNode = {{ visited: true, decisions: [decision('第二')] }};
+        bindDecisionPopover(first, firstNode);
+        bindDecisionPopover(second, secondNode);
+
+        first.dispatch('mouseenter');
+        first.dispatch('mouseleave', {{ relatedTarget: popover }});
+        const deferredAtBoundary = !popover.hidden && first.hasAttribute('aria-describedby');
+        popover.dispatch('mouseenter', {{ relatedTarget: first }});
+        popover.scrollTop = 91;
+        mapDecisionScroll({{ target: popoverChild, composedPath() {{ return [popoverChild, popover]; }} }});
+        flushMicrotasks();
+        const inside = {{ hidden: popover.hidden, described: first.hasAttribute('aria-describedby'), scrollTop: popover.scrollTop }};
+
+        popover.dispatch('mouseleave', {{ relatedTarget: new FakeNode('div', 'outside') }});
+        const leftOutside = popover.hidden && !first.hasAttribute('aria-describedby');
+
+        first.dispatch('mouseenter');
+        first.dispatch('focusin');
+        first.dispatch('mouseleave', {{ relatedTarget: popover }});
+        popover.dispatch('mouseenter', {{ relatedTarget: first }});
+        first.dispatch('focusout', {{ relatedTarget: new FakeNode('div', 'outside') }});
+        const popoverHoverKeepsBlurredAnchor = !popover.hidden && first.hasAttribute('aria-describedby');
+        popover.dispatch('mouseleave', {{ relatedTarget: new FakeNode('div', 'outside') }});
+        const closedAfterPopoverLeavesBlurredAnchor = popover.hidden && !first.hasAttribute('aria-describedby');
+
+        first.dispatch('mouseenter');
+        first.dispatch('mouseleave', {{ relatedTarget: popover }});
+        popover.dispatch('mouseenter', {{ relatedTarget: first }});
+        popover.dispatch('mouseleave', {{ relatedTarget: first }});
+        first.dispatch('mouseenter', {{ relatedTarget: popover }});
+        flushMicrotasks();
+        const returnedToAnchor = !popover.hidden && first.hasAttribute('aria-describedby');
+
+        first.dispatch('mouseleave', {{ relatedTarget: new FakeNode('div', 'outside') }});
+        second.dispatch('mouseenter');
+        flushMicrotasks();
+        const switched = !popover.hidden
+          && !first.hasAttribute('aria-describedby')
+          && second.hasAttribute('aria-describedby')
+          && elements.get('mapDecisionTitle').textContent.includes('第二');
+
+        second.dispatch('mouseleave', {{ relatedTarget: popover }});
+        popover.dispatch('mouseenter', {{ relatedTarget: second }});
+        second.dispatch('keydown', {{ key: 'Escape' }});
+        const escaped = popover.hidden && !second.hasAttribute('aria-describedby');
+        popover.dispatch('mouseenter', {{ relatedTarget: second }});
+        flushMicrotasks();
+        const stayedClosed = popover.hidden && !second.hasAttribute('aria-describedby');
+        second.dispatch('mouseenter');
+        const reopenedOnNewEnter = !popover.hidden && second.hasAttribute('aria-describedby');
+
+        console.log(JSON.stringify({{
+          deferredAtBoundary, inside, leftOutside,
+          popoverHoverKeepsBlurredAnchor, closedAfterPopoverLeavesBlurredAnchor,
+          returnedToAnchor,
+          switched, escaped, stayedClosed, reopenedOnNewEnter,
+        }}));
+        """
+    )
+
+    assert result["deferredAtBoundary"] is True
+    assert result["inside"] == {"hidden": False, "described": True, "scrollTop": 91}
+    assert result["leftOutside"] is True
+    assert result["popoverHoverKeepsBlurredAnchor"] is True
+    assert result["closedAfterPopoverLeavesBlurredAnchor"] is True
+    assert result["returnedToAnchor"] is True
+    assert result["switched"] is True
+    assert result["escaped"] is True
+    assert result["stayedClosed"] is True
+    assert result["reopenedOnNewEnter"] is True
+
+
 def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -1219,6 +1389,8 @@ def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     assert ".map-decision-effect" in css
     assert ".map-decision-popover[hidden]" in css
     assert ".map-decision-option-effect" in css
+    popover_css = css[css.index(".map-decision-popover {") : css.index("}", css.index(".map-decision-popover {"))]
+    assert "pointer-events: auto" in popover_css
     assert "pointer-events: none" in css
 
 
