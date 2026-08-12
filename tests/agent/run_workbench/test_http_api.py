@@ -1213,13 +1213,13 @@ def test_recorded_decisions_fixture_matches_real_capture_output_exactly() -> Non
                                 "index": 0,
                                 "id": "POTION.FIRE",
                                 "name": "火焰药水",
-                                "description": "对一个敌人造成 20 点伤害",
+                                "effect": "对一个敌人造成 20 点伤害",
                             },
                             {
                                 "index": 1,
                                 "id": "POTION.BLOCK",
                                 "name": "格挡药水",
-                                "description": "未来使用时获得 12 点格挡",
+                                "effect": "未来使用时获得 12 点格挡",
                             },
                         ]
                     },
@@ -1332,14 +1332,23 @@ def test_recorded_decisions_fixture_matches_real_capture_output_exactly() -> Non
     ]
     potion_state = capture_inputs[1][1][0]
     selected_potion_id = captured[1][1]["selected_id"]
-    assert any(
-        potion["id"] == selected_potion_id
-        for potion in potion_state["player"]["potions"]
+    captured_potions = potion_state["player"]["potions"]
+    assert snapshot["visited_nodes"][1]["entry_player"]["potions"] == (
+        captured_potions
     )
-    assert snapshot["visited_nodes"][1]["entry_player"]["potions"] == [
-        {"id": selected_potion_id}
+    assert snapshot["visited_nodes"][1]["exit_player"]["potions"] == [
+        potion for potion in captured_potions
+        if potion["id"] != selected_potion_id
     ]
-    assert snapshot["visited_nodes"][1]["exit_player"]["potions"] == []
+    visited = snapshot["visited_nodes"]
+    assert all(
+        current["exit_player"] == following["entry_player"]
+        for current, following in zip(visited, visited[1:])
+    )
+    assert visited[-1]["exit_player"]["potions"] == [
+        potion for potion in captured_potions
+        if potion["id"] != selected_potion_id
+    ]
 
 
 def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
