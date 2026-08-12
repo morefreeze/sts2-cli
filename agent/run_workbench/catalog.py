@@ -178,6 +178,9 @@ class _CompactRun:
     latest_recorded_act_floors: dict[int, tuple[int | float, int]] = field(
         default_factory=dict
     )
+    latest_recorded_act_decisions: dict[
+        int, tuple[int | float, bool]
+    ] = field(default_factory=dict)
     has_replay_action: bool = False
     has_replay_state: bool = False
     replay_parser_succeeded: bool = False
@@ -273,7 +276,16 @@ class _CompactRun:
                 decisions=(
                     self.has_replay_action or self.has_node_decisions
                     if self.source_kind is SourceKind.REPLAY_JSONL
-                    else self.has_card_pick or self.has_node_decisions
+                    else self.has_card_pick
+                    or (
+                        self.source_kind is SourceKind.DECK_HISTORY
+                        and any(
+                            has_decisions
+                            for _timestamp, has_decisions in (
+                                self.latest_recorded_act_decisions.values()
+                            )
+                        )
+                    )
                 ),
                 turn_replay=(
                     self.replay_parser_succeeded
@@ -1548,7 +1560,7 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
                 ]
                 compact.warnings = (*compact.warnings, warning)
             return
-        compact.has_node_decisions = compact.has_node_decisions or any(
+        has_decisions = any(
             type(node) is dict
             and type(node.get("decisions")) is list
             and bool(node["decisions"])
@@ -1561,6 +1573,10 @@ def _update_compact_deck(compact: _CompactRun, record: dict[str, Any]) -> None:
             compact.latest_recorded_act_floors[snapshot.act_index] = (
                 recorded_timestamp,
                 last_route_floor,
+            )
+            compact.latest_recorded_act_decisions[snapshot.act_index] = (
+                recorded_timestamp,
+                has_decisions,
             )
         compact.has_valid_recorded_map = True
         return

@@ -254,6 +254,59 @@ def _recorded_map_route_snapshot(
     return snapshot
 
 
+def _recorded_decision_snapshot(
+    run_id: str,
+    *,
+    act: int,
+    ts: int | float,
+    has_decisions: bool,
+    malformed: bool = False,
+) -> dict:
+    snapshot = _recorded_map_route_snapshot(
+        run_id,
+        act=act,
+        ts=ts,
+        route_length=1,
+    )
+    snapshot["visited_nodes"][0]["decisions"] = (
+        [_recorded_event_decision()] if has_decisions else []
+    )
+    if malformed:
+        snapshot["visited_nodes"][0]["decisions"][0]["options"][0][
+            "selected"
+        ] = False
+    return snapshot
+
+
+def _deck_decision_scenario_rows(
+    record_count: int,
+    specs: list[tuple[int, int | float, bool, bool]],
+) -> list[dict]:
+    core = [
+        _recorded_decision_snapshot(
+            "decision-scenario",
+            act=act,
+            ts=ts,
+            has_decisions=has_decisions,
+            malformed=malformed,
+        )
+        for act, ts, has_decisions, malformed in specs
+    ]
+    core.append(
+        {
+            "event": "outcome",
+            "run_id": "decision-scenario",
+            "status": "dead",
+            "max_global_floor": 18,
+            "ts": 10,
+        }
+    )
+    return [
+        *core,
+        *({"ignored": index} for index in range(record_count - len(core))),
+    ]
+
+
 def _replay(run_id: str, *, floor: int = 4) -> list[dict]:
     return [
         {
@@ -1460,7 +1513,7 @@ def test_large_deck_history_uses_bounded_index_and_exact_streamed_outcomes(
     assert scan_calls == 1
 
 
-def test_recorded_decision_capability_matches_at_511_and_513_threshold(
+def test_recorded_decision_capability_matches_at_511_512_and_513_thresholds(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "deck.jsonl"
@@ -1468,7 +1521,7 @@ def test_recorded_decision_capability_matches_at_511_and_513_threshold(
     capability_dicts: list[dict] = []
     cohort_records = []
 
-    for record_count in (511, 513):
+    for record_count in (511, 512, 513):
         _write_jsonl(
             source,
             _deck_rows_with_recorded_decision(record_count),
@@ -1489,9 +1542,64 @@ def test_recorded_decision_capability_matches_at_511_and_513_threshold(
         cohort_records.append(record)
         views.append(view)
 
-    assert capability_dicts[0] == capability_dicts[1]
-    assert views[0] == views[1]
-    assert cohort_records[0].capabilities == cohort_records[1].capabilities
+    assert capability_dicts[0] == capability_dicts[1] == capability_dicts[2]
+    assert views[0] == views[1] == views[2]
+    assert (
+        cohort_records[0].capabilities
+        == cohort_records[1].capabilities
+        == cohort_records[2].capabilities
+    )
+
+
+@pytest.mark.parametrize("record_count", [511, 512, 513])
+@pytest.mark.parametrize(
+    ("specs", "expected_decisions"),
+    [
+        ([(1, 1, True, False), (1, 2, False, False)], False),
+        ([(1, 1, False, False), (1, 2, True, False)], True),
+        ([(1, 2, False, False), (1, 1, True, False)], False),
+        ([(1, 1, True, False), (1, 1, False, False)], False),
+        ([(1, 1, True, False), (1, 2, True, True)], True),
+        ([(1, 2, False, False), (2, 1, True, False)], True),
+    ],
+    ids=[
+        "newer-empty-clears",
+        "newer-decision-enables",
+        "out-of-order-older-does-not-replace",
+        "same-timestamp-later-row-wins",
+        "malformed-newer-preserves",
+        "latest-decision-in-another-act",
+    ],
+)
+def test_recorded_decision_parity_uses_latest_valid_snapshot_per_act(
+    tmp_path: Path,
+    record_count: int,
+    specs: list[tuple[int, int | float, bool, bool]],
+    expected_decisions: bool,
+) -> None:
+    _write_jsonl(
+        tmp_path / "deck.jsonl",
+        _deck_decision_scenario_rows(record_count, specs),
+    )
+    catalog = RunCatalog([tmp_path], replay_parser=_replay_parser)
+
+    cohort = catalog.list_cohorts()[0]
+    record = catalog.get_cohort_records(cohort["cohort_id"])[0]
+    exact = catalog.get_run("decision-scenario")["run"]
+    route_nodes = [
+        node
+        for node in exact["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+    ]
+
+    assert catalog.list_sources()[0]["record_count"] == record_count
+    assert record.capabilities.decisions is expected_decisions
+    assert (
+        any(bool(node.get("decisions")) for node in route_nodes)
+        is expected_decisions
+    )
+    if specs == [(1, 1, True, False), (1, 2, False, False)]:
+        assert route_nodes[0]["decisions"] == []
 
 
 def test_recorded_decision_compact_copy_cache_and_to_record_are_stable(
@@ -1511,10 +1619,17 @@ def test_recorded_decision_compact_copy_cache_and_to_record_are_stable(
     first = compact.to_record().to_dict()
     second = compact.to_record().to_dict()
     copied = deepcopy(compact).to_record().to_dict()
+    default = catalog_module._CompactRun(run_id="default")
 
-    assert compact.has_node_decisions is True
+    assert compact.has_node_decisions is False
+    assert compact.latest_recorded_act_decisions == {
+        0: (2, True),
+        1: (4, False),
+    }
     assert first == second == copied
     assert first_cohorts == second_cohorts
+    assert default.latest_recorded_act_decisions == {}
+    assert default.to_record().capabilities.decisions is False
 
 
 def test_recorded_decision_malformed_map_never_promotes_compact_capability(
