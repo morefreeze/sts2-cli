@@ -72,6 +72,194 @@ _ACT_COUNT = 4
 _CANONICAL_ROUTE_ID_PATTERN = re.compile(
     r"^a(?P<act_index>[0-3]):n(?P<node_index>[0-9]|1[0-6])$"
 )
+_MAP_ROOT_KEYS = (
+    "act_id",
+    "full_map",
+    "visited_route",
+    "fallback_reason",
+)
+_MAP_NODE_KEYS = (
+    "id",
+    "col",
+    "row",
+    "room_type",
+    "visited",
+    "path_index",
+    "name",
+    "current",
+    "children",
+)
+_MAP_EDGE_KEYS = ("from", "to")
+_MAP_ALIGNMENT_KEYS = ("ok", "ambiguous", "reason", "path_node_ids")
+_MAP_CHILD_KEYS = ("id", "col", "row")
+
+
+def _plain_allowlisted_dict(
+    value: Any,
+    keys: tuple[str, ...],
+) -> dict[str, Any]:
+    """Copy exact builtin fields without invoking mapping overrides."""
+
+    if type(value) is not dict:
+        return {}
+    allowed = frozenset(keys)
+    copied: dict[str, Any] = {}
+    for key, item in dict.items(value):
+        if type(key) is not str or key not in allowed:
+            continue
+        safe_item = _plain_json_value(item)
+        if safe_item is not _UNSAFE_MAP_VALUE:
+            copied[key] = safe_item
+    return copied
+
+
+def _exact_dict_fields(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if type(value) is not dict:
+        return {}
+    allowed = frozenset(keys)
+    return {
+        key: item
+        for key, item in dict.items(value)
+        if type(key) is str and key in allowed
+    }
+
+
+_UNSAFE_MAP_VALUE = object()
+
+
+def _plain_json_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return _UNSAFE_MAP_VALUE
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        return (
+            value
+            if value == value and abs(value) != float("inf")
+            else _UNSAFE_MAP_VALUE
+        )
+    if type(value) is list:
+        if len(value) > 4096:
+            return _UNSAFE_MAP_VALUE
+        copied = []
+        for item in value:
+            safe_item = _plain_json_value(item, depth=depth + 1)
+            if safe_item is _UNSAFE_MAP_VALUE:
+                return _UNSAFE_MAP_VALUE
+            copied.append(safe_item)
+        return copied
+    if type(value) is dict:
+        if len(value) > 512:
+            return _UNSAFE_MAP_VALUE
+        copied_dict = {}
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                continue
+            safe_item = _plain_json_value(item, depth=depth + 1)
+            if safe_item is _UNSAFE_MAP_VALUE:
+                return _UNSAFE_MAP_VALUE
+            copied_dict[key] = safe_item
+        return copied_dict
+    return _UNSAFE_MAP_VALUE
+
+
+def _browser_map_node(value: Any) -> dict[str, Any] | None:
+    copied = _plain_allowlisted_dict(value, _MAP_NODE_KEYS)
+    if (
+        type(copied.get("id")) is not str
+        or type(copied.get("col")) is not int
+        or type(copied.get("row")) is not int
+        or type(copied.get("room_type")) is not str
+        or type(copied.get("visited")) is not bool
+        or (
+            copied.get("path_index") is not None
+            and type(copied.get("path_index")) is not int
+        )
+    ):
+        return None
+    if "name" in copied and type(copied["name"]) is not str:
+        copied.pop("name")
+    if "current" in copied and type(copied["current"]) is not bool:
+        copied.pop("current")
+    if "children" in copied:
+        copied["children"] = _plain_allowlisted_list(
+            copied["children"],
+            _MAP_CHILD_KEYS,
+        )
+    return copied
+
+
+def _browser_map_edge(value: Any) -> dict[str, str] | None:
+    copied = _plain_allowlisted_dict(value, _MAP_EDGE_KEYS)
+    if type(copied.get("from")) is not str or type(copied.get("to")) is not str:
+        return None
+    return copied
+
+
+def _plain_allowlisted_list(
+    value: Any,
+    keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    if type(value) is not list:
+        return []
+    return [
+        _plain_allowlisted_dict(item, keys)
+        for item in value
+        if type(item) is dict
+    ]
+
+
+def _browser_map_payload(act_map: Any) -> dict[str, Any]:
+    """Rebuild the browser map contract from exact ordinary containers."""
+
+    raw = act_map.to_dict()
+    if type(raw) is not dict:
+        raise TypeError("map payload must be an ordinary object")
+    payload = _plain_allowlisted_dict(raw, _MAP_ROOT_KEYS)
+    structural = _exact_dict_fields(raw, ("nodes", "edges", "alignment"))
+    payload["nodes"] = [
+        copied
+        for item in (
+            structural.get("nodes")
+            if type(structural.get("nodes")) is list
+            else []
+        )
+        if (copied := _browser_map_node(item)) is not None
+    ]
+    payload["edges"] = [
+        copied
+        for item in (
+            structural.get("edges")
+            if type(structural.get("edges")) is list
+            else []
+        )
+        if (copied := _browser_map_edge(item)) is not None
+    ]
+    payload["alignment"] = _plain_allowlisted_dict(
+        structural.get("alignment"), _MAP_ALIGNMENT_KEYS
+    )
+    if (
+        type(payload.get("act_id")) is not str
+        or type(payload.get("full_map")) is not bool
+        or type(payload.get("visited_route")) is not bool
+        or (
+            payload.get("fallback_reason") is not None
+            and type(payload.get("fallback_reason")) is not str
+        )
+        or type(payload["alignment"].get("ok")) is not bool
+        or type(payload["alignment"].get("ambiguous")) is not bool
+        or (
+            payload["alignment"].get("reason") is not None
+            and type(payload["alignment"].get("reason")) is not str
+        )
+        or type(payload["alignment"].get("path_node_ids")) is not list
+        or not all(
+            type(node_id) is str
+            for node_id in payload["alignment"].get("path_node_ids", [])
+        )
+    ):
+        raise TypeError("map payload does not match the browser contract")
+    return payload
 
 
 def _canonical_route_node_identity(raw_id: Any) -> tuple[int, int] | None:
@@ -159,11 +347,23 @@ def _canonical_route_nodes(run: dict[str, Any]) -> list[dict[str, Any]]:
         for node, act_index in indexed_nodes
         if "native_run" in _route_node_source_kinds(node)
     }
+    recorded_acts = {
+        act_index
+        for node, act_index in indexed_nodes
+        if "deck_history" in _route_node_source_kinds(node)
+    }
     return [
         node
         for node, act_index in indexed_nodes
-        if act_index not in native_acts
-        or "native_run" in _route_node_source_kinds(node)
+        if (
+            "native_run" in _route_node_source_kinds(node)
+            if act_index in native_acts
+            else (
+                "deck_history" in _route_node_source_kinds(node)
+                if act_index in recorded_acts
+                else True
+            )
+        )
     ]
 
 
@@ -492,11 +692,7 @@ def _run_map_payload(
                 request,
                 reason=_map_service_fallback_reason(error),
             )
-    payload = act_map.to_dict()
-    for graph_node in payload["nodes"]:
-        if type(graph_node) is dict:
-            for untrusted_key in ("decisions", "options", "choices"):
-                graph_node.pop(untrusted_key, None)
+    payload = _browser_map_payload(act_map)
     path_ids = payload["alignment"].get("path_node_ids") or [
         node["id"]
         for node in sorted(

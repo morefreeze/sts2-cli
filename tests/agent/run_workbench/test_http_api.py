@@ -1281,6 +1281,171 @@ def test_recorded_decision_mixed_native_deltas_map_by_trusted_path_index(
     }
 
 
+def test_recorded_decision_replay_and_deck_same_act_use_recorded_route(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-replay-deck-same-act"
+    replay = [
+        {
+            "type": "action",
+            "ts": 1,
+            "data": {
+                "cmd": "start_run",
+                "run_id": run_id,
+                "character": "Ironclad",
+                "seed": "shared-seed",
+                "build_id": "v0.107.1",
+                "checkpoint": "shared-model",
+                "evaluation_mode": "fixed",
+                "scenario": "standard",
+                "ascension": 0,
+            },
+        },
+        {
+            "type": "state",
+            "ts": 2,
+            "data": {
+                "run_id": run_id,
+                "decision": "map",
+                "context": {
+                    "act": 1,
+                    "floor": 1,
+                    "room_type": "Ancient",
+                },
+            },
+        },
+    ]
+    snapshot = _branched_recorded_snapshot(run_id, act=1, ts=3)
+    trusted = [_recorded_decision("同幕可信选择")]
+    snapshot["visited_nodes"][1]["decisions"] = deepcopy(trusted)
+    snapshot.update(
+        character="Ironclad",
+        seed="shared-seed",
+        checkpoint="shared-model",
+        evaluation_mode="fixed",
+        scenario="standard",
+        ascension=0,
+    )
+    _write_jsonl(tmp_path / "replay.jsonl", replay)
+    _write_jsonl(
+        tmp_path / "deck.jsonl",
+        [
+            snapshot,
+            {
+                "event": "outcome",
+                "run_id": run_id,
+                "game_version": "v0.107.1",
+                "status": "dead",
+            },
+        ],
+    )
+
+    class MustNotGenerate:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, request: MapRequest):
+            self.calls += 1
+            raise AssertionError(f"generator must not run for {request.run_id}")
+
+    service = MustNotGenerate()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=viewer.parse_game_progress),
+        map_service=service,
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    visited = sorted(
+        (node for node in payload["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert status == 200
+    assert service.calls == 0
+    assert payload["full_map"] is True
+    assert [node["recorded_node_id"] for node in visited] == [
+        "a0:n0",
+        "a0:n1",
+        "a0:n2",
+    ]
+    assert visited[1]["decisions"] == trusted
+
+
+def test_recorded_decision_replay_and_deck_different_acts_remain_available(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-replay-deck-different-acts"
+    _write_jsonl(
+        tmp_path / "replay.jsonl",
+        [
+            {
+                "type": "action",
+                "ts": 1,
+                "data": {
+                    "cmd": "start_run",
+                    "run_id": run_id,
+                    "character": "Ironclad",
+                    "seed": "shared-seed",
+                    "build_id": "v0.107.1",
+                    "ascension": 0,
+                },
+            },
+            {
+                "type": "state",
+                "ts": 2,
+                "data": {
+                    "run_id": run_id,
+                    "context": {
+                        "act": 1,
+                        "floor": 1,
+                        "room_type": "Ancient",
+                    },
+                },
+            },
+        ],
+    )
+    act_three = _branched_recorded_snapshot(run_id, act=3, ts=3)
+    trusted = [_recorded_decision("第三幕可信选择")]
+    act_three["visited_nodes"][1]["decisions"] = deepcopy(trusted)
+    _write_jsonl(
+        tmp_path / "deck.jsonl",
+        [
+            act_three,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+
+    class CapturingService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="replay route fallback")
+
+    service = CapturingService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=viewer.parse_game_progress),
+        map_service=service,
+    ) as base:
+        first_status, first = _request(
+            base, f"/api/run/map?id={run_id}&act=0"
+        )
+        third_status, third = _request(
+            base, f"/api/run/map?id={run_id}&act=2"
+        )
+
+    assert first_status == third_status == 200
+    assert [act["index"] for act in first["acts"]] == [0, 2]
+    assert [request.act_index for request in service.requests] == [0]
+    assert first["visited_route"] is True
+    third_visited = sorted(
+        (node for node in third["nodes"] if node["visited"]),
+        key=lambda node: node["path_index"],
+    )
+    assert third["full_map"] is True
+    assert third_visited[1]["decisions"] == trusted
+
+
 def test_recorded_decision_generator_fallback_scrubs_graph_and_source_fields(
     tmp_path: Path,
 ) -> None:
@@ -1339,6 +1504,170 @@ def test_recorded_decision_generator_fallback_scrubs_graph_and_source_fields(
         and "choices" not in node
         for node in payload["nodes"]
     )
+
+
+def test_recorded_decision_http_rebuilds_allowlisted_map_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "recorded-decision-map-schema-allowlist"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    forged = [_recorded_decision("伪造选择", selected_id="EVENT.FORGED")]
+    original_to_dict = ActMap.to_dict
+
+    class DictSubclass(dict):
+        pass
+
+    def hostile_to_dict(act_map):
+        payload = original_to_dict(act_map)
+        payload.update(
+            boss={"secret": "BOSS_SECRET"},
+            rows=[[{"secret": "ROW_SECRET"}]],
+            route={"secret": "ROUTE_SECRET"},
+            terminal={"secret": "TERMINAL_SECRET"},
+            extra="ROOT_SECRET",
+        )
+        payload["nodes"][0] = DictSubclass(
+            payload["nodes"][0],
+            decisions=deepcopy(forged),
+            options=deepcopy(forged[0]["options"]),
+            choices=deepcopy(forged[0]["options"]),
+            extra="NODE_SECRET",
+        )
+        payload["nodes"][1].update(
+            name="SAFE_NAME",
+            current=False,
+            children=[],
+            extra="NODE_SECRET",
+        )
+        payload["alignment"]["extra"] = "ALIGNMENT_SECRET"
+        payload["edges"][0]["extra"] = "EDGE_SECRET"
+        return payload
+
+    monkeypatch.setattr(ActMap, "to_dict", hostile_to_dict)
+
+    class OneShotService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="schema fallback")
+
+    service = OneShotService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert set(payload) == {
+        "act_id",
+        "full_map",
+        "visited_route",
+        "fallback_reason",
+        "nodes",
+        "edges",
+        "alignment",
+        "run_id",
+        "act",
+        "acts",
+        "summary",
+    }
+    assert set(payload["alignment"]) == {
+        "ok",
+        "ambiguous",
+        "reason",
+        "path_node_ids",
+    }
+    assert all(
+        set(edge) == {"from", "to"}
+        for edge in payload["edges"]
+    )
+    assert type(payload["nodes"][0]) is dict
+    assert set(payload["nodes"][0]) <= {
+        "id",
+        "col",
+        "row",
+        "room_type",
+        "visited",
+        "path_index",
+        "name",
+        "current",
+        "children",
+        "deltas",
+        "recorded_node_id",
+        "decisions",
+        "art",
+        "terminal",
+        "terminal_status",
+    }
+    assert all(
+        secret not in json.dumps(payload, ensure_ascii=False)
+        for secret in (
+            "BOSS_SECRET",
+            "ROW_SECRET",
+            "ROUTE_SECRET",
+            "TERMINAL_SECRET",
+            "ROOT_SECRET",
+            "NODE_SECRET",
+            "ALIGNMENT_SECRET",
+            "EDGE_SECRET",
+            "EVENT.FORGED",
+        )
+    )
+
+
+def test_recorded_decision_http_does_not_execute_hostile_map_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "recorded-decision-hostile-map-key"
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+    original_to_dict = ActMap.to_dict
+
+    class HostileKey(str):
+        pass
+
+    hostile_key = HostileKey("decisions")
+
+    def hostile_to_dict(act_map):
+        payload = original_to_dict(act_map)
+        payload["nodes"][0][hostile_key] = "VERY_SECRET_STATE"
+
+        def explode(*_args, **_kwargs):
+            raise AssertionError("hostile key hook must not execute")
+
+        HostileKey.__eq__ = explode
+        HostileKey.__hash__ = explode
+        HostileKey.__str__ = explode
+        return payload
+
+    monkeypatch.setattr(ActMap, "to_dict", hostile_to_dict)
+
+    class FallbackService:
+        def generate(self, request: MapRequest):
+            return visited_route_map(request, reason="hostile-key fallback")
+
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=FallbackService(),
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert "VERY_SECRET_STATE" not in json.dumps(payload, ensure_ascii=False)
+    assert all("decisions" not in node for node in payload["nodes"])
 
 
 @pytest.mark.parametrize(
