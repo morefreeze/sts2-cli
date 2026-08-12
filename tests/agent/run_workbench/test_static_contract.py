@@ -398,6 +398,7 @@ def test_act_keyboard_switches_directly_and_async_load_focuses_only_latest_tab()
         function showMapPage(options) {{ showCalls.push(options); }}
         function renderEmpty() {{}}
         function clear() {{}}
+        function hideDecisionPopover() {{}}
         const history = {{
           state: {{ fromDashboard: true }},
           pushState() {{}},
@@ -549,19 +550,19 @@ def test_map_decision_summary_prefers_recorded_newest_and_fails_closed_for_unkno
           kind: 'event', selected_id: 'leave', selected_label: '离开', evidence: 'recorded',
           options: [{{ id: 'leave', label: '离开', effect: '不发生变化', selected: true }}],
         }};
-        const longLabel = `${{'x'.repeat(70)}}😀${{'z'.repeat(600)}}`;
+        const longLabel = `${{'x'.repeat(70)}}😀${{'z'.repeat(100)}}`;
         const latest = {{
           kind: 'card_reward', selected_id: 'pommel', selected_label: longLabel, evidence: 'recorded',
           options: [{{
             id: 'pommel', label: longLabel,
-            effect: '造成 9 点伤害，抽 1 张牌' + 'e'.repeat(600), selected: true,
+            effect: '造成 9 点伤害，抽 1 张牌' + 'e'.repeat(300), selected: true,
           }}],
         }};
         const recorded = nodeDecisionSummary({{ visited: true, decisions: [earlier, latest] }});
         const derived = nodeDecisionSummary({{
           visited: true,
           deltas: {{
-            cards_gained: {{ quality: 'derived', value: [{{ name: {{ en: 'Bash' }} }}] }},
+            cards_gained: {{ quality: 'derived', value: ['Bash'] }},
             potions_gained: {{ quality: 'exact', value: [{{ name: 'Fire Potion' }}] }},
           }},
         }});
@@ -603,6 +604,299 @@ def test_map_decision_summary_prefers_recorded_newest_and_fails_closed_for_unkno
     assert "[object Object]" not in json.dumps(result)
 
 
+def test_map_decision_validator_rejects_malformed_or_unbounded_recorded_evidence():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderDecisionSummary"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        function option(id, selected = false) {{
+          return {{ id, label: `label-${{id}}`, effect: `effect-${{id}}`, selected }};
+        }}
+        function decision(index = 0, optionCount = 2) {{
+          const options = Array.from({{ length: optionCount }}, (_, item) => option(`d${{index}}-o${{item}}`, item === 0));
+          return {{
+            kind: index % 2 ? 'event' : 'card_reward',
+            selected_id: options[0].id,
+            selected_label: options[0].label,
+            options,
+            evidence: 'recorded',
+          }};
+        }}
+        function summary(decisions) {{
+          return nodeDecisionSummary({{ visited: true, decisions }});
+        }}
+        const valid = Array.from({{ length: 16 }}, (_, index) => decision(index));
+        const multiSelected = decision();
+        multiSelected.options[1].selected = true;
+        const idMismatch = decision();
+        idMismatch.selected_id = 'other';
+        const labelMismatch = decision();
+        labelMismatch.selected_label = 'other';
+        const blank = decision();
+        blank.selected_label = '   ';
+        blank.options[0].label = '   ';
+        const loneSurrogate = decision();
+        loneSurrogate.options[0].effect = '\\ud800';
+        const oversizedId = decision();
+        oversizedId.selected_id = 'i'.repeat(257);
+        oversizedId.options[0].id = oversizedId.selected_id;
+        const oversizedEffect = decision();
+        oversizedEffect.options[0].effect = 'e'.repeat(513);
+        const extraField = decision();
+        extraField.options[0].extra = 'forged';
+        const ownConstructor = decision();
+        Object.defineProperty(ownConstructor, 'constructor', {{ value: 'forged', enumerable: true }});
+        const thirtyThree = decision(0, 33);
+        let getterCalls = 0;
+        const getterDecision = decision();
+        Object.defineProperty(getterDecision, 'selected_id', {{
+          enumerable: true,
+          get() {{ getterCalls += 1; return getterDecision.options[0].id; }},
+        }});
+        let nodeGetterCalls = 0;
+        const getterNode = {{ visited: true }};
+        Object.defineProperty(getterNode, 'decisions', {{
+          enumerable: true,
+          get() {{ nodeGetterCalls += 1; return [decision()]; }},
+        }});
+        console.log(JSON.stringify({{
+          valid: summary(valid),
+          invalid: [
+            summary([multiSelected]), summary([idMismatch]), summary([labelMismatch]),
+            summary([blank]), summary([loneSurrogate]), summary([extraField]),
+            summary([oversizedId]), summary([oversizedEffect]),
+            summary([ownConstructor]), summary([thirtyThree]),
+            summary(Array.from({{ length: 17 }}, (_, index) => decision(index))),
+            summary([getterDecision]), nodeDecisionSummary(getterNode),
+          ],
+          getterCalls,
+          nodeGetterCalls,
+        }}));
+        """
+    )
+
+    assert result["valid"]["overflow"] == 15
+    assert result["valid"]["label"] == "label-d15-o0"
+    assert result["invalid"] == [None] * 13
+    assert result["getterCalls"] == 0
+    assert result["nodeGetterCalls"] == 0
+
+
+def test_map_derived_decision_accepts_only_safe_nonblank_string_values():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderDecisionSummary"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        function derived(value) {{
+          return nodeDecisionSummary({{
+            visited: true,
+            deltas: {{ cards_gained: {{ quality: 'derived', value }} }},
+          }});
+        }}
+        const emoji = derived([`${{'x'.repeat(40)}}😀${{'z'.repeat(80)}}`]);
+        const invalid = [0, -1, false, {{}}, null, '   ', '\\ud800'].map((value) => derived([value]));
+        console.log(JSON.stringify({{
+          emoji,
+          emojiScalars: Array.from(emoji.label).length,
+          emojiValid: !Array.from(emoji.label).some((ch) => {{
+            const code = ch.codePointAt(0);
+            return code >= 0xD800 && code <= 0xDFFF;
+          }}),
+          invalid,
+        }}));
+        """
+    )
+
+    assert result["emoji"]["prefix"] == "推导"
+    assert result["emojiScalars"] <= 72
+    assert result["emojiValid"] is True
+    assert "😀" in result["emoji"]["label"]
+    assert result["invalid"] == [None] * 7
+
+
+def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderNodeArt"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        let activeDecisionAnchor = null;
+        let decisionClipSerial = 0;
+        class FakeNode {{
+          constructor(tag, id = '') {{
+            this.tag = tag;
+            this.id = id;
+            this.children = [];
+            this.attributes = {{}};
+            this.listeners = {{}};
+            this.style = {{}};
+            this.className = '';
+            this.textContent = '';
+            this.hidden = false;
+            this.disabled = false;
+            this.inert = false;
+            this.isConnected = true;
+            this.rect = {{ left: 20, right: 76, top: 20, bottom: 76, width: 56, height: 56 }};
+          }}
+          append(...children) {{ this.children.push(...children); }}
+          replaceChildren(...children) {{ this.children = [...children]; }}
+          setAttribute(name, value) {{ this.attributes[name] = String(value); }}
+          removeAttribute(name) {{ delete this.attributes[name]; }}
+          getAttribute(name) {{ return this.attributes[name] ?? null; }}
+          hasAttribute(name) {{ return Object.hasOwn(this.attributes, name); }}
+          addEventListener(name, listener) {{ (this.listeners[name] ||= []).push(listener); }}
+          dispatch(name, event = {{}}) {{
+            (this.listeners[name] || []).forEach((listener) => listener({{
+              preventDefault() {{}}, stopPropagation() {{}}, relatedTarget: null, ...event,
+            }}));
+          }}
+          contains(candidate) {{
+            return candidate === this || this.children.some((child) => child && child.contains && child.contains(candidate));
+          }}
+          closest() {{ return null; }}
+          getBoundingClientRect() {{ return this.rect; }}
+        }}
+        const elements = new Map();
+        ['mapDecisionPopover', 'mapDecisionTitle', 'mapDecisionBody'].forEach((id) => elements.set(id, new FakeNode('div', id)));
+        const popover = elements.get('mapDecisionPopover');
+        popover.hidden = true;
+        popover.rect = {{ left: 0, right: 300, top: 0, bottom: 200, width: 300, height: 200 }};
+        function byId(id) {{ return elements.get(id); }}
+        function clear(node) {{ node.replaceChildren(); }}
+        function element(tag, options = {{}}) {{
+          const node = new FakeNode(tag);
+          if (options.className) node.className = options.className;
+          if (options.text !== undefined) node.textContent = String(options.text);
+          return node;
+        }}
+        const window = {{ innerWidth: 500, innerHeight: 400 }};
+        function treeText(node) {{
+          return [node.textContent, ...node.children.flatMap(treeText)].filter(Boolean);
+        }}
+        function decision(kind, prefix) {{
+          const first = {{ id: `${{prefix}}-1`, label: `${{prefix}} 选项一`, effect: `${{prefix}} 效果一`, selected: true }};
+          const second = {{ id: `${{prefix}}-2`, label: `${{prefix}} 选项二`, effect: `${{prefix}} 效果二`, selected: false }};
+          return {{ kind, selected_id: first.id, selected_label: first.label, options: [first, second], evidence: 'recorded' }};
+        }}
+        {helpers}
+        const node = {{ visited: true, decisions: [decision('event', '事件'), decision('card_reward', '卡牌')] }};
+        const anchor = new FakeNode('g', 'anchor');
+        bindDecisionPopover(anchor, node);
+        anchor.dispatch('mouseenter');
+        const allText = treeText(elements.get('mapDecisionBody'));
+        anchor.dispatch('focusin');
+        anchor.dispatch('mouseleave');
+        const openWhileFocused = !popover.hidden;
+        anchor.dispatch('focusout', {{ relatedTarget: new FakeNode('div') }});
+        const closedAfterBlur = popover.hidden;
+        anchor.dispatch('mouseenter');
+        anchor.dispatch('focusin');
+        anchor.dispatch('focusout', {{ relatedTarget: new FakeNode('div') }});
+        const openWhileHovered = !popover.hidden;
+        anchor.dispatch('mouseleave');
+        const closedAfterLeave = popover.hidden;
+        anchor.dispatch('mouseenter');
+        anchor.dispatch('keydown', {{ key: 'Escape' }});
+        const escapeClosed = popover.hidden && !anchor.hasAttribute('aria-describedby');
+        anchor.dispatch('mouseleave');
+        anchor.dispatch('mouseenter');
+        const reopened = !popover.hidden && anchor.getAttribute('aria-describedby') === 'mapDecisionPopover';
+
+        const other = new FakeNode('g', 'other');
+        bindDecisionPopover(other, node);
+        other.dispatch('mouseenter');
+        const switched = !anchor.hasAttribute('aria-describedby') && other.hasAttribute('aria-describedby');
+        const disconnected = new FakeNode('g', 'disconnected');
+        disconnected.isConnected = false;
+        showDecisionPopover(node, disconnected);
+        const staleClosed = popover.hidden && !other.hasAttribute('aria-describedby');
+
+        const offscreen = new FakeNode('g', 'offscreen');
+        offscreen.rect = {{ left: 900, right: 956, top: 900, bottom: 956, width: 56, height: 56 }};
+        showDecisionPopover(node, offscreen);
+        const positioned = {{ left: Number.parseFloat(popover.style.left), top: Number.parseFloat(popover.style.top) }};
+        const negative = new FakeNode('g', 'negative');
+        negative.rect = {{ left: -100, right: -44, top: -100, bottom: -44, width: 56, height: 56 }};
+        showDecisionPopover(node, negative);
+        const negativePositioned = {{
+          visible: !popover.hidden,
+          left: Number.parseFloat(popover.style.left),
+          top: Number.parseFloat(popover.style.top),
+        }};
+        const invalidAnchors = [
+          Object.assign(new FakeNode('g'), {{ hidden: true }}),
+          Object.assign(new FakeNode('g'), {{ disabled: true }}),
+          Object.assign(new FakeNode('g'), {{ inert: true }}),
+        ];
+        invalidAnchors.push(new FakeNode('g'));
+        invalidAnchors[3].setAttribute('aria-hidden', 'true');
+        invalidAnchors.push(new FakeNode('g'));
+        invalidAnchors[4].setAttribute('disabled', '');
+        const invalidClosed = invalidAnchors.map((candidate) => {{
+          showDecisionPopover(node, candidate);
+          return popover.hidden && !offscreen.hasAttribute('aria-describedby');
+        }});
+        console.log(JSON.stringify({{
+          allText, openWhileFocused, closedAfterBlur, openWhileHovered,
+          closedAfterLeave, escapeClosed, reopened, switched, staleClosed,
+          positioned, negativePositioned, invalidClosed,
+        }}));
+        """
+    )
+
+    for expected in (
+        "事件：事件 选项一",
+        "事件 效果一",
+        "事件 选项一",
+        "事件 选项二",
+        "卡：卡牌 选项一",
+        "卡牌 效果一",
+        "卡牌 选项一",
+        "卡牌 选项二",
+    ):
+        assert any(expected in text for text in result["allText"])
+    assert result["openWhileFocused"] is True
+    assert result["closedAfterBlur"] is True
+    assert result["openWhileHovered"] is True
+    assert result["closedAfterLeave"] is True
+    assert result["escapeClosed"] is True
+    assert result["reopened"] is True
+    assert result["switched"] is True
+    assert result["staleClosed"] is True
+    assert 8 <= result["positioned"]["left"] <= 192
+    assert 8 <= result["positioned"]["top"] <= 192
+    assert result["negativePositioned"] == {"visible": True, "left": 8, "top": 8}
+    assert result["invalidClosed"] == [True] * 5
+
+
 def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -614,6 +908,7 @@ def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
         script, "function renderDecisionSummary", "function showDecisionPopover"
     )
     nodes = _javascript_section(script, "function renderNodes", "function renderMap")
+    load = _javascript_section(script, "async function loadAct", "function closeMapPage")
 
     assert '<aside id="mapDecisionPopover" class="map-decision-popover" role="tooltip" hidden>' in index
     assert 'id="mapDecisionTitle"' in index
@@ -630,6 +925,9 @@ def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
     assert "relatedTarget" in show
     assert "event.key === 'Escape'" in show
     assert "event.stopPropagation()" in show
+    assert "window.addEventListener('resize'" in script
+    assert "window.addEventListener('scroll'" in script
+    assert load.index("hideDecisionPopover()") < load.index("clear(byId('mapSvg'))")
     assert "event.key === 'Enter' || event.key === ' '" in nodes
     assert "selectNode(node, group)" in nodes
     assert "nodeDecisionSummary(node)" in nodes

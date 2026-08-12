@@ -27,6 +27,14 @@
     { key: 'cards_transformed', short: '变', label: '变化卡牌', kind: 'list' },
   ];
   const DECISION_KIND_LABELS = Object.freeze({ event: '事件', card_reward: '卡', potion: '药水', relic: '遗物', shop: '商店', rest: '休息' });
+  const DECISION_FIELDS = Object.freeze(['kind', 'selected_id', 'selected_label', 'options', 'evidence']);
+  const DECISION_OPTION_FIELDS = Object.freeze(['id', 'label', 'effect', 'selected']);
+  const DECISION_MAX_COUNT = 16;
+  const DECISION_MAX_OPTIONS = 32;
+  const DECISION_MAX_ID_SCALARS = 256;
+  const DECISION_MAX_LABEL_SCALARS = 256;
+  const DECISION_MAX_EFFECT_SCALARS = 512;
+  const DECISION_MAX_BYTES = 32768;
   const MAP_COLUMN_GAP = 126;
   const MAP_ROW_GAP = 88;
   const MAP_PADDING_X = 72;
@@ -222,32 +230,158 @@
     return typeof measurement.value === 'number' && Number.isFinite(measurement.value) && measurement.value !== 0;
   }
 
+  function unicodeScalarArray(value) {
+    if (typeof value !== 'string') return null;
+    const scalars = Array.from(value);
+    return scalars.some((scalar) => {
+      const codePoint = scalar.codePointAt(0);
+      return codePoint >= 0xD800 && codePoint <= 0xDFFF;
+    }) ? null : scalars;
+  }
+
   function boundedDecisionText(value, limit = MAP_DECISION_LABEL_LIMIT) {
-    if (typeof value !== 'string' || !Number.isInteger(limit) || limit < 1) return '';
-    const scalars = Array.from(value.trim());
+    if (!Number.isInteger(limit) || limit < 1) return '';
+    const scalars = unicodeScalarArray(value && typeof value === 'string' ? value.trim() : value);
+    if (!scalars || !scalars.length) return '';
     return scalars.length > limit
       ? `${scalars.slice(0, Math.max(0, limit - 1)).join('')}…`
       : scalars.join('');
   }
 
+  function exactDecisionText(value, limit) {
+    const scalars = unicodeScalarArray(value);
+    if (!scalars || !scalars.length || !value.trim() || scalars.length > limit) return null;
+    return value;
+  }
+
+  function ordinaryDataRecord(value, exactFields) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    let prototype;
+    let names;
+    let symbols;
+    try {
+      prototype = Object.getPrototypeOf(value);
+      names = Object.getOwnPropertyNames(value);
+      symbols = Object.getOwnPropertySymbols(value);
+    } catch (_error) {
+      return null;
+    }
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    if (symbols.length || names.includes('__proto__') || names.includes('constructor')) return null;
+    if (names.length !== exactFields.length || exactFields.some((field) => !names.includes(field))) return null;
+    const result = Object.create(null);
+    for (const field of exactFields) {
+      let descriptor;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(value, field);
+      } catch (_error) {
+        return null;
+      }
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null;
+      result[field] = descriptor.value;
+    }
+    return result;
+  }
+
+  function ordinaryArrayValues(value, maximum) {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    let names;
+    let symbols;
+    try {
+      names = Object.getOwnPropertyNames(value);
+      symbols = Object.getOwnPropertySymbols(value);
+    } catch (_error) {
+      return null;
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    const length = lengthDescriptor && lengthDescriptor.value;
+    if (symbols.length || !Number.isInteger(length) || length < 0 || length > maximum) return null;
+    if (names.length !== length + 1 || !names.includes('length')) return null;
+    const result = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null;
+      result.push(descriptor.value);
+    }
+    return result;
+  }
+
+  function validatedDecisionOption(value) {
+    const record = ordinaryDataRecord(value, DECISION_OPTION_FIELDS);
+    if (!record) return null;
+    const id = exactDecisionText(record.id, DECISION_MAX_ID_SCALARS);
+    const label = exactDecisionText(record.label, DECISION_MAX_LABEL_SCALARS);
+    const effect = record.effect === null
+      ? null
+      : exactDecisionText(record.effect, DECISION_MAX_EFFECT_SCALARS);
+    if (!id || !label || (record.effect !== null && !effect) || typeof record.selected !== 'boolean') return null;
+    return { id, label, effect, selected: record.selected };
+  }
+
+  function validatedRecordedDecision(value) {
+    const record = ordinaryDataRecord(value, DECISION_FIELDS);
+    if (!record) return null;
+    const kind = exactDecisionText(record.kind, DECISION_MAX_ID_SCALARS);
+    const selectedId = exactDecisionText(record.selected_id, DECISION_MAX_ID_SCALARS);
+    const selectedLabel = exactDecisionText(record.selected_label, DECISION_MAX_LABEL_SCALARS);
+    if (!kind || !Object.hasOwn(DECISION_KIND_LABELS, kind)
+      || !selectedId || !selectedLabel || record.evidence !== 'recorded') return null;
+    const rawOptions = ordinaryArrayValues(record.options, DECISION_MAX_OPTIONS);
+    if (!rawOptions || !rawOptions.length) return null;
+    const options = rawOptions.map(validatedDecisionOption);
+    if (options.some((option) => option === null)) return null;
+    const selected = options.filter((option) => option.selected === true);
+    if (selected.length !== 1
+      || selected[0].id !== selectedId
+      || selected[0].label !== selectedLabel) return null;
+    return {
+      kind,
+      selected_id: selectedId,
+      selected_label: selectedLabel,
+      options,
+      evidence: 'recorded',
+    };
+  }
+
+  function validateRecordedDecisions(value) {
+    const rawDecisions = ordinaryArrayValues(value, DECISION_MAX_COUNT);
+    if (!rawDecisions) return null;
+    const decisions = rawDecisions.map(validatedRecordedDecision);
+    if (decisions.some((decision) => decision === null)) return null;
+    try {
+      if (new TextEncoder().encode(JSON.stringify(decisions)).length > DECISION_MAX_BYTES) return null;
+    } catch (_error) {
+      return null;
+    }
+    return decisions;
+  }
+
   function recordedNodeDecisions(node) {
-    if (!node || !node.visited || !Array.isArray(node.decisions)) return [];
-    return node.decisions.flatMap((decision) => {
-      if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return [];
-      if (decision.evidence !== 'recorded'
-        || typeof decision.kind !== 'string'
-        || !Object.hasOwn(DECISION_KIND_LABELS, decision.kind)) return [];
-      if (!Array.isArray(decision.options)) return [];
-      const selected = decision.options.find((option) => (
-        option && typeof option === 'object' && !Array.isArray(option)
-        && option.selected === true && typeof option.label === 'string'
-      ));
-      return selected ? [{ decision, selected }] : [];
-    });
+    if (!node || !node.visited || typeof node !== 'object') return [];
+    let descriptor;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(node, 'decisions');
+    } catch (_error) {
+      return null;
+    }
+    if (!descriptor) return [];
+    if (!Object.hasOwn(descriptor, 'value')) return null;
+    const decisions = validateRecordedDecisions(descriptor.value);
+    if (decisions === null) return null;
+    return decisions.map((decision) => ({
+      decision,
+      selected: decision.options.find((option) => option.selected === true),
+    }));
   }
 
   function knownDeltaListLabels(items) {
-    const labels = items.map((item) => nestedDeltaItemLabel(item));
+    const values = ordinaryArrayValues(items, DECISION_MAX_OPTIONS);
+    if (!values || !values.length) return '';
+    const labels = values.map((item) => {
+      const scalars = unicodeScalarArray(item);
+      if (!scalars || !scalars.length || !item.trim() || scalars.length > DECISION_MAX_EFFECT_SCALARS) return '';
+      return boundedDecisionText(item, DELTA_ITEM_LABEL_LIMIT);
+    });
     if (!labels.length || labels.some((label) => !label)) return '';
     const visible = labels.slice(0, DELTA_LIST_LABEL_LIMIT);
     const overflow = labels.length - visible.length;
@@ -257,6 +391,7 @@
   function nodeDecisionSummary(node) {
     if (!node || !node.visited) return null;
     const recorded = recordedNodeDecisions(node);
+    if (recorded === null) return null;
     if (recorded.length) {
       const newest = recorded[recorded.length - 1];
       return {
@@ -334,9 +469,32 @@
     return group;
   }
 
+  function usableDecisionAnchor(anchor) {
+    if (!anchor || typeof anchor !== 'object' || anchor.isConnected !== true
+      || anchor.hidden === true || anchor.disabled === true || anchor.inert === true
+      || typeof anchor.getBoundingClientRect !== 'function'
+      || typeof anchor.setAttribute !== 'function' || typeof anchor.removeAttribute !== 'function'
+      || typeof anchor.getAttribute !== 'function') return false;
+    if (anchor.getAttribute('aria-hidden') === 'true'
+      || (typeof anchor.hasAttribute === 'function'
+        && (anchor.hasAttribute('hidden')
+          || anchor.hasAttribute('disabled')
+          || anchor.hasAttribute('inert')))) return false;
+    if (typeof anchor.closest === 'function'
+      && anchor.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+    return true;
+  }
+
   function showDecisionPopover(node, anchor) {
+    if (!usableDecisionAnchor(anchor)) {
+      hideDecisionPopover();
+      return;
+    }
     const summary = nodeDecisionSummary(node);
-    if (!summary || !anchor) return;
+    if (!summary) {
+      hideDecisionPopover();
+      return;
+    }
     if (activeDecisionAnchor && activeDecisionAnchor !== anchor) hideDecisionPopover();
     const popover = byId('mapDecisionPopover');
     const title = byId('mapDecisionTitle');
@@ -346,24 +504,35 @@
 
     const recorded = recordedNodeDecisions(node);
     if (summary.recorded && recorded.length) {
-      const newest = recorded[recorded.length - 1].decision;
-      const options = element('ul', { className: 'map-decision-options' });
-      newest.options.forEach((option) => {
-        if (!option || typeof option !== 'object' || typeof option.label !== 'string') return;
-        const item = element('li', { className: option.selected === true ? 'selected' : '' });
-        item.append(element('div', {
-          className: 'map-decision-option-label',
-          text: `${option.selected === true ? '✓ ' : ''}${boundedDecisionText(option.label, 256)}`,
+      recorded.forEach(({ decision, selected }) => {
+        const decisionBlock = element('section', { className: 'map-decision-record' });
+        decisionBlock.append(element('h4', {
+          text: `${DECISION_KIND_LABELS[decision.kind]}：${boundedDecisionText(selected.label, DECISION_MAX_LABEL_SCALARS)}`,
         }));
-        if (typeof option.effect === 'string' && option.effect.trim()) {
-          item.append(element('div', {
-            className: 'map-decision-option-effect',
-            text: boundedDecisionText(option.effect, 512),
+        if (selected.effect) {
+          decisionBlock.append(element('div', {
+            className: 'map-decision-selected-effect',
+            text: boundedDecisionText(selected.effect, DECISION_MAX_EFFECT_SCALARS),
           }));
         }
-        options.append(item);
+        const options = element('ul', { className: 'map-decision-options' });
+        decision.options.forEach((option) => {
+          const item = element('li', { className: option.selected === true ? 'selected' : '' });
+          item.append(element('div', {
+            className: 'map-decision-option-label',
+            text: `${option.selected === true ? '✓ ' : ''}${boundedDecisionText(option.label, DECISION_MAX_LABEL_SCALARS)}`,
+          }));
+          if (option.effect) {
+            item.append(element('div', {
+              className: 'map-decision-option-effect',
+              text: boundedDecisionText(option.effect, DECISION_MAX_EFFECT_SCALARS),
+            }));
+          }
+          options.append(item);
+        });
+        decisionBlock.append(options);
+        body.append(decisionBlock);
       });
-      body.append(options);
     } else {
       body.append(
         element('p', { className: 'map-decision-derived-result', text: `${summary.label} · ${summary.effect}` }),
@@ -374,18 +543,37 @@
     activeDecisionAnchor = anchor;
     anchor.setAttribute('aria-describedby', 'mapDecisionPopover');
     popover.hidden = false;
-    const anchorRect = anchor.getBoundingClientRect();
-    const popoverRect = popover.getBoundingClientRect();
+    let anchorRect;
+    let popoverRect;
+    try {
+      anchorRect = anchor.getBoundingClientRect();
+      popoverRect = popover.getBoundingClientRect();
+    } catch (_error) {
+      hideDecisionPopover();
+      return;
+    }
     const viewportWidth = Math.max(16, Number(window.innerWidth) || 0);
     const viewportHeight = Math.max(16, Number(window.innerHeight) || 0);
+    const coordinateValues = [
+      anchorRect.left, anchorRect.right, anchorRect.top, anchorRect.bottom,
+    ];
+    const sizeValues = [popoverRect.width, popoverRect.height, viewportWidth, viewportHeight];
+    if (coordinateValues.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+      || sizeValues.some((value) => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+      hideDecisionPopover();
+      return;
+    }
+    const maxLeft = Math.max(8, viewportWidth - popoverRect.width - 8);
     const left = Math.min(
       Math.max(8, anchorRect.right + 8),
-      Math.max(8, viewportWidth - popoverRect.width - 8),
+      maxLeft,
     );
     const below = anchorRect.bottom + 8;
-    const top = below + popoverRect.height <= viewportHeight - 8
-      ? Math.max(8, below)
-      : Math.max(8, anchorRect.top - popoverRect.height - 8);
+    const preferredTop = below + popoverRect.height <= viewportHeight - 8
+      ? below
+      : anchorRect.top - popoverRect.height - 8;
+    const maxTop = Math.max(8, viewportHeight - popoverRect.height - 8);
+    const top = Math.min(Math.max(8, preferredTop), maxTop);
     popover.style.left = `${left}px`;
     popover.style.top = `${top}px`;
   }
@@ -399,17 +587,31 @@
   }
 
   function bindDecisionPopover(anchor, node) {
-    anchor.addEventListener('mouseenter', () => showDecisionPopover(node, anchor));
-    anchor.addEventListener('mouseleave', () => hideDecisionPopover(anchor));
-    anchor.addEventListener('focusin', () => showDecisionPopover(node, anchor));
+    const state = { hovered: false, focused: false };
+    anchor.addEventListener('mouseenter', () => {
+      state.hovered = true;
+      showDecisionPopover(node, anchor);
+    });
+    anchor.addEventListener('mouseleave', () => {
+      state.hovered = false;
+      if (!state.focused) hideDecisionPopover(anchor);
+    });
+    anchor.addEventListener('focusin', () => {
+      state.focused = true;
+      showDecisionPopover(node, anchor);
+    });
     anchor.addEventListener('focusout', (event) => {
-      if (!anchor.contains(event.relatedTarget)) hideDecisionPopover(anchor);
+      if (anchor.contains(event.relatedTarget)) return;
+      state.focused = false;
+      if (!state.hovered) hideDecisionPopover(anchor);
     });
     anchor.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        hideDecisionPopover(anchor);
+        state.hovered = false;
+        state.focused = false;
+        hideDecisionPopover();
       }
     });
   }
@@ -651,6 +853,7 @@
     byId('mapFallback').hidden = true;
     renderEmpty(byId('actSummary'), '正在重建地图…', 'loading-state');
     renderEmpty(byId('selectedNodeSummary'), '载入地图后，选择一个已访问节点查看收益。');
+    hideDecisionPopover();
     clear(byId('mapSvg'));
     if (historyMode === 'push') {
       history.pushState({ view: 'run-map', runId, actIndex, fromDashboard: true }, '', mapLocation(runId, actIndex));
@@ -704,6 +907,8 @@
 
   byId('mapBackButton').addEventListener('click', closeMapPage);
   byId('actTabs').addEventListener('keydown', handleActTabKeydown);
+  window.addEventListener('resize', () => hideDecisionPopover());
+  window.addEventListener('scroll', () => hideDecisionPopover(), true);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !byId('runMapPage').hidden) {
       event.preventDefault();

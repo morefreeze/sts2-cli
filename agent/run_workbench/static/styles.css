@@ -425,6 +425,23 @@ input:disabled {
   font-size: 14px;
 }
 
+.map-decision-record + .map-decision-record {
+  margin-top: 13px;
+  padding-top: 13px;
+  border-top: 2px solid var(--line);
+}
+
+.map-decision-record h4 {
+  margin: 0 0 3px;
+  font-size: 13px;
+}
+
+.map-decision-selected-effect {
+  margin-bottom: 8px;
+  color: var(--slate-500);
+  font-size: 12px;
+}
+
 .map-decision-options {
   display: grid;
   gap: 9px;
