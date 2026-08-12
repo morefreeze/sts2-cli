@@ -36,6 +36,7 @@ _RUN_DECISION_STATE_MAX_KEY_CHARS = 256
 _RUN_DECISION_STATE_MAX_STRING_CHARS = 16_384
 _RUN_DECISION_STATE_MAX_BYTES = 512 * 1024
 _RUN_DECISION_FINGERPRINT_OMITTED = object()
+_RUN_MAP_CAPTURE_METADATA_OMITTED = object()
 
 
 class _RunMapTransitionError(ValueError):
@@ -643,6 +644,7 @@ class CombatEnv(gym.Env):
         self._run_last_map_poll_state_id: int | None = None
         self._run_last_map_poll_state_ref: dict | None = None
         self._run_last_map_poll_state_fingerprint: str | None = None
+        self._run_map_capture_poll_metadata = _RUN_MAP_CAPTURE_METADATA_OMITTED
         self._run_pending_map_capture: dict | None = None
         self._run_map_retry_state: dict | None = None
         self._run_seed = self._seed
@@ -748,6 +750,7 @@ class CombatEnv(gym.Env):
         self._run_current_map_coord = None
         self._run_current_map_room_identity = None
         self._clear_run_last_map_poll_state()
+        self._run_map_capture_poll_metadata = _RUN_MAP_CAPTURE_METADATA_OMITTED
         self._run_pending_map_capture = None
         self._run_map_retry_state = None
         self._run_logging_errors = []
@@ -1995,14 +1998,19 @@ class CombatEnv(gym.Env):
         return retained
 
     def _capture_run_map_state(
-        self,
-        state: dict,
-        *,
-        poll_state_id: int | None = None,
-        poll_state_ref: object = None,
-        poll_state_fingerprint: object = _RUN_DECISION_FINGERPRINT_OMITTED,
+        self, state: dict
     ) -> bool:
         """Capture evaluation map observability without affecting gameplay."""
+        metadata = self._run_map_capture_poll_metadata
+        if (
+            metadata is _RUN_MAP_CAPTURE_METADATA_OMITTED
+            or metadata[0] is not state
+        ):
+            poll_state_id = None
+            poll_state_ref = None
+            poll_state_fingerprint = _RUN_DECISION_FINGERPRINT_OMITTED
+        else:
+            _, poll_state_id, poll_state_ref, poll_state_fingerprint = metadata
         inventory_checkpoint = self._buffered_inventory_checkpoint()
         self._update_buffered_node_inventory(state)
         if not self._capture_run_maps:
@@ -2034,6 +2042,26 @@ class CombatEnv(gym.Env):
                 self._run_map_capture_failure_active = True
             return False
 
+    def _capture_run_map_state_with_poll_metadata(
+        self,
+        state: dict,
+        *,
+        poll_state_id: int | None,
+        poll_state_ref: object,
+        poll_state_fingerprint: object,
+    ) -> bool:
+        previous = self._run_map_capture_poll_metadata
+        self._run_map_capture_poll_metadata = (
+            state,
+            poll_state_id,
+            poll_state_ref,
+            poll_state_fingerprint,
+        )
+        try:
+            return self._capture_run_map_state(state)
+        finally:
+            self._run_map_capture_poll_metadata = previous
+
     def _poll_run_map_state_once(self, state: dict):
         self._update_buffered_node_inventory(state)
         if type(state) is not dict or not self._capture_run_maps:
@@ -2052,8 +2080,9 @@ class CombatEnv(gym.Env):
         if (self._run_map_retry_state is not None
                 and self._run_map_retry_state.get("state_ref") is state):
             return
-        if self._capture_run_map_state(
+        if self._capture_run_map_state_with_poll_metadata(
             state,
+            poll_state_id=state_id,
             poll_state_ref=state,
             poll_state_fingerprint=state_fingerprint,
         ):
@@ -2072,7 +2101,7 @@ class CombatEnv(gym.Env):
         if retained is None or self._pending_read_only_replies > 0:
             return
         self._run_map_retry_state = None
-        if self._capture_run_map_state(
+        if self._capture_run_map_state_with_poll_metadata(
             retained["state"],
             poll_state_id=retained["state_id"],
             poll_state_ref=retained.get("state_ref"),
@@ -2550,6 +2579,7 @@ class CombatEnv(gym.Env):
         self._run_current_map_coord = None
         self._run_current_map_room_identity = None
         self._clear_run_last_map_poll_state()
+        self._run_map_capture_poll_metadata = _RUN_MAP_CAPTURE_METADATA_OMITTED
         ready = self._read_json(timeout_sec=15.0)
         if ready is None:
             # Game process failed to produce ready message — kill it now
@@ -2578,6 +2608,7 @@ class CombatEnv(gym.Env):
         self._run_current_map_coord = None
         self._run_current_map_room_identity = None
         self._clear_run_last_map_poll_state()
+        self._run_map_capture_poll_metadata = _RUN_MAP_CAPTURE_METADATA_OMITTED
 
     def _read_json(self, timeout_sec: float = 5.0, *, kill_on_failure: bool = True,
                    return_frame_outcome: bool = False,

@@ -721,6 +721,16 @@ def test_run_decision_pending_invalid_fingerprint_never_recomputes_after_mutatio
     env, _ = _recording_env(
         monkeypatch, tmp_path, run_context={"capture_map": True}
     )
+    real_capture = env._capture_run_map_state
+    captured = []
+
+    def capture_with_single_state_argument(state):
+        captured.append(state)
+        return real_capture(state)
+
+    monkeypatch.setattr(
+        env, "_capture_run_map_state", capture_with_single_state_argument
+    )
     state = _event_decision_state(floor=2, option_id="UNSAFE")
     if unsafe_kind == "oversized":
         state["transient"] = "x" * 600_000
@@ -734,6 +744,7 @@ def test_run_decision_pending_invalid_fingerprint_never_recomputes_after_mutatio
     monkeypatch.setattr(env, "_send_read_only", timeout_map)
     with pytest.warns(RuntimeWarning, match="map capture failed"):
         env._poll_run_map_state_once(state)
+    assert captured == [state]
     assert env._run_pending_map_capture["state_ref"] is state
     assert env._run_pending_map_capture["state_fingerprint"] is None
     del state["transient"]
@@ -1045,6 +1056,7 @@ def test_run_decision_process_kill_clears_coord_and_room_identity():
     env._run_current_map_room_identity = (1, 2)
     env._run_last_map_poll_state_ref = {"decision": "event_choice"}
     env._run_last_map_poll_state_fingerprint = "retained"
+    env._run_map_capture_poll_metadata = ("stale",)
 
     env._kill_proc()
 
@@ -1052,6 +1064,10 @@ def test_run_decision_process_kill_clears_coord_and_room_identity():
     assert env._run_current_map_room_identity is None
     assert env._run_last_map_poll_state_ref is None
     assert env._run_last_map_poll_state_fingerprint is None
+    assert (
+        env._run_map_capture_poll_metadata
+        is combat_env._RUN_MAP_CAPTURE_METADATA_OMITTED
+    )
 
 
 def test_run_decision_fresh_reset_clears_target_state(monkeypatch):
@@ -1061,6 +1077,7 @@ def test_run_decision_fresh_reset_clears_target_state(monkeypatch):
     env._run_last_map_poll_state_id = 123
     env._run_last_map_poll_state_ref = {"decision": "event_choice"}
     env._run_last_map_poll_state_fingerprint = "retained"
+    env._run_map_capture_poll_metadata = ("stale",)
     state = combat_env._dummy_combat_state()
     monkeypatch.setattr(env, "_kill_proc", lambda: None)
     monkeypatch.setattr(env, "_start_proc", lambda: None)
@@ -1074,6 +1091,10 @@ def test_run_decision_fresh_reset_clears_target_state(monkeypatch):
     assert env._run_last_map_poll_state_id != 123
     assert env._run_last_map_poll_state_ref is None
     assert env._run_last_map_poll_state_fingerprint is None
+    assert (
+        env._run_map_capture_poll_metadata
+        is combat_env._RUN_MAP_CAPTURE_METADATA_OMITTED
+    )
 
 
 def test_run_decision_graph_transition_clears_exact_poll_token(monkeypatch, tmp_path):
