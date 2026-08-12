@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, asdict, fields, replace
+import hashlib
 import importlib
 import json
 import math
@@ -111,6 +112,36 @@ def _valid_row(*, act: int = 1, ts: float = 10.0):
             _route_node(1, 2, "Elite", after, after),
         ],
     }
+
+
+def _recorded_decision(
+    *,
+    kind: str = "event",
+    selected_id: str = "TAKE",
+    selected_label: str = "拿走",
+    effect: str | None = "获得 25 金币。",
+):
+    return {
+        "kind": kind,
+        "selected_id": selected_id,
+        "selected_label": selected_label,
+        "options": [{
+            "id": selected_id,
+            "label": selected_label,
+            "effect": effect,
+            "selected": True,
+        }],
+        "evidence": "recorded",
+    }
+
+
+def _route_bytes(route_nodes) -> bytes:
+    return json.dumps(
+        route_nodes,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _boss_route_row(*, boss_id: str = "BOSS.TEST"):
@@ -244,6 +275,231 @@ def test_parse_recorded_map_row_builds_existing_map_and_delta_contracts() -> Non
         {"map": parsed.act_map.to_dict(), "route": parsed.route_nodes},
         allow_nan=False,
     )
+
+
+def test_valid_decisions_roundtrip_detach_and_survive_dataclass_operations() -> None:
+    api = _api()
+    row = _valid_row()
+    decision = _recorded_decision()
+    row["visited_nodes"][1]["decisions"] = [decision]
+    expected = deepcopy(row["visited_nodes"][1]["decisions"])
+
+    parsed = api.parse_recorded_map_row(row)
+    replaced = replace(parsed, act_id="RECORDED.ACT.REPLACED")
+    copied = deepcopy(parsed)
+    serialized = asdict(parsed)
+    first_view = parsed.route_nodes
+    second_view = parsed.route_nodes
+    json_payload = json.dumps(
+        parsed.route_nodes, ensure_ascii=False, allow_nan=False
+    )
+
+    assert parsed.route_nodes[1]["decisions"] == expected
+    assert replaced.route_nodes[1]["decisions"] == expected
+    assert copied.route_nodes[1]["decisions"] == expected
+    assert serialized["route_nodes"][1]["decisions"] == expected
+    assert first_view is not second_view
+    assert first_view[1]["decisions"] is not second_view[1]["decisions"]
+    assert type(parsed.route_nodes[1]["decisions"]) is list
+    assert type(parsed.route_nodes[1]["decisions"][0]) is dict
+    assert '"decisions"' in json_payload
+
+    decision["selected_label"] = "已篡改"
+    decision["options"][0]["effect"] = "已篡改"
+    row["visited_nodes"][1]["decisions"].append(_recorded_decision())
+    parsed.route_nodes[1]["decisions"][0]["options"][0]["effect"] = "输出篡改"
+    serialized["route_nodes"][1]["decisions"].clear()
+    copied.route_nodes[1]["decisions"].clear()
+    replaced.route_nodes[1]["decisions"].clear()
+
+    assert parsed.route_nodes[1]["decisions"] == expected
+    assert copied.route_nodes[1]["decisions"] == expected
+    assert replaced.route_nodes[1]["decisions"] == expected
+
+
+def test_absent_decisions_preserves_exact_legacy_route_bytes() -> None:
+    api = _api()
+
+    payload = _route_bytes(api.parse_recorded_map_row(_valid_row()).route_nodes)
+
+    assert b'"decisions"' not in payload
+    assert len(payload) == 3797
+    assert hashlib.sha256(payload).hexdigest() == (
+        "5ab715489e2603eb4001028075e36ba3a2a0c18a9eb911a1cebd374e47f1a1cc"
+    )
+
+
+def test_boss_visited_node_decisions_roundtrip_with_model_identity() -> None:
+    api = _api()
+    row = _boss_route_row()
+    row["visited_nodes"][-1]["decisions"] = [
+        _recorded_decision(
+            kind="relic",
+            selected_id="BOSS_RELIC",
+            selected_label="首领遗物",
+            effect="获得一件首领遗物。",
+        )
+    ]
+
+    parsed = api.parse_recorded_map_row(row)
+
+    assert parsed.route_nodes[-1]["model_id"] == "BOSS.TEST"
+    assert parsed.route_nodes[-1]["decisions"][0]["kind"] == "relic"
+    assert parsed.route_nodes[-1]["decisions"][0]["selected_id"] == "BOSS_RELIC"
+
+
+def test_unvisited_graph_decisions_are_not_authoritative_or_exposed() -> None:
+    api = _api()
+    row = _valid_row()
+    row["map"]["rows"][1][1]["decisions"] = [_recorded_decision()]
+
+    parsed = api.parse_recorded_map_row(row)
+
+    assert all("decisions" not in node for node in parsed.route_nodes)
+    assert all(not hasattr(node, "decisions") for node in parsed.act_map.nodes)
+
+
+class _HostileDecisionString(str):
+    def __eq__(self, _other):
+        raise RuntimeError("DECISION_SECRET /private/inventory")
+
+
+class _HostileDecisionDict(dict):
+    def items(self):
+        raise RuntimeError("DECISION_SECRET /private/inventory")
+
+
+class _HostileDecisionMapping(Mapping):
+    def __getitem__(self, _key):
+        raise RuntimeError("DECISION_SECRET /private/inventory")
+
+    def __iter__(self):
+        raise RuntimeError("DECISION_SECRET /private/inventory")
+
+    def __len__(self):
+        raise RuntimeError("DECISION_SECRET /private/inventory")
+
+
+class _HostileDecisionKey:
+    def __hash__(self):
+        return hash("id")
+
+    def __eq__(self, _other):
+        raise RuntimeError("DECISION_SECRET /private/inventory")
+
+
+def _malformed_decisions(case: str):
+    decision = _recorded_decision()
+    if case == "invalid-kind":
+        decision["kind"] = "combat"
+        return [decision]
+    if case == "zero-selected":
+        decision["options"][0]["selected"] = False
+        return [decision]
+    if case == "two-selected":
+        decision["options"].append({
+            "id": "LEAVE",
+            "label": "离开",
+            "effect": None,
+            "selected": True,
+        })
+        return [decision]
+    if case == "33-options":
+        decision["selected_id"] = "ID0"
+        decision["selected_label"] = "选项0"
+        decision["options"] = [
+            {
+                "id": f"ID{index}",
+                "label": f"选项{index}",
+                "effect": None,
+                "selected": index == 0,
+            }
+            for index in range(33)
+        ]
+        return [decision]
+    if case == "non-list":
+        return {"not": "a list"}
+    if case == "str-subclass":
+        decision["selected_label"] = _HostileDecisionString("拿走")
+        return [decision]
+    if case == "lone-surrogate":
+        decision["options"][0]["effect"] = "\ud800"
+        return [decision]
+    if case == "effect-513":
+        decision["options"][0]["effect"] = "效" * 513
+        return [decision]
+    if case == "dict-subclass":
+        return [_HostileDecisionDict(decision)]
+    if case == "hostile-nested-mapping":
+        decision["options"][0] = _HostileDecisionMapping()
+        return [decision]
+    if case == "hostile-nested-key":
+        decision["options"][0] = {_HostileDecisionKey(): "TAKE"}
+        return [decision]
+    if case == "17-decisions":
+        return [deepcopy(decision) for _index in range(17)]
+    if case == "default-writer-32k-overflow":
+        oversized = _recorded_decision(
+            selected_id="牌" * 256,
+            selected_label="选" * 256,
+            effect="效" * 512,
+        )
+        decisions = [deepcopy(oversized) for _index in range(16)]
+        encoded = json.dumps(
+            decisions, ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+        assert len(encoded) > 32 * 1024
+        return decisions
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "invalid-kind",
+        "zero-selected",
+        "two-selected",
+        "33-options",
+        "non-list",
+        "str-subclass",
+        "lone-surrogate",
+        "effect-513",
+        "dict-subclass",
+        "hostile-nested-mapping",
+        "hostile-nested-key",
+        "17-decisions",
+        "default-writer-32k-overflow",
+    ],
+)
+def test_malformed_decisions_fail_closed_without_losing_other_valid_rows(
+    case: str,
+) -> None:
+    api = _api()
+    invalid = _valid_row(ts=2.0)
+    invalid["visited_nodes"][1]["decisions"] = _malformed_decisions(case)
+
+    with pytest.raises(api.RecordedMapError) as raised:
+        api.parse_recorded_map_row(invalid)
+    snapshots, errors = api.latest_recorded_acts(
+        iter((_valid_row(ts=1.0), invalid))
+    )
+
+    assert 0 < len(str(raised.value)) <= 160
+    assert set(snapshots) == {0}
+    assert all("decisions" not in node for node in snapshots[0].route_nodes)
+    assert len(errors) == 1
+    assert 0 < len(errors[0]) <= 160
+    if case in {
+        "str-subclass",
+        "dict-subclass",
+        "hostile-nested-mapping",
+        "hostile-nested-key",
+    }:
+        assert str(raised.value) == "invalid recorded map row"
+        assert errors == ("row 1: invalid recorded map row",)
+    combined = str(raised.value) + repr(errors)
+    assert "DECISION_SECRET" not in combined
+    assert "/private/inventory" not in combined
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,8 @@ import json
 import math
 from typing import Any, Iterable, Mapping
 
+from agent.run_decisions import DecisionEvidenceError, validate_run_decisions
+
 from .deltas import derive_snapshot_deltas
 from .models import ActMap, MapAlignment, MapEdge, MapNode
 
@@ -562,6 +564,13 @@ def _parse_recorded_row(
             "end_player": exit_,
             "deltas": derive_snapshot_deltas(exit_, entry).to_dict(),
         }
+        if "decisions" in raw_route_node:
+            try:
+                route_node["decisions"] = validate_run_decisions(
+                    raw_route_node["decisions"]
+                )
+            except DecisionEvidenceError as exc:
+                raise _error(str(exc)) from None
         if graph_node.model_id is not None:
             route_node["model_id"] = graph_node.model_id
         route_nodes.append(route_node)
