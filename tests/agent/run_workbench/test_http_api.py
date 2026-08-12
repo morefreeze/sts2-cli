@@ -20,6 +20,7 @@ from agent.run_workbench.map_service import (
     MapOutputError,
     MapServiceTimeoutError,
 )
+from agent.run_workbench.models import ActMap
 
 from .test_catalog import (
     _native,
@@ -1019,7 +1020,12 @@ def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
         for node in canonical["run"]["nodes"]
         if node.get("_workbench_evidence_kind") == "route_node"
     ]
-    canonical_route[1]["decisions"] = deepcopy(forged)
+    for canonical_node in canonical_route:
+        canonical_node.update(
+            decisions=deepcopy(forged),
+            options=deepcopy(forged[0]["options"]),
+            choices=deepcopy(forged[0]["options"]),
+        )
     raw_snapshot = next(
         node
         for node in canonical["run"]["nodes"]
@@ -1053,6 +1059,23 @@ def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
         "latest_recorded_acts",
         captured_latest_recorded_acts,
     )
+    original_act_map_to_dict = ActMap.to_dict
+
+    def forged_act_map_to_dict(act_map):
+        payload = original_act_map_to_dict(act_map)
+        for graph_node in payload["nodes"]:
+            graph_node.update(
+                decisions=deepcopy(forged),
+                options=deepcopy(forged[0]["options"]),
+                choices=deepcopy(forged[0]["options"]),
+            )
+        return payload
+
+    monkeypatch.setattr(
+        ActMap,
+        "to_dict",
+        forged_act_map_to_dict,
+    )
     with _server(StaticCatalog(), map_service=MustNotGenerate()) as base:
         status, first = _request(base, f"/api/run/map?id={run_id}&act=0")
         visited = sorted(
@@ -1063,11 +1086,14 @@ def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
         assert "decisions" not in visited[0]
         assert visited[1]["decisions"] == trusted
         assert all(
-            "decisions" not in node
-            and "options" not in node
+            "options" not in node
             and "choices" not in node
             for node in first["nodes"]
-            if not node["visited"]
+        )
+        assert all(
+            "decisions" not in node
+            for node in first["nodes"]
+            if node.get("path_index") != 1
         )
 
         visited[1]["decisions"][0]["selected_label"] = "响应篡改"
@@ -1081,7 +1107,7 @@ def test_recorded_decision_http_uses_only_authoritative_route_and_detaches(
     )
     assert second_status == 200
     assert second_visited[1]["decisions"] == trusted
-    assert canonical_route[1]["decisions"] == forged
+    assert all(node["decisions"] == forged for node in canonical_route)
     assert all(
         parsed.route_nodes[1]["decisions"] == trusted
         for parsed in parsed_snapshots
@@ -1215,6 +1241,12 @@ def test_recorded_decision_mixed_native_deltas_map_by_trusted_path_index(
     native["map_point_history"][1]["player_stats"][0]["cards_gained"] = [
         "CARD.NATIVE.EXACT"
     ]
+    for path_index, native_node in enumerate(native["map_point_history"]):
+        native_node.update(
+            act=1,
+            act_index=0,
+            global_floor=path_index + 1,
+        )
     (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
     snapshot = _branched_recorded_snapshot(run_id, act=1, ts=1)
     trusted = [_recorded_decision("路径 1 的可信选择")]
@@ -1247,6 +1279,149 @@ def test_recorded_decision_mixed_native_deltas_map_by_trusted_path_index(
         "value": ["CARD.NATIVE.EXACT"],
         "quality": "exact",
     }
+
+
+def test_recorded_decision_generator_fallback_scrubs_graph_and_source_fields(
+    tmp_path: Path,
+) -> None:
+    run_id = "recorded-decision-forged-fallback"
+    forged = [_recorded_decision("伪造选择", selected_id="EVENT.FORGED")]
+    native = _native_route_matching_recorded_coordinates(
+        run_id,
+        middle_room_type="monster",
+    )
+    for native_node in native["map_point_history"]:
+        native_node.update(
+            decisions=deepcopy(forged),
+            options=deepcopy(forged[0]["options"]),
+            choices=deepcopy(forged[0]["options"]),
+        )
+    (tmp_path / "native.run").write_text(json.dumps(native), encoding="utf-8")
+
+    class ForgedFallbackMap:
+        def __init__(self, request: MapRequest) -> None:
+            self.request = request
+
+        def to_dict(self) -> dict:
+            payload = visited_route_map(
+                self.request,
+                reason="forged generator fallback",
+            ).to_dict()
+            for graph_node in payload["nodes"]:
+                graph_node.update(
+                    decisions=deepcopy(forged),
+                    options=deepcopy(forged[0]["options"]),
+                    choices=deepcopy(forged[0]["options"]),
+                )
+            return payload
+
+    class ForgedFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return ForgedFallbackMap(request)
+
+    service = ForgedFallbackService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=_replay_parser),
+        map_service=service,
+    ) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert payload["fallback_reason"] == "forged generator fallback"
+    assert all(
+        "decisions" not in node
+        and "options" not in node
+        and "choices" not in node
+        for node in payload["nodes"]
+    )
+
+
+@pytest.mark.parametrize(
+    "identity_failure",
+    [
+        "gap",
+        "duplicate",
+        "missing",
+        "off-by-one",
+        "wrong-act",
+        "hostile-id",
+    ],
+)
+def test_recorded_decision_rejects_noncanonical_route_identity(
+    tmp_path: Path,
+    identity_failure: str,
+) -> None:
+    run_id = f"recorded-decision-identity-{identity_failure}"
+    snapshot = _branched_recorded_snapshot(run_id, act=1, ts=1)
+    snapshot["visited_nodes"][1]["decisions"] = [
+        _recorded_decision("不得泄漏")
+    ]
+    _write_jsonl(
+        tmp_path / "deck-history.jsonl",
+        [
+            snapshot,
+            {"event": "outcome", "run_id": run_id, "status": "dead"},
+        ],
+    )
+    canonical = RunCatalog(
+        [tmp_path], replay_parser=_replay_parser
+    ).get_run(run_id)
+    route_nodes = [
+        node
+        for node in canonical["run"]["nodes"]
+        if node.get("_workbench_evidence_kind") == "route_node"
+    ]
+
+    if identity_failure == "gap":
+        route_nodes[1]["id"] = "a0:n7"
+    elif identity_failure == "duplicate":
+        route_nodes[1]["id"] = "a0:n0"
+    elif identity_failure == "missing":
+        route_nodes[1].pop("id")
+    elif identity_failure == "off-by-one":
+        for path_index, route_node in enumerate(route_nodes, start=1):
+            route_node["id"] = f"a0:n{path_index}"
+    elif identity_failure == "wrong-act":
+        route_nodes[1]["id"] = "a1:n1"
+    else:
+        class HostileId(str):
+            def __eq__(self, other):
+                raise AssertionError("hostile id equality must not execute")
+
+            def __hash__(self):
+                raise AssertionError("hostile id hash must not execute")
+
+            def __str__(self):
+                raise AssertionError("hostile id string conversion must not execute")
+
+        route_nodes[1]["id"] = HostileId("a0:n1")
+
+    class StaticCatalog:
+        def get_run(self, requested_run_id: str) -> dict:
+            assert requested_run_id == run_id
+            return canonical
+
+    class CapturingFallbackService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="route identity rejected")
+
+    service = CapturingFallbackService()
+    with _server(StaticCatalog(), map_service=service) as base:
+        status, payload = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    assert payload["fallback_reason"] == "route identity rejected"
+    assert all("decisions" not in node for node in payload["nodes"])
 
 
 def test_recorded_decision_multi_act_selects_only_the_requested_act(

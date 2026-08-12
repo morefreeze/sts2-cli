@@ -69,16 +69,28 @@ TRANSLATION_CACHE_TTL_SECONDS = 24 * 60 * 60
 PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024
 _TRANSLATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _ACT_COUNT = 4
+_CANONICAL_ROUTE_ID_PATTERN = re.compile(
+    r"^a(?P<act_index>[0-3]):n(?P<node_index>[0-9]|1[0-6])$"
+)
+
+
+def _canonical_route_node_identity(raw_id: Any) -> tuple[int, int] | None:
+    """Parse the bounded native route identity without coercing foreign types."""
+
+    if type(raw_id) is not str:
+        return None
+    match = _CANONICAL_ROUTE_ID_PATTERN.fullmatch(raw_id)
+    if match is None:
+        return None
+    return int(match.group("act_index")), int(match.group("node_index"))
 
 
 def _canonical_node_act_index(node: dict[str, Any]) -> int:
     """Return the zero-based act owning one canonical recorded node."""
 
-    raw_id = node.get("id")
-    if isinstance(raw_id, str):
-        match = re.match(r"^a(\d+):n\d+$", raw_id)
-        if match:
-            return int(match.group(1))
+    identity = _canonical_route_node_identity(node.get("id"))
+    if identity is not None:
+        return identity[0]
     act_index = node.get("act_index")
     if isinstance(act_index, int) and not isinstance(act_index, bool):
         return max(0, act_index)
@@ -113,14 +125,9 @@ def _canonical_route_node_act_index(node: dict[str, Any]) -> int | None:
     """Return one consistent bounded act identity or fail closed."""
 
     candidates: list[int] = []
-    raw_id = node.get("id")
-    if isinstance(raw_id, str):
-        match = re.match(r"^a(\d+):n\d+$", raw_id)
-        if match:
-            act_index = int(match.group(1))
-            if not 0 <= act_index < _ACT_COUNT:
-                return None
-            candidates.append(act_index)
+    identity = _canonical_route_node_identity(node.get("id"))
+    if identity is not None:
+        candidates.append(identity[0])
     for key, minimum, maximum, offset in (
         ("act_index", 0, _ACT_COUNT - 1, 0),
         ("act", 1, _ACT_COUNT, -1),
@@ -345,6 +352,9 @@ def _recorded_map_matches_canonical_route(
         zip(path_ids, route_nodes, canonical_nodes)
     ):
         map_node = nodes_by_id.get(path_id)
+        canonical_identity = _canonical_route_node_identity(
+            canonical_node.get("id")
+        )
         canonical_col = canonical_node.get("col")
         canonical_row = canonical_node.get("row")
         canonical_room_type = _normalize_visited_room_type(canonical_node)
@@ -360,6 +370,7 @@ def _recorded_map_matches_canonical_route(
             map_node is None
             or not map_node.visited
             or map_node.path_index != path_index
+            or canonical_identity != (recorded.act_index, path_index)
             or type(canonical_col) is not int
             or type(canonical_row) is not int
             or route_node.get("col") != canonical_col
@@ -482,6 +493,10 @@ def _run_map_payload(
                 reason=_map_service_fallback_reason(error),
             )
     payload = act_map.to_dict()
+    for graph_node in payload["nodes"]:
+        if type(graph_node) is dict:
+            for untrusted_key in ("decisions", "options", "choices"):
+                graph_node.pop(untrusted_key, None)
     path_ids = payload["alignment"].get("path_node_ids") or [
         node["id"]
         for node in sorted(
