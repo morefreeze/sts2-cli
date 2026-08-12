@@ -26,18 +26,16 @@
     { key: 'cards_removed', short: '删', label: '移除卡牌', kind: 'list' },
     { key: 'cards_transformed', short: '变', label: '变化卡牌', kind: 'list' },
   ];
+  const DECISION_KIND_LABELS = Object.freeze({ event: '事件', card_reward: '卡', potion: '药水', relic: '遗物', shop: '商店', rest: '休息' });
   const MAP_COLUMN_GAP = 126;
-  const MAP_ROW_GAP = 180;
+  const MAP_ROW_GAP = 88;
   const MAP_PADDING_X = 72;
   const MAP_PADDING_TOP = 72;
-  const MAP_PADDING_BOTTOM = 160;
-  const BADGE_COLUMNS = 2;
-  const BADGE_WIDTH = 54;
-  const BADGE_HEIGHT = 15;
-  const BADGE_GAP_X = 58;
-  const BADGE_GAP_Y = 18;
-  const BADGE_START_X = 56;
-  const BADGE_START_Y = 34;
+  const MAP_PADDING_BOTTOM = 76;
+  const MAP_DECISION_RAIL_GAP = 24;
+  const MAP_DECISION_RAIL_WIDTH = 360;
+  const MAP_DECISION_SUMMARY_WIDTH = 340;
+  const MAP_DECISION_LABEL_LIMIT = 72;
   const DELTA_LIST_LABEL_LIMIT = 3;
   const DELTA_ITEM_LABEL_LIMIT = 48;
   const DELTA_ITEM_DEPTH_LIMIT = 4;
@@ -49,6 +47,8 @@
     abortController: null,
     dashboardHidden: null,
   };
+  let activeDecisionAnchor = null;
+  let decisionClipSerial = 0;
 
   function createSvg(tag, attrs = {}) {
     const node = document.createElementNS(MAP_NS, tag);
@@ -67,15 +67,19 @@
     return artLabel || ROOM_LABELS[normalizedRoomType(node && node.room_type)] || '未知事件';
   }
 
-  function createMapTransform(nodes) {
+  function createMapTransform(nodes, hasDecisionRail = false) {
     const columns = nodes.map((node) => Number(node.col)).filter(Number.isInteger);
     const rows = nodes.map((node) => Number(node.row)).filter(Number.isInteger);
     const minCol = columns.length ? Math.min(...columns) : 0;
     const maxCol = columns.length ? Math.max(...columns) : 0;
     const minRow = rows.length ? Math.min(...rows) : 0;
     const maxRow = rows.length ? Math.max(...rows) : 0;
+    const graphWidth = Math.max(620, (maxCol - minCol) * MAP_COLUMN_GAP + MAP_PADDING_X * 2);
+    const decisionX = graphWidth + MAP_DECISION_RAIL_GAP;
     return {
-      width: Math.max(620, (maxCol - minCol) * MAP_COLUMN_GAP + MAP_PADDING_X * 2),
+      graphWidth,
+      decisionX,
+      width: hasDecisionRail ? decisionX + MAP_DECISION_RAIL_WIDTH : graphWidth,
       height: Math.max(360, (maxRow - minRow) * MAP_ROW_GAP + MAP_PADDING_TOP + MAP_PADDING_BOTTOM),
       point(node) {
         const col = Number.isInteger(node.col) ? node.col : minCol;
@@ -218,21 +222,195 @@
     return typeof measurement.value === 'number' && Number.isFinite(measurement.value) && measurement.value !== 0;
   }
 
-  function renderBadges(group, node) {
-    const badges = BADGE_FIELDS.filter((field) => nonzeroMeasurement(node.deltas && node.deltas[field.key], field));
-    badges.forEach((field, index) => {
-      const measurement = node.deltas[field.key];
-      const badge = createSvg('g', {
-        class: `map-node-badge ${measurement.quality}`,
-        transform: `translate(${-BADGE_START_X + (index % BADGE_COLUMNS) * BADGE_GAP_X} ${BADGE_START_Y + Math.floor(index / BADGE_COLUMNS) * BADGE_GAP_Y})`,
+  function boundedDecisionText(value, limit = MAP_DECISION_LABEL_LIMIT) {
+    if (typeof value !== 'string' || !Number.isInteger(limit) || limit < 1) return '';
+    const scalars = Array.from(value.trim());
+    return scalars.length > limit
+      ? `${scalars.slice(0, Math.max(0, limit - 1)).join('')}…`
+      : scalars.join('');
+  }
+
+  function recordedNodeDecisions(node) {
+    if (!node || !node.visited || !Array.isArray(node.decisions)) return [];
+    return node.decisions.flatMap((decision) => {
+      if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return [];
+      if (decision.evidence !== 'recorded'
+        || typeof decision.kind !== 'string'
+        || !Object.hasOwn(DECISION_KIND_LABELS, decision.kind)) return [];
+      if (!Array.isArray(decision.options)) return [];
+      const selected = decision.options.find((option) => (
+        option && typeof option === 'object' && !Array.isArray(option)
+        && option.selected === true && typeof option.label === 'string'
+      ));
+      return selected ? [{ decision, selected }] : [];
+    });
+  }
+
+  function knownDeltaListLabels(items) {
+    const labels = items.map((item) => nestedDeltaItemLabel(item));
+    if (!labels.length || labels.some((label) => !label)) return '';
+    const visible = labels.slice(0, DELTA_LIST_LABEL_LIMIT);
+    const overflow = labels.length - visible.length;
+    return `${visible.join('、')}${overflow > 0 ? `，另 ${overflow} 项` : ''}`;
+  }
+
+  function nodeDecisionSummary(node) {
+    if (!node || !node.visited) return null;
+    const recorded = recordedNodeDecisions(node);
+    if (recorded.length) {
+      const newest = recorded[recorded.length - 1];
+      return {
+        prefix: DECISION_KIND_LABELS[newest.decision.kind],
+        label: boundedDecisionText(newest.selected.label),
+        effect: boundedDecisionText(newest.selected.effect || ''),
+        overflow: recorded.length - 1,
+        recorded: true,
+      };
+    }
+
+    const derivedFields = [
+      { key: 'cards_gained', verb: '获得', noun: '卡牌' },
+      { key: 'potions_gained', verb: '获得', noun: '药水' },
+      { key: 'relics_gained', verb: '获得', noun: '遗物' },
+      { key: 'cards_upgraded', verb: '升级', noun: '卡牌' },
+      { key: 'cards_removed', verb: '移除', noun: '卡牌' },
+      { key: 'cards_transformed', verb: '变化', noun: '卡牌' },
+    ];
+    for (const field of derivedFields) {
+      const measurement = node.deltas && node.deltas[field.key];
+      if (!measurement || !['exact', 'derived'].includes(measurement.quality)) continue;
+      if (!Array.isArray(measurement.value) || !measurement.value.length) continue;
+      const labels = knownDeltaListLabels(measurement.value);
+      if (!labels) continue;
+      return {
+        prefix: '推导',
+        label: boundedDecisionText(`${field.verb} ${labels}`),
+        effect: `${field.noun} · ${measurement.quality === 'derived' ? '相邻快照推导' : '精确记录'}`,
+        overflow: 0,
+        recorded: false,
+      };
+    }
+    return null;
+  }
+
+  function renderDecisionSummary(layer, node, point, transform) {
+    const summary = nodeDecisionSummary(node);
+    if (!summary) return null;
+    decisionClipSerial += 1;
+    const clipId = `map-decision-clip-${decisionClipSerial}`;
+    const group = createSvg('g', {
+      class: 'map-decision-summary',
+      transform: `translate(${transform.decisionX} ${point.y})`,
+      'clip-path': `url(#${clipId})`,
+      'pointer-events': 'none',
+      'aria-hidden': 'true',
+    });
+    const clipPath = createSvg('clipPath', { id: clipId });
+    clipPath.append(createSvg('rect', {
+      x: 0, y: -15, width: MAP_DECISION_SUMMARY_WIDTH, height: 30, rx: 7,
+    }));
+    const definitions = createSvg('defs');
+    definitions.append(clipPath);
+    group.append(definitions);
+    group.append(createSvg('rect', {
+      x: 0, y: -15, width: MAP_DECISION_SUMMARY_WIDTH, height: 30, rx: 7,
+    }));
+    const textNode = createSvg('text', { x: 10, y: 4 });
+    const label = createSvg('tspan');
+    label.textContent = `${summary.prefix}：${summary.label}`;
+    textNode.append(label);
+    if (summary.effect) {
+      const effect = createSvg('tspan', { class: 'map-decision-effect' });
+      effect.textContent = ` · ${summary.effect}`;
+      textNode.append(effect);
+    }
+    if (summary.overflow > 0) {
+      const overflow = createSvg('tspan', { class: 'map-decision-overflow' });
+      overflow.textContent = ` +${summary.overflow}`;
+      textNode.append(overflow);
+    }
+    group.append(textNode);
+    layer.append(group);
+    return group;
+  }
+
+  function showDecisionPopover(node, anchor) {
+    const summary = nodeDecisionSummary(node);
+    if (!summary || !anchor) return;
+    if (activeDecisionAnchor && activeDecisionAnchor !== anchor) hideDecisionPopover();
+    const popover = byId('mapDecisionPopover');
+    const title = byId('mapDecisionTitle');
+    const body = byId('mapDecisionBody');
+    clear(body);
+    title.textContent = `${summary.prefix}：${summary.label}`;
+
+    const recorded = recordedNodeDecisions(node);
+    if (summary.recorded && recorded.length) {
+      const newest = recorded[recorded.length - 1].decision;
+      const options = element('ul', { className: 'map-decision-options' });
+      newest.options.forEach((option) => {
+        if (!option || typeof option !== 'object' || typeof option.label !== 'string') return;
+        const item = element('li', { className: option.selected === true ? 'selected' : '' });
+        item.append(element('div', {
+          className: 'map-decision-option-label',
+          text: `${option.selected === true ? '✓ ' : ''}${boundedDecisionText(option.label, 256)}`,
+        }));
+        if (typeof option.effect === 'string' && option.effect.trim()) {
+          item.append(element('div', {
+            className: 'map-decision-option-effect',
+            text: boundedDecisionText(option.effect, 512),
+          }));
+        }
+        options.append(item);
       });
-      badge.append(createSvg('rect', { x: 0, y: 0, width: BADGE_WIDTH, height: BADGE_HEIGHT, rx: 5 }));
-      const textNode = createSvg('text', { x: BADGE_WIDTH / 2, y: 11, 'text-anchor': 'middle' });
-      textNode.textContent = `${measurement.quality === 'derived' ? '≈' : ''}${field.short} ${measurementDisplay(measurement, field, true)}`;
-      const title = createSvg('title');
-      title.textContent = `${field.label}：${measurementDisplay(measurement, field)}（${QUALITY_LABELS[measurement.quality]}）`;
-      badge.append(title, textNode);
-      group.append(badge);
+      body.append(options);
+    } else {
+      body.append(
+        element('p', { className: 'map-decision-derived-result', text: `${summary.label} · ${summary.effect}` }),
+        element('p', { className: 'map-decision-unrecorded', text: '该对局未记录备选项' }),
+      );
+    }
+
+    activeDecisionAnchor = anchor;
+    anchor.setAttribute('aria-describedby', 'mapDecisionPopover');
+    popover.hidden = false;
+    const anchorRect = anchor.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    const viewportWidth = Math.max(16, Number(window.innerWidth) || 0);
+    const viewportHeight = Math.max(16, Number(window.innerHeight) || 0);
+    const left = Math.min(
+      Math.max(8, anchorRect.right + 8),
+      Math.max(8, viewportWidth - popoverRect.width - 8),
+    );
+    const below = anchorRect.bottom + 8;
+    const top = below + popoverRect.height <= viewportHeight - 8
+      ? Math.max(8, below)
+      : Math.max(8, anchorRect.top - popoverRect.height - 8);
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+  }
+
+  function hideDecisionPopover(anchor = null) {
+    if (anchor && activeDecisionAnchor && anchor !== activeDecisionAnchor) return;
+    const target = anchor || activeDecisionAnchor;
+    if (target) target.removeAttribute('aria-describedby');
+    byId('mapDecisionPopover').hidden = true;
+    activeDecisionAnchor = null;
+  }
+
+  function bindDecisionPopover(anchor, node) {
+    anchor.addEventListener('mouseenter', () => showDecisionPopover(node, anchor));
+    anchor.addEventListener('mouseleave', () => hideDecisionPopover(anchor));
+    anchor.addEventListener('focusin', () => showDecisionPopover(node, anchor));
+    anchor.addEventListener('focusout', (event) => {
+      if (!anchor.contains(event.relatedTarget)) hideDecisionPopover(anchor);
+    });
+    anchor.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        hideDecisionPopover(anchor);
+      }
     });
   }
 
@@ -281,8 +459,10 @@
 
   function renderNodes(svg, payload, transform) {
     const layer = createSvg('g', { class: 'map-nodes' });
+    const summaries = createSvg('g', { class: 'map-decision-summaries' });
     payload.nodes.forEach((node) => {
       const point = transform.point(node);
+      const decisionSummary = nodeDecisionSummary(node);
       const group = createSvg('g', {
         class: `map-node${node.visited ? ' visited' : ' unvisited'}${node.terminal ? ' terminal' : ''}`,
         transform: `translate(${point.x} ${point.y})`,
@@ -298,21 +478,24 @@
             selectNode(node, group);
           }
         });
+        if (decisionSummary) bindDecisionPopover(group, node);
       }
       const title = createSvg('title');
       title.textContent = nodeTooltip(node);
       group.append(title, createSvg('circle', { class: 'map-node-circle', cx: 0, cy: 0, r: 28 }));
       renderNodeArt(group, node);
-      if (node.visited) renderBadges(group, node);
       layer.append(group);
+      if (decisionSummary) renderDecisionSummary(summaries, node, point, transform);
     });
-    svg.append(layer);
+    svg.append(layer, summaries);
   }
 
   function renderMap(payload) {
     const svg = byId('mapSvg');
+    hideDecisionPopover();
     clear(svg);
-    const transform = createMapTransform(payload.nodes);
+    const hasDecisionRail = payload.nodes.some((node) => nodeDecisionSummary(node) !== null);
+    const transform = createMapTransform(payload.nodes, hasDecisionRail);
     svg.setAttribute('viewBox', `0 0 ${transform.width} ${transform.height}`);
     svg.setAttribute('width', String(transform.width));
     svg.setAttribute('height', String(transform.height));
@@ -524,6 +707,10 @@
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !byId('runMapPage').hidden) {
       event.preventDefault();
+      if (!byId('mapDecisionPopover').hidden) {
+        hideDecisionPopover();
+        return;
+      }
       closeMapPage();
     }
   });

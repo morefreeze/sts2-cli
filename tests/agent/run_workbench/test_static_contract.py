@@ -115,6 +115,9 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
         "mapFallback",
         "mapSvg",
         "mapLegend",
+        "mapDecisionPopover",
+        "mapDecisionTitle",
+        "mapDecisionBody",
         "actSummary",
         "selectedNodeSummary",
     ]
@@ -451,8 +454,9 @@ def _js_number(script: str, name: str) -> int:
     return int(match.group(1))
 
 
-def test_map_fallback_route_badge_geometry_tabs_focus_and_image_contracts():
+def test_map_fallback_route_compact_geometry_tabs_focus_and_image_contracts():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     route = _javascript_section(script, "function routeEdgeKeys", "function appendEdge")
     measurement = _javascript_section(
         script, "function measurementDisplay", "function nonzeroMeasurement"
@@ -479,27 +483,163 @@ def test_map_fallback_route_badge_geometry_tabs_focus_and_image_contracts():
     assert "document.activeElement" in page
     assert "isUsableFocusTarget" in dashboard
 
-    badge_columns = _js_number(script, "BADGE_COLUMNS")
-    badge_width = _js_number(script, "BADGE_WIDTH")
-    badge_gap_x = _js_number(script, "BADGE_GAP_X")
-    badge_start_x = _js_number(script, "BADGE_START_X")
-    badge_height = _js_number(script, "BADGE_HEIGHT")
-    badge_gap_y = _js_number(script, "BADGE_GAP_Y")
-    badge_start_y = _js_number(script, "BADGE_START_Y")
-    column_gap = _js_number(script, "MAP_COLUMN_GAP")
-    row_gap = _js_number(script, "MAP_ROW_GAP")
-    padding_bottom = _js_number(script, "MAP_PADDING_BOTTOM")
-    max_badges = 11
-    right_extent = badge_start_x + (badge_columns - 1) * badge_gap_x + badge_width
-    left_extent = badge_start_x
-    bottom_extent = (
-        badge_start_y
-        + ((max_badges - 1) // badge_columns) * badge_gap_y
-        + badge_height
+    assert _js_number(script, "MAP_ROW_GAP") == 88
+    assert _js_number(script, "MAP_PADDING_BOTTOM") == 76
+    assert _js_number(script, "MAP_DECISION_RAIL_GAP") == 24
+    assert _js_number(script, "MAP_DECISION_RAIL_WIDTH") >= 340
+    assert _js_number(script, "MAP_DECISION_LABEL_LIMIT") == 72
+    assert "renderBadges(group, node)" not in script
+    assert "renderDecisionSummary" in script
+    assert "mapDecisionPopover" in index
+
+
+def test_map_compact_geometry_keeps_graph_points_stable_when_rail_is_added():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith("const MAP_")
+        and re.search(r"= \d+;", line)
     )
-    assert column_gap > right_extent - left_extent
-    assert row_gap > bottom_extent + 28
-    assert padding_bottom >= bottom_extent
+    transform = _javascript_section(
+        script, "function createMapTransform", "function routeEdgeKeys"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {transform}
+        const nodes = Array.from({{ length: 17 }}, (_, row) => ({{ col: row % 3, row }}));
+        const plain = createMapTransform(nodes, false);
+        const railed = createMapTransform(nodes, true);
+        console.log(JSON.stringify({{
+          plain: {{ width: plain.width, height: plain.height, points: nodes.map(plain.point) }},
+          railed: {{
+            width: railed.width, graphWidth: railed.graphWidth,
+            decisionX: railed.decisionX, points: nodes.map(railed.point),
+          }},
+        }}));
+        """
+    )
+
+    assert result["plain"]["height"] < 1700
+    assert abs(result["plain"]["points"][0]["y"] - result["plain"]["points"][1]["y"]) == 88
+    assert result["railed"]["width"] > result["plain"]["width"]
+    assert result["railed"]["graphWidth"] == result["plain"]["width"]
+    assert result["railed"]["decisionX"] > result["railed"]["graphWidth"]
+    assert result["railed"]["points"] == result["plain"]["points"]
+
+
+def test_map_decision_summary_prefers_recorded_newest_and_fails_closed_for_unknowns():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith(("const DELTA_", "const MAP_DECISION_", "const DECISION_"))
+    )
+    helpers = _javascript_section(
+        script, "function boundedDeltaLabel", "function renderDecisionSummary"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        const earlier = {{
+          kind: 'event', selected_id: 'leave', selected_label: '离开', evidence: 'recorded',
+          options: [{{ id: 'leave', label: '离开', effect: '不发生变化', selected: true }}],
+        }};
+        const longLabel = `${{'x'.repeat(70)}}😀${{'z'.repeat(600)}}`;
+        const latest = {{
+          kind: 'card_reward', selected_id: 'pommel', selected_label: longLabel, evidence: 'recorded',
+          options: [{{
+            id: 'pommel', label: longLabel,
+            effect: '造成 9 点伤害，抽 1 张牌' + 'e'.repeat(600), selected: true,
+          }}],
+        }};
+        const recorded = nodeDecisionSummary({{ visited: true, decisions: [earlier, latest] }});
+        const derived = nodeDecisionSummary({{
+          visited: true,
+          deltas: {{
+            cards_gained: {{ quality: 'derived', value: [{{ name: {{ en: 'Bash' }} }}] }},
+            potions_gained: {{ quality: 'exact', value: [{{ name: 'Fire Potion' }}] }},
+          }},
+        }});
+        const unknown = nodeDecisionSummary({{
+          visited: true,
+          deltas: {{ cards_gained: {{ quality: 'unknown', value: [{{ name: 'SECRET' }}] }} }},
+        }});
+        const forgedKind = nodeDecisionSummary({{
+          visited: true,
+          decisions: [{{
+            kind: '__proto__', evidence: 'recorded',
+            options: [{{ label: 'FORGED', effect: 'FORGED', selected: true }}],
+          }}],
+        }});
+        console.log(JSON.stringify({{
+          recorded,
+          recordedLabelScalars: Array.from(recorded.label).length,
+          recordedEffectScalars: Array.from(recorded.effect).length,
+          recordedLabelValid: !Array.from(recorded.label).some((ch) => ch.length === 1 && /[\\uD800-\\uDFFF]/.test(ch)),
+          derived,
+          unknown,
+          forgedKind,
+        }}));
+        """
+    )
+
+    assert result["recorded"]["prefix"] == "卡"
+    assert result["recorded"]["overflow"] == 1
+    assert result["recorded"]["recorded"] is True
+    assert result["recordedLabelScalars"] <= 72
+    assert result["recordedEffectScalars"] <= 72
+    assert result["recordedLabelValid"] is True
+    assert "😀" in result["recorded"]["label"]
+    assert result["derived"]["prefix"] == "推导"
+    assert result["derived"]["label"].startswith("获得 Bash")
+    assert result["derived"]["recorded"] is False
+    assert result["unknown"] is None
+    assert result["forgedKind"] is None
+    assert "[object Object]" not in json.dumps(result)
+
+
+def test_map_decision_tooltip_contract_is_safe_accessible_and_keeps_node_keys():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    show = _javascript_section(
+        script, "function showDecisionPopover", "function renderNodeArt"
+    )
+    render = _javascript_section(
+        script, "function renderDecisionSummary", "function showDecisionPopover"
+    )
+    nodes = _javascript_section(script, "function renderNodes", "function renderMap")
+
+    assert '<aside id="mapDecisionPopover" class="map-decision-popover" role="tooltip" hidden>' in index
+    assert 'id="mapDecisionTitle"' in index
+    assert 'id="mapDecisionBody"' in index
+    assert "textContent" in show
+    assert "innerHTML" not in script
+    assert "该对局未记录备选项" in show
+    assert "getBoundingClientRect" in show
+    assert "window.innerWidth" in show and "window.innerHeight" in show
+    assert "Math.max(8" in show
+    assert "aria-describedby" in show
+    for event_name in ("mouseenter", "mouseleave", "focusin", "focusout"):
+        assert event_name in show
+    assert "relatedTarget" in show
+    assert "event.key === 'Escape'" in show
+    assert "event.stopPropagation()" in show
+    assert "event.key === 'Enter' || event.key === ' '" in nodes
+    assert "selectNode(node, group)" in nodes
+    assert "nodeDecisionSummary(node)" in nodes
+    assert "createSvg('clipPath'" in render
+    assert "createSvg('tspan', { class: 'map-decision-effect' })" in render
+    assert ".map-decision-summary" in css
+    assert ".map-decision-effect" in css
+    assert ".map-decision-popover[hidden]" in css
+    assert ".map-decision-option-effect" in css
+    assert "pointer-events: none" in css
 
 
 def test_static_routes_reject_unknown_traversal_encoding_and_queries(tmp_path: Path):
