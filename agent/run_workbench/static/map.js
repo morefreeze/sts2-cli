@@ -54,6 +54,7 @@
     requestToken: 0,
     abortController: null,
     dashboardHidden: null,
+    positionedMapKey: '',
   };
   let activeDecisionAnchor = null;
   let decisionClipSerial = 0;
@@ -101,6 +102,37 @@
         };
       },
     };
+  }
+
+  function mapAutoPositionTarget(nodes) {
+    const visited = nodes
+      .filter((node) => node.visited)
+      .sort((left, right) => left.path_index - right.path_index);
+    return visited.find((node) => node.current === true)
+      || visited.findLast((node) => node.terminal === true)
+      || visited.at(-1)
+      || null;
+  }
+
+  function positionMapViewport(nodes, transform) {
+    const svg = byId('mapSvg');
+    const scroller = svg && svg.parentElement;
+    const target = mapAutoPositionTarget(nodes);
+    if (!scroller || !target) return;
+    const clientHeight = Number(scroller.clientHeight);
+    const clientWidth = Number(scroller.clientWidth);
+    if (!(clientHeight > 0) || !(clientWidth > 0)) return;
+    const point = transform.point(target);
+    const scrollHeight = Math.max(Number(scroller.scrollHeight) || 0, transform.height);
+    const scrollWidth = Math.max(Number(scroller.scrollWidth) || 0, transform.width);
+    scroller.scrollTop = Math.min(
+      Math.max(0, point.y - clientHeight / 2),
+      Math.max(0, scrollHeight - clientHeight),
+    );
+    scroller.scrollLeft = Math.min(
+      Math.max(0, point.x - clientWidth / 2),
+      Math.max(0, scrollWidth - clientWidth),
+    );
   }
 
   function routeEdgeKeys(payload) {
@@ -849,7 +881,7 @@
     svg.append(layer, summaries);
   }
 
-  function renderMap(payload) {
+  function renderMap(payload, { autoPosition = false, preservePosition = null } = {}) {
     const svg = byId('mapSvg');
     hideDecisionPopover();
     clear(svg);
@@ -870,6 +902,11 @@
     renderNeutralEdges(svg, payload, nodeById, transform, routeKeys);
     renderVisitedEdges(svg, payload, nodeById, transform, routeKeys);
     renderNodes(svg, payload, transform);
+    if (autoPosition) positionMapViewport(payload.nodes, transform);
+    else if (preservePosition && svg.parentElement) {
+      svg.parentElement.scrollTop = preservePosition.top;
+      svg.parentElement.scrollLeft = preservePosition.left;
+    }
   }
 
   function appendDefinition(container, label, value) {
@@ -1003,6 +1040,12 @@
       return;
     }
     if (opener && opener.isConnected) mapState.opener = opener;
+    const mapKey = `${runId}\u0000${actIndex}`;
+    const autoPosition = mapState.positionedMapKey !== mapKey;
+    const mapScroller = byId('mapSvg').parentElement;
+    const preservePosition = !autoPosition && mapScroller
+      ? { top: mapScroller.scrollTop, left: mapScroller.scrollLeft }
+      : null;
     mapState.runId = runId;
     mapState.actIndex = actIndex;
     showMapPage({ focusPage: !focusActTab });
@@ -1030,7 +1073,8 @@
       mapState.abortController = null;
       const selectedTab = renderActTabs(payload);
       if (focusActTab && selectedTab) selectedTab.focus();
-      renderMap(payload);
+      renderMap(payload, { autoPosition, preservePosition });
+      mapState.positionedMapKey = mapKey;
       renderActSummary(payload);
       const fallback = byId('mapFallback');
       fallback.hidden = payload.full_map || !payload.fallback_reason;

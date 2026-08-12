@@ -547,6 +547,197 @@ def test_map_compact_geometry_keeps_graph_points_stable_when_rail_is_added():
     assert result["railed"]["points"] == result["plain"]["points"]
 
 
+def test_map_initial_position_reveals_current_or_last_route_without_side_effects():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    constants = "\n".join(
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith("const MAP_")
+        and re.search(r"= \d+;", line)
+    )
+    helpers = _javascript_section(
+        script, "function createMapTransform", "function routeEdgeKeys"
+    )
+
+    result = _run_node_json(
+        f"""
+        {constants}
+        {helpers}
+        const activeElement = {{ id: 'unchanged-focus' }};
+        const document = {{ activeElement }};
+        const popover = {{ hidden: false, scrollTop: 73 }};
+        const scroll = {{
+          clientHeight: 360, clientWidth: 300,
+          scrollHeight: 0, scrollWidth: 0,
+          scrollTop: 0, scrollLeft: 0,
+        }};
+        const svg = {{ parentElement: scroll }};
+        function byId(id) {{
+          if (id === 'mapSvg') return svg;
+          if (id === 'mapDecisionPopover') return popover;
+          throw new Error(id);
+        }}
+        function visible(point) {{
+          return point.y - 28 >= scroll.scrollTop
+            && point.y + 28 <= scroll.scrollTop + scroll.clientHeight;
+        }}
+        const nodes = Array.from({{ length: 17 }}, (_, row) => ({{
+          id: `node-${{row}}`, col: row % 3, row,
+          visited: row <= 4, path_index: row <= 4 ? row : null,
+          current: row === 3,
+        }}));
+        const transform = createMapTransform(nodes, true);
+        scroll.scrollHeight = transform.height;
+        scroll.scrollWidth = transform.width;
+        const currentTarget = mapAutoPositionTarget(nodes);
+        positionMapViewport(nodes, transform);
+        const current = {{
+          target: currentTarget.id,
+          visible: visible(transform.point(currentTarget)),
+          scrollTop: scroll.scrollTop,
+        }};
+
+        nodes.forEach((node) => {{ node.current = false; }});
+        scroll.scrollTop = 0;
+        const lastTarget = mapAutoPositionTarget(nodes);
+        positionMapViewport(nodes, transform);
+        const last = {{
+          target: lastTarget.id,
+          visible: visible(transform.point(lastTarget)),
+          scrollTop: scroll.scrollTop,
+        }};
+
+        const topNodes = nodes.map((node) => ({{
+          ...node,
+          visited: node.row === 16,
+          path_index: node.row === 16 ? 0 : null,
+          current: node.row === 16,
+        }}));
+        scroll.scrollTop = 0;
+        const topTransform = createMapTransform(topNodes, false);
+        scroll.scrollHeight = topTransform.height;
+        scroll.scrollWidth = topTransform.width;
+        positionMapViewport(topNodes, topTransform);
+        const top = scroll.scrollTop;
+
+        const emptyNodes = nodes.map((node) => ({{
+          ...node, visited: false, path_index: null, current: false,
+        }}));
+        scroll.scrollTop = 0;
+        const emptyTransform = createMapTransform(emptyNodes, false);
+        scroll.scrollHeight = emptyTransform.height;
+        positionMapViewport(emptyNodes, emptyTransform);
+
+        console.log(JSON.stringify({{
+          current, last, top, empty: scroll.scrollTop,
+          focusUnchanged: document.activeElement === activeElement,
+          popover: {{ hidden: popover.hidden, scrollTop: popover.scrollTop }},
+        }}));
+        """
+    )
+
+    assert result["current"]["target"] == "node-3"
+    assert result["current"]["visible"] is True
+    assert result["current"]["scrollTop"] > 0
+    assert result["last"]["target"] == "node-4"
+    assert result["last"]["visible"] is True
+    assert result["last"]["scrollTop"] > 0
+    assert result["top"] == 0
+    assert result["empty"] == 0
+    assert result["focusUnchanged"] is True
+    assert result["popover"] == {"hidden": False, "scrollTop": 73}
+
+
+def test_map_load_auto_positions_new_run_act_once_and_preserves_same_act_scroll():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    load = _javascript_section(script, "async function loadAct", "function closeMapPage")
+
+    result = _run_node_json(
+        f"""
+        const pending = [];
+        const renderCalls = [];
+        const mapState = {{
+          runId: '', actIndex: 0, opener: null, requestToken: 0,
+          abortController: null, positionedMapKey: '',
+        }};
+        const mapScroll = {{ scrollTop: 0, scrollLeft: 0 }};
+        const elements = new Map();
+        elements.set('mapSvg', {{
+          hidden: false, textContent: '', parentElement: mapScroll,
+        }});
+        function byId(id) {{
+          if (!elements.has(id)) elements.set(id, {{ hidden: false, textContent: '' }});
+          return elements.get(id);
+        }}
+        function showMapPage() {{}}
+        function renderEmpty() {{}}
+        function clear(node) {{
+          if (node === elements.get('mapSvg')) {{
+            mapScroll.scrollTop = 0;
+            mapScroll.scrollLeft = 0;
+          }}
+        }}
+        function hideDecisionPopover() {{}}
+        const history = {{ state: null, pushState() {{}}, replaceState() {{}} }};
+        function mapLocation(runId, actIndex) {{ return `${{runId}}:${{actIndex}}`; }}
+        function setStatus() {{}}
+        function getJSON(url) {{
+          return new Promise((resolve) => pending.push({{ url, resolve }}));
+        }}
+        function renderActTabs() {{ return null; }}
+        function renderMap(payload, options) {{
+          renderCalls.push({{
+            act: payload.act.index,
+            autoPosition: options && options.autoPosition,
+            preservePosition: options && options.preservePosition,
+          }});
+          if (options && options.preservePosition) {{
+            mapScroll.scrollTop = options.preservePosition.top;
+            mapScroll.scrollLeft = options.preservePosition.left;
+          }}
+        }}
+        function renderActSummary() {{}}
+        function selectNode() {{}}
+        {load}
+        function payload(actIndex) {{
+          return {{
+            act: {{ index: actIndex }}, nodes: [], full_map: true,
+            fallback_reason: null,
+          }};
+        }}
+        async function load(runId, actIndex) {{
+          const promise = loadAct(runId, actIndex);
+          pending.at(-1).resolve(payload(actIndex));
+          await promise;
+        }}
+        async function exercise() {{
+          await load('run-a', 0);
+          mapScroll.scrollTop = 321;
+          mapScroll.scrollLeft = 24;
+          await load('run-a', 0);
+          const restoredSameAct = {{ top: mapScroll.scrollTop, left: mapScroll.scrollLeft }};
+          await load('run-a', 1);
+          await load('run-b', 1);
+          return {{ renderCalls, restoredSameAct, positionedMapKey: mapState.positionedMapKey }};
+        }}
+        exercise().then((value) => console.log(JSON.stringify(value)));
+        """
+    )
+
+    assert result["renderCalls"] == [
+        {"act": 0, "autoPosition": True, "preservePosition": None},
+        {
+            "act": 0,
+            "autoPosition": False,
+            "preservePosition": {"top": 321, "left": 24},
+        },
+        {"act": 1, "autoPosition": True, "preservePosition": None},
+        {"act": 1, "autoPosition": True, "preservePosition": None},
+    ]
+    assert result["restoredSameAct"] == {"top": 321, "left": 24}
+    assert result["positionedMapKey"] == "run-b\u00001"
+
+
 def test_map_decision_summary_prefers_recorded_newest_and_fails_closed_for_unknowns():
     script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
     constants = "\n".join(
