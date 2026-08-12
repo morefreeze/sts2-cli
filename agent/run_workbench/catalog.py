@@ -409,6 +409,7 @@ class RunCatalog:
                 source = self._sources[source_id]
                 sources.append(deepcopy(source.entry))
                 path_ids.update(_source_redactions(source))
+                errors.extend(source.entry["errors"])
                 if (
                     source.descriptor.kind
                     in {
@@ -424,7 +425,6 @@ class RunCatalog:
                         include_all=source.descriptor.kind
                         is SourceKind.REPLAY_JSONL,
                     )
-                    errors.extend(source.entry["errors"])
                     errors.extend(scan_errors)
                     adapted = adapt_records(
                         source.path.name,
@@ -1100,8 +1100,20 @@ def _merge_compact_records(
             merged.append(group[0])
         else:
             merged.append(_join_catalog_group(group))
-    merged.extend(historical)
-    return merged
+    if not historical:
+        return merged
+    return join_records(
+        [
+            *(
+                item.to_record() if isinstance(item, _CompactRun) else item
+                for item in merged
+            ),
+            *(
+                item.to_record() if isinstance(item, _CompactRun) else item
+                for item in historical
+            ),
+        ]
+    )
 
 
 def _record_run_id(record: dict[str, Any]) -> str:

@@ -15,7 +15,14 @@ from agent.run_workbench.catalog import (
     CatalogNotFoundError,
     RunCatalog,
 )
-from agent.run_workbench.models import NodeOrigin, RunStatus, SourceKind
+from agent.run_workbench.joiner import join_records
+from agent.run_workbench.models import (
+    NodeOrigin,
+    RunMetadata,
+    RunRecord,
+    RunStatus,
+    SourceKind,
+)
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> Path:
@@ -314,7 +321,14 @@ def _deck_decision_scenario_rows(
     )
     return [
         *core,
-        *({"ignored": index} for index in range(record_count - len(core))),
+        *(
+            {
+                "event": "milestone",
+                "run_id": "decision-scenario",
+                "ordinal": index,
+            }
+            for index in range(record_count - len(core))
+        ),
     ]
 
 
@@ -1685,7 +1699,8 @@ def test_recorded_decision_giant_json_integer_is_a_bounded_scan_error(
     source = catalog.list_sources()[0]
     cohort = catalog.list_cohorts()[0]
     record = catalog.get_cohort_records(cohort["cohort_id"])[0]
-    exact = catalog.get_run("decision-scenario")["run"]
+    run_view = catalog.get_run("decision-scenario")
+    exact = run_view["run"]
 
     assert source["source_kind"] == "deck_history"
     assert source["open_mode"] == "run"
@@ -1694,6 +1709,7 @@ def test_recorded_decision_giant_json_integer_is_a_bounded_scan_error(
     assert len(source["errors"]) == 1
     assert len(source["errors"][0]) <= 160
     assert "9999999999" not in source["errors"][0]
+    assert run_view["errors"] == source["errors"]
     assert record.capabilities.decisions is True
     assert exact["capabilities"]["decisions"] is True
 
@@ -1724,12 +1740,14 @@ def test_recorded_decision_nonfinite_timestamp_is_invalid_across_threshold(
     source = catalog.list_sources()[0]
     cohort = catalog.list_cohorts()[0]
     record = catalog.get_cohort_records(cohort["cohort_id"])[0]
-    exact = catalog.get_run("decision-scenario")["run"]
+    run_view = catalog.get_run("decision-scenario")
+    exact = run_view["run"]
 
     assert source["source_kind"] == "deck_history"
     assert source["open_mode"] == "run"
     assert source["record_count"] == record_count
     assert source["error_count"] == 1
+    assert run_view["errors"] == source["errors"]
     assert record.capabilities.decisions is True
     assert exact["capabilities"]["decisions"] is True
     route_node = next(
@@ -1738,6 +1756,117 @@ def test_recorded_decision_nonfinite_timestamp_is_invalid_across_threshold(
         if node.get("_workbench_evidence_kind") == "route_node"
     )
     assert route_node["decisions"][0]["selected_label"] == "献血"
+
+
+def test_recorded_decision_get_run_dedupes_same_error_across_candidate_sources(
+    tmp_path: Path,
+) -> None:
+    roots = [tmp_path / "small", tmp_path / "large"]
+    for root, record_count in zip(roots, (511, 513), strict=True):
+        root.mkdir()
+        records = _deck_decision_scenario_rows(
+            record_count,
+            [(1, 1, True, False)],
+        )
+        invalid = _recorded_decision_snapshot(
+            "decision-scenario",
+            act=1,
+            ts=2,
+            has_decisions=False,
+        )
+        raw_invalid = json.dumps(invalid).replace('"ts": 2', '"ts": NaN')
+        _write_jsonl_with_raw_line(root / "deck.jsonl", records, raw_invalid)
+
+    run_view = RunCatalog(roots, replay_parser=_replay_parser).get_run(
+        "decision-scenario"
+    )
+
+    assert run_view["errors"] == [
+        "deck.jsonl:2: invalid JSON: non-standard numeric constant NaN"
+    ]
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [
+            RunRecord(
+                run_id="known",
+                source_id="identified",
+                source_kind=SourceKind.EVAL_RESULTS,
+                metadata=RunMetadata(
+                    seed="shared",
+                    started_at=10,
+                    ended_at=20,
+                ),
+            ),
+            RunRecord(
+                run_id="",
+                source_id="anonymous",
+                source_kind=SourceKind.DECK_HISTORY,
+                metadata=RunMetadata(
+                    seed="shared",
+                    started_at=15,
+                    ended_at=25,
+                ),
+                nodes=[{"event": "outcome", "status": "dead"}],
+            ),
+        ],
+        [
+            RunRecord(
+                run_id="",
+                source_id="anonymous-b",
+                source_kind=SourceKind.REPLAY_JSONL,
+                metadata=RunMetadata(
+                    seed="shared",
+                    started_at=10,
+                    ended_at=20,
+                ),
+                nodes=[{"id": "node-b"}],
+            ),
+            RunRecord(
+                run_id="",
+                source_id="anonymous-a",
+                source_kind=SourceKind.DECK_HISTORY,
+                metadata=RunMetadata(
+                    seed="shared",
+                    started_at=15,
+                    ended_at=25,
+                ),
+                nodes=[{"id": "node-a"}],
+            ),
+        ],
+        [
+            RunRecord(
+                run_id="",
+                source_id="anonymous-unique-b",
+                source_kind=SourceKind.REPLAY_JSONL,
+                nodes=[{"id": "node-b"}],
+            ),
+            RunRecord(
+                run_id="",
+                source_id="anonymous-unique-a",
+                source_kind=SourceKind.DECK_HISTORY,
+                nodes=[{"id": "node-a"}],
+            ),
+        ],
+    ],
+    ids=[
+        "identified-and-anonymous",
+        "two-overlapping-anonymous",
+        "unique-anonymous-control",
+    ],
+)
+def test_recorded_decision_catalog_preprocessing_preserves_historical_join_semantics(
+    records: list[RunRecord],
+) -> None:
+    expected = join_records(deepcopy(records))
+
+    actual = catalog_module._merge_compact_records(deepcopy(records), [])
+
+    assert [record.to_dict() for record in actual] == [
+        record.to_dict() for record in expected
+    ]
 
 
 def test_recorded_decision_compact_copy_cache_and_to_record_are_stable(
