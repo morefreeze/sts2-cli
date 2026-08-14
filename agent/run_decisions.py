@@ -106,9 +106,10 @@ def _candidate_label(candidate: dict, option_id: str) -> str | None:
     safe_candidate = _capture_dict(candidate)
     if safe_candidate is None:
         return None
-    label = _unicode_text(safe_candidate.get("label"), MAX_LABEL_CHARS)
-    if label is not None:
-        return label
+    for key in ("label", "title"):
+        label = _unicode_text(safe_candidate.get(key), MAX_LABEL_CHARS)
+        if label is not None:
+            return label
     label = _localized_text(safe_candidate.get("name"), MAX_LABEL_CHARS)
     if label is not None:
         return label

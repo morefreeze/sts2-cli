@@ -22,6 +22,9 @@ from agent.run_workbench.map_service import (
     MapServiceTimeoutError,
 )
 from agent.run_workbench.models import ActMap
+from tests.agent.run_simulator_contract import (
+    run_simulator_contract_capture_inputs,
+)
 
 from .test_catalog import (
     _native,
@@ -1078,12 +1081,12 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "rest",
     ]
     assert [decision["selected_id"] for decision in decisions] == [
-        "EVENT.BLOOD_FOR_GOLD",
+        "0",
         "CARD.POMMEL_STRIKE",
-        "POTION.FIRE",
-        "CARD.SHRUG_IT_OFF",
-        "RELIC.ANCHOR",
-        "REST.SMITH",
+        "0",
+        "0",
+        "0",
+        "SMITH",
         "CARD.BASH",
     ]
     assert [decision["selected_label"] for decision in decisions] == [
@@ -1092,7 +1095,7 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "火焰药水",
         "购买耸肩无视 · 50 金币",
         "购买锚 · 120 金币",
-        "锻造",
+        "SmithRestSiteOption",
         "重击",
     ]
     assert [decision["kind"] for decision in visited[2].get("decisions", [])] == []
@@ -1105,27 +1108,55 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "quality": "derived",
     }
     assert visited[3]["deltas"]["cards_gained"] == {
-        "value": [{"id": "CARD.SHRUG_IT_OFF", "upgraded": False}],
+        "value": [
+            {
+                "id": "CARD.SHRUG_IT_OFF",
+                "name": "耸肩无视",
+                "cost": 1,
+                "type": "Skill",
+                "upgraded": False,
+                "stats": None,
+                "keywords": None,
+                "after_upgrade": None,
+            }
+        ],
         "quality": "derived",
     }
     assert visited[3]["deltas"]["relics_gained"] == {
-        "value": [{"id": "RELIC.ANCHOR"}],
-        "quality": "derived",
+        "value": None,
+        "quality": "unknown",
     }
     assert visited[4]["deltas"]["hp_change"] == {
         "value": 0,
         "quality": "derived",
     }
     assert visited[4]["deltas"]["cards_upgraded"] == {
-        "value": [{"id": "CARD.BASH", "upgraded": True}],
+        "value": [
+            {
+                "id": "CARD.BASH",
+                "name": "重击",
+                "cost": 2,
+                "type": "Attack",
+                "upgraded": True,
+                "stats": None,
+                "keywords": None,
+                "after_upgrade": None,
+            }
+        ],
         "quality": "derived",
     }
     assert all(
         decision["evidence"] == "recorded"
         and len(decision["options"]) >= 2
         and sum(option["selected"] for option in decision["options"]) == 1
-        and all(type(option["effect"]) is str and option["effect"].strip()
-                for option in decision["options"])
+        and (
+            all(option["effect"] is None for option in decision["options"])
+            if decision["selected_id"] == "SMITH"
+            else all(
+                type(option["effect"]) is str and option["effect"].strip()
+                for option in decision["options"]
+            )
+        )
         for decision in decisions
     )
     decision_json = json.dumps(
@@ -1149,178 +1180,7 @@ def test_recorded_decisions_fixture_matches_real_capture_output_exactly() -> Non
     ]
     snapshot = next(row for row in rows if row.get("event") == "map_snapshot")
 
-    def command(action: str, **args: object) -> dict:
-        return {"cmd": "action", "action": action, "args": args}
-
-    capture_inputs = [
-        [
-            (
-                {
-                    "decision": "event_choice",
-                    "options": [
-                        {
-                            "index": 0,
-                            "option_id": "EVENT.BLOOD_FOR_GOLD",
-                            "name": "献血换取金币",
-                            "description": "失去 6 点生命，获得 90 金币",
-                        },
-                        {
-                            "index": 1,
-                            "option_id": "EVENT.LEAVE",
-                            "name": "离开",
-                            "description": "生命与金币保持不变",
-                        },
-                    ],
-                },
-                command("choose_option", option_index=0),
-            ),
-        ],
-        [
-            (
-                {
-                    "decision": "card_reward",
-                    "can_skip": False,
-                    "cards": [
-                        {
-                            "index": 0,
-                            "id": "CARD.POMMEL_STRIKE",
-                            "name": "剑柄打击",
-                            "description": "造成 9 点伤害，抽 1 张牌",
-                        },
-                        {
-                            "index": 1,
-                            "id": "CARD.CLEAVE",
-                            "name": "顺劈斩",
-                            "description": "对所有敌人造成 8 点伤害",
-                        },
-                        {
-                            "index": 2,
-                            "id": "CARD.IRON_WAVE",
-                            "name": "钢铁波浪",
-                            "description": "获得 5 点格挡并造成 5 点伤害",
-                        },
-                    ],
-                },
-                command("select_card_reward", card_index=0),
-            ),
-            (
-                {
-                    "decision": "combat_play",
-                    "context": {"room_type": "Monster"},
-                    "player": {
-                        "potions": [
-                            {
-                                "index": 0,
-                                "id": "POTION.FIRE",
-                                "name": "火焰药水",
-                                "effect": "对一个敌人造成 20 点伤害",
-                            },
-                            {
-                                "index": 1,
-                                "id": "POTION.BLOCK",
-                                "name": "格挡药水",
-                                "effect": "未来使用时获得 12 点格挡",
-                            },
-                        ]
-                    },
-                },
-                command("use_potion", potion_index=0),
-            ),
-        ],
-        [],
-        [
-            (
-                {
-                    "decision": "shop",
-                    "context": {"room_type": "Shop"},
-                    "cards": [
-                        {
-                            "index": 0,
-                            "id": "CARD.SHRUG_IT_OFF",
-                            "name": "耸肩无视",
-                            "cost": 50,
-                            "description": "获得 8 点格挡，抽 1 张牌",
-                        },
-                        {
-                            "index": 1,
-                            "id": "CARD.CLEAVE",
-                            "name": "顺劈斩",
-                            "cost": 55,
-                            "description": "对所有敌人造成 8 点伤害",
-                        },
-                    ],
-                },
-                command("buy_card", card_index=0),
-            ),
-            (
-                {
-                    "decision": "shop",
-                    "context": {"room_type": "Shop"},
-                    "relics": [
-                        {
-                            "index": 0,
-                            "id": "RELIC.ANCHOR",
-                            "name": "锚",
-                            "cost": 120,
-                            "description": "每场战斗开始时获得 10 点格挡",
-                        },
-                        {
-                            "index": 1,
-                            "id": "RELIC.BLUE_CANDLE",
-                            "name": "蓝蜡烛",
-                            "cost": 140,
-                            "description": "可以打出诅咒牌并失去 1 点生命",
-                        },
-                    ],
-                },
-                command("buy_relic", relic_index=0),
-            ),
-        ],
-        [
-            (
-                {
-                    "decision": "rest_site",
-                    "context": {"room_type": "RestSiteRoom"},
-                    "options": [
-                        {
-                            "index": 0,
-                            "option_id": "REST.SMITH",
-                            "name": "锻造",
-                            "description": "选择一张卡牌升级",
-                        },
-                        {
-                            "index": 1,
-                            "option_id": "REST.HEAL",
-                            "name": "休息",
-                            "description": "回复 12 点生命至 80 点",
-                        },
-                    ],
-                },
-                command("choose_option", option_index=0),
-            ),
-            (
-                {
-                    "decision": "card_select",
-                    "context": {"room_type": "RestSiteRoom"},
-                    "cards": [
-                        {
-                            "index": 0,
-                            "id": "CARD.BASH",
-                            "name": "重击",
-                            "description": "升级后伤害与易伤效果增强",
-                        },
-                        {
-                            "index": 1,
-                            "id": "CARD.STRIKE",
-                            "name": "打击",
-                            "description": "升级后造成更多伤害",
-                        },
-                    ],
-                },
-                command("select_cards", indices="0"),
-            ),
-        ],
-    ]
+    capture_inputs = run_simulator_contract_capture_inputs()
     captured = [
         [capture_run_decision(state, action) for state, action in node_inputs]
         for node_inputs in capture_inputs
@@ -1330,24 +1190,63 @@ def test_recorded_decisions_fixture_matches_real_capture_output_exactly() -> Non
     assert captured == [
         node.get("decisions", []) for node in snapshot["visited_nodes"]
     ]
-    potion_state = capture_inputs[1][1][0]
-    selected_potion_id = captured[1][1]["selected_id"]
-    captured_potions = potion_state["player"]["potions"]
-    assert snapshot["visited_nodes"][1]["entry_player"]["potions"] == (
-        captured_potions
-    )
-    assert snapshot["visited_nodes"][1]["exit_player"]["potions"] == [
-        potion for potion in captured_potions
-        if potion["id"] != selected_potion_id
-    ]
+    from agent.combat_env import CombatEnv
+
     visited = snapshot["visited_nodes"]
+    bounded = CombatEnv._bounded_player_snapshot
+    event_state = capture_inputs[0][0][0]
+    potion_state = capture_inputs[1][1][0]
+    shop_state = capture_inputs[3][0][0]
+    rest_state = capture_inputs[4][0][0]
+    after_rest_state = deepcopy(capture_inputs[4][1][0])
+    next(
+        card
+        for card in after_rest_state["player"]["deck"]
+        if card["id"] == "CARD.BASH"
+    )["upgraded"] = True
+
+    assert potion_state["player"]["potions"] == [
+        {
+            "index": 0,
+            "name": "火焰药水",
+            "description": "对一个敌人造成 20 点伤害",
+            "vars": None,
+            "target_type": "AnyEnemy",
+        },
+        {
+            "index": 1,
+            "name": "格挡药水",
+            "description": "获得 12 点格挡",
+            "vars": None,
+            "target_type": "None",
+        },
+    ]
+    selected_potion_index = int(captured[1][1]["selected_id"])
+    after_use_state = deepcopy(potion_state)
+    after_use_state["player"]["potions"] = [
+        potion
+        for potion in potion_state["player"]["potions"]
+        if potion["index"] != selected_potion_index
+    ]
+    assert visited[0]["entry_player"] == bounded(event_state)
+    assert visited[0]["exit_player"] == bounded(potion_state)
+    assert visited[1]["entry_player"] == bounded(potion_state)
+    assert visited[1]["exit_player"] == bounded(shop_state)
+    assert visited[1]["exit_player"]["potions"] == bounded(after_use_state)[
+        "potions"
+    ]
+    assert visited[2]["entry_player"] == bounded(shop_state)
+    assert visited[2]["exit_player"] == bounded(shop_state)
+    assert visited[3]["entry_player"] == bounded(shop_state)
+    assert visited[3]["exit_player"] == bounded(rest_state)
+    assert visited[4]["entry_player"] == bounded(rest_state)
+    assert visited[4]["exit_player"] == bounded(after_rest_state)
     assert all(
         current["exit_player"] == following["entry_player"]
         for current, following in zip(visited, visited[1:])
     )
-    assert visited[-1]["exit_player"]["potions"] == [
-        potion for potion in captured_potions
-        if potion["id"] != selected_potion_id
+    assert visited[-1]["exit_player"]["potions"] == bounded(after_use_state)[
+        "potions"
     ]
 
 

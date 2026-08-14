@@ -5,6 +5,10 @@ import math
 
 import pytest
 
+from tests.agent.run_simulator_contract import (
+    run_simulator_contract_capture_inputs,
+)
+
 from agent.run_decisions import (
     DECISION_KINDS,
     MAX_DECISIONS_BYTES,
@@ -259,6 +263,114 @@ def test_event_capture_retains_all_alternatives_including_disabled() -> None:
         "DISABLED",
     ]
     assert [option["selected"] for option in result["options"]] == [True, False, False]
+
+
+def test_capture_matches_current_run_simulator_field_contract() -> None:
+    captures = run_simulator_contract_capture_inputs()
+    event_state = captures[0][0][0]
+    potion_state = captures[1][1][0]
+    shop_state = captures[3][0][0]
+    rest_state = captures[4][0][0]
+    assert set(event_state["options"][0]) == {
+        "index", "title", "description", "text_key", "is_locked", "vars",
+    }
+    assert set(shop_state["cards"][0]) == {
+        "index", "name", "type", "rarity", "card_cost", "description",
+        "stats", "keywords", "after_upgrade", "cost", "is_stocked",
+        "on_sale",
+    }
+    assert set(shop_state["relics"][0]) == {
+        "index", "name", "description", "cost", "is_stocked",
+    }
+    assert set(potion_state["player"]["potions"][0]) == {
+        "index", "name", "description", "vars", "target_type",
+    }
+    assert set(potion_state["player"]["relics"][0]) == {
+        "name", "description", "vars",
+    }
+    assert set(rest_state["options"][0]) == {
+        "index", "option_id", "name", "is_enabled",
+    }
+    event = capture_run_decision(*captures[0][0])
+    card_reward = capture_run_decision(*captures[1][0])
+    potion = capture_run_decision(*captures[1][1])
+    shop_card = capture_run_decision(*captures[3][0])
+    shop_relic = capture_run_decision(*captures[3][1])
+    rest_option = capture_run_decision(*captures[4][0])
+    rest_card = capture_run_decision(*captures[4][1])
+
+    assert event is not None
+    assert event["selected_id"] == "0"
+    assert event["selected_label"] == "献血换取金币"
+    assert [option["id"] for option in event["options"]] == ["0", "1"]
+    assert card_reward is not None and card_reward["selected_id"] == (
+        "CARD.POMMEL_STRIKE"
+    )
+    assert potion is not None
+    assert potion["selected_id"] == "0"
+    assert potion["selected_label"] == "火焰药水"
+    assert potion["options"][0]["effect"] == "对一个敌人造成 20 点伤害"
+    assert shop_card is not None
+    assert shop_card["selected_id"] == "0"
+    assert shop_card["selected_label"] == "购买耸肩无视 · 50 金币"
+    assert shop_relic is not None
+    assert shop_relic["selected_id"] == "0"
+    assert shop_relic["selected_label"] == "购买锚 · 120 金币"
+    assert rest_option is not None
+    assert rest_option["selected_id"] == "SMITH"
+    assert rest_option["selected_label"] == "SmithRestSiteOption"
+    assert rest_option["options"][0]["effect"] is None
+    assert rest_card is not None and rest_card["selected_id"] == "CARD.BASH"
+
+
+@pytest.mark.parametrize(
+    ("title", "expected_label"),
+    [
+        ("题" * MAX_LABEL_CHARS, "题" * MAX_LABEL_CHARS),
+        ("题" * (MAX_LABEL_CHARS + 1), "0"),
+        ("\ud800", "0"),
+        (7, "0"),
+    ],
+    ids=["max-title", "oversized-title", "invalid-unicode", "non-string"],
+)
+def test_event_title_label_preserves_exact_builtin_and_size_boundaries(
+    title: object, expected_label: str
+) -> None:
+    state = {
+        "decision": "event_choice",
+        "options": [
+            {
+                "index": 0,
+                "title": title,
+                "description": "具体效果",
+                "text_key": "EVENT.OPTION",
+            }
+        ],
+    }
+
+    result = capture_run_decision(
+        state, _command("choose_option", option_index=0)
+    )
+
+    assert result is not None
+    assert result["selected_label"] == expected_label
+
+
+def test_event_title_label_rejects_string_subclasses() -> None:
+    class ForgedTitle(str):
+        pass
+
+    state = {
+        "decision": "event_choice",
+        "options": [{"index": 0, "title": ForgedTitle("伪造标题")}],
+    }
+
+    result = capture_run_decision(
+        state, _command("choose_option", option_index=0)
+    )
+
+    assert result is not None
+    assert result["selected_label"] == "0"
 
 
 def test_skip_card_reward_adds_and_selects_explicit_skip_option() -> None:

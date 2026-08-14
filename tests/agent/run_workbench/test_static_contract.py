@@ -841,19 +841,23 @@ def test_recorded_decisions_fixture_renders_all_six_one_line_grey_summaries():
         "事件", "卡", "药水", "商店", "遗物", "休息", "休息",
     ]
     assert [decision["selected_id"] for decision in decisions] == [
-        "EVENT.BLOOD_FOR_GOLD",
+        "0",
         "CARD.POMMEL_STRIKE",
-        "POTION.FIRE",
-        "CARD.SHRUG_IT_OFF",
-        "RELIC.ANCHOR",
-        "REST.SMITH",
+        "0",
+        "0",
+        "0",
+        "SMITH",
         "CARD.BASH",
     ]
     assert [summary["label"] for summary in result] == [
         decision["selected_label"] for decision in decisions
     ]
     assert [summary["effect"] for summary in result] == [
-        next(option["effect"] for option in decision["options"] if option["selected"])
+        next(
+            option["effect"] or ""
+            for option in decision["options"]
+            if option["selected"]
+        )
         for decision in decisions
     ]
     assert all(summary["recorded"] is True and summary["overflow"] == 0 for summary in result)
@@ -1350,11 +1354,18 @@ def test_map_decision_popover_renders_all_records_and_coordinates_hover_focus():
     }
     for decision in decisions:
         selected = next(option for option in decision["options"] if option["selected"])
-        for expected in (
+        expected_text = [
             f"{labels[decision['kind']]}：{decision['selected_label']}",
-            selected["effect"],
-            *(text for option in decision["options"] for text in (option["label"], option["effect"])),
-        ):
+            *(option["label"] for option in decision["options"]),
+            *(
+                option["effect"]
+                for option in decision["options"]
+                if option["effect"] is not None
+            ),
+        ]
+        if selected["effect"] is not None:
+            expected_text.append(selected["effect"])
+        for expected in expected_text:
             assert any(expected in text for text in result["allText"])
     assert result["openWhileFocused"] is True
     assert result["closedAfterBlur"] is True
