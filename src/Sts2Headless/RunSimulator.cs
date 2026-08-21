@@ -195,6 +195,16 @@ internal class LocLookup
 /// </summary>
 public class RunSimulator
 {
+    /// <summary>
+    /// v0.111 removed CombatManager.IsPlayPhase: the turn phase moved onto
+    /// PlayerCombatState so each player in a multiplayer run tracks its own.
+    /// Headless is always singleplayer, so player 0 is the whole answer.
+    /// </summary>
+    private bool IsPlayPhase =>
+        _runState != null && _runState.Players is { Count: > 0 }
+        && _runState.Players[0].PlayerCombatState?.Phase
+           == MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.Play;
+
     private static int? _expectedSaveSchemaVersion;
     private static bool _expectedSaveSchemaVersionReady;
     private static readonly object _expectedSaveSchemaVersionLock = new();
@@ -545,7 +555,9 @@ public class RunSimulator
             Log($"RunState created, players={_runState.Players?.Count}");
 
             var netService = new NetSingleplayerGameService();
-            RunManager.Instance.SetUpSavedSinglePlayer(_runState, save);
+            // v0.111 renamed this and made it async; pump so the load completes inline.
+            PumpWhileWaiting(RunManager.Instance.SetUpSavedSingleplayer(_runState, save),
+                             10.0, "SetUpSavedSingleplayer");
             LocalContext.NetId = netService.NetId;
 
             CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
@@ -1097,18 +1109,18 @@ public class RunSimulator
             Log("DoEndTurn: player.Creature is null — treating as game over");
             return DetectDecisionPoint();
         }
-        if (!CombatManager.Instance.IsPlayPhase)
+        if (!IsPlayPhase)
         {
             // Might be between phases — pump and check
             try { _syncCtx.Pump(); } catch (Exception ex) { Log($"DoEndTurn pre-check pump: {ex.GetType().Name}: {ex.Message}"); }
-            if (!CombatManager.Instance.IsPlayPhase)
+            if (!IsPlayPhase)
             {
                 if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true)
                     return DetectDecisionPoint();
                 // Brief wait for ThreadPool if sync context didn't catch it
                 Thread.Sleep(100);
                 try { _syncCtx.Pump(); } catch (Exception ex) { Log($"DoEndTurn pre-check pump2: {ex.GetType().Name}: {ex.Message}"); }
-                if (!CombatManager.Instance.IsPlayPhase)
+                if (!IsPlayPhase)
                     return DetectDecisionPoint();
             }
         }
@@ -1152,14 +1164,14 @@ public class RunSimulator
             SafePump();
 
             // Fast path: DEF-mode enemies process instantaneously inside Pump()
-            if (CombatManager.Instance.IsInProgress && CombatManager.Instance.IsPlayPhase)
+            if (CombatManager.Instance.IsInProgress && IsPlayPhase)
                 PumpStartOfTurnSetup(player, roundAtEndTurn);
 
             // Fallback wait: up to 3s for enemy turn to complete.
             // NOTE: Task.Yield/Cmd.Wait Harmony patches may fail on newer CoreCLR —
             // in that case SuppressYield has no effect. We rely on the InlineSyncCtx
             // being active so that continuations posted via await are drained by Pump().
-            if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature?.IsDead == true)
+            if (CombatManager.Instance.IsInProgress && !IsPlayPhase && !player.Creature?.IsDead == true)
             {
                 bool isBossRoom = (_runState?.CurrentRoom as CombatRoom)?.RoomType == RoomType.Boss;
                 int waitIter = isBossRoom ? 1000 : 300; // 10s for boss, 3s for normal
@@ -1176,7 +1188,7 @@ public class RunSimulator
                         SafePump();
                         if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
                         if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) goto AfterWait;
-                        if (CombatManager.Instance.IsPlayPhase) goto AfterWait;
+                        if (IsPlayPhase) goto AfterWait;
                         if (earlyBurst % 10 == 9) Thread.Sleep(1); // yield occasionally
                     }
                     prevExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
@@ -1188,7 +1200,7 @@ public class RunSimulator
                     SafePump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) break;
-                    if (CombatManager.Instance.IsPlayPhase) break;
+                    if (IsPlayPhase) break;
 
                     // When executor just stopped, burst-pump to drain post-execution continuations
                     bool curExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
@@ -1198,7 +1210,7 @@ public class RunSimulator
                         {
                             SynchronizationContext.SetSynchronizationContext(_syncCtx);
                             SafePump();
-                            if (CombatManager.Instance.IsPlayPhase || !CombatManager.Instance.IsInProgress) goto AfterWait;
+                            if (IsPlayPhase || !CombatManager.Instance.IsInProgress) goto AfterWait;
                             if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
                             Thread.Sleep(1);
                         }
@@ -1208,7 +1220,7 @@ public class RunSimulator
                 }
                 AfterWait:
                 // Flush start-of-turn setup if turn started
-                if (_turnStarted.IsSet || CombatManager.Instance.IsPlayPhase)
+                if (_turnStarted.IsSet || IsPlayPhase)
                     PumpStartOfTurnSetup(player, roundAtEndTurn);
 
                 // Player died asynchronously (HP=0 but IsDead not set yet due to Harmony patch failure):
@@ -1220,7 +1232,7 @@ public class RunSimulator
                     Log($"EndTurn: player HP={curHp} IsDead={player.Creature?.IsDead} — treating as game_over(defeat)");
                     return GameOverState(false);
                 }
-                if (CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsPlayPhase && !player.Creature?.IsDead == true)
+                if (CombatManager.Instance.IsInProgress && !IsPlayPhase && !player.Creature?.IsDead == true)
                 {
                     var stuckState = CombatManager.Instance.DebugOnlyGetState();
                     var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
@@ -1291,7 +1303,14 @@ public class RunSimulator
             _syncCtx.Pump();
             RunManager.Instance.RewardSynchronizer.SyncLocalObtainedCard(card);
         }
-        catch (Exception ex) { Log($"Add card to deck: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            // Loud, not silent: a swallowed failure here means the card silently
+            // never enters the deck, which is invisible from the JSON protocol
+            // (select_card_reward still reports success).
+            Console.Error.WriteLine($"[ERROR] Add card to deck failed: {ex.GetType().Name}: {ex.Message}");
+            Log($"Add card to deck: {ex.Message}");
+        }
 
         _pendingCardReward = null;
         // Check if more rewards pending
@@ -1326,8 +1345,8 @@ public class RunSimulator
             return Error("buy_card requires 'card_index'");
 
         var idx = Convert.ToInt32(args["card_index"]);
-        var allEntries = merchantRoom.Inventory.CharacterCardEntries
-            .Concat(merchantRoom.Inventory.ColorlessCardEntries).ToList();
+        var allEntries = merchantRoom.GetLocalInventory().CharacterCardEntries
+            .Concat(merchantRoom.GetLocalInventory().ColorlessCardEntries).ToList();
         if (idx < 0 || idx >= allEntries.Count)
             return Error($"Invalid card index {idx}");
 
@@ -1338,7 +1357,7 @@ public class RunSimulator
         YieldPatches.SuppressYield = true;
         try
         {
-            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.Inventory);
+            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory());
             var deadline2 = DateTime.UtcNow.AddSeconds(3);
             while (!purchaseTask.IsCompleted && DateTime.UtcNow < deadline2)
             {
@@ -1363,7 +1382,7 @@ public class RunSimulator
             return Error("buy_relic requires 'relic_index'");
 
         var idx = Convert.ToInt32(args["relic_index"]);
-        var entries = merchantRoom.Inventory.RelicEntries;
+        var entries = merchantRoom.GetLocalInventory().RelicEntries;
         if (idx < 0 || idx >= entries.Count) return Error($"Invalid relic index {idx}");
 
         var entry = entries[idx];
@@ -1373,7 +1392,7 @@ public class RunSimulator
         YieldPatches.SuppressYield = true;
         try
         {
-            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.Inventory);
+            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory());
             var deadline2 = DateTime.UtcNow.AddSeconds(3);
             while (!purchaseTask.IsCompleted && DateTime.UtcNow < deadline2)
             {
@@ -1398,7 +1417,7 @@ public class RunSimulator
             return Error("buy_potion requires 'potion_index'");
 
         var idx = Convert.ToInt32(args["potion_index"]);
-        var entries = merchantRoom.Inventory.PotionEntries;
+        var entries = merchantRoom.GetLocalInventory().PotionEntries;
         if (idx < 0 || idx >= entries.Count) return Error($"Invalid potion index {idx}");
 
         var entry = entries[idx];
@@ -1409,7 +1428,7 @@ public class RunSimulator
         YieldPatches.SuppressYield = true;
         try
         {
-            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.Inventory);
+            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory());
             var deadline2 = DateTime.UtcNow.AddSeconds(3);
             while (!purchaseTask.IsCompleted && DateTime.UtcNow < deadline2)
             {
@@ -1439,14 +1458,14 @@ public class RunSimulator
         if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
             return Error("Not in a shop");
 
-        var removal = merchantRoom.Inventory.CardRemovalEntry;
+        var removal = merchantRoom.GetLocalInventory().CardRemovalEntry;
         if (removal == null) return Error("No card removal available");
         if (player.Gold < removal.Cost) return Error("Not enough gold");
 
         try
         {
             // Run on background thread so card selection can pause (same pattern as event options)
-            var task = Task.Run(() => removal.OnTryPurchaseWrapper(merchantRoom.Inventory));
+            var task = Task.Run(() => removal.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -1976,7 +1995,7 @@ public class RunSimulator
                 goto checkCardSelect;  // Jump back to card_select handling
             }
 
-            if (CombatManager.Instance.IsInProgress && CombatManager.Instance.IsPlayPhase)
+            if (CombatManager.Instance.IsInProgress && IsPlayPhase)
             {
                 // BUG-027 safety net: if energy=0 and hand is empty but cards remain in
                 // draw/discard piles, start-of-turn setup hasn't finished yet.  Pump with
@@ -2018,7 +2037,7 @@ public class RunSimulator
             {
                 _syncCtx.Pump();
                 Thread.Sleep(5);
-                if (CombatManager.Instance.IsPlayPhase) return CombatPlayState(player);
+                if (IsPlayPhase) return CombatPlayState(player);
                 if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
             }
             // Final check after full wait: if combat ended, go to post-combat; else assume still in play
@@ -2365,7 +2384,10 @@ public class RunSimulator
                 Log("[DBG-POSTCOMBAT] Calling GenerateWithoutOffering");
                 var genTask = rewardsSet.GenerateWithoutOffering();
                 Log($"[DBG-POSTCOMBAT] GenerateWithoutOffering task started, IsCompleted={genTask.IsCompleted}");
-                var rewards = PumpWhileWaiting(genTask, 10.0, "GenerateWithoutOffering");
+                PumpWhileWaiting(genTask, 10.0, "GenerateWithoutOffering");
+                // v0.111 made this return a bare Task — the generated rewards
+                // now live on the set itself rather than the task result.
+                var rewards = rewardsSet.Rewards;
                 Log($"[DBG-POSTCOMBAT] GenerateWithoutOffering done, rewards={(rewards == null ? "null" : "ok")}");
                 _syncCtx.Pump();
 
@@ -2382,7 +2404,7 @@ public class RunSimulator
                         if (reward is GoldReward || reward is MegaCrit.Sts2.Core.Rewards.RelicReward
                             || reward is MegaCrit.Sts2.Core.Rewards.PotionReward)
                         {
-                            try { PumpWhileWaiting(reward.OnSelectWrapper(), 5.0, "OnSelectWrapper"); _syncCtx.Pump(); }
+                            try { PumpWhileWaiting(reward.SelectUnsynchronized(), 5.0, "SelectReward"); _syncCtx.Pump(); }
                             catch (Exception ex) { Log($"Auto-collect reward: {ex.Message}"); }
                         }
                         else if (reward is CardReward cr)
@@ -2699,7 +2721,7 @@ public class RunSimulator
 
     private Dictionary<string, object?> ShopState(MerchantRoom merchantRoom, Player player)
     {
-        var inv = merchantRoom.Inventory;
+        var inv = merchantRoom.GetLocalInventory();
         if (inv == null) { ForceToMap(); return MapSelectState(); }
 
         var cards = inv.CharacterCardEntries.Concat(inv.ColorlessCardEntries)
@@ -2756,7 +2778,7 @@ public class RunSimulator
             ["is_stocked"] = e.IsStocked,
         }).ToList();
 
-        var removal = merchantRoom.Inventory.CardRemovalEntry;
+        var removal = merchantRoom.GetLocalInventory().CardRemovalEntry;
 
         return new Dictionary<string, object?>
         {
@@ -2904,7 +2926,7 @@ public class RunSimulator
     /// </summary>
     private void PumpStartOfTurnSetup(Player player, int prevRound = -1)
     {
-        if (!CombatManager.Instance.IsPlayPhase) return;
+        if (!IsPlayPhase) return;
         YieldPatches.SuppressYield = true;
         try
         {
@@ -2945,9 +2967,9 @@ public class RunSimulator
         {
             _syncCtx.Pump();
             if (!CombatManager.Instance.IsInProgress) return;
-            if (CombatManager.Instance.IsPlayPhase) return;
+            if (IsPlayPhase) return;
             WaitForActionExecutor();
-            if (CombatManager.Instance.IsPlayPhase || !CombatManager.Instance.IsInProgress) return;
+            if (IsPlayPhase || !CombatManager.Instance.IsInProgress) return;
             Thread.Sleep(5);
         }
     }
@@ -3085,6 +3107,37 @@ public class RunSimulator
         _modelDbInitialized = true;
 
         TestMode.IsOn = true;
+
+        // v0.111 added a mod system, and StartRun now reaches ReflectionHelper.ModTypes,
+        // which throws while ModManager.State is None. The real Initialize() wants Steam
+        // and file IO we do not have headless, so declare mod loading Skipped — that is
+        // the "finished, no mods" state, which is exactly true here.
+        try
+        {
+            var mm = typeof(MegaCrit.Sts2.Core.Modding.ModManager);
+            mm.GetProperty("State", BindingFlags.Public | BindingFlags.Static)!
+              .SetValue(null, MegaCrit.Sts2.Core.Modding.ModManagerState.Skipped);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] ModManager.State: {ex.Message}");
+        }
+
+        // v0.111 gates card/relic model serialization behind this cache. Without it
+        // CardPileCmd.Add throws "used before it was initialized" — which the reward
+        // path caught and discarded, so every card reward silently added nothing and
+        // every run finished Act 1 on its starting deck.
+        try
+        {
+            // AssemblyInfo feeds the ContentSorter that the cache walks, so the
+            // chain has to be initialized from the bottom up.
+            MegaCrit.Sts2.Core.Modding.AssemblyInfo.Init();
+            MegaCrit.Sts2.Core.Multiplayer.Serialization.ModelIdSerializationCache.Init();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] ModelIdSerializationCache.Init: {ex.Message}");
+        }
 
         // Install inline sync context on main thread
         SynchronizationContext.SetSynchronizationContext(_syncCtx);
@@ -3352,11 +3405,14 @@ public class RunSimulator
         private ManualResetEventSlim? _rewardWait;
         private int _rewardChoice = -1;
 
-        public CardModel? GetSelectedCardReward(
+        // v0.111 widened the return type from CardModel? to a struct carrying either a
+        // card or an alternative reward. Headless only ever picks a card, so the
+        // alternative field stays unset and `default` means skip.
+        public MegaCrit.Sts2.Core.TestSupport.CardRewardSelection GetSelectedCardReward(
             IReadOnlyList<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> options,
             IReadOnlyList<CardRewardAlternative> alternatives)
         {
-            if (options.Count == 0) return null;
+            if (options.Count == 0) return default;
 
             // Store pending and block until main loop resolves
             PendingRewardCards = options.ToList();
@@ -3371,8 +3427,9 @@ public class RunSimulator
             _rewardWait = null;
 
             if (choice >= 0 && choice < options.Count)
-                return options[choice].Card;
-            return null;  // Skip
+                return new MegaCrit.Sts2.Core.TestSupport.CardRewardSelection
+                { card = options[choice].Card };
+            return default;  // Skip
         }
 
         public bool HasPendingReward => PendingRewardCards != null && _rewardWait != null;
@@ -3702,9 +3759,9 @@ public class RunSimulator
             try
             {
                 await CreatureCmd.Damage(ctx, play.Target!, card.DynamicVars.Damage.BaseValue,
-                    MegaCrit.Sts2.Core.ValueProps.ValueProp.Move, card);
-                await PowerCmd.Apply<WeakPower>(play.Target!, card.DynamicVars["WeakPower"].BaseValue,
-                    card.Owner.Creature, card);
+                    MegaCrit.Sts2.Core.ValueProps.ValueProp.Move, card, play);
+                await PowerCmd.Apply<WeakPower>(ctx, play.Target!, card.DynamicVars["WeakPower"].BaseValue,
+                    card.Owner.Creature, card, silent: false);
             }
             catch (Exception ex) { Console.Error.WriteLine($"[WARN] Neutralize safe: {ex.Message}"); }
         }

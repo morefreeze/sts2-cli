@@ -500,7 +500,16 @@ rm -rf "$PATCH_DIR"
 
 echo ""
 echo "🏗️ Building..."
+# Pipe through tail loses the exit status, so check PIPESTATUS. Without this the
+# smoke test below runs the previous binary and reports "passed" on a failed build.
 $DOTNET build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -5
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo ""
+    echo "❌ Build failed — skipping smoke test (it would only exercise the old binary)."
+    echo "   A game update usually means changed APIs; rerun the build for the full error list:"
+    echo "   $DOTNET build src/Sts2Headless/Sts2Headless.csproj"
+    exit 1
+fi
 
 echo ""
 echo "🩺 Smoke test (1 Ironclad run — surfaces game-API stub gaps from updates)..."
