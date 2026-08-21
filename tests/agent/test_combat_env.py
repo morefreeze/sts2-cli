@@ -362,6 +362,10 @@ def _task1_serialized_boss_map_snapshot(monkeypatch, tmp_path, *, entry_hp=55):
 def test_run_decision_event_after_ancient_transition_attaches_only_to_monster(
     monkeypatch, tmp_path
 ):
+    # These assertions are about run-decision recording, and they drive the map
+    # choice by patching greedy_action. The map planner (default on) bypasses
+    # greedy_action for map_select, so pin the one-step heuristic here.
+    monkeypatch.setenv("STS2_MAP_PLANNER", "0")
     env, _ = _recording_env(
         monkeypatch, tmp_path, run_context={"capture_map": True}
     )
@@ -2974,6 +2978,9 @@ def test_run_logging_rejects_nested_nan_without_marking_emitted(monkeypatch, tmp
 
 
 def test_initial_auto_advance_transport_failure_is_crash(monkeypatch, tmp_path):
+    # Transport failure is the subject; the canned reply sequence assumes the
+    # one-step heuristic, which the default-on map planner would replace.
+    monkeypatch.setenv("STS2_MAP_PLANNER", "0")
     env, history_path = _recording_env(monkeypatch, tmp_path)
     env.dry_run = False
     monkeypatch.setattr(env, "_kill_proc", lambda: None)
