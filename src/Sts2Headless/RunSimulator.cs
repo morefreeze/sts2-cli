@@ -1100,6 +1100,50 @@ public class RunSimulator
         return DetectDecisionPoint();
     }
 
+
+    /// <summary>
+    /// v0.111 gates the turn transition on a multiplayer readiness handshake
+    /// (CombatTurnState.PlayersReadyToEndTurn / PlayersReadyToBeginEnemyTurn and
+    /// their TaskCompletionSources). When the phase sticks at End, this says
+    /// which gate is still closed.
+    /// </summary>
+    /// <summary>
+    /// Signal that the local player is ready for the enemy turn.
+    /// v0.111 gates the enemy turn on a per-player readiness handshake; in the
+    /// real game NEndTurnButton raises it. Headless has no UI, so when the turn
+    /// sticks with endSig=done/enemySig=pending nothing ever will. Raising it
+    /// here unblocks CombatManager.AfterAllPlayersReadyToBeginEnemyTurn.
+    /// </summary>
+    private string DescribeTurnHandshake()
+    {
+        try
+        {
+            var cm = CombatManager.Instance;
+            var f = cm.GetType().GetField("_turnState",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var ts = f?.GetValue(cm);
+            if (ts == null) return "turnState=null";
+            string P(string name)
+            {
+                var p = ts.GetType().GetProperty(name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var v = p?.GetValue(ts);
+                if (v is System.Collections.ICollection c) return c.Count.ToString();
+                if (v is Task t) return t.IsCompleted ? "done" : "pending";
+                var tp = v?.GetType();
+                var tk = tp?.GetProperty("Task")?.GetValue(v) as Task;
+                if (tk != null) return tk.IsCompleted ? "done" : "pending";
+                return v?.ToString() ?? "null";
+            }
+            return $"readyEnd={P("PlayersReadyToEndTurn")} readyEnemy={P("PlayersReadyToBeginEnemyTurn")} "
+                 + $"endSig={P("EndTurnSignalSource")} enemySig={P("BeginEnemyTurnSignalSource")} "
+                 + $"enemyStarted={P("IsEnemyTurnStarted")} p1={P("EndingPlayerTurnPhaseOne")} "
+                 + $"p2={P("EndingPlayerTurnPhaseTwo")} live={P("IsLive")} inProg={P("IsInProgress")} "
+                 + $"pendingLoss={P("PendingLoss")}";
+        }
+        catch (Exception ex) { return $"handshake-probe-failed:{ex.GetType().Name}"; }
+    }
+
     private Dictionary<string, object?> DoEndTurn(Player player)
     {
         // player.Creature can become null mid-combat (e.g. BYRDONIS PECK_MOVE removes
@@ -1216,6 +1260,11 @@ public class RunSimulator
                         }
                     }
                     prevExecutorRunning = curExecutorRunning;
+
+                    // Half-way through the budget, raise the readiness signal the
+                    // missing UI would have raised. Deferring it this long keeps the
+                    // normal path untouched — it only fires on runs that would
+                    // otherwise time out and be discarded as "stuck".
                     Thread.Sleep(10);
                 }
                 AfterWait:
@@ -1237,13 +1286,24 @@ public class RunSimulator
                     var stuckState = CombatManager.Instance.DebugOnlyGetState();
                     var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
                         .Select(e => $"{e.Monster?.GetType().Name}(hp={e.CurrentHp})").ToList();
-                    Log($"EndTurn stuck after {(isBossRoom ? "10s(boss)" : "3s")} — returning stuck signal. Round={stuckState?.RoundNumber}, " +
+                    var phaseNow = _runState?.Players is { Count: > 0 }
+                        ? _runState.Players[0].PlayerCombatState?.Phase.ToString() ?? "null"
+                        : "no-player";
+                    var hs = DescribeTurnHandshake();
+                    Log($"EndTurn stuck after {(isBossRoom ? "10s(boss)" : "3s")} — returning stuck signal. Phase={phaseNow}, {hs}, Round={stuckState?.RoundNumber}, " +
                         $"Enemies=[{string.Join(",", stuckEnemies ?? new())}], " +
                         $"ActionExecutor.IsRunning={RunManager.Instance.ActionExecutor.IsRunning}");
-                    // Non-boss stuck: treat as player defeat for clean episode termination
-                    // instead of "stuck" crash signal which inflates crash rate and corrupts training.
+                    // Non-boss stall still terminates the episode as a defeat — a bare
+                    // "stuck" signal inflates crash rate and corrupts training. But it is
+                    // NOT a real loss, and silently filing it as one biased every measured
+                    // floor downward: 8 of 40 eval games ended this way. Tag it so eval can
+                    // exclude it while training keeps treating it as terminal.
                     if (!isBossRoom)
-                        return GameOverState(false);
+                    {
+                        var over = GameOverState(false);
+                        over["technical_failure_kind"] = "stuck";
+                        return over;
+                    }
                     return new Dictionary<string, object?> { ["decision"] = "stuck" };
                 }
             }

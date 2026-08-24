@@ -717,11 +717,7 @@ class CombatEnv(gym.Env):
                 # Advance failed — game ended (natural game_over or crash).
                 # Signal game_over via info instead of silently restarting:
                 # eval_rl.py checks info["game_over"] to end the eval game correctly.
-                terminal_status = (
-                    "crash" if state is None else
-                    "stuck" if state.get("decision") == "stuck" else
-                    None if state.get("decision") == "game_over" else "invalid"
-                )
+                terminal_status = _terminal_status_for(state)
                 self._emit_run_outcome(
                     state or self._current_state,
                     bool(state and state.get("victory", False)),
@@ -821,9 +817,7 @@ class CombatEnv(gym.Env):
 
         state = self._advance_to_combat(state)
         if state is None or state.get("decision") != "combat_play":
-            terminal_status = ("crash" if state is None else
-                               "stuck" if state.get("decision") == "stuck" else
-                               None if state.get("decision") == "game_over" else "invalid")
+            terminal_status = _terminal_status_for(state)
             self._emit_run_outcome(
                 state or {}, bool(state and state.get("victory", False)),
                 status=terminal_status,
@@ -1036,9 +1030,9 @@ class CombatEnv(gym.Env):
                 # Boss kill: also award combat_win_reward so victory > regular combat win
                 r += self._combat_win_reward(state)
             self._run_max_floor = max(self._run_max_floor, self._current_floor)
-            self._emit_run_outcome(state, bool(state.get("victory", False)))
-            return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
-                                               "victory": state.get("victory", False)}
+            self._emit_run_outcome(state, bool(state.get("victory", False)),
+                                   status=_terminal_status_for(state))
+            return last_obs, r, True, False, self._game_over_info(state)
 
         if decision == "combat_play":
             state = self._combat_check_heal(state)  # reactive heal if HP critical mid-fight
@@ -1048,9 +1042,9 @@ class CombatEnv(gym.Env):
                 if state.get("victory", False):
                     r += self._combat_win_reward(state)
                 self._run_max_floor = max(self._run_max_floor, self._current_floor)
-                self._emit_run_outcome(state, bool(state.get("victory", False)))
-                return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
-                                                   "victory": state.get("victory", False)}
+                self._emit_run_outcome(state, bool(state.get("victory", False)),
+                                       status=_terminal_status_for(state))
+                return last_obs, r, True, False, self._game_over_info(state)
             self._current_state = state
             return self._encode(state), reward, False, False, {}
 
@@ -1082,9 +1076,9 @@ class CombatEnv(gym.Env):
                     if state.get("victory", False):
                         r += self._combat_win_reward(state)
                     self._run_max_floor = max(self._run_max_floor, self._current_floor)
-                    self._emit_run_outcome(state, bool(state.get("victory", False)))
-                    return last_obs, r, True, False, {"floor": self._current_floor, "game_over": True,
-                                                       "victory": state.get("victory", False)}
+                    self._emit_run_outcome(state, bool(state.get("victory", False)),
+                                           status=_terminal_status_for(state))
+                    return last_obs, r, True, False, self._game_over_info(state)
 
         # Combat ended (transitioned to card_reward, map_select, etc.) — we won
         reward += self._combat_win_reward(state)
@@ -2390,6 +2384,21 @@ class CombatEnv(gym.Env):
         self._run_milestone_records = []
         self._run_card_pick_records = []
 
+    def _game_over_info(self, state: dict) -> dict:
+        """info dict for a terminal game_over, honouring the engine's failure tag.
+
+        The engine marks a stalled turn loop with technical_failure_kind while
+        still reporting game_over. Without forwarding that, classify_eval_result
+        scores the run as an ordinary defeat and it silently drags the measured
+        floor down — 8 of 40 eval games ended this way.
+        """
+        info = {"floor": self._current_floor, "game_over": True,
+                "victory": state.get("victory", False)}
+        status = _terminal_status_for(state)
+        if status in {"stuck", "crash", "timeout", "invalid"}:
+            info["crashed" if status == "crash" else status] = True
+        return info
+
     def _terminal_reward(self, state: dict) -> float:
         if state.get("victory", False):
             return 2.0
@@ -2870,6 +2879,24 @@ class CombatEnv(gym.Env):
         except Exception:
             self._kill_proc()
             return None
+
+
+def _terminal_status_for(state) -> str | None:
+    """Map a terminal engine state to an eval status.
+
+    A game_over carrying technical_failure_kind is the engine reporting that the
+    turn loop stalled, not that the player lost. It still ends the episode, but
+    counting it as a defeat drags every measured floor down invisibly.
+    """
+    if state is None:
+        return "crash"
+    decision = state.get("decision")
+    if decision == "stuck":
+        return "stuck"
+    if decision == "game_over":
+        kind = state.get("technical_failure_kind")
+        return kind if kind in {"crash", "timeout", "stuck", "invalid"} else None
+    return "invalid"
 
 
 def _dummy_combat_state() -> dict:
