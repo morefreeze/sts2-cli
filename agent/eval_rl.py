@@ -470,6 +470,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                      load_seed: str = None,
                      native_save_path: str = None,
                      boss_deck_log_path: str = None,
+                     game_log: bool = False,
                      boss_snapshot_dir: str = None,
                      boss_snapshot_min_hp: int = 50,
                      combat_snapshot_dir: str = None,
@@ -552,7 +553,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         env_kwargs = dict(character=character, seed=game_seed,
                           seed_prefix=f"eval_{i}", max_floor=0, extra_obs=extra_obs,
                           relic_obs=relic_obs, ascension=ascension,
-                          run_context=run_context)
+                          run_context=run_context, game_log=game_log)
         if replay_actions:
             env_kwargs["replay_actions"] = replay_actions
         if native_save_path:
@@ -922,6 +923,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Per-room summaries + detailed last-combat trace on wins")
     p.add_argument("--load", default=None,
                    help="Replay actions from a play.py save (.json) before agent takes over")
+    p.add_argument("--game-log", action="store_true",
+                   help="Write a full per-run GameLogger JSONL to logs/ so the "
+                        "run can be replayed in agent/run_progress_viewer.py. "
+                        "Off by default: one file per game.")
     p.add_argument("--deck-log", default="data/eval_decks.jsonl",
                    help="JSONL file to append deck + per-card scores at the start of each "
                         "boss combat. Pass 'none' to disable.")
@@ -969,6 +974,7 @@ def main():
     load_seed = None
     native_save_path = None
     character = args.character
+    game_log = bool(args.game_log)
     n_games = args.n_games
     if args.load:
         load_path = os.path.abspath(args.load)
@@ -1009,7 +1015,7 @@ def main():
     effective_scenario = args.scenario or (
         "native_save" if native_save_path else "full_run"
     )
-    stats = run_eval_verbose(model, character, n_games=n_games,
+    stats = run_eval_verbose(model, character, n_games=n_games, game_log=game_log,
                              fixed_seeds=args.fixed_seeds, seed_offset=args.seed_offset,
                              invalid_retries=args.invalid_retries,
                              verbose=args.verbose,

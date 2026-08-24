@@ -565,6 +565,9 @@ BOSS_ENTRY_HP_WEIGHT = 0.8
 BOSS_DENSE_DAMAGE_WEIGHT = 0.50
 
 
+import os as _os_gl
+
+
 class CombatEnv(gym.Env):
     """
     Gymnasium environment for STS2 combat.
@@ -582,12 +585,18 @@ class CombatEnv(gym.Env):
                  relic_obs: bool = None,
                  replay_actions: list = None, native_save_path: str = None,
                  set_hp_after_load: int = None,
-                 run_context: dict | None = None):
+                 run_context: dict | None = None,
+                 game_log: bool = False):
         super().__init__()
         if cards_json is None:
             cards_json = os.path.join(PROJECT_ROOT, "localization_eng", "cards.json")
         self.enc = StateEncoder(cards_json)
         self.character = character
+        # Replay logging (opt-in, --game-log). eval_rl only ever wrote per-run
+        # summaries, so a stuck boss fight had no turn-by-turn record to inspect
+        # in run_progress_viewer. GameLogger writes the format that viewer reads.
+        self._game_logger = None
+        self._game_log_enabled = bool(game_log)
         self.ascension = ascension
         self._seed = seed
         self._seed_prefix = seed_prefix
@@ -741,6 +750,7 @@ class CombatEnv(gym.Env):
             or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
         )
         self._run_seed = run_seed
+        self._open_game_log(run_seed)
         self._run_start_emitted = False
         self._run_started_at = time.time()
         self._run_outcome_emitted = False
@@ -835,6 +845,60 @@ class CombatEnv(gym.Env):
         self._combat_steps = 0
         return self._encode(state), {}
 
+
+    def _open_game_log(self, run_seed: str):
+        """Start a fresh replay log for this run (no-op unless --game-log)."""
+        self._close_game_log()
+        if not self._game_log_enabled:
+            return
+        try:
+            import sys as _sys
+            _p = _os_gl.path.join(PROJECT_ROOT, "python")
+            if _p not in _sys.path:
+                _sys.path.insert(0, _p)
+            from game_log import GameLogger
+            self._game_logger = GameLogger(self.character, run_seed, enabled=True)
+        except Exception:
+            self._game_logger = None      # logging must never break a run
+
+    def _close_game_log(self):
+        if self._game_logger is not None:
+            try:
+                self._game_logger.close()
+            except Exception:
+                pass
+            self._game_logger = None
+
+    def _dump_stuck(self, kind: str, state: dict):
+        """Record where a stuck was declared. Stuck runs are dropped from the
+        stats as technical failures, and they skew toward DEEP runs (Defect's
+        were at A2F16/A3F15), so the exclusion silently biases results down."""
+        import json as _json, os as _os
+        path = _os.environ.get("STS2_STUCK_DUMP")
+        if not path:
+            return
+        try:
+            st = state or {}
+            row = {
+                "kind": kind,
+                "act": (st.get("context") or {}).get("act"),
+                "floor": (st.get("context") or {}).get("floor") or self._current_floor,
+                "room_type": (st.get("context") or {}).get("room_type"),
+                "decision": st.get("decision"),
+                "round": st.get("round"),
+                "energy": st.get("energy"),
+                "hp": (st.get("player") or {}).get("hp"),
+                "hand": [c.get("name") for c in (st.get("hand") or [])],
+                "hand_cost": [c.get("cost") for c in (st.get("hand") or [])],
+                "enemies": [{"name": e.get("name"), "hp": e.get("hp"),
+                             "powers": e.get("powers")}
+                            for e in (st.get("enemies") or [])],
+                "player_powers": st.get("player_powers"),
+            }
+            with open(path, "a") as fh:
+                fh.write(_json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
     def step(self, action: int):
         if self.dry_run or self._current_state is None:
             return np.zeros(self.enc.obs_size + self._EXTRA_OBS, dtype=np.float32), -2.0, True, False, {}
@@ -881,6 +945,7 @@ class CombatEnv(gym.Env):
                 # Still stuck — kill this combat
                 last_obs = self._encode(self._current_state)
                 self._game_alive = False
+                self._dump_stuck("end_turn_ignored", self._current_state)
                 self._emit_run_outcome(self._current_state, False, status="stuck")
                 self._kill_proc()
                 return last_obs, -2.0, True, False, {"stuck": True}
@@ -924,6 +989,7 @@ class CombatEnv(gym.Env):
         # continuing would corrupt the C# process → cr=100% cascade.
         if state.get("decision") == "stuck":
             self._game_alive = False
+            self._dump_stuck("engine_deadlock", self._current_state)
             self._emit_run_outcome(self._current_state, False, status="stuck")
             self._kill_proc()
             last_obs = self._encode(self._current_state)
@@ -2565,6 +2631,7 @@ class CombatEnv(gym.Env):
             self._update_buffered_node_inventory(state)
             if state is None:
                 return None
+        self._dump_stuck("advance_loop_exhausted", state)
         return {
             "decision": "stuck",
             "technical_failure_kind": "stuck",
@@ -2792,9 +2859,14 @@ class CombatEnv(gym.Env):
                 return None
             self._proc.stdin.write((json.dumps(cmd) + "\n").encode())
             self._proc.stdin.flush()
+            if self._game_logger is not None:
+                self._game_logger.log_action(cmd)
             # DoEndTurn takes ~3-15s; killing blow triggers DetectPostCombatState
             # which can take up to ~10s for reward generation. Use 60s to be safe.
-            return self._read_json(timeout_sec=60.0)
+            reply = self._read_json(timeout_sec=60.0)
+            if self._game_logger is not None and reply is not None:
+                self._game_logger.log_state(reply)
+            return reply
         except Exception:
             self._kill_proc()
             return None
