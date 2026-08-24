@@ -384,6 +384,9 @@ public class GpuParticles2D : Node2D
     public float Explosiveness { get; set; }
     public Material? ProcessMaterial { get; set; }
     public void Restart() { }
+    // build 23372702 sets Texture on enemy/VFX particles (BygoneEffigy); the
+    // other members upstream added here are already declared above.
+    public Texture2D? Texture { get; set; }
 }
 
 // Sprite

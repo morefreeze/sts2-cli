@@ -28,7 +28,7 @@
   "RATIO_FORMAT": "{Numerator}/{Denominator}",
   "TAB_ACHIEVEMENT.header": "Achievements",
   "TAB_STATS.header": "Statistics",
-  "TIP_PLAYTIME.description": "How much you have played and your best winstreak.",
+  "TIP_PLAYTIME.description": "How much you have played and the fastest you've ever won a run.",
   "TIP_PLAYTIME.header": "Playtime",
   "TIP_WIN_LOSS.description": "The total Ascensions completed across all characters.",
   "TIP_WIN_LOSS.header": "Ascensions"

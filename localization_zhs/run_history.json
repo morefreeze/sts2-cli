@@ -21,6 +21,10 @@
   "HISTORY_ENTRY.transformed": "{Icon}{Title1}变化为{Title2}。",
   "HISTORY_ENTRY.upgraded": "{Icon}{Title}被升级。",
   "HISTORY_ENTRY.used": "{Icon}{Title}被使用。",
+  "INFO.DATE_FORMAT": "yyyy MMMM d",
+  "INFO.DATE_TIME": "[gold]{Date}[/gold]，[blue]{Time}[/blue]",
+  "INFO.SEED": "[gold]种子[/gold]：{Seed}",
+  "INFO.TIME_FORMAT": "h:mm tt",
   "MAP_POINT_HISTORY.abandon.0": "{character}直接放弃了。",
   "MAP_POINT_HISTORY.abandon.1": "{character}觉得累了……",
   "MAP_POINT_HISTORY.abandon.2": "{character}抛下了命运。",
@@ -45,6 +49,6 @@
   "PLAYER_COUNT.singleplayer": "单人游戏",
   "PLAYER_HOVER": "[blue]{PlayerName}[/blue]\n[gold]{CharacterName}[/gold]",
   "PLAYER_NAME": "[blue]{PlayerName}[/blue]",
-  "RELIC_HISTORY.categories": "{ShopRelics:cond:>0?{}商店，|} {AncientRelics:cond:>0?{}先古|}{EventRelics:cond:>0?{}事件，|}{RareRelics:cond:>0?{}稀有，|}{UncommonRelics:cond:>0?{}罕见，|}{CommonRelics:cond:>0?{}普通，|}{StarterRelics:cond:>0?{}初始|}",
+  "RELIC_HISTORY.categories": "{ShopRelics:cond:>0?{}商店，|} {AncientRelics:cond:>0?{}先古，|}{EventRelics:cond:>0?{}事件，|}{RareRelics:cond:>0?{}稀有，|}{UncommonRelics:cond:>0?{}罕见，|}{CommonRelics:cond:>0?{}普通，|}{StarterRelics:cond:>0?{}初始|}",
   "RELIC_HISTORY.header": "遗物（{totalRelics}）："
 }

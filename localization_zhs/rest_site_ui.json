@@ -10,6 +10,8 @@
   "OPTION_HATCH.name": "孵化",
   "OPTION_HEAL.description": "回复最大生命值的30%（{Heal}）。{ExtraText}",
   "OPTION_HEAL.name": "休息",
+  "OPTION_KINDLE.description": "为[gold]{RelicName}[/gold]添加{RekindleAmount}层充能。",
+  "OPTION_KINDLE.name": "添火",
   "OPTION_LIFT.description": "在战斗开始时拥有+1力量。（剩余{LiftsLeft}次）",
   "OPTION_LIFT.name": "锻炼",
   "OPTION_MEND.description": "回复{HasTarget:{Name}|其他角色}最大生命值的30%{HasTarget:（{Heal}）|}。",

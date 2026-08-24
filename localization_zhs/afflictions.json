@@ -17,5 +17,8 @@
   "RINGING.extraCardText": "昏眩。",
   "RINGING.title": "昏眩",
   "SMOG.description": "你在本回合无法再打出更多[gold]技能[/gold]牌。回合结束时消除。",
-  "SMOG.title": "烟雾"
+  "SMOG.title": "烟雾",
+  "TAINTED.description": "打出时获得[blue]{Amount}[/blue]层[gold]污染[/gold]。",
+  "TAINTED.extraCardText": "获得{Amount}层污染。",
+  "TAINTED.title": "污染"
 }

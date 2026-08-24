@@ -1,6 +1,12 @@
 {
   "AFFLICTION_FTUE_DESCRIPTION": "Enemies may impair your cards by applying afflictions to them.\nA card may only have 1 affliction at a time. Afflictions wear off at the end of combat.",
   "AFFLICTION_FTUE_TITLE": "What are Afflictions?",
+  "ASCENSION_MULTIPLAYER_FTUE_DESCRIPTION": "Congratulations, encountering the [red]Architect[/red] has unlocked Multiplayer Ascensions!\n\nMultiplayer Ascensions are a way to further challenge yourself and prove your mastery in multiplayer.\n\nCompleting [gold]Act[/gold] [blue]3[/blue] will unlock progressively harder challenges.",
+  "ASCENSION_MULTIPLAYER_FTUE_DISCLAIMER": "Note: In multiplayer, Ascensions are tracked separately from singleplayer and are shared across all characters.",
+  "ASCENSION_MULTIPLAYER_FTUE_TITLE": "Multiplayer Ascensions!",
+  "ASCENSION_SINGLEPLAYER_FTUE_DESCRIPTION": "Congratulations, encountering the [red]Architect[/red] has unlocked Ascensions!\n\nAscensions are a way to further challenge yourself and prove your mastery for each character.\n\nCompleting [gold]Act[/gold] [blue]3[/blue] with Ascensions will unlock progressively harder challenges.",
+  "ASCENSION_SINGLEPLAYER_FTUE_DISCLAIMER": "Note: Completing Ascension 1 unlocks an Epoch, but higher Ascensions are optional.",
+  "ASCENSION_SINGLEPLAYER_FTUE_TITLE": "Ascensions Unlocked!",
   "CANNOT_PLAY_CARD_FTUE_DESCRIPTION": "Cards cannot be played if you don't have enough Energy.\n\nEnd your turn to replenish your Energy and draw new cards.",
   "CANNOT_PLAY_CARD_FTUE_TITLE": "Tip: You can't play this card!",
   "CAN_PLAY_CARDS_FTUE_DESCRIPTION": "This is the [gold]Energy Indicator[/gold].\n\nExample: [blue]2/3[/blue] means you have [blue]2[/blue] energy remaining for this turn and that it will replenish to [blue]3[/blue] at the start of your next turn.",

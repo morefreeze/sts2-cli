@@ -1,6 +1,12 @@
 {
   "AFFLICTION_FTUE_DESCRIPTION": "敌人可能会对你的卡牌施加“侵蚀”来削弱他们。\n一张卡牌同时只能拥有1种侵蚀。侵蚀会在战斗结束时移除。",
   "AFFLICTION_FTUE_TITLE": "提示：什么是侵蚀？",
+  "ASCENSION_MULTIPLAYER_FTUE_DESCRIPTION": "恭喜，见到[red]建筑师[/red]解锁了多人进阶！\n\n多人进阶是在多人模式下进一步挑战自己和证明你实力的机会。\n\n完成[blue]第3[/blue][gold]阶段[/gold]将会逐渐解锁更难的挑战。",
+  "ASCENSION_MULTIPLAYER_FTUE_DISCLAIMER": "注：多人模式的进阶与单机玩法分开计算，但所有角色会共享多人进阶进度。",
+  "ASCENSION_MULTIPLAYER_FTUE_TITLE": "多人进阶！",
+  "ASCENSION_SINGLEPLAYER_FTUE_DESCRIPTION": "恭喜，见到[red]建筑师[/red]解锁了进阶！\n\n进阶是进一步挑战自己和证明你实力的方式。\n\n以进阶难度完成[blue]第3[/blue][gold]阶段[/gold]将会逐渐解锁更难的挑战。",
+  "ASCENSION_SINGLEPLAYER_FTUE_DISCLAIMER": "注：通关进阶1难度会解锁一个历史节点，但更高等级的进阶是完全的可选内容。",
+  "ASCENSION_SINGLEPLAYER_FTUE_TITLE": "进阶难度已解锁！",
   "CANNOT_PLAY_CARD_FTUE_DESCRIPTION": "如果没有足够的能量，就无法打出卡牌。\n\n结束你的回合来补充你的能量和抽取新的卡牌。",
   "CANNOT_PLAY_CARD_FTUE_TITLE": "提示：你无法打出这张牌！",
   "CAN_PLAY_CARDS_FTUE_DESCRIPTION": "这是[gold]能量指示器[/gold]。\n\n例如：[blue]2/3[/blue]代表你在本回合还剩余[blue]2[/blue]点能量，而在你的下个回合开始时能量会补充到[blue]3[/blue]点。",

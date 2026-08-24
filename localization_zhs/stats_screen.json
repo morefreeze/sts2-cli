@@ -28,7 +28,7 @@
   "RATIO_FORMAT": "{Numerator}/{Denominator}",
   "TAB_ACHIEVEMENT.header": "成就",
   "TAB_STATS.header": "统计",
-  "TIP_PLAYTIME.description": "你的游玩时长和你的最高连胜。",
+  "TIP_PLAYTIME.description": "你的游玩时长和你的最速获胜。",
   "TIP_PLAYTIME.header": "游玩时间",
   "TIP_WIN_LOSS.description": "所有角色完成的总进阶层数。",
   "TIP_WIN_LOSS.header": "进阶"

@@ -1,4 +1,5 @@
 {
+  "ACHIEVEMENTS_LOCKED": "[red]本局游戏无法解锁成就与历史节点。[/red]",
   "ACT_NUMBER": "阶段{actNumber}",
   "ASCENSION_LEVEL": "进阶{ascension}",
   "BATTLE_START": "战斗开始",
@@ -14,6 +15,7 @@
   "CARD_RARITY.UNCOMMON": "罕见",
   "CARD_TYPE.ATTACK": "攻击",
   "CARD_TYPE.CURSE": "诅咒",
+  "CARD_TYPE.NONE": "无",
   "CARD_TYPE.POWER": "能力",
   "CARD_TYPE.QUEST": "任务",
   "CARD_TYPE.SKILL": "技能",
@@ -97,6 +99,7 @@
   "TO_INSPECT_PROMPT": "察看",
   "TREASURE_BANNER": "里面有什么？",
   "TREASURE_EMPTY": "空的",
+  "TREASURE_FIGHT_TEXT": "开抢！！！",
   "TURN_COUNT": "第{turnNumber}回合",
   "UNDO_END_TURN_BUTTON": "取消",
   "VIEW_UPGRADES": "查看升级"

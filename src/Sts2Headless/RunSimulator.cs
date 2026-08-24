@@ -3,6 +3,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Entities.Ascension;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -39,14 +40,33 @@ namespace Sts2Headless;
 internal class InlineSynchronizationContext : SynchronizationContext
 {
     private readonly Queue<(SendOrPostCallback, object?)> _queue = new();
+    private bool _executing;
 
     public override void Post(SendOrPostCallback d, object? state)
     {
-        // Always enqueue — never execute inline. Inline execution caused infinite loops
-        // when game background async loops (while(true){await Task.Yield();...}) post their
-        // next continuation while the current one is running, keeping Pump() busy forever.
-        // Callers must use Pump() to drain the queue.
-        lock (_queue) { _queue.Enqueue((d, state)); }
+        if (_executing)
+        {
+            _queue.Enqueue((d, state));
+            return;
+        }
+        // removed debug log
+
+        // Execute inline immediately, then drain any nested posts
+        _executing = true;
+        try
+        {
+            d(state);
+            // Drain any callbacks that were queued during execution
+            while (_queue.Count > 0)
+            {
+                var (cb, st) = _queue.Dequeue();
+                cb(st);
+            }
+        }
+        finally
+        {
+            _executing = false;
+        }
     }
 
     public override void Send(SendOrPostCallback d, object? state)
@@ -56,23 +76,13 @@ internal class InlineSynchronizationContext : SynchronizationContext
 
     public void Pump()
     {
-        // Process only items that were in the queue when Pump() was called.
-        // Items added DURING this Pump() call are left for the next call.
-        // This prevents infinite loops: a background loop's next iteration is queued
-        // but not run until the caller calls Pump() again (bounded by Thread.Sleep loops).
-        int countToProcess;
-        lock (_queue) { countToProcess = _queue.Count; }
-        for (int i = 0; i < countToProcess; i++)
+        // Drain any remaining queued callbacks
+        while (_queue.Count > 0)
         {
-            (SendOrPostCallback cb, object? st) item;
-            lock (_queue) { if (_queue.Count == 0) break; item = _queue.Dequeue(); }
-            try { item.cb(item.st); }
-            catch (Exception ex)
-            {
-                // Swallow ALL exceptions from game VFX/async callbacks (NLowHpBorderVfx etc.)
-                // that would otherwise escape Pump() and crash DoEndTurn/DoPlayCard callers.
-                Console.Error.WriteLine($"[WARN] SyncCtx.Pump swallowed exception: {ex.GetType().Name}: {ex.Message}");
-            }
+            var (cb, st) = _queue.Dequeue();
+            _executing = true;
+            try { cb(st); }
+            finally { _executing = false; }
         }
     }
 }
@@ -195,16 +205,6 @@ internal class LocLookup
 /// </summary>
 public class RunSimulator
 {
-    /// <summary>
-    /// v0.111 removed CombatManager.IsPlayPhase: the turn phase moved onto
-    /// PlayerCombatState so each player in a multiplayer run tracks its own.
-    /// Headless is always singleplayer, so player 0 is the whole answer.
-    /// </summary>
-    private bool IsPlayPhase =>
-        _runState != null && _runState.Players is { Count: > 0 }
-        && _runState.Players[0].PlayerCombatState?.Phase
-           == MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.Play;
-
     private static int? _expectedSaveSchemaVersion;
     private static bool _expectedSaveSchemaVersionReady;
     private static readonly object _expectedSaveSchemaVersionLock = new();
@@ -218,16 +218,16 @@ public class RunSimulator
     private bool _eventOptionChosen;
     private int _lastEventOptionCount;
 
-    // Tracked for crash-recovery: UnhandledException handler writes these to stdout
-    // before the process exits, so Python gets a clean game_over instead of EOF.
-    public static volatile int LastKnownPlayerHp = 80;
-    public static volatile bool LastActionWasKillingBlow = false;
-
     // Pending rewards for card selection (populated after combat, before proceeding)
     private List<Reward>? _pendingRewards;
     private CardReward? _pendingCardReward;
     private bool _rewardsProcessed;
     private int _goldBeforeCombat;
+    // Read by Program.cs's UnhandledException handler to write a sensible
+    // game_over if the process dies during post-combat cleanup.
+    public static volatile int LastKnownPlayerHp = 80;
+    public static volatile bool LastActionWasKillingBlow = false;
+
     private int _lastKnownHp;
     private readonly HeadlessCardSelector _cardSelector = new();
     // Pending bundle selection (Scroll Boxes: pick 1 of N packs)
@@ -270,11 +270,6 @@ public class RunSimulator
             // Launch the run
             RunManager.Instance.Launch();
             Log("Run launched");
-
-            // Try AssetCache injection again now that the game is live.
-            // The singleton is created lazily during Launch(), so this is the first
-            // opportunity to find and populate it with stub VFX entries.
-            PreloadVfxAssets();
 
             // Register event handlers for combat turn transitions
             CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
@@ -319,41 +314,6 @@ public class RunSimulator
         field?.SetValue(obj, value);
     }
 
-    private static void ClampPlayerHp(Player player)
-    {
-        var creature = player.Creature;
-        if (creature == null) return;
-        var maxHp = creature.MaxHp;
-        if (maxHp > 0 && creature.CurrentHp > maxHp)
-            SetField(creature, "_currentHp", maxHp);
-    }
-
-    private void RemoveDeckCardHeadless(Player player, CardModel? selected, int fallbackIndex)
-    {
-        var deck = player.Deck;
-        if (deck == null) return;
-
-        var deckCards = deck.Cards?.Where(c => c != null).ToList() ?? new List<CardModel>();
-        CardModel? target = selected != null && deckCards.Contains(selected) ? selected : null;
-        if (target == null && fallbackIndex >= 0 && fallbackIndex < deckCards.Count)
-            target = deckCards[fallbackIndex];
-        if (target == null) return;
-
-        try { _runState?.RemoveCard(target); } catch { }
-
-        if (deck.Cards != null && deck.Cards.Contains(target))
-        {
-            foreach (var field in deck.GetType().GetFields(NonPublic))
-            {
-                if (field.GetValue(deck) is System.Collections.IList list && list.Contains(target))
-                {
-                    list.Remove(target);
-                    break;
-                }
-            }
-        }
-    }
-
     public Dictionary<string, object?> SetPlayer(Dictionary<string, System.Text.Json.JsonElement> args)
     {
         try
@@ -365,7 +325,6 @@ public class RunSimulator
                 SetField(player.Creature, "_currentHp", hpEl.GetInt32());
             if (args.TryGetValue("max_hp", out var mhpEl) && player.Creature != null)
                 SetField(player.Creature, "_maxHp", mhpEl.GetInt32());
-            ClampPlayerHp(player);
             if (args.TryGetValue("gold", out var goldEl))
                 player.Gold = goldEl.GetInt32();
 
@@ -418,7 +377,15 @@ public class RunSimulator
                         if (id != null)
                         {
                             var model = ModelDb.GetById<PotionModel>(new ModelId("POTION", id));
-                            if (model != null) slots[idx] = model;
+                            // Inject a mutable instance (not the canonical model — that throws
+                            // CanonicalModelException when the game reads potion.Owner) and set its
+                            // Owner, or UsePotionAction fails with "without an owner!".
+                            if (model != null)
+                            {
+                                var mutable = model.ToMutable();
+                                mutable.Owner = player;
+                                slots[idx] = mutable;
+                            }
                         }
                         idx++;
                     }
@@ -980,7 +947,7 @@ public class RunSimulator
 
         // Call EnterMapCoord directly (same as what MoveToMapCoordAction does in TestMode)
         // This avoids the action executor which can swallow errors silently.
-        PumpWhileWaiting(RunManager.Instance.EnterMapCoord(coord), 5.0, "EnterMapCoord");
+        RunManager.Instance.EnterMapCoord(coord).GetAwaiter().GetResult();
         _syncCtx.Pump();
         WaitForActionExecutor();
 
@@ -1022,11 +989,18 @@ public class RunSimulator
                         target = enemies[targetIndex];
                 }
             }
-            // Fallback: auto-target first alive enemy
+            // No target_index given: only auto-target when the choice is unambiguous
+            // (a single alive enemy). With multiple enemies, picking one is a real game
+            // decision — return an error instead of silently targeting enemy 0 (#79).
             if (target == null)
             {
                 var state = CombatManager.Instance.DebugOnlyGetState();
-                target = state?.Enemies?.FirstOrDefault(e => e != null && e.IsAlive);
+                var alive = state?.Enemies?.Where(e => e != null && e.IsAlive).ToList() ?? new();
+                if (alive.Count == 1)
+                    target = alive[0];
+                else if (alive.Count > 1)
+                    return Error($"Card {card.Id.Entry} targets a single enemy (AnyEnemy); " +
+                                 $"'target_index' is required when multiple enemies are alive ({alive.Count}).");
             }
         }
         // All other target types (None, All, etc.) → leave target as null
@@ -1041,54 +1015,14 @@ public class RunSimulator
 
         var handCountBefore = hand.Count;
 
-        // Track for crash-recovery: if process crashes during post-combat cleanup,
-        // the UnhandledException handler uses these to write a sensible game_over response.
-        var combatState = CombatManager.Instance.DebugOnlyGetState();
-        var aliveEnemies = combatState?.Enemies?.Count(e => e != null && e.IsAlive) ?? 0;
+        var combatStateForCrash = CombatManager.Instance.DebugOnlyGetState();
+        var aliveEnemiesForCrash = combatStateForCrash?.Enemies?.Count(e => e != null && e.IsAlive) ?? 0;
         LastKnownPlayerHp = player.Creature?.CurrentHp ?? 0;
-        LastActionWasKillingBlow = (hand.Count == 1 && aliveEnemies == 1);
+        LastActionWasKillingBlow = (hand.Count == 1 && aliveEnemiesForCrash == 1);
 
         var playAction = new PlayCardAction(card, target);
-        try
-        {
-            RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
-        }
-        catch (Exception ex)
-        {
-            // VFX/async code (e.g. Whirlwind.OnPlay, NLowHpBorderVfx.Create) can throw
-            // synchronously through ActionQueueChanged/TaskHelper, crashing the process.
-            // Catch here and return defeat rather than killing the process.
-            Log($"DoPlayCard: sync exception in EnqueueWithoutSynchronizing: {ex.GetType().Name}: {ex.Message}");
-            return GameOverState(false);
-        }
-        // SuppressYield=true during card execution so on-death / on-hit async effects
-        // (Task.Yield calls IL-patched in sts2.dll) complete inline instead of posting
-        // continuations to InlineSyncCtx and stalling when main thread is blocked.
-        YieldPatches.SuppressYield = true;
-        try
-        {
-            WaitForActionExecutor();
-
-            // Always drain pending async continuations while SuppressYield=true so that
-            // on-death / post-combat effects triggered by the card complete synchronously
-            // before we return. Without this, SuppressYield flips to false and the
-            // remaining continuations get posted to a thread-pool context that never
-            // drains, leaving the game in a half-ended state → hang → Python 60s timeout.
-            // Loop breaks immediately if executor is idle (fast path for normal cards).
-            for (int i = 0; i < 3000; i++)
-            {
-                _syncCtx.Pump();
-                var ae = RunManager.Instance?.ActionExecutor;
-                if (ae == null || !ae.IsRunning)
-                {
-                    _syncCtx.Pump();
-                    break;
-                }
-                if (i % 5 == 4) Thread.Sleep(1);
-            }
-
-        }
-        finally { YieldPatches.SuppressYield = false; }
+        RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
+        WaitForActionExecutor();
 
         // Check if card play had no effect (hand unchanged, same card still at same index)
         var handAfter = pcs.Hand.Cards;
@@ -1100,71 +1034,38 @@ public class RunSimulator
         return DetectDecisionPoint();
     }
 
-
-    /// <summary>
-    /// v0.111 gates the turn transition on a multiplayer readiness handshake
-    /// (CombatTurnState.PlayersReadyToEndTurn / PlayersReadyToBeginEnemyTurn and
-    /// their TaskCompletionSources). When the phase sticks at End, this says
-    /// which gate is still closed.
-    /// </summary>
-    /// <summary>
-    /// Signal that the local player is ready for the enemy turn.
-    /// v0.111 gates the enemy turn on a per-player readiness handshake; in the
-    /// real game NEndTurnButton raises it. Headless has no UI, so when the turn
-    /// sticks with endSig=done/enemySig=pending nothing ever will. Raising it
-    /// here unblocks CombatManager.AfterAllPlayersReadyToBeginEnemyTurn.
-    /// </summary>
-    private string DescribeTurnHandshake()
+    // STS2 build 23372702 removed CombatManager.IsPlayPhase (global) in favor of a
+    // per-player PlayerCombatState.Phase. Headless is single-player, so the local
+    // player (Players[0]) being in the Play phase is the equivalent signal.
+    private bool IsPlayPhase()
     {
-        try
-        {
-            var cm = CombatManager.Instance;
-            var f = cm.GetType().GetField("_turnState",
-                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-            var ts = f?.GetValue(cm);
-            if (ts == null) return "turnState=null";
-            string P(string name)
-            {
-                var p = ts.GetType().GetProperty(name,
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                var v = p?.GetValue(ts);
-                if (v is System.Collections.ICollection c) return c.Count.ToString();
-                if (v is Task t) return t.IsCompleted ? "done" : "pending";
-                var tp = v?.GetType();
-                var tk = tp?.GetProperty("Task")?.GetValue(v) as Task;
-                if (tk != null) return tk.IsCompleted ? "done" : "pending";
-                return v?.ToString() ?? "null";
-            }
-            return $"readyEnd={P("PlayersReadyToEndTurn")} readyEnemy={P("PlayersReadyToBeginEnemyTurn")} "
-                 + $"endSig={P("EndTurnSignalSource")} enemySig={P("BeginEnemyTurnSignalSource")} "
-                 + $"enemyStarted={P("IsEnemyTurnStarted")} p1={P("EndingPlayerTurnPhaseOne")} "
-                 + $"p2={P("EndingPlayerTurnPhaseTwo")} live={P("IsLive")} inProg={P("IsInProgress")} "
-                 + $"pendingLoss={P("PendingLoss")}";
-        }
-        catch (Exception ex) { return $"handshake-probe-failed:{ex.GetType().Name}"; }
+        var p = (_runState != null && _runState.Players.Count > 0) ? _runState.Players[0] : null;
+        return p?.PlayerCombatState?.Phase == MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.Play;
     }
 
     private Dictionary<string, object?> DoEndTurn(Player player)
     {
-        // player.Creature can become null mid-combat (e.g. BYRDONIS PECK_MOVE removes
-        // the player creature from the creatures list). Treat as game over.
-        if (player.Creature == null)
+        // A pending card / card-reward / bundle selection is an unresolved prompt; ending
+        // the turn here would silently mutate combat instead. Surface the prompt unchanged
+        // and let the caller resolve it first (#61).
+        if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
         {
-            Log("DoEndTurn: player.Creature is null — treating as game over");
+            Log("end_turn ignored: a card selection is pending");
             return DetectDecisionPoint();
         }
-        if (!IsPlayPhase)
+
+        if (!IsPlayPhase())
         {
             // Might be between phases — pump and check
-            try { _syncCtx.Pump(); } catch (Exception ex) { Log($"DoEndTurn pre-check pump: {ex.GetType().Name}: {ex.Message}"); }
-            if (!IsPlayPhase)
+            _syncCtx.Pump();
+            if (!IsPlayPhase())
             {
-                if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true)
+                if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead)
                     return DetectDecisionPoint();
                 // Brief wait for ThreadPool if sync context didn't catch it
                 Thread.Sleep(100);
-                try { _syncCtx.Pump(); } catch (Exception ex) { Log($"DoEndTurn pre-check pump2: {ex.GetType().Name}: {ex.Message}"); }
-                if (!IsPlayPhase)
+                _syncCtx.Pump();
+                if (!IsPlayPhase())
                     return DetectDecisionPoint();
             }
         }
@@ -1172,154 +1073,149 @@ public class RunSimulator
         // Ensure no actions are still running before ending turn
         WaitForActionExecutor();
 
-        int roundAtEndTurn = CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0;
-        Log($"Ending turn (round={roundAtEndTurn})");
+        Log($"Ending turn (round={CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0})");
         _turnStarted.Reset();
         _combatEnded.Reset();
 
-        // Keep SuppressYield=true for the ENTIRE DoEndTurn including all wait loops.
-        // Enemy async continuations (BYRDONIS etc.) execute on ThreadPool threads; with
-        // SuppressYield=false those threads post Task.Yield() continuations back to the
-        // ThreadPool default context, which _syncCtx.Pump() never drains → enemy turn
-        // stalls forever. Keeping it true makes Task.Yield() a no-op everywhere so the
-        // enemy processing chain completes inline.
+        // Enable SuppressYield so Task.Yield() runs inline during enemy turn processing.
+        // This prevents deadlocks during boss fights (e.g., Vantom) where continuations
+        // would otherwise be posted to ThreadPool and never complete.
+        // Keep SuppressYield=true through the initial fallback wait loop — multi-hit
+        // attacks (e.g., 10x2) have continuations between hits that also need suppression.
         YieldPatches.SuppressYield = true;
         try
         {
-            try { PlayerCmd.EndTurn(player, canBackOut: false); }
-            catch (Exception ex)
+            PlayerCmd.EndTurn(player, canBackOut: false);
+            _syncCtx.Pump();
+
+            // Fallback: if turn didn't complete synchronously, keep pumping with SuppressYield on
+            if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
             {
-                // VFX code (e.g. NLowHpBorderVfx.Create during enemy attack) can throw
-                // synchronously through TaskHelper/ActionExecutor, propagating to here.
-                // Return defeat rather than crashing the process.
-                Log($"DoEndTurn: sync exception in PlayerCmd.EndTurn: {ex.GetType().Name}: {ex.Message}");
-                return GameOverState(false);
-            }
-
-            // Wrap individual Pump() calls in the wait loop so any exception that escapes
-            // Pump()'s internal catch (e.g. AggregateException wrappers) doesn't kill the process.
-            void SafePump() {
-                try { _syncCtx.Pump(); }
-                catch (Exception ex) {
-                    Log($"DoEndTurn: SafePump swallowed exception: {ex.GetType().Name}: {ex.Message}");
-                }
-            }
-
-            SafePump();
-
-            // Fast path: DEF-mode enemies process instantaneously inside Pump()
-            if (CombatManager.Instance.IsInProgress && IsPlayPhase)
-                PumpStartOfTurnSetup(player, roundAtEndTurn);
-
-            // Fallback wait: up to 3s for enemy turn to complete.
-            // NOTE: Task.Yield/Cmd.Wait Harmony patches may fail on newer CoreCLR —
-            // in that case SuppressYield has no effect. We rely on the InlineSyncCtx
-            // being active so that continuations posted via await are drained by Pump().
-            if (CombatManager.Instance.IsInProgress && !IsPlayPhase && !player.Creature?.IsDead == true)
-            {
-                bool isBossRoom = (_runState?.CurrentRoom as CombatRoom)?.RoomType == RoomType.Boss;
-                int waitIter = isBossRoom ? 1000 : 300; // 10s for boss, 3s for normal
-                bool prevExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
-
-                // Early burst: executor idle at start → newly spawned enemies (Wriggler split,
-                // Nibbit spawn) need rapid pumping to kick off their first action processing.
-                // This handles the case where Task.Yield() Harmony patch failed on .NET 10.
-                if (!prevExecutorRunning)
+                for (int i = 0; i < 50; i++)
                 {
-                    for (int earlyBurst = 0; earlyBurst < 500; earlyBurst++)
-                    {
-                        SynchronizationContext.SetSynchronizationContext(_syncCtx);
-                        SafePump();
-                        if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
-                        if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) goto AfterWait;
-                        if (IsPlayPhase) goto AfterWait;
-                        if (earlyBurst % 10 == 9) Thread.Sleep(1); // yield occasionally
-                    }
-                    prevExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
-                }
-
-                for (int i = 0; i < waitIter; i++)   // waitIter × 10ms
-                {
-                    SynchronizationContext.SetSynchronizationContext(_syncCtx);
-                    SafePump();
+                    _syncCtx.Pump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
-                    if (!CombatManager.Instance.IsInProgress || player.Creature?.IsDead == true) break;
-                    if (IsPlayPhase) break;
-
-                    // When executor just stopped, burst-pump to drain post-execution continuations
-                    bool curExecutorRunning = RunManager.Instance.ActionExecutor.IsRunning;
-                    if (prevExecutorRunning && !curExecutorRunning)
-                    {
-                        for (int burst = 0; burst < 300; burst++)
-                        {
-                            SynchronizationContext.SetSynchronizationContext(_syncCtx);
-                            SafePump();
-                            if (IsPlayPhase || !CombatManager.Instance.IsInProgress) goto AfterWait;
-                            if (_turnStarted.IsSet || _combatEnded.IsSet) goto AfterWait;
-                            Thread.Sleep(1);
-                        }
-                    }
-                    prevExecutorRunning = curExecutorRunning;
-
-                    // Half-way through the budget, raise the readiness signal the
-                    // missing UI would have raised. Deferring it this long keeps the
-                    // normal path untouched — it only fires on runs that would
-                    // otherwise time out and be discarded as "stuck".
-                    Thread.Sleep(10);
-                }
-                AfterWait:
-                // Flush start-of-turn setup if turn started
-                if (_turnStarted.IsSet || IsPlayPhase)
-                    PumpStartOfTurnSetup(player, roundAtEndTurn);
-
-                // Player died asynchronously (HP=0 but IsDead not set yet due to Harmony patch failure):
-                // return game_over directly instead of stuck to avoid cr spike on player death.
-                int curHp = player.Creature?.CurrentHp ?? 1;
-                bool playerEffectivelyDead = (player.Creature?.IsDead == true) || (curHp <= 0);
-                if (playerEffectivelyDead)
-                {
-                    Log($"EndTurn: player HP={curHp} IsDead={player.Creature?.IsDead} — treating as game_over(defeat)");
-                    return GameOverState(false);
-                }
-                if (CombatManager.Instance.IsInProgress && !IsPlayPhase && !player.Creature?.IsDead == true)
-                {
-                    var stuckState = CombatManager.Instance.DebugOnlyGetState();
-                    var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
-                        .Select(e => $"{e.Monster?.GetType().Name}(hp={e.CurrentHp})").ToList();
-                    var phaseNow = _runState?.Players is { Count: > 0 }
-                        ? _runState.Players[0].PlayerCombatState?.Phase.ToString() ?? "null"
-                        : "no-player";
-                    var hs = DescribeTurnHandshake();
-                    Log($"EndTurn stuck after {(isBossRoom ? "10s(boss)" : "3s")} — returning stuck signal. Phase={phaseNow}, {hs}, Round={stuckState?.RoundNumber}, " +
-                        $"Enemies=[{string.Join(",", stuckEnemies ?? new())}], " +
-                        $"ActionExecutor.IsRunning={RunManager.Instance.ActionExecutor.IsRunning}");
-                    // Non-boss stall still terminates the episode as a defeat — a bare
-                    // "stuck" signal inflates crash rate and corrupts training. But it is
-                    // NOT a real loss, and silently filing it as one biased every measured
-                    // floor downward: 8 of 40 eval games ended this way. Tag it so eval can
-                    // exclude it while training keeps treating it as terminal.
-                    if (!isBossRoom)
-                    {
-                        var over = GameOverState(false);
-                        over["technical_failure_kind"] = "stuck";
-                        return over;
-                    }
-                    return new Dictionary<string, object?> { ["decision"] = "stuck" };
+                    if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
+                    if (IsPlayPhase()) break;
+                    Thread.Sleep(5);
                 }
             }
-
-        }
-        catch (Exception ex)
-        {
-            // Belt-and-suspenders: catch any exception that escapes the inner SafePump/PlayerCmd
-            // try-catches (e.g. from async continuation re-throws or unhandled async paths).
-            // Return defeat instead of letting the exception propagate and corrupt game state.
-            Log($"DoEndTurn: outer catch: {ex.GetType().Name}: {ex.Message}");
-            return GameOverState(false);
         }
         finally
         {
             YieldPatches.SuppressYield = false;
+        }
+
+        // Second fallback: if still stuck after SuppressYield window, cancel and retry.
+        // The WaitUntilQueue TCS is likely deadlocked.
+        if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
+        {
+            Log("EndTurn stuck, cancelling and retrying with SuppressYield...");
+            try
+            {
+                RunManager.Instance.ActionExecutor.Cancel();
+                _syncCtx.Pump();
+                Thread.Sleep(50);
+                _syncCtx.Pump();
+
+                // Reset the player ready state and try again with SuppressYield
+                CombatManager.Instance.UndoReadyToEndTurn(player);
+                _syncCtx.Pump();
+
+                YieldPatches.SuppressYield = true;
+                try
+                {
+                    PlayerCmd.EndTurn(player, canBackOut: false);
+                    _syncCtx.Pump();
+                }
+                finally
+                {
+                    YieldPatches.SuppressYield = false;
+                }
+
+                for (int i = 0; i < 100; i++)
+                {
+                    _syncCtx.Pump();
+                    if (_turnStarted.IsSet || _combatEnded.IsSet) break;
+                    if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
+                    if (IsPlayPhase()) break;
+                    Thread.Sleep(10);
+                }
+            }
+            catch (Exception ex) { Log($"Cancel retry: {ex.Message}"); }
+
+            // NUCLEAR OPTION: If STILL stuck after 2 attempts, use ThreadPool to force
+            // the enemy turn processing to complete with SuppressYield permanently on.
+            if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
+            {
+                var stuckState = CombatManager.Instance.DebugOnlyGetState();
+                var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
+                    .Select(e => $"{e.Monster?.GetType().Name}(hp={e.CurrentHp})").ToList();
+                Log($"EndTurn STILL stuck after retry — nuclear fallback. Round={stuckState?.RoundNumber}, " +
+                    $"Enemies=[{string.Join(",", stuckEnemies ?? new())}], " +
+                    $"IsPlayPhase={IsPlayPhase()}, " +
+                    $"IsInProgress={CombatManager.Instance.IsInProgress}, " +
+                    $"ActionExecutor.IsRunning={RunManager.Instance.ActionExecutor.IsRunning}");
+                try
+                {
+                    // Cancel again and undo
+                    RunManager.Instance.ActionExecutor.Cancel();
+                    _syncCtx.Pump();
+                    CombatManager.Instance.UndoReadyToEndTurn(player);
+                    _syncCtx.Pump();
+                    Thread.Sleep(50);
+
+                    // Run EndTurn on ThreadPool with SuppressYield permanently on
+                    YieldPatches.SuppressYield = true;
+                    var endTurnTask = Task.Run(() =>
+                    {
+                        PlayerCmd.EndTurn(player, canBackOut: false);
+                    });
+
+                    // Aggressively pump sync context while waiting (up to 5 seconds)
+                    for (int i = 0; i < 500; i++)
+                    {
+                        _syncCtx.Pump();
+                        if (endTurnTask.IsCompleted) break;
+                        if (_turnStarted.IsSet || _combatEnded.IsSet) break;
+                        if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
+                        if (IsPlayPhase()) break;
+                        Thread.Sleep(10);
+                    }
+                    YieldPatches.SuppressYield = false;
+
+                    // If still not play phase, try just waiting a bit more
+                    if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
+                    {
+                        for (int i = 0; i < 200; i++)
+                        {
+                            _syncCtx.Pump();
+                            Thread.Sleep(10);
+                            if (IsPlayPhase() || !CombatManager.Instance.IsInProgress || player.Creature.IsDead)
+                                break;
+                        }
+                    }
+
+                    if (IsPlayPhase())
+                        Log("Nuclear fallback SUCCEEDED — play phase resumed");
+                    else
+                    {
+                        Log("Nuclear fallback FAILED — forcing game_over to escape deadlock");
+                        // Terminating as a defeat keeps training crash rates sane, but this
+                        // is NOT a real loss. Filing it as one biased every measured floor
+                        // downward with nothing in the output to reveal it — 8 of 40 eval
+                        // games ended this way. Tag it so eval can exclude it.
+                        var escaped = GameOverState(false);
+                        escaped["technical_failure_kind"] = "stuck";
+                        return escaped;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Nuclear fallback error: {ex.Message}");
+                    YieldPatches.SuppressYield = false;
+                }
+            }
         }
 
         return DetectDecisionPoint();
@@ -1363,14 +1259,7 @@ public class RunSimulator
             _syncCtx.Pump();
             RunManager.Instance.RewardSynchronizer.SyncLocalObtainedCard(card);
         }
-        catch (Exception ex)
-        {
-            // Loud, not silent: a swallowed failure here means the card silently
-            // never enters the deck, which is invisible from the JSON protocol
-            // (select_card_reward still reports success).
-            Console.Error.WriteLine($"[ERROR] Add card to deck failed: {ex.GetType().Name}: {ex.Message}");
-            Log($"Add card to deck: {ex.Message}");
-        }
+        catch (Exception ex) { Log($"Add card to deck: {ex.Message}"); }
 
         _pendingCardReward = null;
         // Check if more rewards pending
@@ -1414,22 +1303,13 @@ public class RunSimulator
         if (!entry.IsStocked) return Error("Card already purchased");
         if (player.Gold < entry.Cost) return Error("Not enough gold");
 
-        YieldPatches.SuppressYield = true;
         try
         {
-            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory());
-            var deadline2 = DateTime.UtcNow.AddSeconds(3);
-            while (!purchaseTask.IsCompleted && DateTime.UtcNow < deadline2)
-            {
-                _syncCtx.Pump();
-                if (purchaseTask.IsCompleted) break;
-                Thread.Sleep(5);
-            }
+            entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
             Log($"Bought card: {entry.CreationResult?.Card?.GetType().Name ?? "?"} for {entry.Cost}g");
         }
-        catch (Exception ex) { Log($"Buy card exception ({ex.GetType().Name}): {ex.Message}"); }
-        finally { YieldPatches.SuppressYield = false; }
+        catch (Exception ex) { return Error($"Buy card failed: {ex.Message}"); }
 
         return DetectDecisionPoint();
     }
@@ -1449,22 +1329,32 @@ public class RunSimulator
         if (!entry.IsStocked) return Error("Relic already purchased");
         if (player.Gold < entry.Cost) return Error("Not enough gold");
 
-        YieldPatches.SuppressYield = true;
         try
         {
-            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory());
-            var deadline2 = DateTime.UtcNow.AddSeconds(3);
-            while (!purchaseTask.IsCompleted && DateTime.UtcNow < deadline2)
+            // The pickup effect can open a card_select (e.g. KIFUDA → enchant up to 3 with
+            // Adroit, #80). Run the purchase on a background task and yield as soon as a
+            // pending selection appears so the caller can resolve it; the background task
+            // continues once the selector's TCS is fed by select_cards.
+            var inv = merchantRoom.GetLocalInventory();
+            var task = Task.Run(() => entry.OnTryPurchaseWrapper(inv));
+            for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
-                if (purchaseTask.IsCompleted) break;
-                Thread.Sleep(5);
+                if (_cardSelector.HasPending || _cardSelector.HasPendingReward) break;
+                if (_pendingBundles != null) break;
+                if (task.IsCompleted) break;
+                Thread.Sleep(10);
             }
+            if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
+            {
+                Log($"Buy relic {entry.Model.GetType().Name}: yielded for pending selection");
+                return DetectDecisionPoint();
+            }
+            if (!task.IsCompleted) task.Wait(2000);
             _syncCtx.Pump();
-            Log($"Bought relic: {entry.Model?.GetType().Name ?? "?"} for {entry.Cost}g");
+            Log($"Bought relic: {entry.Model.GetType().Name} for {entry.Cost}g");
         }
-        catch (Exception ex) { Log($"Buy relic exception ({ex.GetType().Name}): {ex.Message}"); }
-        finally { YieldPatches.SuppressYield = false; }
+        catch (Exception ex) { return Error($"Buy relic failed: {ex.Message}"); }
 
         return DetectDecisionPoint();
     }
@@ -1484,31 +1374,17 @@ public class RunSimulator
         if (!entry.IsStocked) return Error("Potion already purchased");
         if (player.Gold < entry.Cost) return Error("Not enough gold");
 
-        bool purchaseSucceeded = false;
-        YieldPatches.SuppressYield = true;
         try
         {
-            var purchaseTask = entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory());
-            var deadline2 = DateTime.UtcNow.AddSeconds(3);
-            while (!purchaseTask.IsCompleted && DateTime.UtcNow < deadline2)
-            {
-                _syncCtx.Pump();
-                if (purchaseTask.IsCompleted) break;
-                Thread.Sleep(5);
-            }
+            entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
-            // Check if purchase went through: entry removed from stock
-            purchaseSucceeded = !entry.IsStocked;
-            Log($"Bought potion: {entry.Model?.GetType().Name ?? "?"} for {entry.Cost}g (succeeded={purchaseSucceeded})");
+            Log($"Bought potion: {entry.Model.GetType().Name} for {entry.Cost}g");
         }
         catch (Exception ex)
         {
-            // NullRef in headless — likely UI animation code after actual purchase completed.
-            // Check if purchase went through despite the exception.
-            purchaseSucceeded = !entry.IsStocked; // if unstocked, purchase went through before exception
-            Log($"Buy potion exception ({ex.GetType().Name}): {ex.Message} — purchase succeeded={purchaseSucceeded}");
+            // Potion purchase sometimes NullRefs in headless (missing potion slot UI)
+            Log($"Buy potion failed: {ex.Message}");
         }
-        finally { YieldPatches.SuppressYield = false; }
 
         return DetectDecisionPoint();
     }
@@ -1584,10 +1460,6 @@ public class RunSimulator
             .ToArray();
 
         Log($"Card selection: indices [{string.Join(",", indices)}]");
-        var selectedBeforeResolve = _cardSelector.PendingOptions?
-            .Where((_, i) => indices.Contains(i))
-            .ToList() ?? new List<CardModel>();
-        var deckCountBeforeSelect = player.Deck?.Cards?.Count(c => c != null) ?? 0;
         _cardSelector.ResolvePendingByIndices(indices);
         _syncCtx.Pump();
         WaitForActionExecutor();
@@ -1611,15 +1483,6 @@ public class RunSimulator
             Thread.Sleep(200);
             _syncCtx.Pump();
             WaitForActionExecutor();
-            var deckCountAfterSelect = player.Deck?.Cards?.Count(c => c != null) ?? 0;
-            if (indices.Length > 0 && deckCountAfterSelect >= deckCountBeforeSelect)
-            {
-                RemoveDeckCardHeadless(
-                    player,
-                    selectedBeforeResolve.Count > 0 ? selectedBeforeResolve[0] : null,
-                    indices[0]);
-                _syncCtx.Pump();
-            }
             Log("Card selection in shop (card removal), refreshing shop state");
         }
 
@@ -1673,17 +1536,19 @@ public class RunSimulator
                         target = enemies[targetIdx];
                 }
             }
+            // Same single-enemy rule as play_card: only auto-target when unambiguous (#79).
             if (target == null && CombatManager.Instance.IsInProgress)
             {
                 var combatState = CombatManager.Instance.DebugOnlyGetState();
-                target = combatState?.Enemies?.FirstOrDefault(e => e != null && e.IsAlive);
+                var alive = combatState?.Enemies?.Where(e => e != null && e.IsAlive).ToList() ?? new();
+                if (alive.Count == 1)
+                    target = alive[0];
+                else if (alive.Count > 1)
+                    return Error($"Potion {potion.Id.Entry} targets a single enemy (AnyEnemy); " +
+                                 $"'target_index' is required when multiple enemies are alive ({alive.Count}).");
             }
         }
-        // All other target types (None, All, etc.):
-        // Fall back to player.Creature so self-heal potions (e.g. BloodPotion, TargetType.None)
-        // don't throw "single target potion during combat, but the target ID is null".
-        if (target == null && CombatManager.Instance.IsInProgress)
-            target = player.Creature;
+        // All other target types (None, All, etc.) → leave target as null
 
         Log($"Using potion: {potion.GetType().Name} at slot {idx} target={target?.GetType().Name ?? "none"}");
         try
@@ -1780,7 +1645,6 @@ public class RunSimulator
                 Thread.Sleep(200);
                 _syncCtx.Pump();
                 WaitForActionExecutor();
-                ClampPlayerHp(player);
                 ForceToMap();
                 return MapSelectState();
             }
@@ -1822,12 +1686,10 @@ public class RunSimulator
                     catch (Exception ex) { Log($"Event choose: {ex.Message}"); }
                 }
 
-                var optCountAfter = localEvent.CurrentOptions?.Count ?? 0;
-                if (!localEvent.IsFinished && optCountAfter == optCountBefore && optCountAfter > 0)
-                {
-                    Log($"Event {localEvent.GetType().Name} didn't advance, force-finishing");
-                    ForceToMap();
-                }
+                // Note: do NOT force-finish on `optCountAfter == optCountBefore`. Events can
+                // legitimately stay interactive with the same option count (Slippery Bridge
+                // Hold On loops until Overcome is chosen, #59). Trust IsFinished and let the
+                // next DetectDecisionPoint return the current options for the next choice.
             }
         }
 
@@ -1838,7 +1700,7 @@ public class RunSimulator
     private Dictionary<string, object?> DoLeaveRoom(Player player)
     {
         Log("Leaving room");
-        try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); }
+        try { RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult(); }
         catch { }
         _syncCtx.Pump();
         WaitForActionExecutor();
@@ -1850,13 +1712,43 @@ public class RunSimulator
             Log("Force leaving non-combat room to map");
             try
             {
-                PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)");
+                RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult();
                 _syncCtx.Pump();
                 WaitForActionExecutor();
             }
             catch (Exception ex) { Log($"Force leave: {ex.Message}"); }
         }
         return DetectDecisionPoint();
+    }
+
+    /// <summary>
+    /// Headless mode skips Godot transition callbacks that normally trigger between-act healing
+    /// (AncientEventModel.BeforeEventStarted). Replicates the original sts2.dll formula:
+    ///   healAmount = MaxHp - CurrentHp  (i.e. heal to full)
+    ///   if Ascension >= 2: healAmount *= 0.8
+    /// No-op if the engine already healed (missingHp &lt;= 0), so this is safe alongside any
+    /// future engine path that does fire the callback.
+    /// Adapted from PR #83 commit cf75bec by @tianyumyum.
+    /// </summary>
+    private void HealBetweenActs()
+    {
+        if (_runState == null) return;
+        var player = _runState.Players[0];
+        if (player.Creature == null) return;
+
+        var currentHp = player.Creature.CurrentHp;
+        var maxHp = player.Creature.MaxHp;
+        var missingHp = maxHp - currentHp;
+        if (missingHp <= 0) return;
+
+        decimal healAmount = missingHp;
+        if (RunManager.Instance.HasAscension((AscensionLevel)2))
+            healAmount *= 0.8m;
+
+        var newHp = currentHp + (int)Math.Ceiling(healAmount);
+        if (newHp > maxHp) newHp = maxHp;
+        SetField(player.Creature, "_currentHp", newHp);
+        Log($"Between-act heal: {currentHp} → {newHp} (missing={missingHp}, ascension2+={RunManager.Instance.HasAscension((AscensionLevel)2)})");
     }
 
     private Dictionary<string, object?> DoProceed(Player player)
@@ -1869,30 +1761,20 @@ public class RunSimulator
         {
             if (combatRoom.IsPreFinished || !CombatManager.Instance.IsInProgress)
             {
-                YieldPatches.SuppressYield = true;
-                try
+                // Final act boss → victory (same rule as DetectPostCombatState, #81).
+                if (_runState != null && _runState.CurrentActIndex >= 2)
                 {
-                    var nextActTask = RunManager.Instance.EnterNextAct();
-                    var deadline = DateTime.UtcNow.AddSeconds(10);
-                    while (!nextActTask.IsCompleted && DateTime.UtcNow < deadline)
-                    {
-                        _syncCtx.Pump();
-                        WaitForActionExecutor();
-                        if (nextActTask.IsCompleted) break;
-                        Thread.Sleep(10);
-                    }
-                    if (!nextActTask.IsCompleted)
-                        Log("EnterNextAct (DoProceed) timed out after 10s");
-                    _syncCtx.Pump();
-                    WaitForActionExecutor();
+                    Log($"Final boss defeated via Proceed (Act {_runState.CurrentActIndex + 1}), reporting victory");
+                    return GameOverState(true);
                 }
-                finally { YieldPatches.SuppressYield = false; }
+                RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
+                WaitForActionExecutor();
+                HealBetweenActs();
                 return DetectDecisionPoint();
             }
         }
 
-        try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); }
-        catch { }
+        RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
         WaitForActionExecutor();
         return DetectDecisionPoint();
     }
@@ -1909,7 +1791,7 @@ public class RunSimulator
         var player = _runState.Players[0];
 
         // Check game over (death)
-        if (player.Creature != null && player.Creature?.IsDead == true)
+        if (player.Creature != null && player.Creature.IsDead)
         {
             return GameOverState(false);
         }
@@ -2055,53 +1937,22 @@ public class RunSimulator
                 goto checkCardSelect;  // Jump back to card_select handling
             }
 
-            if (CombatManager.Instance.IsInProgress && IsPlayPhase)
+            if (CombatManager.Instance.IsInProgress && IsPlayPhase())
             {
-                // BUG-027 safety net: if energy=0 and hand is empty but cards remain in
-                // draw/discard piles, start-of-turn setup hasn't finished yet.  Pump with
-                // SuppressYield=true so Task.Yield() continuations (energy reset, draw)
-                // complete inline instead of hanging.
-                var pcs = player.PlayerCombatState;
-                bool energyZero = (pcs?.Energy ?? 1) == 0;
-                bool handEmpty  = (pcs?.Hand?.Cards?.Count ?? 1) == 0;
-                bool hasCards   = (pcs?.DrawPile?.Cards?.Count ?? 0) + (pcs?.DiscardPile?.Cards?.Count ?? 0) > 0;
-                if (energyZero && handEmpty && hasCards)
-                {
-                    Log("BUG-027: energy=0 + hand empty but deck not exhausted — pumping start-of-turn setup");
-                    YieldPatches.SuppressYield = true;
-                    try
-                    {
-                        for (int i = 0; i < 30; i++)
-                        {
-                            WaitForActionExecutor();
-                            _syncCtx.Pump();
-                            var p2 = player.PlayerCombatState;
-                            if ((p2?.Energy ?? 0) > 0 || (p2?.Hand?.Cards?.Count ?? 0) > 0) break;
-                            Thread.Sleep(10);
-                        }
-                    }
-                    finally
-                    {
-                        YieldPatches.SuppressYield = false;
-                    }
-                }
                 return CombatPlayState(player);
             }
-            if (!CombatManager.Instance.IsInProgress || (player.Creature != null && player.Creature?.IsDead == true))
+            if (!CombatManager.Instance.IsInProgress || (player.Creature != null && player.Creature.IsDead))
             {
                 return DetectPostCombatState(player, combatRoom);
             }
-            // Fallback: wait up to ~2s for combat state to resolve (killing-blow transitions
-            // can take >100ms for async EndCombat / reward generation to complete)
-            for (int i = 0; i < 400; i++)
+            // Fallback: brief wait
+            for (int i = 0; i < 20; i++)
             {
                 _syncCtx.Pump();
                 Thread.Sleep(5);
-                if (IsPlayPhase) return CombatPlayState(player);
+                if (IsPlayPhase()) return CombatPlayState(player);
                 if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
             }
-            // Final check after full wait: if combat ended, go to post-combat; else assume still in play
-            if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
             return CombatPlayState(player);
         }
 
@@ -2246,18 +2097,93 @@ public class RunSimulator
         if (player.Creature != null && player.Creature.CurrentHp > 0)
             _lastKnownHp = player.Creature.CurrentHp;
 
+        // Alive enemies in the same order play_card's AnyEnemy targeting uses, so
+        // damage_by_target[i].target_index aligns with the target_index clients pass.
+        var aliveEnemiesForTargeting = combatState?.Enemies?
+            .Where(e => e != null && e.IsAlive).ToList() ?? new();
+
         var hand = pcs?.Hand?.Cards?.Select((c, i) =>
         {
-            // Extract actual stat values from DynamicVars
+            // Export the *currently resolved* stat values, not the card base: refresh the
+            // DynamicVar previews (mirrors NCard.UpdateVisuals) so damage reflects Strength/Weak,
+            // block reflects Frail, calculateddamage reflects current Block, etc. ClearPreview
+            // resets PreviewValue to BaseValue, and only damage/block/calculated vars override it,
+            // so reading PreviewValue uniformly is safe. Issues #65 #69 #70 #71 #74 #75.
             var stats = new Dictionary<string, object?>();
             try
             {
+                c.DynamicVars.ClearPreview();
+                c.UpdateDynamicVarPreview(
+                    MegaCrit.Sts2.Core.Entities.Cards.CardPreviewMode.Normal,
+                    c.CurrentTarget, c.DynamicVars);
                 foreach (var dv in c.DynamicVars.Values)
                 {
-                    stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue;
+                    stats[dv.Name.ToLowerInvariant()] = (int)dv.PreviewValue;
                 }
+                // Restore the live card to base state. UpdateDynamicVarPreview mutates the
+                // card's preview (and for self-cost cards like Momentum Strike, leaving it in
+                // preview state corrupts the subsequent PlayCardAction — card stays in hand).
+                c.DynamicVars.ClearPreview();
             }
             catch { }
+
+            // Per-target resolved damage for attack cards: the scalar `stats` above use the
+            // card's CurrentTarget, but a single value can't capture target-specific modifiers
+            // (Vulnerable #60, Slow #77) or conditional hit counts (Dismantle #78, X-cost
+            // Whirlwind #82). Re-run the preview per enemy via MultiCreatureTargeting, the same
+            // path the game uses to draw multi-target previews, and read the resolved vars.
+            List<Dictionary<string, object?>>? damageByTarget = null;
+            if (c.Type == CardType.Attack && aliveEnemiesForTargeting.Count > 0
+                && (c.TargetType == TargetType.AnyEnemy || c.TargetType == TargetType.AllEnemies))
+            {
+                damageByTarget = new List<Dictionary<string, object?>>();
+                for (int ti = 0; ti < aliveEnemiesForTargeting.Count; ti++)
+                {
+                    var tgt = aliveEnemiesForTargeting[ti];
+                    try
+                    {
+                        c.DynamicVars.ClearPreview();
+                        c.UpdateDynamicVarPreview(
+                            MegaCrit.Sts2.Core.Entities.Cards.CardPreviewMode.MultiCreatureTargeting,
+                            tgt, c.DynamicVars);
+                        var tstats = new Dictionary<string, object?>();
+                        foreach (var dv in c.DynamicVars.Values)
+                            tstats[dv.Name.ToLowerInvariant()] = (int)dv.PreviewValue;
+
+                        // Per-hit damage = calculateddamage (override cards) or damage.
+                        int? perHit = tstats.TryGetValue("calculateddamage", out var cdv) && cdv is int cdi && cdi > 0
+                            ? cdi
+                            : (tstats.TryGetValue("damage", out var dv2) && dv2 is int di ? di : (int?)null);
+                        // Hit count: explicit `repeat` var if present, else for X-cost attacks
+                        // the hit count is the current X (= available energy), e.g. Whirlwind (#82).
+                        int repeat = tstats.TryGetValue("repeat", out var rv) && rv is int ri && ri > 0 ? ri : 1;
+                        if (repeat == 1 && c.EnergyCost?.CostsX == true && pcs != null)
+                            repeat = pcs.Energy;
+                        // Dismantle hits twice when the target is Vulnerable (#78). The doubled
+                        // hit count lives in Dismantle.OnPlay, not in any DynamicVar preview or
+                        // the Hook.ModifyAttackHitCount path (which needs an AttackCommand we
+                        // don't have at preview time), so it's special-cased by card entry.
+                        if (repeat == 1 && c.Id.Entry == "DISMANTLE" && tgt.Powers != null
+                            && tgt.Powers.Any(p => p?.Id.Entry == "VULNERABLE_POWER"))
+                            repeat = 2;
+
+                        var row = new Dictionary<string, object?>
+                        {
+                            ["target_index"] = ti,
+                            ["name"] = _loc.Monster(tgt.Monster?.Id.Entry ?? "UNKNOWN"),
+                        };
+                        if (perHit != null) row["damage"] = perHit;
+                        if (repeat > 1)
+                        {
+                            row["repeat"] = repeat;
+                            if (perHit != null) row["total_damage"] = perHit * repeat;
+                        }
+                        damageByTarget.Add(row);
+                    }
+                    catch { }
+                    finally { c.DynamicVars.ClearPreview(); }
+                }
+            }
 
             // Use CurrentStarCost (combat-modified) for UI/can_play; BaseStarCost ignores temporary reductions.
             var starCost = c.CurrentStarCost;
@@ -2293,6 +2219,8 @@ public class RunSimulator
                 cardInfo["affliction"] = _loc.Bilingual("afflictions", c.Affliction.Id.Entry + ".title");
                 try { if (c.Affliction.Amount != 0) cardInfo["affliction_amount"] = c.Affliction.Amount; } catch { }
             }
+            if (damageByTarget != null && damageByTarget.Count > 0)
+                cardInfo["damage_by_target"] = damageByTarget;
             return cardInfo;
         }).ToList() ?? new();
 
@@ -2319,8 +2247,22 @@ public class RunSimulator
                             {
                                 try
                                 {
-                                    intentInfo["damage"] = atk.GetTotalDamage(playerCreatures, e);
-                                    if (atk.Repeats > 1) intentInfo["hits"] = atk.Repeats;
+                                    // For multi-hit attacks, expose per-hit `damage` (matching the
+                                    // game's intent description, which pairs GetSingleDamage with
+                                    // Repeat) plus an explicit `total_damage`. Reporting the total in
+                                    // `damage` while also reporting `hits` let clients compute
+                                    // damage*hits and double-count incoming damage (#67).
+                                    var hits = atk.Repeats;
+                                    if (hits > 1)
+                                    {
+                                        intentInfo["damage"] = atk.GetSingleDamage(playerCreatures, e);
+                                        intentInfo["hits"] = hits;
+                                        intentInfo["total_damage"] = atk.GetTotalDamage(playerCreatures, e);
+                                    }
+                                    else
+                                    {
+                                        intentInfo["damage"] = atk.GetTotalDamage(playerCreatures, e);
+                                    }
                                 }
                                 catch { }
                             }
@@ -2430,55 +2372,40 @@ public class RunSimulator
         Log($"Post-combat: RoomType={combatRoom.RoomType}, IsPreFinished={combatRoom.IsPreFinished}");
         _syncCtx.Pump();
 
-        // Generate rewards manually instead of using TestMode auto-accept.
-        // Pump-while-waiting: Harmony patches fail on CoreCLR 10.0.5 so Task.Yield()
-        // continuations post to InlineSyncCtx but .GetResult() would deadlock because
-        // main thread is blocked. We pump InlineSyncCtx while waiting for completion.
+        // Generate rewards manually instead of using TestMode auto-accept
         if (_pendingRewards == null && !_rewardsProcessed)
         {
             _goldBeforeCombat = player.Gold;
             try
             {
-                Log("[DBG-POSTCOMBAT] Creating RewardsSet");
                 var rewardsSet = new RewardsSet(player).WithRewardsFromRoom(combatRoom);
-                Log("[DBG-POSTCOMBAT] Calling GenerateWithoutOffering");
-                var genTask = rewardsSet.GenerateWithoutOffering();
-                Log($"[DBG-POSTCOMBAT] GenerateWithoutOffering task started, IsCompleted={genTask.IsCompleted}");
-                PumpWhileWaiting(genTask, 10.0, "GenerateWithoutOffering");
-                // v0.111 made this return a bare Task — the generated rewards
-                // now live on the set itself rather than the task result.
+                // build 23372702: GenerateWithoutOffering() now returns Task (void);
+                // generated rewards live on rewardsSet.Rewards afterwards.
+                rewardsSet.GenerateWithoutOffering().GetAwaiter().GetResult();
                 var rewards = rewardsSet.Rewards;
-                Log($"[DBG-POSTCOMBAT] GenerateWithoutOffering done, rewards={(rewards == null ? "null" : "ok")}");
                 _syncCtx.Pump();
 
-                if (rewards == null)
+                // Auto-collect gold and potions, but present card choices to agent
+                var cardRewards = new List<CardReward>();
+                foreach (var reward in rewards)
                 {
-                    Log("GenerateWithoutOffering returned null — skipping rewards");
+                    if (reward is GoldReward || reward is MegaCrit.Sts2.Core.Rewards.RelicReward
+                        || reward is MegaCrit.Sts2.Core.Rewards.PotionReward)
+                    {
+                        try { reward.SelectUnsynchronized().GetAwaiter().GetResult(); _syncCtx.Pump(); }
+                        catch (Exception ex) { Log($"Auto-collect reward: {ex.Message}"); }
+                    }
+                    else if (reward is CardReward cr)
+                    {
+                        cardRewards.Add(cr);
+                    }
                 }
-                else
-                {
-                    // Auto-collect gold and potions, but present card choices to agent
-                    var cardRewards = new List<CardReward>();
-                    foreach (var reward in rewards)
-                    {
-                        if (reward is GoldReward || reward is MegaCrit.Sts2.Core.Rewards.RelicReward
-                            || reward is MegaCrit.Sts2.Core.Rewards.PotionReward)
-                        {
-                            try { PumpWhileWaiting(reward.SelectUnsynchronized(), 5.0, "SelectReward"); _syncCtx.Pump(); }
-                            catch (Exception ex) { Log($"Auto-collect reward: {ex.Message}"); }
-                        }
-                        else if (reward is CardReward cr)
-                        {
-                            cardRewards.Add(cr);
-                        }
-                    }
 
-                    if (cardRewards.Count > 0)
-                    {
-                        _pendingCardReward = cardRewards[0];
-                        _pendingRewards = rewards;
-                        return CardRewardState(player, combatRoom);
-                    }
+                if (cardRewards.Count > 0)
+                {
+                    _pendingCardReward = cardRewards[0];
+                    _pendingRewards = rewards;
+                    return CardRewardState(player, combatRoom);
                 }
 
                 _pendingRewards = null;
@@ -2491,35 +2418,26 @@ public class RunSimulator
         _pendingRewards = null;
         _rewardsProcessed = true;
 
-        // Boss → next act
+        // Boss → next act, OR final victory after the last act's boss (#81). Act index is
+        // 0-based and STS2 has 3 acts (0/1/2); killing the Act-3 (index 2) boss has no next
+        // act — EnterNextAct NREs and DetectDecisionPoint falls through to an empty
+        // map_select. Report victory directly in that case.
         if (combatRoom.RoomType == RoomType.Boss)
         {
+            if (_runState != null && _runState.CurrentActIndex >= 2)
+            {
+                Log($"Final boss defeated (Act {_runState.CurrentActIndex + 1}), reporting victory");
+                return GameOverState(true);
+            }
             Log("Boss defeated, entering next act");
-            // EnterNextAct() uses async continuations. If Harmony patches fail on newer CoreCLR,
-            // blocking with .GetResult() deadlocks because continuations need _syncCtx.Pump()
-            // to drain — which can't run while the main thread is blocked. Run as a Task and
-            // pump while waiting, with SuppressYield=true to make Task.Yield() a no-op when patches work.
-            YieldPatches.SuppressYield = true;
             try
             {
-                var nextActTask = RunManager.Instance.EnterNextAct();
-                var deadline = DateTime.UtcNow.AddSeconds(10);
-                while (!nextActTask.IsCompleted && DateTime.UtcNow < deadline)
-                {
-                    _syncCtx.Pump();
-                    WaitForActionExecutor();
-                    if (nextActTask.IsCompleted) break;
-                    Thread.Sleep(10);
-                }
-                if (nextActTask.IsCompleted && nextActTask.Exception != null)
-                    Log($"EnterNextAct exception: {nextActTask.Exception.InnerException?.Message}");
-                else if (!nextActTask.IsCompleted)
-                    Log("EnterNextAct timed out after 10s — proceeding");
+                RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
                 _syncCtx.Pump();
                 WaitForActionExecutor();
+                HealBetweenActs();
             }
             catch (Exception ex) { Log($"EnterNextAct: {ex.Message}"); }
-            finally { YieldPatches.SuppressYield = false; }
             return DetectDecisionPoint();
         }
 
@@ -2567,18 +2485,18 @@ public class RunSimulator
 
     private void ForceToMap()
     {
-        Log("[DBG-FORCEMAP] Calling ProceedFromTerminalRewardsScreen");
-        try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); }
+        try
+        {
+            RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
+            _syncCtx.Pump();
+        }
         catch { }
-        _syncCtx.Pump();
 
         if (_runState?.CurrentRoom is not MapRoom)
         {
-            Log("[DBG-FORCEMAP] Entering MapRoom");
-            try { PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)"); _syncCtx.Pump(); }
+            try { RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult(); _syncCtx.Pump(); }
             catch (Exception ex) { Log($"ForceToMap: {ex.Message}"); }
         }
-        Log("[DBG-FORCEMAP] Done");
     }
 
     private Dictionary<string, object?> EventChoiceState(EventRoom eventRoom)
@@ -2586,33 +2504,26 @@ public class RunSimulator
         var localEvent = RunManager.Instance.EventSynchronizer?.GetLocalEvent();
         _syncCtx.Pump();
 
-        // If we already chose an event option and the event didn't advance, force-finish
-        if (_eventOptionChosen && localEvent != null && !localEvent.IsFinished)
-        {
-            var currentOpts = localEvent.CurrentOptions;
-            var sameOptions = currentOpts != null && currentOpts.Count > 0 &&
-                _lastEventOptionCount > 0 && currentOpts.Count == _lastEventOptionCount;
-            if (sameOptions)
-            {
-                Log($"Event {localEvent.GetType().Name}: same options after choice, force-finishing");
-                _eventOptionChosen = false;
-                ForceToMap();
-                return MapSelectState();
-            }
-            // Options changed — event advanced to next page, show new options
-            _eventOptionChosen = false;
-        }
+        // Reset the choice-tracking flag once we re-export the event state. Earlier this
+        // block force-finished events whose option count was unchanged, but that incorrectly
+        // killed legitimate loops like Slippery Bridge Hold On (#59). Rely on IsFinished
+        // instead and let DetectDecisionPoint show the current options for the next choice.
+        if (_eventOptionChosen) _eventOptionChosen = false;
 
         // If event is finished, proceed to map
         if (localEvent == null || localEvent.IsFinished)
         {
             Log($"Event {localEvent?.GetType().Name ?? "null"} finished, proceeding");
-            try { PumpWhileWaiting(RunManager.Instance.ProceedFromTerminalRewardsScreen(), 5.0, "ProceedFromTerminalRewardsScreen"); _syncCtx.Pump(); }
+            try
+            {
+                RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
+                _syncCtx.Pump();
+            }
             catch { }
             // Force to map if still in event room
             if (_runState?.CurrentRoom is EventRoom)
             {
-                try { PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)"); _syncCtx.Pump(); }
+                try { RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult(); _syncCtx.Pump(); }
                 catch { }
             }
             return _runState?.CurrentRoom is MapRoom ? MapSelectState() : DetectDecisionPoint();
@@ -2622,7 +2533,7 @@ public class RunSimulator
         if (currentOptions == null || currentOptions.Count == 0)
         {
             Log($"Event {localEvent.GetType().Name} has no options, auto-skipping");
-            try { PumpWhileWaiting(RunManager.Instance.EnterRoom(new MapRoom()), 5.0, "EnterRoom(Map)"); _syncCtx.Pump(); }
+            try { RunManager.Instance.EnterRoom(new MapRoom()).GetAwaiter().GetResult(); _syncCtx.Pump(); }
             catch { }
             return MapSelectState();
         }
@@ -2706,6 +2617,22 @@ public class RunSimulator
                             foreach (var dv in mutable.DynamicVars.Values)
                                 optVars[dv.Name] = (int)dv.BaseValue;
                         }
+                    }
+                    catch { }
+                }
+
+                // `RandomCard` (Slippery Bridge / Overcome) carries a *deck index*, but the
+                // description template `{RandomCard}` should render that deck card's name. Resolve
+                // it to the localized name so clients can substitute it (#58). Scoped to this var
+                // name on purpose: other card vars (e.g. Wood Carvings' BirdCard/ToricCard) index
+                // a transform-target pool, not the deck, so a generic rule would mis-resolve them.
+                if (optVars != null && optVars.TryGetValue("RandomCard", out var rcVal) && rcVal is int rcIdx)
+                {
+                    try
+                    {
+                        var deck = _runState?.Players?[0]?.Deck?.Cards;
+                        if (deck != null && rcIdx >= 0 && rcIdx < deck.Count && deck[rcIdx] != null)
+                            optVars["RandomCard"] = _loc.Card(deck[rcIdx].Id.Entry);
                     }
                     catch { }
                 }
@@ -2796,8 +2723,16 @@ public class RunSimulator
                     if (card != null)
                     {
                         cardCost = card.EnergyCost?.GetResolved() ?? 0;
-                        var mutable = card.ToMutable();
-                        foreach (var dv in mutable.DynamicVars.Values)
+                        // The shop entry's card can have uninitialized DynamicVars (stats: null
+                        // while after_upgrade is populated, #68). Read base stats from a fresh
+                        // ModelDb clone at the card's current upgrade level, like GetUpgradedInfo.
+                        var fresh = ModelDb.GetById<CardModel>(card.Id).ToMutable();
+                        for (int u = 0; u < card.CurrentUpgradeLevel; u++)
+                        {
+                            fresh.UpgradeInternal();
+                            fresh.FinalizeUpgradeInternal();
+                        }
+                        foreach (var dv in fresh.DynamicVars.Values)
                             stats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue;
                     }
                 }
@@ -2858,15 +2793,64 @@ public class RunSimulator
         // Treasure rooms give relics via TreasureRoomRelicSynchronizer
         Log("Treasure room — collecting rewards");
 
-        // BUG-013: Ensure any pending relic picking session is complete before starting new one
         WaitForActionExecutor();
         _syncCtx.Pump();
 
+        // TreasureRoom.EnterInternal opens a relic-picking session (BeginRelicPicking) that the
+        // headless must drive, otherwise (a) no relic is ever awarded and (b) the session stays
+        // open so the NEXT treasure room's BeginRelicPicking throws "relic picking session while
+        // one was already occurring!" (issue #56). Auto-pick the first offered relic: PickRelicLocally
+        // enqueues a PickRelicAction whose execution awards the relic and ends the session
+        // (OnPicked -> EndRelicVoting). An empty offer is closed with CompleteWithNoRelics.
         try
         {
-            PumpWhileWaiting(treasureRoom.DoNormalRewards(), 5.0, "DoNormalRewards");
+            var relicSync = RunManager.Instance.TreasureRoomRelicSynchronizer;
+            if (relicSync?.CurrentRelics != null)
+            {
+                // The actual relic grant normally lives in the UI node's RelicsAwarded handler
+                // (RelicCmd.Obtain per result), which is absent in headless. Capture the awarded
+                // results, then grant them ourselves after the pick resolves (granting inside the
+                // event — mid action-execution — risks re-entrancy).
+                List<MegaCrit.Sts2.Core.Entities.TreasureRelicPicking.RelicPickingResult>? awarded = null;
+                Action<List<MegaCrit.Sts2.Core.Entities.TreasureRelicPicking.RelicPickingResult>> capture = r => awarded = r;
+                relicSync.RelicsAwarded += capture;
+                try
+                {
+                    if (relicSync.CurrentRelics.Count > 0)
+                    {
+                        Log($"Auto-picking treasure relic 0 of {relicSync.CurrentRelics.Count}");
+                        relicSync.PickRelicLocally(0);
+                    }
+                    else
+                    {
+                        relicSync.CompleteWithNoRelics();
+                    }
+                    _syncCtx.Pump();
+                    WaitForActionExecutor();
+                    _syncCtx.Pump();
+                }
+                finally { relicSync.RelicsAwarded -= capture; }
+
+                if (awarded != null)
+                {
+                    foreach (var res in awarded)
+                    {
+                        if (res.relic != null && res.player != null)
+                            RelicCmd.Obtain(res.relic.ToMutable(), res.player).GetAwaiter().GetResult();
+                    }
+                    _syncCtx.Pump();
+                    WaitForActionExecutor();
+                    _syncCtx.Pump();
+                }
+            }
+        }
+        catch (Exception ex) { Log($"Treasure relic pick: {ex.Message}"); }
+
+        try
+        {
+            treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
             _syncCtx.Pump();
-            PumpWhileWaiting(treasureRoom.DoExtraRewardsIfNeeded(), 5.0, "DoExtraRewardsIfNeeded");
+            treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
             _syncCtx.Pump();
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("relic picking session"))
@@ -2877,9 +2861,9 @@ public class RunSimulator
             _syncCtx.Pump();
             try
             {
-                PumpWhileWaiting(treasureRoom.DoNormalRewards(), 5.0, "DoNormalRewards");
+                treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
                 _syncCtx.Pump();
-                PumpWhileWaiting(treasureRoom.DoExtraRewardsIfNeeded(), 5.0, "DoExtraRewardsIfNeeded");
+                treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
                 _syncCtx.Pump();
             }
             catch (Exception retryEx) { Log($"Treasure rewards retry failed: {retryEx.Message}"); }
@@ -2888,6 +2872,24 @@ public class RunSimulator
 
         ForceToMap();
         return MapSelectState();
+    }
+
+    /// <summary>Drive a task to completion on the inline sync context, bounded.</summary>
+    private void PumpWhileWaiting(Task task, double timeoutSeconds = 5.0, string? label = null)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (!task.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            SynchronizationContext.SetSynchronizationContext(_syncCtx);
+            _syncCtx.Pump();
+            WaitForActionExecutor();
+            if (task.IsCompleted) break;
+            Thread.Sleep(1);
+        }
+        if (!task.IsCompleted)
+            Log($"PumpWhileWaiting[{label ?? "task"}] timed out after {timeoutSeconds}s");
+        else if (task.IsFaulted)
+            Log($"PumpWhileWaiting[{label ?? "task"}] faulted: {task.Exception?.InnerException?.Message}");
     }
 
     private Dictionary<string, object?> GameOverState(bool isVictory)
@@ -2939,84 +2941,11 @@ public class RunSimulator
                     if (!executor.IsRunning) break;
                     Thread.Sleep(1);
                 }
-                if (executor.IsRunning)
-                    Log("[DBG-WAE] WaitForActionExecutor timed out (executor still running after 1s)");
             }
         }
         catch (Exception ex)
         {
             Log($"WaitForActionExecutor exception: {ex.Message}");
-        }
-    }
-
-    // Pump InlineSyncCtx while waiting for an async Task to complete.
-    // Harmony patches fail on CoreCLR 10.0.5, so Task.Yield() continuations post to
-    // InlineSyncCtx rather than running inline. Blocking with .GetResult() deadlocks;
-    // this helper drains the queue in a loop so continuations can make progress.
-    private void PumpWhileWaiting(Task task, double timeoutSeconds = 5.0, string? label = null)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-        while (!task.IsCompleted && DateTime.UtcNow < deadline)
-        {
-            SynchronizationContext.SetSynchronizationContext(_syncCtx);
-            _syncCtx.Pump();
-            WaitForActionExecutor();
-            if (task.IsCompleted) break;
-            Thread.Sleep(1);
-        }
-        if (!task.IsCompleted)
-            Log($"PumpWhileWaiting[{label ?? "task"}] timed out after {timeoutSeconds}s");
-        else if (task.IsFaulted)
-            Log($"PumpWhileWaiting[{label ?? "task"}] faulted: {task.Exception?.InnerException?.Message}");
-    }
-
-    private T? PumpWhileWaiting<T>(Task<T> task, double timeoutSeconds = 5.0, string? label = null)
-    {
-        PumpWhileWaiting((Task)task, timeoutSeconds, label);
-        return task.IsCompletedSuccessfully ? task.Result : default;
-    }
-
-    /// <summary>
-    /// BUG-027: After TurnStarted fires, start-of-turn actions (energy reset, card draw)
-    /// are still pending as Task.Yield() continuations.  Without SuppressYield=true those
-    /// continuations get posted to ThreadPool and never complete in headless mode, leaving
-    /// energy=0 and hand empty for every subsequent end_turn call.
-    /// Call this immediately after detecting _turnStarted.IsSet or IsPlayPhase=true to
-    /// flush those continuations inline.
-    /// </summary>
-    private void PumpStartOfTurnSetup(Player player, int prevRound = -1)
-    {
-        if (!IsPlayPhase) return;
-        YieldPatches.SuppressYield = true;
-        try
-        {
-            // Hard 5s deadline: each WaitForActionExecutor can take up to 1s; without a
-            // deadline a stuck executor would loop 60 × 1s = 60s → Python timeout crash.
-            var deadline = DateTime.UtcNow.AddSeconds(5.0);
-            for (int i = 0; i < 60 && DateTime.UtcNow < deadline; i++)
-            {
-                WaitForActionExecutor();
-                _syncCtx.Pump();
-                var pcs = player.PlayerCombatState;
-                int drawLeft = (pcs?.DrawPile?.Cards?.Count ?? 0)
-                             + (pcs?.DiscardPile?.Cards?.Count ?? 0);
-                // Done when energy is restored, or cards appear in hand,
-                // or the deck is genuinely empty (nothing left to draw).
-                bool turnDataReady = (pcs?.Energy ?? 0) > 0
-                    || (pcs?.Hand?.Cards?.Count ?? 0) > 0
-                    || drawLeft == 0;
-                // Also require round to have advanced past prevRound so DetectDecisionPoint()
-                // doesn't return stale round=N — Python stuck detection fires if round unchanged.
-                int curRound = CombatManager.Instance.DebugOnlyGetState()?.RoundNumber ?? 0;
-                bool roundAdvanced = prevRound <= 0 || curRound > prevRound;
-                if (turnDataReady && roundAdvanced)
-                    break;
-                Thread.Sleep(5);
-            }
-        }
-        finally
-        {
-            YieldPatches.SuppressYield = false;
         }
     }
 
@@ -3027,9 +2956,9 @@ public class RunSimulator
         {
             _syncCtx.Pump();
             if (!CombatManager.Instance.IsInProgress) return;
-            if (IsPlayPhase) return;
+            if (IsPlayPhase()) return;
             WaitForActionExecutor();
-            if (IsPlayPhase || !CombatManager.Instance.IsInProgress) return;
+            if (IsPlayPhase() || !CombatManager.Instance.IsInProgress) return;
             Thread.Sleep(5);
         }
     }
@@ -3112,7 +3041,7 @@ public class RunSimulator
                 var dstats = new Dictionary<string, object?>();
                 try { foreach (var dv in c.DynamicVars.Values) dstats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
                 var dkws = c.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
-                return new Dictionary<string, object?>
+                var dcard = new Dictionary<string, object?>
                 {
                     ["id"] = c.Id.ToString(),
                     ["name"] = _loc.Card(c.Id.Entry),
@@ -3124,6 +3053,19 @@ public class RunSimulator
                     ["keywords"] = dkws?.Count > 0 ? dkws : null,
                     ["after_upgrade"] = GetUpgradedInfo(c),
                 };
+                // Enchantment/affliction metadata, matching the combat hand export so clients
+                // can see e.g. Slither applied to a deck card after an event (#76).
+                if (c.Enchantment != null)
+                {
+                    dcard["enchantment"] = _loc.Bilingual("enchantments", c.Enchantment.Id.Entry + ".title");
+                    try { if (c.Enchantment.Amount != 0) dcard["enchantment_amount"] = c.Enchantment.Amount; } catch { }
+                }
+                if (c.Affliction != null)
+                {
+                    dcard["affliction"] = _loc.Bilingual("afflictions", c.Affliction.Id.Entry + ".title");
+                    try { if (c.Affliction.Amount != 0) dcard["affliction_amount"] = c.Affliction.Amount; } catch { }
+                }
+                return dcard;
             }).ToList(),
         };
     }
@@ -3168,37 +3110,6 @@ public class RunSimulator
 
         TestMode.IsOn = true;
 
-        // v0.111 added a mod system, and StartRun now reaches ReflectionHelper.ModTypes,
-        // which throws while ModManager.State is None. The real Initialize() wants Steam
-        // and file IO we do not have headless, so declare mod loading Skipped — that is
-        // the "finished, no mods" state, which is exactly true here.
-        try
-        {
-            var mm = typeof(MegaCrit.Sts2.Core.Modding.ModManager);
-            mm.GetProperty("State", BindingFlags.Public | BindingFlags.Static)!
-              .SetValue(null, MegaCrit.Sts2.Core.Modding.ModManagerState.Skipped);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[WARN] ModManager.State: {ex.Message}");
-        }
-
-        // v0.111 gates card/relic model serialization behind this cache. Without it
-        // CardPileCmd.Add throws "used before it was initialized" — which the reward
-        // path caught and discarded, so every card reward silently added nothing and
-        // every run finished Act 1 on its starting deck.
-        try
-        {
-            // AssemblyInfo feeds the ContentSorter that the cache walks, so the
-            // chain has to be initialized from the bottom up.
-            MegaCrit.Sts2.Core.Modding.AssemblyInfo.Init();
-            MegaCrit.Sts2.Core.Multiplayer.Serialization.ModelIdSerializationCache.Init();
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[WARN] ModelIdSerializationCache.Init: {ex.Message}");
-        }
-
         // Install inline sync context on main thread
         SynchronizationContext.SetSynchronizationContext(_syncCtx);
 
@@ -3218,6 +3129,12 @@ public class RunSimulator
         try { SaveManager.Instance.InitProfileId(0); }
         catch (Exception ex) { Console.Error.WriteLine($"[WARN] SaveManager.InitProfileId: {ex.Message}"); }
 
+        // Initialize PrefsSave (FastMode etc.). build 23372702 reads PrefsSave.FastMode
+        // from many gameplay paths (e.g. Slice.OnPlay anim delay); without this the
+        // PrefsSave getter returns null and those paths NRE.
+        try { SaveManager.Instance.InitPrefsDataForTest(); }
+        catch (Exception ex) { Console.Error.WriteLine($"[WARN] SaveManager.InitPrefsDataForTest: {ex.Message}"); }
+
         // Initialize progress data for epoch/timeline tracking
         try { SaveManager.Instance.InitProgressData(); }
         catch (Exception ex) { Console.Error.WriteLine($"[WARN] InitProgressData: {ex.Message}"); }
@@ -3232,15 +3149,9 @@ public class RunSimulator
         // because there's no Godot scene tree, causing the ActionExecutor to deadlock.
         PatchCmdWait();
 
-        // Patch VFX helpers (PlayerHurtVignetteHelper.Play, NLowHpBorderVfx.Create) to no-ops.
-        // KinPriest.BeamMove damages the player → VFX chain crashes with NullReferenceException
-        // in headless mode → ActionExecutor dies → combat stuck after 10s timeout.
-        PatchVfx();
-
-        // Pre-populate the game's internal AssetCache with stub PackedScene entries.
-        // NLowHpBorderVfx.Create() calls AssetCache.Get("res://scenes/vfx/ui/vfx_low_hp_border.tscn")
-        // which returns null in headless (not in pak cache) → NullReferenceException.
-        PreloadVfxAssets();
+        // Patch TalkCmd.Play to a no-op (issue #64). Monster speech-bubble VFX during
+        // moves (e.g. BygoneEffigy.WakeMove) NRE in headless and break the enemy turn.
+        PatchTalkCmd();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3264,9 +3175,29 @@ public class RunSimulator
         }
         Console.Error.WriteLine($"[INFO] ModelDb: {registered} registered, {failed} failed out of {subtypes.Count}");
 
+        // v0.111 added a mod system, and StartRun reaches ReflectionHelper.ModTypes,
+        // which throws while ModManager.State is None. The real Initialize() wants Steam
+        // and file IO we do not have headless, so declare mod loading Skipped — that is
+        // the "finished, no mods" state, which is exactly true here.
+        try
+        {
+            typeof(MegaCrit.Sts2.Core.Modding.ModManager)
+                .GetProperty("State", BindingFlags.Public | BindingFlags.Static)!
+                .SetValue(null, MegaCrit.Sts2.Core.Modding.ModManagerState.Skipped);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] ModManager.State: {ex.Message}");
+        }
+
         // Initialize net ID serialization cache (needed for combat actions)
         try
         {
+            // AssemblyInfo feeds the ContentSorter the cache walks. Without it Init()
+            // throws "ContentSorter called before AssemblyInfo was initialized", the
+            // reward path swallows the resulting CardPileCmd.Add failure, and every
+            // card reward reports success while adding nothing.
+            MegaCrit.Sts2.Core.Modding.AssemblyInfo.Init();
             ModelIdSerializationCache.Init();
             Console.Error.WriteLine("[INFO] ModelIdSerializationCache initialized");
         }
@@ -3358,6 +3289,33 @@ public class RunSimulator
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[WARN] Failed to patch Cmd.Wait: {ex.Message}");
+        }
+    }
+
+    private static void PatchTalkCmd()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.talkpatch");
+            var talkType = typeof(CombatManager).Assembly.GetType("MegaCrit.Sts2.Core.Commands.TalkCmd");
+            var playMethod = talkType?.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                .FirstOrDefault(m => m.Name == "Play");
+            if (playMethod == null)
+            {
+                Console.Error.WriteLine("[WARN] Could not find TalkCmd.Play to patch");
+                return;
+            }
+            var prefix = typeof(YieldPatches).GetMethod(nameof(YieldPatches.TalkCmdPlayPrefix),
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+            if (prefix != null)
+            {
+                harmony.Patch(playMethod, new HarmonyMethod(prefix));
+                Console.Error.WriteLine("[INFO] Patched TalkCmd.Play() to no-op (prevents enemy-move VFX crash, issue #64)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] Failed to patch TalkCmd.Play: {ex.Message}");
         }
     }
 
@@ -3465,14 +3423,15 @@ public class RunSimulator
         private ManualResetEventSlim? _rewardWait;
         private int _rewardChoice = -1;
 
-        // v0.111 widened the return type from CardModel? to a struct carrying either a
-        // card or an alternative reward. Headless only ever picks a card, so the
-        // alternative field stays unset and `default` means skip.
+        // NOTE: STS2 build 23372702 changed ICardSelector.GetSelectedCardReward to return
+        // a CardRewardSelection struct { CardModel card; CardRewardAlternative alternative }.
+        // CardReward.OnSelect interprets: alternative != null → pick that alternative
+        // (Skip/Reroll); else card != null → take that card; both null → skip (no card kept).
         public MegaCrit.Sts2.Core.TestSupport.CardRewardSelection GetSelectedCardReward(
             IReadOnlyList<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> options,
             IReadOnlyList<CardRewardAlternative> alternatives)
         {
-            if (options.Count == 0) return default;
+            if (options.Count == 0) return default;  // Skip
 
             // Store pending and block until main loop resolves
             PendingRewardCards = options.ToList();
@@ -3487,9 +3446,8 @@ public class RunSimulator
             _rewardWait = null;
 
             if (choice >= 0 && choice < options.Count)
-                return new MegaCrit.Sts2.Core.TestSupport.CardRewardSelection
-                { card = options[choice].Card };
-            return default;  // Skip
+                return new MegaCrit.Sts2.Core.TestSupport.CardRewardSelection { card = options[choice].Card };
+            return default;  // Skip (card=null, alternative=null)
         }
 
         public bool HasPendingReward => PendingRewardCards != null && _rewardWait != null;
@@ -3526,6 +3484,19 @@ public class RunSimulator
         public static bool CmdWaitPrefix(ref Task __result)
         {
             __result = Task.CompletedTask;
+            return false; // Skip original method
+        }
+
+        /// <summary>
+        /// Harmony prefix: no-op TalkCmd.Play (issue #64). The speech-bubble VFX
+        /// (NSpeechBubbleVfx.Create + GetVfxContainer().AddChildSafely) NREs in headless,
+        /// which derails enemy moves like BygoneEffigy.WakeMove mid enemy turn and forces
+        /// the EndTurn nuclear fallback / false game_over. The bubble is purely cosmetic and
+        /// its return value is ignored by callers, so returning null is safe.
+        /// </summary>
+        public static bool TalkCmdPlayPrefix(ref MegaCrit.Sts2.Core.Nodes.Vfx.NSpeechBubbleVfx? __result)
+        {
+            __result = null;
             return false; // Skip original method
         }
     }
@@ -3881,236 +3852,6 @@ public class RunSimulator
         }
     }
 
-    // Patch PlayerHurtVignetteHelper.Play() and NLowHpBorderVfx.Create() to no-ops.
-    // When KinPriest.BeamMove() damages the player, the VFX chain calls these methods
-    // which crash with NullReferenceException in headless mode (missing Godot scene nodes),
-    // killing the ActionExecutor and leaving the combat stuck.
-    private static void PatchVfx()
-    {
-        try
-        {
-            var harmony = new Harmony("sts2headless.vfxpatch");
-            var cmdPileType = typeof(MegaCrit.Sts2.Core.Commands.CardPileCmd);
-            var asm = cmdPileType.Assembly;
-
-            // Patch PlayerHurtVignetteHelper.Play() → no-op
-            var vignetteType = asm.GetType("MegaCrit.Sts2.Core.Nodes.Vfx.PlayerHurtVignetteHelper");
-            if (vignetteType != null)
-            {
-                var play = vignetteType.GetMethod("Play",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
-                if (play != null)
-                {
-                    var prefix = typeof(VfxPatches).GetMethod(nameof(VfxPatches.NoOpPrefix),
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
-                    harmony.Patch(play, new HarmonyMethod(prefix));
-                    Console.Error.WriteLine("[INFO] Patched PlayerHurtVignetteHelper.Play() to no-op");
-                }
-            }
-            else Console.Error.WriteLine("[WARN] PlayerHurtVignetteHelper type not found");
-
-            // Patch NLowHpBorderVfx.Create() → no-op (returns null; callers must handle)
-            var lowHpType = asm.GetType("MegaCrit.Sts2.Core.Nodes.Vfx.Ui.NLowHpBorderVfx");
-            if (lowHpType != null)
-            {
-                var create = lowHpType.GetMethod("Create",
-                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
-                if (create != null)
-                {
-                    var prefix = typeof(VfxPatches).GetMethod(nameof(VfxPatches.NoOpPrefix),
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
-                    harmony.Patch(create, new HarmonyMethod(prefix));
-                    Console.Error.WriteLine("[INFO] Patched NLowHpBorderVfx.Create() to no-op");
-                }
-            }
-            else Console.Error.WriteLine("[WARN] NLowHpBorderVfx type not found");
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[WARN] PatchVfx failed: {ex.Message}");
-        }
-    }
-
-    internal static class VfxPatches
-    {
-        public static bool NoOpPrefix() => false;
-    }
-
-    // Pre-populate the game's internal AssetCache with stub PackedScene entries so that
-    // VFX factory methods (NLowHpBorderVfx.Create etc.) don't crash with NullReferenceException
-    // when calling AssetCache.Get() for scene paths not present in the headless pak cache.
-    private static void PreloadVfxAssets()
-    {
-        try
-        {
-            var cmdPileType = typeof(MegaCrit.Sts2.Core.Commands.CardPileCmd);
-            var asm = cmdPileType.Assembly;
-
-            var assetCacheType = asm.GetType("MegaCrit.Sts2.Core.Assets.AssetCache")
-                ?? asm.GetTypes().FirstOrDefault(t => t.Name == "AssetCache");
-            if (assetCacheType == null)
-            {
-                Console.Error.WriteLine("[WARN] PreloadVfxAssets: AssetCache type not found");
-                return;
-            }
-
-            // AssetCache may have multiple per-type dictionary fields.
-            // Enumerate all static/instance Dictionary<string, *> fields and inject stubs
-            // for known missing VFX paths, using the field's value type as the stub type.
-            var allFields = assetCacheType.GetFields(
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-
-            // Find the singleton instance — try static Instance/Current, then known manager types
-            object? assetCacheInstance = null;
-            foreach (var propName in new[] { "Instance", "Current", "Singleton" })
-            {
-                var p = assetCacheType.GetProperty(propName,
-                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                if (p != null) { assetCacheInstance = p.GetValue(null); break; }
-                var f = assetCacheType.GetField(propName,
-                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                if (f != null) { assetCacheInstance = f.GetValue(null); break; }
-            }
-            // Try ALL static fields on AssetCache itself (singleton may have any field name)
-            if (assetCacheInstance == null)
-            {
-                foreach (var f in assetCacheType.GetFields(
-                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public))
-                {
-                    if (f.FieldType == assetCacheType || f.FieldType.IsAssignableFrom(assetCacheType))
-                    {
-                        try { assetCacheInstance = f.GetValue(null); } catch { }
-                        if (assetCacheInstance != null) break;
-                    }
-                }
-            }
-            // Try static fields on known types that might hold AssetCache
-            if (assetCacheInstance == null)
-            {
-                foreach (var holderTypeName in new[] {
-                    "MegaCrit.Sts2.Core.Runs.RunManager",
-                    "MegaCrit.Sts2.Core.Assets.AssetManager",
-                    "MegaCrit.Sts2.Core.GameManager",
-                    "MegaCrit.Sts2.Core.Assets.AssetLoader",
-                    "MegaCrit.Sts2.Core.Assets.GameAssets",
-                })
-                {
-                    var hType = asm.GetType(holderTypeName);
-                    if (hType == null) continue;
-                    foreach (var sf in hType.GetFields(
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
-                    {
-                        if (sf.FieldType == assetCacheType)
-                        {
-                            try { assetCacheInstance = sf.GetValue(null); } catch { }
-                            if (assetCacheInstance != null) break;
-                        }
-                    }
-                    if (assetCacheInstance != null) break;
-                }
-            }
-            // Try known manager types (avoid asm.GetTypes() which throws ReflectionTypeLoadException)
-            if (assetCacheInstance == null)
-            {
-                foreach (var managerTypeName in new[] {
-                    "MegaCrit.Sts2.Core.Runs.RunManager",
-                    "MegaCrit.Sts2.Core.Assets.AssetManager",
-                    "MegaCrit.Sts2.Core.GameManager",
-                })
-                {
-                    var manType = asm.GetType(managerTypeName);
-                    if (manType == null) continue;
-                    var manInst = manType.GetProperty("Instance",
-                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public)?.GetValue(null);
-                    if (manInst == null) continue;
-                    var instBindings = System.Reflection.BindingFlags.Instance |
-                                      System.Reflection.BindingFlags.Public |
-                                      System.Reflection.BindingFlags.NonPublic;
-                    foreach (var prop in manType.GetProperties(instBindings))
-                    {
-                        if (prop.PropertyType == assetCacheType)
-                        {
-                            try { assetCacheInstance = prop.GetValue(manInst); } catch { }
-                            if (assetCacheInstance != null) break;
-                        }
-                    }
-                    if (assetCacheInstance == null)
-                    {
-                        foreach (var fld in manType.GetFields(instBindings))
-                        {
-                            if (fld.FieldType == assetCacheType)
-                            {
-                                try { assetCacheInstance = fld.GetValue(manInst); } catch { }
-                                if (assetCacheInstance != null) break;
-                            }
-                        }
-                    }
-                    if (assetCacheInstance != null) break;
-                }
-            }
-            if (assetCacheInstance == null)
-            {
-                Console.Error.WriteLine($"[WARN] PreloadVfxAssets: could not find {assetCacheType.FullName} instance — VFX crashes may persist");
-                return;
-            }
-            Console.Error.WriteLine($"[INFO] PreloadVfxAssets: found {assetCacheType.FullName} instance");
-
-            int totalAdded = 0;
-            foreach (var field in allFields)
-            {
-                if (!field.FieldType.IsGenericType) continue;
-                var typeArgs = field.FieldType.GetGenericArguments();
-                if (typeArgs.Length != 2 || typeArgs[0] != typeof(string)) continue;
-
-                var dict = field.GetValue(assetCacheInstance);
-                if (dict == null) continue;
-
-                var valueType = typeArgs[1];
-                object? stub = null;
-                try
-                {
-                    if (valueType == typeof(Godot.PackedScene)) stub = new Godot.PackedScene();
-                    else if (valueType.IsClass) stub = Activator.CreateInstance(valueType);
-                }
-                catch { continue; }
-                if (stub == null) continue;
-
-                var dictType = dict.GetType();
-                var addMethod = dictType.GetMethod("set_Item");
-                if (addMethod == null) continue;
-
-                // VFX scene paths and resource paths known to be missing in headless
-                var paths = new[] {
-                    "res://scenes/vfx/ui/vfx_low_hp_border.tscn",
-                    "res://scenes/vfx/ui/vfx_gaseous_screen.tscn",
-                    "res://scenes/vfx/ui/vfx_epoch_chains.tscn",
-                    "res://images/enchantments/missing_enchantment.png",
-                };
-                foreach (var path in paths)
-                {
-                    try
-                    {
-                        // Only add if not already present
-                        var containsKey = dictType.GetMethod("ContainsKey");
-                        bool alreadyPresent = containsKey != null && (bool)containsKey.Invoke(dict, new object[] { path })!;
-                        if (!alreadyPresent)
-                        {
-                            addMethod.Invoke(dict, new object[] { path, stub });
-                            totalAdded++;
-                        }
-                    }
-                    catch { }
-                }
-            }
-            Console.Error.WriteLine($"[INFO] PreloadVfxAssets: injected {totalAdded} stub entries across all caches in {assetCacheType.FullName}");
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[WARN] PreloadVfxAssets failed: {ex.Message}");
-        }
-    }
-
     private static void Log(string message)
     {
         Console.Error.WriteLine($"[SIM] {message}");
@@ -4140,37 +3881,6 @@ public class RunSimulator
         var rows = new List<List<Dictionary<string, object?>>>();
         var currentCoord = _runState.CurrentMapCoord;
         var visited = _runState.VisitedMapCoords;
-        var serializedCoords = new HashSet<(int col, int row)>();
-
-        var startPoint = map.StartingMapPoint;
-        if (startPoint != null)
-        {
-            var startCol = (int)startPoint.coord.col;
-            var startRow = (int)startPoint.coord.row;
-            var startChildren = startPoint.Children?.Select(ch => new Dictionary<string, object?>
-            {
-                ["col"] = (int)ch.coord.col,
-                ["row"] = (int)ch.coord.row,
-            }).ToList();
-            var isCurrent = currentCoord.HasValue &&
-                currentCoord.Value.col == startPoint.coord.col && currentCoord.Value.row == startPoint.coord.row;
-            var isVisited = currentCoord.HasValue ||
-                (visited?.Any(v => v.col == startPoint.coord.col && v.row == startPoint.coord.row) ?? false);
-
-            rows.Add(new List<Dictionary<string, object?>>
-            {
-                new()
-                {
-                    ["col"] = startCol,
-                    ["row"] = startRow,
-                    ["type"] = startPoint.PointType.ToString(),
-                    ["children"] = startChildren,
-                    ["visited"] = isVisited,
-                    ["current"] = isCurrent,
-                },
-            });
-            serializedCoords.Add((startCol, startRow));
-        }
 
         for (int row = 0; row < map.GetRowCount(); row++)
         {
@@ -4178,7 +3888,6 @@ public class RunSimulator
             foreach (var point in map.GetPointsInRow(row))
             {
                 if (point == null) continue;
-                if (!serializedCoords.Add(((int)point.coord.col, (int)point.coord.row))) continue;
                 var children = point.Children?.Select(ch => new Dictionary<string, object?>
                 {
                     ["col"] = (int)ch.coord.col,

@@ -151,3 +151,14 @@ A typical run starts with a Neow `event_choice` — agents must handle this init
 - `python/play_full_run.py` — batch testing tool
 - `lib/` — game DLLs (not in repo, copied by setup.sh)
 - `localization_eng/`, `localization_zhs/` — bilingual loc data
+
+## Conventions
+
+- **Event completion**: trust `localEvent.IsFinished`. Never gate on "option count unchanged after a choice" — events legitimately loop on the same page (Slippery Bridge Hold On) and post-selection continuations (heal/enchant/add-card) often run on the same options page; force-finishing kills them silently.
+- **Async selection continuations**: any path whose effect can open a card_select / card_reward / bundle (event option, shop relic pickup, etc.) must run on `Task.Run(...)` and yield as soon as `_cardSelector.HasPending` / `HasPendingReward` / `_pendingBundles != null` appears. The Task completes naturally once the external `select_cards` feeds the selector's TCS. Reference shape: `DoChooseOption`, `DoBuyRelic`.
+- **DynamicVar preview during serialization**: `UpdateDynamicVarPreview` mutates the live card. Bracket reads with `ClearPreview` **before and after** — leaving the card in preview state corrupts subsequent play actions (Momentum Strike `PlayCardAction` failure).
+
+## Protocol notes
+
+- `card_select` decision uses key `cards` (not `options`) and action `select_cards` with comma-separated `indices`.
+- `AnyEnemy` cards/potions require `target_index` when ≥2 enemies are alive; with a single alive enemy the adapter auto-targets.

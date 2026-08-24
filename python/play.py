@@ -1583,7 +1583,7 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                         return
                 print(f"\r  {c(t('Replay complete!','回放完成!'), 'green')}" + " " * 30)
                 print()
-        print(f"\n{c(t('Slay the Spire 2 — Headless CLI', '杀戮尖塔 2 — 无头模式'), 'bold')}")
+        print(f"\n{c(t('Slay the Spire 2 — Headless CLI', '杀戮尖塔 2 — 终端版'), 'bold')}")
         if native_save_path:
             p = state.get("player", {}) if state else {}
             ctx = state.get("context", {}) if state else {}

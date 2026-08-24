@@ -20,5 +20,8 @@
   "RINGING.extraCardText": "Ringing.",
   "RINGING.title": "Ringing",
   "SMOG.description": "You cannot play additional [gold]Skills[/gold] this turn. Clears at the end of the turn.",
-  "SMOG.title": "Smog"
+  "SMOG.title": "Smog",
+  "TAINTED.description": "Gain [blue]{Amount}[/blue] [gold]Tainted[/gold] when played.",
+  "TAINTED.extraCardText": "Gain {Amount} Tainted.",
+  "TAINTED.title": "Tainted"
 }

@@ -1,1 +1,2 @@
-45 tables at 03/20/2026 18:40:50
+Synced from Slay the Spire 2.pck (v0.106.1, build 23372702) on 2026-05-27
+46 tables

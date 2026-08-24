@@ -13,6 +13,8 @@
   "LIGHTNING_ORB.description": "Orb: Deals damage to random enemies.",
   "LIGHTNING_ORB.smartDescription": "[gold]Passive:[/gold] At the end of turn, deal [blue]{Passive}[/blue] damage to a random enemy.\n[gold]Evoke:[/gold] Deal [blue]{Evoke}[/blue] damage to a random enemy.",
   "LIGHTNING_ORB.title": "Lightning",
+  "MOCK_COMBAT_CLEANUP_ORB.description": "",
+  "MOCK_COMBAT_CLEANUP_ORB.title": "Mock Combat Cleanup",
   "PLASMA_ORB.description": "Orb: Gains Energy.",
   "PLASMA_ORB.smartDescription": "[gold]Passive:[/gold] At the start of turn,\ngain {energyPrefix:energyIcons(1)}.\n[gold]Evoke:[/gold] Gain {energyPrefix:energyIcons(2)}.\nPlasma is unaffected by [gold]Focus[/gold].",
   "PLASMA_ORB.title": "Plasma"
