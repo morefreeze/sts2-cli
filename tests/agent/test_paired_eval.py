@@ -1,5 +1,4 @@
 import json
-import math
 
 import pytest
 
@@ -163,28 +162,36 @@ def test_pair_arms_treats_missing_room_fields_as_zero_fights(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_paired_stats_known_value_regression():
-    # a = [10, 12, 14], b = [12, 13, 20] -> diffs = [2, 1, 6]
+    # a = [10, 12, 14], b = [12, 13, 20] -> diffs = [2, 1, 6].
+    #
+    # Expected numbers below are LITERALS, independently hand/script-derived
+    # from the fixture, not re-derived here via the same formula the
+    # implementation uses (that would make this test circular: a shared
+    # formula bug, e.g. dividing by sqrt(n-1) instead of sqrt(n) in `se`,
+    # would pass a test that recomputes its expectation the same broken way).
+    #
+    # By hand: mean_diff = (2+1+6)/3 = 3.0
+    #   sample variance (ddof=1) = ((2-3)^2 + (1-3)^2 + (6-3)^2) / (3-1)
+    #                            = (1 + 4 + 9) / 2 = 7.0
+    #   se = sqrt(7.0) / sqrt(3) = 2.6457513110645907 / 1.7320508075688772
+    #      = 1.5275252316519468
+    #   t  = mean_diff / se = 3.0 / 1.5275252316519468 = 1.9639610121239313
+    #   p  = erfc(|t| / sqrt(2)) = erfc(1.388730105...) = 0.04953461343562678
+    # Cross-checked with a standalone `python3 -c "..."` script that does not
+    # import agent.paired_eval at all, and with the closed form
+    # t/sqrt(2) = 3*sqrt(3/14) as an independent sanity check on `t`.
     a = [10, 12, 14]
     b = [12, 13, 20]
 
     stats = paired_stats(a, b)
 
-    diffs = [2, 1, 6]
-    expected_mean_diff = sum(diffs) / 3
-    # sample std, ddof=1: variance = sum((x-mean)^2)/(n-1)
-    mean = expected_mean_diff
-    variance = sum((d - mean) ** 2 for d in diffs) / 2
-    expected_se = math.sqrt(variance) / math.sqrt(3)
-    expected_t = expected_mean_diff / expected_se
-    expected_p = math.erfc(abs(expected_t) / math.sqrt(2))
-
     assert stats["n"] == 3
     assert stats["mean_a"] == pytest.approx(12.0)
     assert stats["mean_b"] == pytest.approx(15.0)
-    assert stats["mean_diff"] == pytest.approx(expected_mean_diff)
-    assert stats["se"] == pytest.approx(expected_se)
-    assert stats["t"] == pytest.approx(expected_t)
-    assert stats["p"] == pytest.approx(expected_p)
+    assert stats["mean_diff"] == pytest.approx(3.0)
+    assert stats["se"] == pytest.approx(1.5275252316519468)
+    assert stats["t"] == pytest.approx(1.9639610121239313)
+    assert stats["p"] == pytest.approx(0.04953461343562678)
 
 
 def test_paired_stats_n_equals_one_returns_none_stats():

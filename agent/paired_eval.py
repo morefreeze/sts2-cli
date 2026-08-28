@@ -301,15 +301,21 @@ def compare(path_a, path_b, *, label_a: str = "A", label_b: str = "B") -> dict:
         "label_b": label_b,
         "path_a": os.fspath(path_a),
         "path_b": os.fspath(path_b),
+        # unique_seeds/duplicates_collapsed come off `pairing`, not back out of
+        # arm_a/arm_b["diagnostics"], so there is exactly one place that
+        # derives them from the loaded rows — pair_arms() — rather than two
+        # copies that could drift. `valid_seeds` has no such second copy (it
+        # is not part of pairing accounting), so it is read straight off the
+        # arm's own diagnostics.
         "arm_a": {
-            "unique_seeds": arm_a["diagnostics"]["unique_seeds"],
+            "unique_seeds": pairing.unique_seeds_a,
             "valid_seeds": arm_a["diagnostics"]["valid_seeds"],
-            "duplicates_collapsed": arm_a["diagnostics"]["duplicates_collapsed"],
+            "duplicates_collapsed": pairing.duplicates_a,
         },
         "arm_b": {
-            "unique_seeds": arm_b["diagnostics"]["unique_seeds"],
+            "unique_seeds": pairing.unique_seeds_b,
             "valid_seeds": arm_b["diagnostics"]["valid_seeds"],
-            "duplicates_collapsed": arm_b["diagnostics"]["duplicates_collapsed"],
+            "duplicates_collapsed": pairing.duplicates_b,
         },
         "pairs": len(pairing.seeds),
         "only_in_a": pairing.only_in_a,
