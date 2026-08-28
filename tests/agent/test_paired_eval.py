@@ -6,7 +6,9 @@ import pytest
 from agent.paired_eval import (
     PairingResult,
     compare,
+    format_report,
     load_arm,
+    main,
     pair_arms,
     paired_stats,
 )
@@ -279,3 +281,78 @@ def test_compare_win_metric_is_zero_one_indicator(tmp_path):
     assert win_stats["mean_a"] == pytest.approx(0.5)
     assert win_stats["mean_b"] == pytest.approx(0.5)
     assert win_stats["mean_diff"] == pytest.approx(0.0)
+
+
+def test_compare_surfaces_unique_seed_and_duplicate_diagnostics(tmp_path):
+    path_a = write_jsonl(tmp_path / "a.jsonl", [
+        result_row("s1", floor=10),
+        result_row("s1", floor=11),  # duplicate, collapsed
+        result_row("s2", floor=12),
+    ])
+    path_b = write_jsonl(tmp_path / "b.jsonl", [
+        result_row("s1", floor=13),
+        result_row("s2", floor=14),
+    ])
+
+    result = compare(path_a, path_b)
+
+    assert result["arm_a"]["unique_seeds"] == 2
+    assert result["arm_a"]["duplicates_collapsed"] == 1
+    assert result["arm_a"]["valid_seeds"] == 2
+    assert result["arm_b"]["unique_seeds"] == 2
+    assert result["arm_b"]["duplicates_collapsed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# format_report / CLI
+# ---------------------------------------------------------------------------
+
+def test_format_report_marks_significant_metric_with_asterisk():
+    result = {
+        "label_a": "A", "label_b": "B",
+        "path_a": "a.jsonl", "path_b": "b.jsonl",
+        "arm_a": {"unique_seeds": 3, "valid_seeds": 3, "duplicates_collapsed": 0},
+        "arm_b": {"unique_seeds": 3, "valid_seeds": 3, "duplicates_collapsed": 0},
+        "pairs": 3, "only_in_a": 0, "only_in_b": 0,
+        "invalid_in_a": 0, "invalid_in_b": 0,
+        "room_pairs": {"monster": 0, "elite": 0, "boss": 0},
+        "metrics": {
+            "floor": {"mean_a": 17.5, "mean_b": 18.14, "mean_diff": 0.64,
+                      "se": 0.1, "t": 6.4, "p": 0.0001, "n": 3},
+            "win": {"mean_a": 0.5, "mean_b": 0.5, "mean_diff": 0.0,
+                    "se": 0.2, "t": 0.0, "p": 0.9, "n": 3},
+            "combat_wins": {"mean_a": None, "mean_b": None, "mean_diff": None,
+                            "se": None, "t": None, "p": None, "n": 0},
+        },
+    }
+
+    report = format_report(result)
+    lines = {line.split()[0]: line for line in report.splitlines() if line}
+
+    assert "*" in lines["floor"]
+    assert "*" not in lines["win"]
+    assert "n/a" in lines["combat_wins"]
+
+
+def test_main_json_flag_prints_valid_json_to_stdout(tmp_path, capsys):
+    path_a = write_jsonl(tmp_path / "a.jsonl", [result_row("s1", floor=10)])
+    path_b = write_jsonl(tmp_path / "b.jsonl", [result_row("s1", floor=12)])
+
+    exit_code = main([str(path_a), str(path_b), "--json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pairs"] == 1
+    assert payload["metrics"]["floor"]["mean_diff"] == pytest.approx(2.0)
+
+
+def test_main_text_mode_prints_readable_table(tmp_path, capsys):
+    path_a = write_jsonl(tmp_path / "a.jsonl", [result_row("s1", floor=10)])
+    path_b = write_jsonl(tmp_path / "b.jsonl", [result_row("s1", floor=12)])
+
+    exit_code = main([str(path_a), str(path_b), "--label-a", "base", "--label-b", "cand"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "base" in out and "cand" in out
+    assert "floor" in out
