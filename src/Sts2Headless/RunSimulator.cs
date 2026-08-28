@@ -2301,6 +2301,47 @@ public class RunSimulator
             ["amount"] = pw.Amount,
         }).ToList();
 
+        // draw_pile / discard_pile: the EXACT ordered card list, not just a count, so
+        // callers (turn_planner.py) can predict future draws instead of guessing at a
+        // random shuffle. ORDER CONVENTION — confirmed by decompiling lib/sts2.dll, not
+        // assumed: CardPile.MoveToTopInternal does `_cards.Remove(card); _cards.Insert(0,
+        // card)` (moving a card "to top" puts it at index 0) and MoveToBottomInternal
+        // does `_cards.Add(card)` (bottom = end of list). CardPileCmd's single-card-draw
+        // path (<DrawInternal>d__21.MoveNext) reads `card = drawPile.Cards.FirstOrDefault()`
+        // each iteration — the engine itself draws from index 0. So **index 0 is the top
+        // of the pile / the next card drawn**, and the list is already in draw order.
+        // Lightweight identity fields only: unlike the hand cards above, these cards are
+        // not being played this decision, so there is no reason to pay for
+        // UpdateDynamicVarPreview (and every reason not to — it mutates the live card;
+        // see the hand-serialization comment above re: Momentum Strike corruption). Doing
+        // that preview dance for ~30 pile cards every single decision would also be a
+        // real hot-path cost for information nobody asked for.
+        List<Dictionary<string, object?>> PileCardList(CardPile? pile)
+        {
+            var list = new List<Dictionary<string, object?>>();
+            try
+            {
+                var cards = pile?.Cards;
+                if (cards == null) return list;
+                for (int i = 0; i < cards.Count; i++)
+                {
+                    var c = cards[i];
+                    if (c == null) continue;
+                    list.Add(new Dictionary<string, object?>
+                    {
+                        ["index"] = i,
+                        ["id"] = c.Id.ToString(),
+                        ["name"] = _loc.Card(c.Id.Entry),
+                        ["cost"] = c.EnergyCost?.GetResolved() ?? 0,
+                        ["type"] = c.Type.ToString(),
+                        ["target_type"] = c.TargetType.ToString(),
+                    });
+                }
+            }
+            catch { /* pile introspection must never take down decision serialization */ }
+            return list;
+        }
+
         var result = new Dictionary<string, object?>
         {
             ["type"] = "decision",
@@ -2315,6 +2356,8 @@ public class RunSimulator
             ["player_powers"] = playerPowers?.Count > 0 ? playerPowers : null,
             ["draw_pile_count"] = pcs?.DrawPile?.Cards?.Count ?? 0,
             ["discard_pile_count"] = pcs?.DiscardPile?.Cards?.Count ?? 0,
+            ["draw_pile"] = PileCardList(pcs?.DrawPile),
+            ["discard_pile"] = PileCardList(pcs?.DiscardPile),
         };
 
         // Character-specific mechanics

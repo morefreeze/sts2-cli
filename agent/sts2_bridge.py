@@ -38,7 +38,8 @@ else:
 # --- JSON helpers ---
 _STRIP_KEYS = {"description", "after_upgrade", "enchantment", "enchantment_amount",
                "affliction", "affliction_amount", "id", "draw_pile_count",
-               "discard_pile_count", "upgraded", "act_name"}
+               "discard_pile_count", "draw_pile", "discard_pile",
+               "upgraded", "act_name"}
 
 
 def compact_json(obj, depth=0):

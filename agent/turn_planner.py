@@ -138,18 +138,62 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
         hand_meta.append(meta)
         if known:
             s.hand.append(cid)
-    # Draw pile: full deck composition is known (player.deck). Fill the sim
-    # draw pile with deck − hand so draw effects (Pommel Strike, Shrug It Off)
-    # pull real cards. Order is shuffled with a fixed seed — exact order is
-    # unknowable but composition is exact.
-    deck_ids = [_card_id_norm(c) for c in (player.get("deck") or [])]
-    hand_ids = [m["id"] for m in hand_meta]
-    pool = list(deck_ids)
-    for hid in hand_ids:
-        if hid in pool:
-            pool.remove(hid)
-    random.Random(99).shuffle(pool)
-    s.draw_pile = pool
+    # Draw pile: when the C# side reports the real ordered pile (RunSimulator.cs
+    # "draw_pile" field, added for this planner), use it verbatim instead of
+    # guessing — order is no longer unknowable. The C# pile is reported
+    # top-first: index 0 is the next card drawn. This was confirmed two ways,
+    # not assumed: (1) decompiling lib/sts2.dll — CardPile.MoveToTopInternal
+    # does `_cards.Remove(card); _cards.Insert(0, card)` and
+    # CardPileCmd's single-card-draw path reads
+    # `card = drawPile.Cards.FirstOrDefault()` each iteration; (2) empirically,
+    # ending turn 1 without playing a card (forcing a full redraw of the
+    # then-reported draw_pile) reproduced the exact same order in the new hand.
+    # The Python sim's CombatState.draw() pops from the END of the list
+    # (`self.draw_pile.pop()`) — i.e. the sim treats the LAST element as top —
+    # so the real order must be REVERSED here, or the sim would draw
+    # bottom-up instead of top-down and silently invert every prediction.
+    # Unknown/broken ids are kept (not filtered): this matches the pre-existing
+    # deck-composition fallback below (which never filtered either), and it's
+    # safe because a card only matters to the sim once it reaches hand and is
+    # considered for play — dfs() in plan_action() already skips any hand card
+    # with get_card_data(cid) is None, so an unknown id drawn mid-search just
+    # becomes an inert, unplayable hand slot, exactly like today.
+    real_draw_pile = state.get("draw_pile")
+    if real_draw_pile is not None:
+        # An empty list is a GENUINELY empty draw pile (everything is
+        # currently in hand/discard) — it must stay empty, not fall back to
+        # the deck-composition guess below, which would incorrectly
+        # resurrect cards that are actually elsewhere right now.
+        ids = [_card_id_norm(c) for c in real_draw_pile]
+        s.draw_pile = list(reversed(ids))
+    else:
+        # No real order in this state (older logs / replays predating the
+        # "draw_pile" field): full deck composition is known (player.deck).
+        # Fill the sim draw pile with deck − hand so draw effects (Pommel
+        # Strike, Shrug It Off) pull real cards. Order is shuffled with a
+        # fixed seed — exact order is unknowable but composition is exact.
+        deck_ids = [_card_id_norm(c) for c in (player.get("deck") or [])]
+        hand_ids = [m["id"] for m in hand_meta]
+        pool = list(deck_ids)
+        for hid in hand_ids:
+            if hid in pool:
+                pool.remove(hid)
+        random.Random(99).shuffle(pool)
+        s.draw_pile = pool
+
+    # Discard pile: also real & exact when reported. Needed so a mid-search
+    # reshuffle (CombatState.draw(): draw_pile empty + discard_pile non-empty
+    # → shuffle discard back into draw_pile) has real cards to work with —
+    # previously this was never set, so build_sim_state's sim always started
+    # with an empty discard pile even mid-combat, and any reshuffle inside a
+    # DFS sequence found nothing to shuffle back in. Order doesn't need
+    # reversing (or any particular convention): CombatState.draw() always
+    # rng.shuffle()s the discard pile before treating it as the new draw
+    # pile, so only composition matters here, not sequence.
+    real_discard_pile = state.get("discard_pile")
+    if real_discard_pile is not None:
+        s.discard_pile = [_card_id_norm(c) for c in real_discard_pile]
+
     return s, hand_meta
 
 

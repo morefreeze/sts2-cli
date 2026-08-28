@@ -1,7 +1,10 @@
+from collections import Counter
+
 from agent.sim.combat_state import CombatState, Enemy
 from agent.sim.combat_step import play_card
 from agent.turn_planner import (
     apply_vantom_slippery_mask,
+    build_sim_state,
     intent_defense_override,
     plan_action,
     vantom_slippery_override,
@@ -259,3 +262,106 @@ def test_vantom_slippery_mask_blocks_wasteful_attack_only():
     assert adjusted[4]
     assert adjusted[11]
     assert adjusted[40]
+
+
+# --- build_sim_state: real draw/discard pile order (Task 1) ----------------
+#
+# RunSimulator.cs now reports the ordered draw_pile/discard_pile alongside
+# the pre-existing counts. Its order is top-first (index 0 = next card
+# drawn) — confirmed by decompiling lib/sts2.dll (CardPile.MoveToTopInternal
+# inserts at index 0; CardPileCmd's single-draw path reads
+# `drawPile.Cards.FirstOrDefault()`) and empirically (ending a turn without
+# playing anything redraws the reported pile in the same order). The
+# Python sim's CombatState.draw() pops from the END of its list, so
+# build_sim_state must store the real pile REVERSED for the sim to draw the
+# correct card first — that's the behavior under test below, not just the
+# JSON pass-through.
+
+def _base_combat_play_state(**overrides):
+    state = {
+        "decision": "combat_play",
+        "energy": 3,
+        "max_energy": 3,
+        "player": {"hp": 50, "max_hp": 80, "block": 0, "deck": []},
+        "hand": [],
+        "enemies": [],
+    }
+    state.update(overrides)
+    return state
+
+
+def test_build_sim_state_uses_real_draw_pile_order_when_present():
+    state = _base_combat_play_state(draw_pile=[
+        {"id": "CARD.STRIKE_IRONCLAD"},
+        {"id": "CARD.DEFEND_IRONCLAD"},
+        {"id": "CARD.BASH"},
+    ])
+
+    sim, _ = build_sim_state(state)
+
+    assert sim is not None
+    # Behavioral check, not just a mirror of the reversal: the FIRST card the
+    # sim actually draws must be the real game's top card (STRIKE_IRONCLAD,
+    # reported at index 0), even though the sim's own list stores it last.
+    assert sim.draw(1) == ["STRIKE_IRONCLAD"]
+    assert sim.draw(2) == ["DEFEND_IRONCLAD", "BASH"]
+
+
+def test_build_sim_state_falls_back_to_shuffled_deck_composition_when_draw_pile_absent():
+    deck = ([{"id": "CARD.STRIKE_IRONCLAD"}] * 5
+            + [{"id": "CARD.DEFEND_IRONCLAD"}] * 4
+            + [{"id": "CARD.BASH"}])
+    state = _base_combat_play_state(
+        player={"hp": 50, "max_hp": 80, "block": 0, "deck": deck},
+        hand=[
+            attack_card("CARD.STRIKE_IRONCLAD", 0),
+            block_card("CARD.DEFEND_IRONCLAD", 1),
+        ],
+        # No "draw_pile" key at all — simulates a log/replay recorded before
+        # this field existed. Must fall back to the old deck-minus-hand
+        # shuffle rather than crash or leave the pile empty.
+    )
+
+    sim, hand_meta = build_sim_state(state)
+
+    assert sim is not None
+    hand_ids = [m["id"] for m in hand_meta]
+    assert hand_ids == ["STRIKE_IRONCLAD", "DEFEND_IRONCLAD"]
+    # Order is an arbitrary fixed-seed shuffle (unchanged legacy behavior) —
+    # only composition (deck - hand) is a guaranteed property.
+    assert Counter(sim.draw_pile) == Counter(
+        {"STRIKE_IRONCLAD": 4, "DEFEND_IRONCLAD": 3, "BASH": 1}
+    )
+
+
+def test_build_sim_state_empty_real_draw_pile_stays_empty():
+    # A real, observed draw_pile of [] means the pile is GENUINELY empty
+    # right now (everything is in hand/discard) — this must NOT be treated
+    # like a missing field and fall back to the deck-composition guess,
+    # which would incorrectly resurrect cards that are actually elsewhere.
+    state = _base_combat_play_state(
+        player={"hp": 50, "max_hp": 80, "block": 0,
+                "deck": [{"id": "CARD.STRIKE_IRONCLAD"}] * 5},
+        draw_pile=[],
+    )
+
+    sim, _ = build_sim_state(state)
+
+    assert sim is not None
+    assert sim.draw_pile == []
+    assert sim.draw(3) == []  # nothing to draw, no crash
+
+
+def test_build_sim_state_sets_discard_pile_when_present_without_reversing():
+    # Discard-pile order carries no meaning in the sim (CombatState.draw()
+    # always rng.shuffle()s it before treating it as the new draw pile), so
+    # unlike draw_pile this is a straight pass-through — asserted explicitly
+    # so a future copy-paste of the draw_pile reversal doesn't sneak in here.
+    state = _base_combat_play_state(discard_pile=[
+        {"id": "CARD.STRIKE_IRONCLAD"}, {"id": "CARD.BASH"},
+    ])
+
+    sim, _ = build_sim_state(state)
+
+    assert sim is not None
+    assert sim.discard_pile == ["STRIKE_IRONCLAD", "BASH"]
