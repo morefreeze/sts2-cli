@@ -50,6 +50,27 @@ def test_load_arm_keeps_last_occurrence_and_counts_duplicates(tmp_path):
     assert arm["diagnostics"]["unique_seeds"] == 2
 
 
+def test_load_arm_skips_malformed_line_and_counts_it(tmp_path):
+    # Simulates the realistic failure mode on this machine: the eval process
+    # gets killed mid-write and the final line of the JSONL is a truncated,
+    # unparseable fragment. The good rows on either side of it must survive,
+    # and the bad line must be counted (not silently dropped) so a truncated
+    # input file is visibly truncated in the report.
+    path = tmp_path / "arm.jsonl"
+    lines = [
+        json.dumps(result_row("s1", floor=10)),
+        '{"seed": "s2", "status": "win", "floor": 12',  # truncated, no closing brace
+        json.dumps(result_row("s3", floor=14)),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    arm = load_arm(path)
+
+    assert set(arm["by_seed"]) == {"s1", "s3"}
+    assert arm["diagnostics"]["malformed_lines"] == 1
+    assert arm["diagnostics"]["unique_seeds"] == 2
+
+
 def test_load_arm_classifies_valid_vs_invalid_seeds(tmp_path):
     path = write_jsonl(tmp_path / "arm.jsonl", [
         result_row("s1", status="win"),
@@ -228,6 +249,18 @@ def test_paired_stats_empty_input_does_not_raise():
     assert stats["p"] is None
 
 
+def test_paired_stats_rejects_nan_input():
+    # A NaN silently riding through would produce a corrupt (and
+    # RFC-8259-invalid) number in the JSON report. Must fail loudly instead.
+    with pytest.raises(ValueError):
+        paired_stats([1.0, float("nan"), 3.0], [2.0, 2.0, 4.0])
+
+
+def test_paired_stats_rejects_inf_input():
+    with pytest.raises(ValueError):
+        paired_stats([1.0, 2.0, 3.0], [2.0, float("inf"), 4.0])
+
+
 # ---------------------------------------------------------------------------
 # compare (full pipeline)
 # ---------------------------------------------------------------------------
@@ -306,8 +339,60 @@ def test_compare_surfaces_unique_seed_and_duplicate_diagnostics(tmp_path):
     assert result["arm_a"]["unique_seeds"] == 2
     assert result["arm_a"]["duplicates_collapsed"] == 1
     assert result["arm_a"]["valid_seeds"] == 2
+    assert result["arm_a"]["malformed_lines"] == 0
     assert result["arm_b"]["unique_seeds"] == 2
     assert result["arm_b"]["duplicates_collapsed"] == 0
+
+
+def test_compare_with_no_shared_seeds_reports_zero_pairs(tmp_path):
+    # The two arms never overlap at all (e.g. disjoint seed ranges) --
+    # exercises the branch of compare()'s metric loop where every seed list
+    # fed to paired_stats is empty.
+    path_a = write_jsonl(tmp_path / "a.jsonl", [
+        result_row("s1"),
+        result_row("s2"),
+    ])
+    path_b = write_jsonl(tmp_path / "b.jsonl", [
+        result_row("s3"),
+        result_row("s4"),
+    ])
+
+    result = compare(path_a, path_b)
+
+    assert result["pairs"] == 0
+    assert result["only_in_a"] == 2
+    assert result["only_in_b"] == 2
+    assert result["invalid_in_a"] == 0
+    assert result["invalid_in_b"] == 0
+    for name in ("floor", "win", "combat_wins"):
+        assert result["metrics"][name]["n"] == 0
+        assert result["metrics"][name]["mean_a"] is None
+    for room in ("monster", "elite", "boss"):
+        assert result["room_pairs"][room] == 0
+
+    # format_report must render this without crashing on the all-None stats.
+    report = format_report(result)
+    assert "n/a" in report
+
+
+def test_compare_output_is_strict_json_roundtrippable(tmp_path):
+    path_a = write_jsonl(tmp_path / "a.jsonl", [
+        result_row("s1", status="win", floor=10, combat_wins=3,
+                   total_elite_hp_loss=20, elite_combats=2),
+        result_row("s2", status="dead", floor=12, combat_wins=4),
+    ])
+    path_b = write_jsonl(tmp_path / "b.jsonl", [
+        result_row("s1", status="win", floor=11, combat_wins=3,
+                   total_elite_hp_loss=8, elite_combats=2),
+        result_row("s2", status="win", floor=14, combat_wins=5),
+    ])
+
+    result = compare(path_a, path_b)
+
+    # allow_nan=False is the same guard main() uses for --json: this must
+    # not raise, and the round trip must reproduce the same structure.
+    encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
+    assert json.loads(encoded) == result
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +403,10 @@ def test_format_report_marks_significant_metric_with_asterisk():
     result = {
         "label_a": "A", "label_b": "B",
         "path_a": "a.jsonl", "path_b": "b.jsonl",
-        "arm_a": {"unique_seeds": 3, "valid_seeds": 3, "duplicates_collapsed": 0},
-        "arm_b": {"unique_seeds": 3, "valid_seeds": 3, "duplicates_collapsed": 0},
+        "arm_a": {"unique_seeds": 3, "valid_seeds": 3, "duplicates_collapsed": 0,
+                  "malformed_lines": 0},
+        "arm_b": {"unique_seeds": 3, "valid_seeds": 3, "duplicates_collapsed": 0,
+                  "malformed_lines": 0},
         "pairs": 3, "only_in_a": 0, "only_in_b": 0,
         "invalid_in_a": 0, "invalid_in_b": 0,
         "room_pairs": {"monster": 0, "elite": 0, "boss": 0},
@@ -339,6 +426,10 @@ def test_format_report_marks_significant_metric_with_asterisk():
     assert "*" in lines["floor"]
     assert "*" not in lines["win"]
     assert "n/a" in lines["combat_wins"]
+    # Multiple-comparisons caveat must be visible in the rendered text, not
+    # just in the docstring -- the reader of the printed table is who needs
+    # to know the marker is per-metric and uncorrected.
+    assert "uncorrected" in report
 
 
 def test_main_json_flag_prints_valid_json_to_stdout(tmp_path, capsys):
@@ -363,3 +454,38 @@ def test_main_text_mode_prints_readable_table(tmp_path, capsys):
     assert exit_code == 0
     assert "base" in out and "cand" in out
     assert "floor" in out
+
+
+# ---------------------------------------------------------------------------
+# Cross-check against agent.eval_rl (slow: imports torch/sb3_contrib)
+# ---------------------------------------------------------------------------
+#
+# agent/paired_eval.py deliberately keeps its own copy of the valid-status
+# set (_VALID_STATUSES) instead of importing agent.eval_rl, because eval_rl
+# imports torch and sb3_contrib at module level and this module's near-zero
+# import time is a load-bearing property (it is meant to be run often and
+# interactively; see the "INTENTIONAL COPY" comment on _VALID_STATUSES).
+# That means nothing else in this file will ever catch the two definitions
+# drifting apart. This one test pays the heavy import cost on purpose so
+# that drift is caught here instead of silently in production.
+
+def test_valid_statuses_match_eval_rl_classification():
+    from agent.eval_rl import _TECHNICAL_STATUSES, classify_eval_result
+    from agent.paired_eval import _VALID_STATUSES
+
+    observed_statuses = set()
+    info_flags = (None, "reset_failure", "load_failed", "invalid",
+                  "replay_failed", "stuck", "crashed")
+    for timed_out in (False, True):
+        for run_won in (False, True):
+            for flag in info_flags:
+                info = {flag: True} if flag else {}
+                observed_statuses.add(classify_eval_result(
+                    timed_out=timed_out, run_won=run_won, info=info,
+                ))
+
+    # Every status classify_eval_result can produce is either "technical"
+    # (eval_rl's own _TECHNICAL_STATUSES) or a real policy outcome
+    # (paired_eval's _VALID_STATUSES) -- and never both.
+    assert _VALID_STATUSES == observed_statuses - _TECHNICAL_STATUSES
+    assert _VALID_STATUSES.isdisjoint(_TECHNICAL_STATUSES)

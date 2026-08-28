@@ -30,7 +30,7 @@ import json
 import math
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -38,8 +38,19 @@ import numpy as np
 # real end state, win or loss). Everything else — crash, timeout, stuck,
 # reset_failure, invalid — is a technical failure of the harness or engine,
 # not a signal about the policy, and must never be averaged into a metric.
-# Mirrors `_TECHNICAL_STATUSES` / the `valid` filter in
-# `agent.eval_rl.summarize_eval_results`.
+#
+# This is an INTENTIONAL COPY of eval_rl.py's status classification
+# (`_TECHNICAL_STATUSES` / the `valid` filter in
+# `summarize_eval_results`), not an import of it. `agent/eval_rl.py` imports
+# torch and sb3_contrib at module level; importing it here would drag this
+# module's (and its whole test file's) import time from ~instant to
+# multi-second, and this is a tool meant to be run often and interactively —
+# that property is worth more than deduplicating one two-element set. If
+# eval_rl.py's status classification ever changes, this set must be updated
+# by hand to match;
+# tests/agent/test_paired_eval.py::test_valid_statuses_match_eval_rl_classification
+# pays eval_rl's heavy import cost (deliberately, only in that one test) and
+# fails loudly if the two drift apart.
 _VALID_STATUSES = {"win", "dead"}
 
 # Per-room HP-loss room names, lower-cased to match the JSONL field prefixes
@@ -63,16 +74,31 @@ def load_arm(path) -> dict:
     row"); validity is only decided at pairing time, because a seed that is
     invalid in this arm can still be meaningful to report as dropped rather
     than silently missing.
+
+    A truncated final line (the eval process killed mid-write — a realistic
+    failure mode on this machine for long batches) is skipped rather than
+    raised: this module gates ship/no-ship decisions, and one bad line
+    aborting the entire A/B report is worse than the report proceeding
+    without it. But unlike the malformed-line handling elsewhere in
+    `agent/` (which silently `continue`s), the count is NOT swallowed — it
+    is tallied as `diagnostics["malformed_lines"]` and surfaced in the CLI
+    report header, so a truncated input file reads as visibly truncated
+    rather than quietly smaller.
     """
     rows: dict[str, dict] = {}
     total_lines = 0
     duplicates = 0
+    malformed_lines = 0
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                malformed_lines += 1
+                continue
             seed = row.get("seed")
             if seed is None:
                 # Can't pair a row that carries no pairing key; ignore it
@@ -92,6 +118,7 @@ def load_arm(path) -> dict:
             "duplicates_collapsed": duplicates,
             "valid_seeds": valid_seeds,
             "invalid_seeds": len(rows) - valid_seeds,
+            "malformed_lines": malformed_lines,
         },
     }
 
@@ -117,7 +144,7 @@ class PairingResult:
     unique_seeds_a: int
     unique_seeds_b: int
     duplicates_a: int
-    duplicates_b: int = field(default=0)
+    duplicates_b: int
 
 
 def pair_arms(arm_a: dict, arm_b: dict) -> PairingResult:
@@ -198,6 +225,15 @@ def paired_stats(a_values, b_values) -> dict:
     the same seed sequence (i.e. index i in both is the same seed) — callers
     are `compare()`, which builds both lists from `PairingResult.seeds` (or
     `.room_seeds[room]`) in that same order.
+
+    Non-finite inputs (NaN/Inf) raise `ValueError` rather than propagating.
+    This module gates ship/no-ship decisions on a JSON report consumed by
+    other tools (`--json`, `allow_nan=False`); a NaN silently riding through
+    the arithmetic into a printed `mean_diff`/`se`/`t`/`p` would be a corrupt
+    number pretending to be data, and RFC-8259-invalid JSON to boot. Failing
+    loudly here, at the one place these values are computed, points
+    directly at the offending seed's row instead of letting a downstream
+    `json.dumps` failure or a nonsensical printed digit be the first symptom.
     """
     a = list(a_values)
     b = list(b_values)
@@ -213,6 +249,13 @@ def paired_stats(a_values, b_values) -> dict:
 
     a_arr = np.asarray(a, dtype=float)
     b_arr = np.asarray(b, dtype=float)
+    if not (np.all(np.isfinite(a_arr)) and np.all(np.isfinite(b_arr))):
+        raise ValueError(
+            "paired_stats received a non-finite value (NaN/Inf) in the "
+            "input sequences — refusing to compute a paired comparison over "
+            "corrupt data. Trace the offending seed's row back in the "
+            "source JSONL rather than trusting a stat computed from it."
+        )
     mean_a = float(np.mean(a_arr))
     mean_b = float(np.mean(b_arr))
     diffs = b_arr - a_arr
@@ -260,9 +303,9 @@ def _room_hp_per_fight(row: dict, room: str) -> float:
     return total / fights if fights else 0.0
 
 
-# Metric name -> (values-from-row extractor, seed list to use). The seed
-# list is resolved against the PairingResult at compare() time; room metrics
-# use the narrower per-room pairing, everything else uses the full pairing.
+# Metric name -> values-from-row extractor, for the metrics computed over
+# the full run-level pairing (`PairingResult.seeds`). Room metrics are
+# handled separately below, over the narrower `PairingResult.room_seeds`.
 _RUN_LEVEL_METRICS = {
     "floor": _floor_value,
     "win": _win_value,
@@ -304,18 +347,20 @@ def compare(path_a, path_b, *, label_a: str = "A", label_b: str = "B") -> dict:
         # unique_seeds/duplicates_collapsed come off `pairing`, not back out of
         # arm_a/arm_b["diagnostics"], so there is exactly one place that
         # derives them from the loaded rows — pair_arms() — rather than two
-        # copies that could drift. `valid_seeds` has no such second copy (it
-        # is not part of pairing accounting), so it is read straight off the
-        # arm's own diagnostics.
+        # copies that could drift. `valid_seeds` and `malformed_lines` have
+        # no such second copy (neither is part of pairing accounting), so
+        # they are read straight off the arm's own diagnostics.
         "arm_a": {
             "unique_seeds": pairing.unique_seeds_a,
             "valid_seeds": arm_a["diagnostics"]["valid_seeds"],
             "duplicates_collapsed": pairing.duplicates_a,
+            "malformed_lines": arm_a["diagnostics"]["malformed_lines"],
         },
         "arm_b": {
             "unique_seeds": pairing.unique_seeds_b,
             "valid_seeds": arm_b["diagnostics"]["valid_seeds"],
             "duplicates_collapsed": pairing.duplicates_b,
+            "malformed_lines": arm_b["diagnostics"]["malformed_lines"],
         },
         "pairs": len(pairing.seeds),
         "only_in_a": pairing.only_in_a,
@@ -327,14 +372,18 @@ def compare(path_a, path_b, *, label_a: str = "A", label_b: str = "B") -> dict:
     }
 
 
-_METRIC_LABELS = {
-    "floor": "floor",
-    "win": "win",
-    "combat_wins": "combat_wins",
-    "monster_hp_loss_per_fight": "monster_hp_loss_per_fight",
-    "elite_hp_loss_per_fight": "elite_hp_loss_per_fight",
-    "boss_hp_loss_per_fight": "boss_hp_loss_per_fight",
-}
+# Report order for the metrics in `compare()`'s "metrics" dict. A plain
+# tuple, not a name->label mapping — there is currently no metric whose
+# display label differs from its dict key, so a relabeling indirection would
+# rename nothing.
+_METRIC_ORDER = (
+    "floor",
+    "win",
+    "combat_wins",
+    "monster_hp_loss_per_fight",
+    "elite_hp_loss_per_fight",
+    "boss_hp_loss_per_fight",
+)
 
 
 def _fmt(value, digits=3) -> str:
@@ -346,22 +395,36 @@ def _fmt(value, digits=3) -> str:
 def format_report(result: dict) -> str:
     """Render `compare()`'s output as the readable text table the CLI prints.
 
-    A `*` after `p` flags p < 0.05 — the eyeball-scan signal for "this
-    metric moved". It is not a claim of correctness at small n; see the
-    normal-approximation caveat on `paired_stats`.
+    A `*` after `p` flags p < 0.05 for THAT metric alone — an uncorrected,
+    per-metric threshold, and only a scan signal for "this metric moved",
+    not a claim of correctness at small n (see the normal-approximation
+    caveat on `paired_stats`).
+
+    Multiple comparisons: this table reports six metrics per comparison, so
+    scanning all six at an uncorrected alpha=0.05 makes at least one
+    spurious `*` noticeably more likely than 5%. This function deliberately
+    does NOT apply a Bonferroni or similar correction — floor, win, and
+    combat_wins are strongly correlated on this data (they largely move
+    together within a run), and a correction that assumes independent tests
+    would be badly over-conservative, hiding real effects behind a raised
+    threshold. The uncorrected rendering trusts the reader to weigh a lone
+    borderline `*` accordingly; the footnote printed with the table exists
+    so that trust is informed rather than assumed.
     """
     lines = []
     lines.append(f"Paired eval: {result['label_a']} (A) vs {result['label_b']} (B)")
     lines.append(
         f"  arm A: {result['arm_a']['unique_seeds']} seeds "
         f"({result['arm_a']['valid_seeds']} valid, "
-        f"{result['arm_a']['duplicates_collapsed']} duplicates collapsed)  "
+        f"{result['arm_a']['duplicates_collapsed']} duplicates collapsed, "
+        f"{result['arm_a']['malformed_lines']} malformed lines skipped)  "
         f"[{result['path_a']}]"
     )
     lines.append(
         f"  arm B: {result['arm_b']['unique_seeds']} seeds "
         f"({result['arm_b']['valid_seeds']} valid, "
-        f"{result['arm_b']['duplicates_collapsed']} duplicates collapsed)  "
+        f"{result['arm_b']['duplicates_collapsed']} duplicates collapsed, "
+        f"{result['arm_b']['malformed_lines']} malformed lines skipped)  "
         f"[{result['path_b']}]"
     )
     lines.append(
@@ -379,17 +442,22 @@ def format_report(result: dict) -> str:
     header = f"{'metric':<28}{'n':>5}  {'mean_a':>10}  {'mean_b':>10}  {'diff':>10}  {'se':>8}  {'t':>7}  {'p':>8}"
     lines.append(header)
     lines.append("-" * len(header))
-    for name, label in _METRIC_LABELS.items():
+    for name in _METRIC_ORDER:
         stats = result["metrics"].get(name)
         if stats is None:
             continue
         sig = "*" if (stats["p"] is not None and stats["p"] < 0.05) else " "
         lines.append(
-            f"{label:<28}{stats['n']:>5}  "
+            f"{name:<28}{stats['n']:>5}  "
             f"{_fmt(stats['mean_a']):>10}  {_fmt(stats['mean_b']):>10}  "
             f"{_fmt(stats['mean_diff']):>10}  {_fmt(stats['se']):>8}  "
             f"{_fmt(stats['t'], 2):>7}  {_fmt(stats['p'], 4):>7}{sig}"
         )
+    lines.append(
+        "* p < 0.05, per metric, uncorrected for multiple comparisons — "
+        "scanning several metrics at this threshold makes at least one "
+        "spurious '*' more likely than 5% (see format_report docstring)."
+    )
     return "\n".join(lines)
 
 
@@ -411,7 +479,12 @@ def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     result = compare(args.path_a, args.path_b, label_a=args.label_a, label_b=args.label_b)
     if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        # allow_nan=False mirrors eval_rl.append_eval_result_row: a NaN/Inf
+        # reaching this call would otherwise print the bare (RFC-8259-invalid)
+        # `NaN` token. paired_stats() already refuses to compute a stat over
+        # non-finite inputs, so this is defense in depth, not the primary
+        # guard — it should never actually fire.
+        print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
     else:
         print(format_report(result))
     return 0
