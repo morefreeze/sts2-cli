@@ -2736,7 +2736,29 @@ public class RunSimulator
                         ["index"] = i,
                         ["id"] = c.Id.ToString(),
                         ["name"] = _loc.Card(c.Id.Entry),
-                        ["cost"] = c.EnergyCost?.GetResolved() ?? 0,
+                        // Base/unresolved cost, NOT GetResolved(). Measured: GetResolved()
+                        // (-> GetWithModifiers(All) -> Hook.ModifyEnergyCostInCombat, which
+                        // double-iterates every combat hook listener with virtual dispatch)
+                        // averaged ~9-12us/card here across a real run, vs ~0.05us/card for
+                        // GetWithModifiers(None) -- a ~99.5% cut per pile card, and this runs
+                        // for every card in both piles on EVERY combat_play serialization
+                        // (every action, not once per turn). A card sitting in a pile isn't
+                        // playable right now, and by the time it IS drawn the live relic/power
+                        // modifiers will have changed anyway, so a fully-resolved cost here is
+                        // false precision bought at real expense. GetWithModifiers(None) still
+                        // reflects permanent upgrades (it reads the post-UpgradeBy `_base`,
+                        // confirmed by decompiling CardEnergyCost in lib/sts2.dll) -- it just
+                        // skips local modifiers (CostModifiers.Local) and the combat-hook pass
+                        // (CostModifiers.Global), which are exactly the transient parts that
+                        // won't still apply by draw time anyway.
+                        //
+                        // DELIBERATE SEMANTIC SPLIT: `cost` means resolved-for-now on hand
+                        // cards (still GetResolved() below -- those ARE playable this decision,
+                        // so their live-modified cost is load-bearing) but base-not-resolved on
+                        // pile cards. Do not assume the two are the same number. See the mirror
+                        // note in agent/turn_planner.py above _resolve_draw_pile /
+                        // _resolve_discard_pile.
+                        ["cost"] = c.EnergyCost?.GetWithModifiers(CostModifiers.None) ?? 0,
                         ["type"] = c.Type.ToString(),
                         ["target_type"] = c.TargetType.ToString(),
                     });

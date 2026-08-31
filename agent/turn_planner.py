@@ -186,6 +186,20 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
 
 
 def _resolve_draw_pile(state: dict, player: dict, hand_meta: list[dict]) -> list[str]:
+    # NOTE on `cost` (not read by this function today, only `id` is): the C#
+    # side (RunSimulator.cs PileCardList) reports a DIFFERENT cost semantic
+    # for draw_pile/discard_pile entries than for `hand` entries. Hand card
+    # `cost` is GetResolved() — live, relic/power-adjusted, correct for a
+    # card that's actually playable this decision. Pile card `cost` is the
+    # base/unresolved cost (upgrades still apply, but not local or global
+    # in-combat modifiers) — a card sitting in a pile isn't playable now,
+    # and by the time it's drawn the live modifiers will likely have
+    # changed anyway, so resolving it here would be false precision at real
+    # perf expense (GetResolved's Hook.ModifyEnergyCostInCombat call is ~24%
+    # of CombatPlayState's serialization time). If a future change here
+    # starts reading `cost` off draw_pile/discard_pile entries, do NOT
+    # assume it's the same number as hand `cost` — it isn't.
+    #
     # Draw pile: when the C# side reports the real ordered pile (RunSimulator.cs
     # "draw_pile" field, added for this planner), use it verbatim instead of
     # guessing — order is no longer unknowable. The C# pile is reported

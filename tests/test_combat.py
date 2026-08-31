@@ -50,9 +50,16 @@ class TestCombatStructure:
         yet, so discard_pile==[] is a real, live example of "genuinely
         empty" straight from the engine (not a synthetic dict) -- if a
         future edit "cleans up" the draw_pile/discard_pile assignment to
-        match the player_powers idiom (`X?.Count > 0 ? X : null`), or if
-        PileCardList's failure path regresses back to swallowing exceptions
-        into an empty list, this is the test that catches it.
+        match the player_powers idiom (`X?.Count > 0 ? X : null`), this is
+        the test that catches it.
+
+        This does NOT exercise PileCardList's failure path (the try/catch
+        that returns null on exception): nothing here forces an exception,
+        so at combat start with an intact engine PileCardList never throws
+        either way -- the old buggy exception-swallowing code and the
+        current code both produce an identical `[]` here. The null-on-
+        failure contract is presently guarded only by code review, not by
+        an automated test.
         """
         state = game.start(seed="cs5")
         game.skip_neow(state)
