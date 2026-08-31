@@ -39,6 +39,7 @@ else:
 _STRIP_KEYS = {"description", "after_upgrade", "enchantment", "enchantment_amount",
                "affliction", "affliction_amount", "id", "draw_pile_count",
                "discard_pile_count", "draw_pile", "discard_pile",
+               "intent_forecast",
                "upgraded", "act_name"}
 
 

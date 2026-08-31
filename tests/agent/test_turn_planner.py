@@ -1,10 +1,11 @@
 from collections import Counter
 
 from agent.sim.combat_state import CombatState, Enemy
-from agent.sim.combat_step import play_card
+from agent.sim.combat_step import _advance_enemy_intents, play_card
 from agent.turn_planner import (
     apply_vantom_slippery_mask,
     build_sim_state,
+    defense_override_enabled,
     intent_defense_override,
     plan_action,
     vantom_slippery_override,
@@ -138,6 +139,23 @@ def test_defense_override_is_more_conservative_in_boss_and_elite_rooms():
     assert intent_defense_override(regular) is None
     assert intent_defense_override(boss) == 7
     assert intent_defense_override(elite) == 7
+
+
+def test_defense_override_enabled_defaults_on(monkeypatch):
+    monkeypatch.delenv("STS2_DEFENSE", raising=False)
+    assert defense_override_enabled() is True
+
+
+def test_defense_override_enabled_stays_on_for_truthy_values(monkeypatch):
+    for value in ("1", "true", "on", "yes", "anything"):
+        monkeypatch.setenv("STS2_DEFENSE", value)
+        assert defense_override_enabled() is True
+
+
+def test_defense_override_enabled_opts_out_on_falsy_values(monkeypatch):
+    for value in ("0", "false", "off", "FALSE", "Off"):
+        monkeypatch.setenv("STS2_DEFENSE", value)
+        assert defense_override_enabled() is False
 
 
 def test_slippery_clamps_next_enemy_hp_loss_and_consumes_stacks():
@@ -365,3 +383,152 @@ def test_build_sim_state_sets_discard_pile_when_present_without_reversing():
 
     assert sim is not None
     assert sim.discard_pile == ["STRIKE_IRONCLAD", "BASH"]
+
+
+# --- build_sim_state / _advance_enemy_intents: intent_forecast (Task 2a) ---
+#
+# RunSimulator.cs now reports "intent_forecast": {"rounds": [...], "exact":
+# bool, "unsupported": [...]} alongside "enemies" — a multi-turn lookahead
+# resolved by the real C# MonsterMoveStateMachine + real seeded RNG, grouped
+# by round with each entry carrying "enemy_index" so it aligns with the
+# "enemies" array. build_sim_state reduces each round to the same
+# {"type","damage","hits"} shape used for the current-turn intent, and
+# _advance_enemy_intents (combat_step.py) consumes the queue one round per
+# simulated end_turn(), falling back to the wiki-scraped state machine once
+# it runs out (or was never populated).
+
+def test_build_sim_state_attaches_intent_forecast_per_enemy():
+    state = _base_combat_play_state(
+        enemies=[
+            {
+                "name": "Cultist",
+                "hp": 30, "max_hp": 30, "block": 0,
+                "intents": [{"type": "buff"}],
+            },
+            {
+                "name": "Jaw Worm",
+                "hp": 20, "max_hp": 20, "block": 0,
+                "intents": [{"type": "attack", "damage": 8, "hits": 1}],
+            },
+        ],
+        intent_forecast={
+            "rounds": [
+                [
+                    {"enemy_index": 0, "move": "STAB_MOVE", "type": "attack",
+                     "damage": 6, "hits": 1},
+                    {"enemy_index": 1, "move": "CHOMP_MOVE", "type": "attack",
+                     "damage": 11, "hits": 1},
+                ],
+                [
+                    {"enemy_index": 0, "move": "BUFF_MOVE", "type": "buff"},
+                    {"enemy_index": 1, "move": "THRASH_MOVE", "type": "attack",
+                     "damage": 7, "hits": 2},
+                ],
+            ],
+            "exact": True,
+            "unsupported": [],
+        },
+    )
+
+    sim, _ = build_sim_state(state)
+
+    assert sim is not None
+    cultist, jaw_worm = sim.enemies
+    assert cultist.intent_forecast == [
+        {"type": "attack", "damage": 6, "hits": 1},
+        {"type": "debuff", "damage": 0, "hits": 0},
+    ]
+    assert jaw_worm.intent_forecast == [
+        {"type": "attack", "damage": 11, "hits": 1},
+        {"type": "attack", "damage": 7, "hits": 2},
+    ]
+
+
+def test_build_sim_state_intent_forecast_truncates_at_first_unsupported_round():
+    # Enemy 0 has no entry in round 1 (e.g. RunSimulator.cs hit an unknown
+    # branch type and stopped producing rounds for it) — the queue must stop
+    # there rather than treat the gap as "does nothing", so
+    # _advance_enemy_intents falls back to the state machine once it's empty.
+    state = _base_combat_play_state(
+        enemies=[
+            {"name": "Boss", "hp": 100, "max_hp": 100, "block": 0,
+             "intents": [{"type": "attack", "damage": 20, "hits": 1}]},
+        ],
+        intent_forecast={
+            "rounds": [
+                [{"enemy_index": 0, "move": "SLASH", "type": "attack",
+                  "damage": 15, "hits": 1}],
+                [],
+            ],
+            "exact": False,
+            "unsupported": ["enemy 0 (BOSS): unsupported state type Foo"],
+        },
+    )
+
+    sim, _ = build_sim_state(state)
+
+    assert sim is not None
+    assert sim.enemies[0].intent_forecast == [
+        {"type": "attack", "damage": 15, "hits": 1},
+    ]
+
+
+def test_build_sim_state_intent_forecast_absent_leaves_queue_empty():
+    # Older logs/replays predate the "intent_forecast" field entirely.
+    state = _base_combat_play_state(
+        enemies=[
+            {"name": "Slime", "hp": 10, "max_hp": 10, "block": 0,
+             "intents": [{"type": "attack", "damage": 3, "hits": 1}]},
+        ],
+    )
+
+    sim, _ = build_sim_state(state)
+
+    assert sim is not None
+    assert sim.enemies[0].intent_forecast == []
+
+
+def test_advance_enemy_intents_consumes_forecast_before_state_machine():
+    state = CombatState(hp=80, max_hp=80)
+    e = Enemy(id="TOTALLY_UNKNOWN_MONSTER_XYZ", name="Mystery", hp=10, max_hp=10,
+              intent={"type": "debuff", "damage": 0, "hits": 0})
+    e.intent_forecast = [
+        {"type": "attack", "damage": 9, "hits": 2},
+        {"type": "attack", "damage": 4, "hits": 1},
+    ]
+    state.enemies = [e]
+
+    _advance_enemy_intents(state)
+
+    assert e.intent == {"type": "attack", "damage": 9, "hits": 2}
+    assert e.intent_forecast == [{"type": "attack", "damage": 4, "hits": 1}]
+
+
+def test_advance_enemy_intents_falls_back_once_forecast_exhausted():
+    # An unknown monster id has no spire-codex/legacy data either, so once
+    # the forecast queue empties, the existing fallback is a deterministic
+    # no-op (leaves e.intent as whatever it last was) — proving the old
+    # behavior still runs unchanged rather than crashing or looping forever.
+    state = CombatState(hp=80, max_hp=80)
+    e = Enemy(id="TOTALLY_UNKNOWN_MONSTER_XYZ", name="Mystery", hp=10, max_hp=10,
+              intent={"type": "attack", "damage": 9, "hits": 2})
+    e.intent_forecast = []
+    state.enemies = [e]
+
+    _advance_enemy_intents(state)
+
+    assert e.intent == {"type": "attack", "damage": 9, "hits": 2}
+    assert e.intent_forecast == []
+
+
+def test_advance_enemy_intents_ignores_dead_enemies():
+    state = CombatState(hp=80, max_hp=80)
+    e = Enemy(id="DEAD_ENEMY", name="Dead", hp=0, max_hp=10,
+              intent={"type": "debuff", "damage": 0, "hits": 0})
+    e.intent_forecast = [{"type": "attack", "damage": 9, "hits": 2}]
+    state.enemies = [e]
+
+    _advance_enemy_intents(state)
+
+    # Dead enemies are skipped entirely — forecast untouched.
+    assert e.intent_forecast == [{"type": "attack", "damage": 9, "hits": 2}]

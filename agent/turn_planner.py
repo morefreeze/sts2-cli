@@ -94,8 +94,20 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
             relic_names.append(str(nm).upper().replace(" ", "_").replace("-", "_"))
     s.relics = relic_names
 
+    # intent_forecast (Task 2a): C#-side multi-turn lookahead, grouped by
+    # round then filtered per enemy_index below using the SAME "first attack
+    # intent, else zeroed debuff" reduction as the current-round intent above
+    # — same normalized {"type","damage","hits"} shape, just one round later
+    # each time. Stop at the first round with no entries for an enemy: that
+    # signals the C# side couldn't (or didn't) forecast any further for it
+    # (see "unsupported"), and a hole mid-list must not be misread as "does
+    # nothing" — it must instead make the queue run out so
+    # _advance_enemy_intents falls back to the wiki-scraped state machine,
+    # exactly like an absent forecast would.
+    forecast_rounds = ((state.get("intent_forecast") or {}).get("rounds") or [])
+
     # Enemies — in JSON order so target indices align
-    for e in state.get("enemies") or []:
+    for idx, e in enumerate(state.get("enemies") or []):
         intents = e.get("intents") or []
         atk = next((it for it in intents
                     if (it.get("type") or "").lower() == "attack"), None)
@@ -117,6 +129,22 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
             intent=intent,
         )
         en.statuses = _powers_to_statuses(e.get("powers"))
+        enemy_index = e.get("index", idx)
+        forecast: list[dict] = []
+        for round_entries in forecast_rounds:
+            matches = [it for it in (round_entries or [])
+                       if it.get("enemy_index") == enemy_index]
+            if not matches:
+                break
+            fatk = next((it for it in matches
+                         if (it.get("type") or "").lower() == "attack"), None)
+            if fatk:
+                forecast.append({"type": "attack",
+                                  "damage": int(fatk.get("damage", 0) or 0),
+                                  "hits": int(fatk.get("hits", 1) or 1)})
+            else:
+                forecast.append({"type": "debuff", "damage": 0, "hits": 0})
+        en.intent_forecast = forecast
         out_hp = en.hp
         if out_hp > 0:
             s.enemies.append(en)

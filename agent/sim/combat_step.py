@@ -561,12 +561,28 @@ def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
 
 
 def _advance_enemy_intents(state: CombatState) -> None:
-    """Advance each enemy along its declared attack_pattern (spire-codex
-    state machine). Falls back to old random-from-moves when the monster
-    isn't in spire-codex or has no pattern."""
+    """Advance each enemy's intent for its next turn.
+
+    Preferred source: `e.intent_forecast` (Task 2a) — real intents already
+    resolved by the C# engine's actual MonsterMoveStateMachine + seeded RNG,
+    queued in order. Popping from here instead of walking the state machine
+    below sidesteps two independent defects: (1) the wiki-scraped data below
+    can disagree with the shipped game version, and (2) this function never
+    tracked which state an enemy's OWN cycle was actually in across multiple
+    simulated turns (see intent_state_id's docstring), so multi-turn search
+    would otherwise silently restart every enemy at its initial_move.
+
+    Falls back to the declared attack_pattern (spire-codex state machine),
+    and then old random-from-moves, once the forecast is exhausted or was
+    never populated (older logs/replays, or a monster the C# side marked
+    unsupported) — unchanged from pre-Task-2a behavior.
+    """
     edb = _load_enemy_db()
     for e in state.enemies:
         if e.hp <= 0:
+            continue
+        if e.intent_forecast:
+            e.intent = e.intent_forecast.pop(0)
             continue
         spire = _spire_lookup(e.id, e.name)
         if spire is not None and spire.get("attack_pattern"):

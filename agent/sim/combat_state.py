@@ -37,6 +37,16 @@ class Enemy:
     # don't re-fire mid-combat.
     intent_state_id: str = ""
     intent_used_once: list[str] = field(default_factory=list)
+    # Multi-turn forecast (Task 2a): future intents already resolved by the
+    # REAL C# MonsterMoveStateMachine + the REAL seeded RNG (RunSimulator.cs
+    # "intent_forecast" field), queued in order — [0] is this enemy's next
+    # intent after the upcoming one (`intent` above), [1] the one after that,
+    # etc. `_advance_enemy_intents` (combat_step.py) pops from here instead of
+    # walking the wiki-scraped attack_pattern below when available; the wiki
+    # data (agent/sim/enemy_intents.py, scraped from sts2-wiki.org) has
+    # already been found to disagree with the shipped v0.111 monster data
+    # elsewhere in this project. Falls back to the old walk once exhausted.
+    intent_forecast: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

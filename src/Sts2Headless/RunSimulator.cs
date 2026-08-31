@@ -215,6 +215,19 @@ public class RunSimulator
     private readonly ManualResetEventSlim _turnStarted = new(false);
     private readonly ManualResetEventSlim _combatEnded = new(false);
     private static readonly LocLookup _loc = new();
+
+    /// <summary>
+    /// Number of future enemy turns exposed via combat_play's "intent_forecast"
+    /// (Task 2a). Round 0 of the forecast is free — it's just the already-known
+    /// e.Monster.NextMove, identical to the "intents" field next to it. Rounds
+    /// 1-2 require walking the real MonsterMoveStateMachine forward, which is
+    /// where all the cost/risk lives (RNG branching, conditional evaluation).
+    /// 3 total rounds gives the planner two genuinely new turns of visibility
+    /// — enough for a short multi-turn search — without paying to walk deeper
+    /// than any current search actually looks.
+    /// </summary>
+    private const int IntentForecastRounds = 3;
+
     private bool _eventOptionChosen;
     private int _lastEventOptionCount;
 
@@ -2293,6 +2306,346 @@ public class RunSimulator
                 };
             }).ToList() ?? new();
 
+        // intent_forecast (Task 2a): multi-turn enemy intent lookahead so
+        // turn_planner.py can search past the current turn. Built from the
+        // REAL C# MonsterMoveStateMachine + the REAL seeded RNG — not the
+        // wiki-scraped state machine agent/sim/enemy_intents.py falls back to
+        // (that data is scraped from sts2-wiki.org and has already been found
+        // to disagree with shipped v0.111 data elsewhere in this project).
+        // Wrapped so a forecasting bug degrades to exact:false, never takes
+        // down the whole combat_play decision.
+        Dictionary<string, object?> BuildIntentForecast()
+        {
+            var rounds = new List<List<Dictionary<string, object?>>>();
+            for (int r = 0; r < IntentForecastRounds; r++) rounds.Add(new List<Dictionary<string, object?>>());
+            var unsupported = new List<string>();
+            var exact = true;
+
+            void AddIntents(List<Dictionary<string, object?>> bucket, int enemyIndex,
+                MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MoveState move, Creature owner)
+            {
+                if (move.Intents == null) return;
+                foreach (var intent in move.Intents)
+                {
+                    var entry = new Dictionary<string, object?>
+                    {
+                        ["enemy_index"] = enemyIndex,
+                        ["move"] = move.StateId,
+                        ["type"] = intent.IntentType.ToString(),
+                    };
+                    // Same resolution as the current-turn `intents` block above:
+                    // per-hit `damage` + `hits` for multi-hit attacks (matching the
+                    // game's own intent description, which pairs GetSingleDamage
+                    // with Repeat), a single `damage` total otherwise. Uses the
+                    // CURRENT playerCreatures/owner state — exact for round 0
+                    // (nothing has happened yet) and best-effort for rounds 1+ if
+                    // Strength/Vulnerable/etc. change before then; that is an
+                    // inherent limit of forecasting past decisions nobody has
+                    // made yet, not a bug in the resolution itself.
+                    if (intent is MegaCrit.Sts2.Core.MonsterMoves.Intents.AttackIntent atk && playerCreatures != null)
+                    {
+                        try
+                        {
+                            var hits = atk.Repeats;
+                            if (hits > 1)
+                            {
+                                entry["damage"] = atk.GetSingleDamage(playerCreatures, owner);
+                                entry["hits"] = hits;
+                                entry["total_damage"] = atk.GetTotalDamage(playerCreatures, owner);
+                            }
+                            else
+                            {
+                                entry["damage"] = atk.GetTotalDamage(playerCreatures, owner);
+                            }
+                        }
+                        catch { }
+                    }
+                    bucket.Add(entry);
+                }
+            }
+
+            // Reimplements RandomBranchState's private GetStateWeight formula
+            // (confirmed by decompiling lib/sts2.dll) against a LOCAL
+            // forecastLog instead of the live machine's StateLog. This can't
+            // just call branch.GetNextState(owner, rng): that method's weight
+            // lookup hardcodes `owner.Monster.MoveStateMachine.StateLog` — the
+            // REAL machine's log, which doesn't contain our hypothetical future
+            // rounds, and there's no way to point it at a substitute
+            // (MonsterModel.MoveStateMachine's setter is private and throws if
+            // already set — swapping it is not an option). Reimplementing
+            // against the public fields (repeatType/maxTimes/cooldown/
+            // GetWeight()) is the only way to get cooldown/UseOnlyOnce/
+            // CanRepeatXTimes right for round 2+, where the log must include
+            // round 1's forecasted move.
+            string? PickRandomBranch(
+                MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.RandomBranchState branch,
+                List<string> forecastLog, MegaCrit.Sts2.Core.Random.Rng rng)
+            {
+                float Weight(MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.RandomBranchState.StateWeight sw)
+                {
+                    // Repeat-type gate and cooldown gate are INDEPENDENT and BOTH
+                    // apply (the original formula is multiplicative: num *
+                    // cooldown-factor * GetWeight()) — a branch can carry BOTH a
+                    // MoveRepeatType AND a cooldown at once (e.g. Flyconid's
+                    // VULNERABLE_SPORES_MOVE is CannotRepeat with cooldown=3). An
+                    // earlier version of this method `return`ed as soon as the
+                    // repeat-type check passed, silently skipping the cooldown
+                    // check for every UseOnlyOnce/CannotRepeat/CanRepeatXTimes
+                    // branch — confirmed wrong by empirical verification (Task 2a
+                    // notes): Flyconid's two spore moves, which differ only in
+                    // cooldown (3 vs 2), mispredicted whenever the skipped
+                    // cooldown would have zeroed one of them out.
+                    bool allowedByRepeat;
+                    if (sw.repeatType == MegaCrit.Sts2.Core.MonsterMoves.MoveRepeatType.UseOnlyOnce)
+                    {
+                        allowedByRepeat = !forecastLog.Contains(sw.stateId);
+                    }
+                    else if (sw.repeatType == MegaCrit.Sts2.Core.MonsterMoves.MoveRepeatType.CannotRepeat)
+                    {
+                        allowedByRepeat = !(forecastLog.Count > 0 && forecastLog[^1] == sw.stateId);
+                    }
+                    else if (sw.repeatType == MegaCrit.Sts2.Core.MonsterMoves.MoveRepeatType.CanRepeatXTimes)
+                    {
+                        int consecutive = 0;
+                        for (int idx = forecastLog.Count - 1; idx >= 0 && forecastLog[idx] == sw.stateId; idx--)
+                            consecutive++;
+                        allowedByRepeat = consecutive < sw.maxTimes;
+                    }
+                    else // CanRepeatForever
+                    {
+                        allowedByRepeat = true;
+                    }
+                    if (!allowedByRepeat) return 0f;
+
+                    if (sw.cooldown > 0)
+                    {
+                        int seen = 0;
+                        for (int idx = forecastLog.Count - 1; idx >= 0 && seen < sw.cooldown; idx--, seen++)
+                            if (forecastLog[idx] == sw.stateId) return 0f;
+                    }
+                    return sw.GetWeight();
+                }
+
+                float total = branch.States.Sum(Weight);
+                if (total <= 0f) return null;
+                float roll = rng.NextFloat(total);
+                foreach (var sw in branch.States)
+                {
+                    roll -= Weight(sw);
+                    if (roll <= 0f) return sw.stateId;
+                }
+                return null;
+            }
+
+            // Walks the machine's transition graph starting AFTER `afterMove`
+            // has been "performed" — always a safe assumption for forecasting:
+            // by the time round N+1's transition would happen for real, round
+            // N's move has already executed (PerformMove always precedes the
+            // next RollMove for a given monster). Never calls
+            // OnEnterState()/OnExitState() on any MonsterState — MoveState's
+            // OnExitState resets a SHARED _performedAtLeastOnce flag that the
+            // LIVE monster's own bookkeeping depends on, and States are shared
+            // (not cloned) between the live machine and this walk.
+            MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MoveState? ResolveNextMove(
+                MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MonsterMoveStateMachine machine,
+                MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MoveState afterMove,
+                Creature owner, MegaCrit.Sts2.Core.Random.Rng rng, List<string> forecastLog,
+                out string? reason)
+            {
+                reason = null;
+                string? nextId = afterMove.FollowUpState?.Id ?? afterMove.FollowUpStateId;
+                if (string.IsNullOrEmpty(nextId))
+                {
+                    reason = $"{afterMove.Id} has no follow-up state";
+                    return null;
+                }
+                for (int guard = 0; guard < 32; guard++)
+                {
+                    if (!machine.States.TryGetValue(nextId!, out var state))
+                    {
+                        reason = $"unknown state id {nextId}";
+                        return null;
+                    }
+                    switch (state)
+                    {
+                        case MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MoveState move:
+                            return move;
+                        case MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.RandomBranchState random:
+                            nextId = PickRandomBranch(random, forecastLog, rng);
+                            if (nextId == null)
+                            {
+                                reason = $"random branch {random.Id} has no positive-weight option";
+                                return null;
+                            }
+                            break;
+                        case MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.ConditionalBranchState cond:
+                            try { nextId = cond.GetNextState(owner, rng); }
+                            catch (Exception ex)
+                            {
+                                reason = $"conditional branch {cond.Id} threw {ex.GetType().Name}";
+                                return null;
+                            }
+                            break;
+                        default:
+                            reason = $"unsupported state type {state.GetType().Name}";
+                            return null;
+                    }
+                }
+                reason = "did not reach a move state within 32 transitions";
+                return null;
+            }
+
+            // Per-enemy walking state for round 1+. Round 0 needs none of this
+            // (it's just the already-resolved NextMove), so it's populated in
+            // this same setup pass, per enemy, independent of the others.
+            int n = aliveEnemiesForTargeting.Count;
+            var walkerName = new string[n];
+            var walkerMachine = new MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MonsterMoveStateMachine?[n];
+            var walkerCursor = new MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.MoveState?[n];
+            var walkerLog = new List<string>?[n];
+            var walkerFailed = new bool[n];
+
+            for (int ei = 0; ei < n; ei++)
+            {
+                var owner = aliveEnemiesForTargeting[ei];
+                var monsterName = owner.Monster?.Id.Entry ?? "UNKNOWN";
+                walkerName[ei] = monsterName;
+                try
+                {
+                    var machine = owner.Monster?.MoveStateMachine;
+                    var current = owner.Monster?.NextMove;
+                    if (machine == null || current == null)
+                    {
+                        unsupported.Add($"enemy {ei} ({monsterName}): no MoveStateMachine/NextMove");
+                        exact = false;
+                        walkerFailed[ei] = true;
+                        continue;
+                    }
+
+                    // Round 0 is free: it's the already-resolved NextMove, identical
+                    // to the "intents" field above.
+                    AddIntents(rounds[0], ei, current, owner);
+
+                    // Local cursor mirroring MonsterMoveStateMachine.StateLog: seeded
+                    // from the REAL log (what has actually happened), extended with
+                    // each forecasted round so round 2+'s cooldown/UseOnlyOnce/
+                    // CanRepeatXTimes checks see round 1's hypothetical move — same
+                    // as the real engine would after it actually happens. Never
+                    // written back to `machine`.
+                    //
+                    // Do NOT unconditionally append `current` here: RollMove's
+                    // internal FindNextMoveState already appends the resolved
+                    // MoveState to StateLog when it transitions there (confirmed by
+                    // decompiling lib/sts2.dll), so in the normal case `current` is
+                    // ALREADY machine.StateLog's last entry — appending it again
+                    // would double-count it and shift every cooldown-window scan
+                    // for round 2+ by one, silently mismatching (found empirically:
+                    // Flyconid's cooldown-gated spore moves). Only append when it's
+                    // genuinely missing — e.g. a stunned monster's NextMove was set
+                    // via SetMoveImmediate/ForceCurrentState, which bypasses logging
+                    // entirely.
+                    var forecastLog = machine.StateLog.Select(s => s.Id).ToList();
+                    if (forecastLog.Count == 0 || forecastLog[^1] != current.StateId)
+                        forecastLog.Add(current.StateId);
+
+                    walkerMachine[ei] = machine;
+                    walkerCursor[ei] = current;
+                    walkerLog[ei] = forecastLog;
+                }
+                catch (Exception ex)
+                {
+                    unsupported.Add($"enemy {ei} ({monsterName}): {ex.GetType().Name}: {ex.Message}");
+                    exact = false;
+                    walkerFailed[ei] = true;
+                }
+            }
+
+            if (IntentForecastRounds > 1 && n > 0)
+            {
+                // CRITICAL: clone the RNG before walking forward, and clone it only
+                // ONCE for the whole fight, not once per enemy. Walking the REAL
+                // _runState.Rng.MonsterAi here would consume real random draws and
+                // shift every subsequent monster-AI roll in the player's actual
+                // run — a silent, run-destroying bug. `new Rng(x.ToSerializable())`
+                // makes a fully detached copy; `liveRng` itself must never have
+                // .NextFloat()/.NextInt()/etc called on it below.
+                //
+                // ONE clone for every enemy (not one each) because MonsterAi is a
+                // SINGLE shared stream across the whole fight — confirmed by
+                // decompiling lib/sts2.dll: CombatState.cs assigns
+                // `monster.RunRng = RunState.Rng;` (the same RunRngSet instance)
+                // to every monster, and CombatManager's turn-start resolution
+                // (`foreach (Creature enemy in turnState.State.Enemies)
+                // enemy.PrepareForNextTurn(...)`) rolls every enemy's next move
+                // from that one stream, in that enumeration order, once per round.
+                // Walking each enemy's entire multi-round sequence back-to-back
+                // (round 1 AND round 2 for enemy 0, THEN enemy 1) draws from a
+                // per-enemy clone in the wrong relative order whenever more than
+                // one enemy in the fight actually rolls (RandomBranchState) —
+                // confirmed empirically: Flyconid (a pure-RandomBranchState
+                // monster with no HP/Powers-dependent branching at all)
+                // mispredicted which spore move fires in ~2% of two-enemy-fight
+                // forecasts before this was walked round-robin (see Task 2a
+                // verification notes). Round-robin — one round for every enemy,
+                // in enemy_index order, before any enemy advances to the next
+                // round — reproduces the real interleaving exactly.
+                var liveRng = _runState?.Rng?.MonsterAi;
+                if (liveRng == null)
+                {
+                    for (int ei = 0; ei < n; ei++)
+                    {
+                        if (walkerFailed[ei]) continue;
+                        unsupported.Add($"enemy {ei} ({walkerName[ei]}): no RunState.Rng.MonsterAi");
+                    }
+                    exact = false;
+                }
+                else
+                {
+                    var forecastRng = new MegaCrit.Sts2.Core.Random.Rng(liveRng.ToSerializable());
+                    for (int round = 1; round < IntentForecastRounds; round++)
+                    {
+                        for (int ei = 0; ei < n; ei++)
+                        {
+                            if (walkerFailed[ei]) continue;
+                            var owner = aliveEnemiesForTargeting[ei];
+                            try
+                            {
+                                var next = ResolveNextMove(walkerMachine[ei]!, walkerCursor[ei]!, owner,
+                                    forecastRng, walkerLog[ei]!, out var reason);
+                                if (next == null)
+                                {
+                                    unsupported.Add($"enemy {ei} ({walkerName[ei]}): {reason}");
+                                    exact = false;
+                                    walkerFailed[ei] = true;
+                                    continue;
+                                }
+                                walkerLog[ei]!.Add(next.StateId);
+                                AddIntents(rounds[round], ei, next, owner);
+                                walkerCursor[ei] = next;
+                            }
+                            catch (Exception ex)
+                            {
+                                unsupported.Add($"enemy {ei} ({walkerName[ei]}): {ex.GetType().Name}: {ex.Message}");
+                                exact = false;
+                                walkerFailed[ei] = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return new Dictionary<string, object?>
+            {
+                ["rounds"] = rounds,
+                ["exact"] = exact,
+                ["unsupported"] = unsupported,
+            };
+        }
+
+        Dictionary<string, object?>? intentForecast = null;
+        try { intentForecast = BuildIntentForecast(); }
+        catch (Exception ex) { Log($"BuildIntentForecast: {ex.Message}"); }
+
         // Player powers/buffs
         var playerPowers = player.Creature?.Powers?.Select(pw => new Dictionary<string, object?>
         {
@@ -2352,6 +2705,7 @@ public class RunSimulator
             ["max_energy"] = pcs?.MaxEnergy ?? 0,
             ["hand"] = hand,
             ["enemies"] = enemies,
+            ["intent_forecast"] = intentForecast,
             ["player"] = PlayerSummary(player),
             ["player_powers"] = playerPowers?.Count > 0 ? playerPowers : null,
             ["draw_pile_count"] = pcs?.DrawPile?.Cards?.Count ?? 0,
