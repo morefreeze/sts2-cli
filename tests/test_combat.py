@@ -1,4 +1,6 @@
 """Tests for combat scenarios."""
+from collections import Counter
+
 import pytest
 
 
@@ -9,7 +11,8 @@ class TestCombatStructure:
         state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
         assert state["decision"] == "combat_play"
         for key in ("round", "energy", "max_energy", "hand", "enemies",
-                    "player", "draw_pile_count", "discard_pile_count", "player_powers"):
+                    "player", "draw_pile_count", "discard_pile_count", "player_powers",
+                    "draw_pile", "discard_pile"):
             assert key in state, f"Missing: {key}"
 
     def test_card_fields(self, game):
@@ -21,6 +24,100 @@ class TestCombatStructure:
             assert "cost" in card
             assert "can_play" in card
             assert card["type"] in ("Attack", "Skill", "Power", "Status", "Curse")
+
+    def test_pile_card_fields(self, game):
+        """draw_pile/discard_pile entries need enough shape for the planner
+        to identify, cost-check, and target-check a card without playing it
+        (turn_planner.py reads id/cost; the next planned task -- multi-turn
+        search -- is expected to need cost/type too, see RunSimulator.cs's
+        comment above PileCardList)."""
+        state = game.start(seed="cs4")
+        game.skip_neow(state)
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+        assert state["draw_pile"], "expected a non-empty starting draw pile"
+        for card in state["draw_pile"]:
+            for key in ("index", "id", "name", "cost", "type", "target_type"):
+                assert key in card, f"pile card missing {key}: {card}"
+            assert isinstance(card["name"], str)
+            assert card["type"] in ("Attack", "Skill", "Power", "Status", "Curse")
+
+    def test_discard_pile_present_and_empty_at_combat_start(self, game):
+        """Live-engine regression guard for the empty-vs-absent contract
+        documented in RunSimulator.cs above PileCardList: a genuinely empty
+        pile MUST be reported as `[]`, never collapsed to None/absent the
+        way the player_powers field just below it collapses an empty list.
+        At the very start of combat nothing has been played or discarded
+        yet, so discard_pile==[] is a real, live example of "genuinely
+        empty" straight from the engine (not a synthetic dict) -- if a
+        future edit "cleans up" the draw_pile/discard_pile assignment to
+        match the player_powers idiom (`X?.Count > 0 ? X : null`), or if
+        PileCardList's failure path regresses back to swallowing exceptions
+        into an empty list, this is the test that catches it.
+        """
+        state = game.start(seed="cs5")
+        game.skip_neow(state)
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+        assert "discard_pile" in state
+        assert state["discard_pile"] == [], (
+            "discard_pile must be an empty list (genuinely empty) at combat "
+            "start, not None/absent"
+        )
+
+    def test_draw_pile_order_matches_next_draw(self, game):
+        """Live-engine proof of the ordering contract documented in
+        RunSimulator.cs above PileCardList: draw_pile[0] is the top of the
+        pile / the actual next card drawn, and the whole list is already in
+        draw order -- not just trusting the comment, but confirming it
+        against a real draw.
+
+        Uses set_player(deck=...) to give the combat a bigger-than-normal,
+        two-card-type deck. This matters because with the *default*
+        starting deck, the draw pile remaining after the initial hand draw
+        is exactly equal to the next turn's hand size (e.g. Ironclad: 10
+        card deck - 5 card hand = 5 remaining, and the next end_turn draws
+        exactly 5) -- so the *entire* remaining pile gets drawn regardless
+        of its internal order, which would make this test pass even if the
+        order convention were backwards. Sizing the deck so more cards
+        remain than get drawn next turn makes it a real prefix draw, and
+        segregating the forced order by card identity (all of one Strike
+        vs Defend on top) makes the drawn hand's composition a clear,
+        unambiguous signal of which end of the list was actually consumed.
+        """
+        state = game.start(character="Ironclad", seed="cs6")
+        game.skip_neow(state)
+        game.set_player(deck=["STRIKE_IRONCLAD"] * 10 + ["DEFEND_IRONCLAD"] * 10)
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+        hand_size = len(state["hand"])
+        draw_pile = state["draw_pile"]
+        assert len(draw_pile) > hand_size, (
+            "test setup needs a surplus pile (more remaining than get "
+            "redrawn) or a full-pile draw would pass regardless of order"
+        )
+
+        ids = [c["id"].split(".", 1)[-1] for c in draw_pile]
+        counts = Counter(ids)
+        # Put whichever card type has enough copies to fill a whole hand on
+        # top, so the forced top-hand_size slice is a pure, unambiguous
+        # composition to check against afterwards.
+        top_type, top_n = counts.most_common(1)[0]
+        assert top_n >= hand_size, (
+            "test setup needs one card type with enough remaining copies "
+            "to fill a full hand"
+        )
+        forced = [top_type] * counts[top_type]
+        for other_type in [k for k in counts if k != top_type]:
+            forced += [other_type] * counts[other_type]
+        result = game.set_draw_order(forced)
+        assert result["type"] == "ok"
+
+        state = game.act("end_turn")
+        assert state["decision"] == "combat_play"
+        new_hand_ids = [c["id"].split(".", 1)[-1] for c in state["hand"]]
+        assert Counter(new_hand_ids) == Counter([top_type] * hand_size), (
+            f"draw_pile[0] must be the actual next card drawn; forced "
+            f"{top_type} to the top of the pile but the next hand drawn "
+            f"was {Counter(new_hand_ids)}"
+        )
 
     def test_enemy_fields(self, game):
         state = game.start(seed="cs3")

@@ -166,6 +166,13 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
         hand_meta.append(meta)
         if known:
             s.hand.append(cid)
+    s.draw_pile = _resolve_draw_pile(state, player, hand_meta)
+    s.discard_pile = _resolve_discard_pile(state)
+
+    return s, hand_meta
+
+
+def _resolve_draw_pile(state: dict, player: dict, hand_meta: list[dict]) -> list[str]:
     # Draw pile: when the C# side reports the real ordered pile (RunSimulator.cs
     # "draw_pile" field, added for this planner), use it verbatim instead of
     # guessing — order is no longer unknowable. The C# pile is reported
@@ -193,22 +200,23 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
         # the deck-composition guess below, which would incorrectly
         # resurrect cards that are actually elsewhere right now.
         ids = [_card_id_norm(c) for c in real_draw_pile]
-        s.draw_pile = list(reversed(ids))
-    else:
-        # No real order in this state (older logs / replays predating the
-        # "draw_pile" field): full deck composition is known (player.deck).
-        # Fill the sim draw pile with deck − hand so draw effects (Pommel
-        # Strike, Shrug It Off) pull real cards. Order is shuffled with a
-        # fixed seed — exact order is unknowable but composition is exact.
-        deck_ids = [_card_id_norm(c) for c in (player.get("deck") or [])]
-        hand_ids = [m["id"] for m in hand_meta]
-        pool = list(deck_ids)
-        for hid in hand_ids:
-            if hid in pool:
-                pool.remove(hid)
-        random.Random(99).shuffle(pool)
-        s.draw_pile = pool
+        return list(reversed(ids))
+    # No real order in this state (older logs / replays predating the
+    # "draw_pile" field): full deck composition is known (player.deck).
+    # Fill the sim draw pile with deck − hand so draw effects (Pommel
+    # Strike, Shrug It Off) pull real cards. Order is shuffled with a
+    # fixed seed — exact order is unknowable but composition is exact.
+    deck_ids = [_card_id_norm(c) for c in (player.get("deck") or [])]
+    hand_ids = [m["id"] for m in hand_meta]
+    pool = list(deck_ids)
+    for hid in hand_ids:
+        if hid in pool:
+            pool.remove(hid)
+    random.Random(99).shuffle(pool)
+    return pool
 
+
+def _resolve_discard_pile(state: dict) -> list[str]:
     # Discard pile: also real & exact when reported. Needed so a mid-search
     # reshuffle (CombatState.draw(): draw_pile empty + discard_pile non-empty
     # → shuffle discard back into draw_pile) has real cards to work with —
@@ -220,9 +228,8 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
     # pile, so only composition matters here, not sequence.
     real_discard_pile = state.get("discard_pile")
     if real_discard_pile is not None:
-        s.discard_pile = [_card_id_norm(c) for c in real_discard_pile]
-
-    return s, hand_meta
+        return [_card_id_norm(c) for c in real_discard_pile]
+    return []
 
 
 def _predict_after_enemy_turn(sim: CombatState, rng: random.Random) -> CombatState:

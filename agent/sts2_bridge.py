@@ -36,6 +36,11 @@ else:
         if a == "--log" and i + 1 < len(sys.argv): LOG_FILE = sys.argv[i + 1]
 
 # --- JSON helpers ---
+# draw_pile/discard_pile: large ordered card lists (id/name/cost/type/target_type per
+# card, potentially ~30 entries each) that exist for turn_planner.py's lookahead, which
+# reads combat_play JSON directly off the subprocess (not through this bridge's
+# --compact HTTP responses). The compact client never looks at them, so strip them here
+# to keep interactive payloads small.
 _STRIP_KEYS = {"description", "after_upgrade", "enchantment", "enchantment_amount",
                "affliction", "affliction_amount", "id", "draw_pile_count",
                "discard_pile_count", "draw_pile", "discard_pile",

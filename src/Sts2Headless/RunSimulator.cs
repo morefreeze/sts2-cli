@@ -2669,7 +2669,38 @@ public class RunSimulator
         // see the hand-serialization comment above re: Momentum Strike corruption). Doing
         // that preview dance for ~30 pile cards every single decision would also be a
         // real hot-path cost for information nobody asked for.
-        List<Dictionary<string, object?>> PileCardList(CardPile? pile)
+        //
+        // FAILURE CONTRACT — deliberately asymmetric with the player_powers idiom just
+        // below (`X?.Count > 0 ? X : null`, where empty and null are interchangeable):
+        // for draw_pile/discard_pile, empty and absent are NOT interchangeable.
+        // turn_planner.py's build_sim_state reads these via `state.get("draw_pile")` /
+        // `state.get("discard_pile")` and branches on `is not None` — present-and-empty
+        // means "the pile is genuinely empty right now" (keep it empty), absent means
+        // "unknown, fall back to the old deck-minus-hand shuffle". So on ANY failure
+        // below — not just a bad card at index 0, ANY card anywhere in the loop — this
+        // must return null for the WHOLE pile, never the partial/empty list accumulated
+        // so far. A partial list would silently tell the planner a card isn't in the
+        // deck (rare, and effectively undetectable); an empty list from a card-0 failure
+        // would silently look exactly like a real empty pile. Both are silent data
+        // corruption, so do NOT narrow this to a per-card try/catch either — a per-card
+        // catch just makes the corruption rarer, not gone. If a future cleanup collapses
+        // this to match the player_powers idiom above, it reintroduces exactly this bug;
+        // see the live-engine regression tests in tests/test_combat.py
+        // (test_discard_pile_present_and_empty_at_combat_start).
+        //
+        // How null actually serializes: Program.cs's JsonSerializerOptions sets
+        // DefaultIgnoreCondition = WhenWritingNull, but that is a per-PROPERTY knob.
+        // `result` below is a Dictionary<string, object?>, and System.Text.Json's
+        // dictionary-value serializer does NOT consult DefaultIgnoreCondition at all —
+        // verified empirically, a null dictionary value still serializes as `"key":null`,
+        // the key is not dropped. That is fine for the one real consumer: Python's
+        // `dict.get("draw_pile")` returns None identically whether the key is missing or
+        // present-with-null, so turn_planner.py's fallback still triggers correctly. Do
+        // not "fix" this by hand-deleting the key from `result` on null — dict.get()
+        // already makes that unnecessary, and papering over the DefaultIgnoreCondition
+        // gap here would just invite the next contributor to trust that setting for a
+        // field where it actually matters.
+        List<Dictionary<string, object?>>? PileCardList(CardPile? pile)
         {
             var list = new List<Dictionary<string, object?>>();
             try
@@ -2691,7 +2722,14 @@ public class RunSimulator
                     });
                 }
             }
-            catch { /* pile introspection must never take down decision serialization */ }
+            catch (Exception ex)
+            {
+                // ANY failure invalidates the WHOLE pile for this decision — see the
+                // failure-contract comment above. Logged so a real bug here shows up
+                // somewhere instead of just quietly degrading planner lookahead.
+                Log($"PileCardList: {ex.Message}");
+                return null;
+            }
             return list;
         }
 
