@@ -2644,7 +2644,27 @@ public class RunSimulator
 
         Dictionary<string, object?>? intentForecast = null;
         try { intentForecast = BuildIntentForecast(); }
-        catch (Exception ex) { Log($"BuildIntentForecast: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log($"BuildIntentForecast: {ex.Message}");
+            // Never guess silently: everything inside BuildIntentForecast is
+            // already guarded per-enemy, so this only fires on a genuinely
+            // unexpected top-level failure — but leaving intentForecast as a
+            // bare C# null still serializes as an explicit JSON `null` (
+            // DefaultIgnoreCondition.WhenWritingNull does NOT drop null
+            // values held in a Dictionary<string, object?>), which Python's
+            // dict.get() cannot distinguish from "forecast object present but
+            // genuinely empty". Emit the same {"exact": false, "unsupported":
+            // [...]} shape the per-enemy path already uses on partial failure
+            // instead, so every combat_play response carries a consistent,
+            // self-describing envelope.
+            intentForecast = new Dictionary<string, object?>
+            {
+                ["rounds"] = new List<List<Dictionary<string, object?>>>(),
+                ["exact"] = false,
+                ["unsupported"] = new List<string> { $"top-level: {ex.GetType().Name}: {ex.Message}" },
+            };
+        }
 
         // Player powers/buffs
         var playerPowers = player.Creature?.Powers?.Select(pw => new Dictionary<string, object?>

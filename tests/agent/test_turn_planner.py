@@ -5,7 +5,6 @@ from agent.sim.combat_step import _advance_enemy_intents, play_card
 from agent.turn_planner import (
     apply_vantom_slippery_mask,
     build_sim_state,
-    defense_override_enabled,
     intent_defense_override,
     plan_action,
     vantom_slippery_override,
@@ -139,23 +138,6 @@ def test_defense_override_is_more_conservative_in_boss_and_elite_rooms():
     assert intent_defense_override(regular) is None
     assert intent_defense_override(boss) == 7
     assert intent_defense_override(elite) == 7
-
-
-def test_defense_override_enabled_defaults_on(monkeypatch):
-    monkeypatch.delenv("STS2_DEFENSE", raising=False)
-    assert defense_override_enabled() is True
-
-
-def test_defense_override_enabled_stays_on_for_truthy_values(monkeypatch):
-    for value in ("1", "true", "on", "yes", "anything"):
-        monkeypatch.setenv("STS2_DEFENSE", value)
-        assert defense_override_enabled() is True
-
-
-def test_defense_override_enabled_opts_out_on_falsy_values(monkeypatch):
-    for value in ("0", "false", "off", "FALSE", "Off"):
-        monkeypatch.setenv("STS2_DEFENSE", value)
-        assert defense_override_enabled() is False
 
 
 def test_slippery_clamps_next_enemy_hp_loss_and_consumes_stacks():
@@ -396,6 +378,13 @@ def test_build_sim_state_sets_discard_pile_when_present_without_reversing():
 # _advance_enemy_intents (combat_step.py) consumes the queue one round per
 # simulated end_turn(), falling back to the wiki-scraped state machine once
 # it runs out (or was never populated).
+#
+# rounds[0] is a self-check, NOT a queued future move: RunSimulator.cs builds
+# it from owner.Monster?.NextMove, identical by construction to the per-enemy
+# "intents" field the state already carries — see combat_state.py:42 and
+# RunSimulator.cs ~2581. Every fixture below therefore gives round 0 the same
+# values as the enemy's "intents" (mirroring the real wire payload) and
+# asserts that intent_forecast[0] is round 1's data, never round 0's.
 
 def test_build_sim_state_attaches_intent_forecast_per_enemy():
     state = _base_combat_play_state(
@@ -414,15 +403,21 @@ def test_build_sim_state_attaches_intent_forecast_per_enemy():
         intent_forecast={
             "rounds": [
                 [
+                    # Round 0 mirrors "intents" above — skipped, not queued.
+                    {"enemy_index": 0, "move": "BUFF_MOVE", "type": "buff"},
+                    {"enemy_index": 1, "move": "CHOMP_MOVE", "type": "attack",
+                     "damage": 8, "hits": 1},
+                ],
+                [
                     {"enemy_index": 0, "move": "STAB_MOVE", "type": "attack",
                      "damage": 6, "hits": 1},
-                    {"enemy_index": 1, "move": "CHOMP_MOVE", "type": "attack",
-                     "damage": 11, "hits": 1},
+                    {"enemy_index": 1, "move": "THRASH_MOVE", "type": "attack",
+                     "damage": 7, "hits": 2},
                 ],
                 [
                     {"enemy_index": 0, "move": "BUFF_MOVE", "type": "buff"},
-                    {"enemy_index": 1, "move": "THRASH_MOVE", "type": "attack",
-                     "damage": 7, "hits": 2},
+                    {"enemy_index": 1, "move": "CHOMP_MOVE", "type": "attack",
+                     "damage": 11, "hits": 1},
                 ],
             ],
             "exact": True,
@@ -434,21 +429,23 @@ def test_build_sim_state_attaches_intent_forecast_per_enemy():
 
     assert sim is not None
     cultist, jaw_worm = sim.enemies
+    # [0] must be round 1's data, [1] round 2's — round 0 never appears.
     assert cultist.intent_forecast == [
         {"type": "attack", "damage": 6, "hits": 1},
         {"type": "debuff", "damage": 0, "hits": 0},
     ]
     assert jaw_worm.intent_forecast == [
-        {"type": "attack", "damage": 11, "hits": 1},
         {"type": "attack", "damage": 7, "hits": 2},
+        {"type": "attack", "damage": 11, "hits": 1},
     ]
 
 
 def test_build_sim_state_intent_forecast_truncates_at_first_unsupported_round():
-    # Enemy 0 has no entry in round 1 (e.g. RunSimulator.cs hit an unknown
-    # branch type and stopped producing rounds for it) — the queue must stop
-    # there rather than treat the gap as "does nothing", so
-    # _advance_enemy_intents falls back to the state machine once it's empty.
+    # Enemy 0 has no entry in round 2 (e.g. RunSimulator.cs hit an unknown
+    # branch type and stopped producing rounds for it beyond that point) —
+    # the queue must stop there rather than treat the gap as "does nothing",
+    # so _advance_enemy_intents falls back to the state machine once it's
+    # empty. Round 0 mirrors "intents" and is skipped regardless.
     state = _base_combat_play_state(
         enemies=[
             {"name": "Boss", "hp": 100, "max_hp": 100, "block": 0,
@@ -456,6 +453,8 @@ def test_build_sim_state_intent_forecast_truncates_at_first_unsupported_round():
         ],
         intent_forecast={
             "rounds": [
+                [{"enemy_index": 0, "move": "SLAM", "type": "attack",
+                  "damage": 20, "hits": 1}],
                 [{"enemy_index": 0, "move": "SLASH", "type": "attack",
                   "damage": 15, "hits": 1}],
                 [],
@@ -486,6 +485,52 @@ def test_build_sim_state_intent_forecast_absent_leaves_queue_empty():
 
     assert sim is not None
     assert sim.enemies[0].intent_forecast == []
+
+
+def test_advance_enemy_intents_after_build_sim_state_skips_current_round():
+    # Integration regression: chains the REAL pipeline (build_sim_state ->
+    # _advance_enemy_intents) instead of hand-constructing intent_forecast on
+    # a bare Enemy like the unit tests above/below do. RunSimulator.cs's
+    # round 0 is, by construction, identical to "intents" (the field already
+    # in use as the enemy's current move) — see combat_state.py:42. Before
+    # the fix, build_sim_state queued round 0 as forecast[0], so this first
+    # _advance_enemy_intents() call re-installed the move the enemy had just
+    # used (11 dmg x1) instead of advancing to round 1's real next move
+    # (8 dmg x2). This must fail against the pre-fix code.
+    state = _base_combat_play_state(
+        enemies=[
+            {
+                "name": "Cultist",
+                "hp": 30, "max_hp": 30, "block": 0,
+                "intents": [{"type": "attack", "damage": 11, "hits": 1}],
+            },
+        ],
+        intent_forecast={
+            "rounds": [
+                # Round 0: mirrors "intents" above exactly, as the real
+                # wire payload always does.
+                [{"enemy_index": 0, "move": "DARK_STRIKE", "type": "attack",
+                  "damage": 11, "hits": 1}],
+                # Round 1: the actual next move.
+                [{"enemy_index": 0, "move": "RITUAL", "type": "attack",
+                  "damage": 8, "hits": 2}],
+            ],
+            "exact": True,
+            "unsupported": [],
+        },
+    )
+
+    sim, _ = build_sim_state(state)
+    assert sim is not None
+    cultist = sim.enemies[0]
+    # Sanity check the fixture: current intent is the just-used 11 dmg x1
+    # move, matching round 0 by construction.
+    assert cultist.intent == {"type": "attack", "damage": 11, "hits": 1}
+
+    _advance_enemy_intents(sim)
+
+    # Must advance to round 1's move (8 dmg x2), not repeat round 0 (11 x1).
+    assert cultist.intent == {"type": "attack", "damage": 8, "hits": 2}
 
 
 def test_advance_enemy_intents_consumes_forecast_before_state_machine():

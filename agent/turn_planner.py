@@ -104,7 +104,20 @@ def build_sim_state(state: dict) -> tuple[CombatState | None, list[dict]]:
     # nothing" — it must instead make the queue run out so
     # _advance_enemy_intents falls back to the wiki-scraped state machine,
     # exactly like an absent forecast would.
-    forecast_rounds = ((state.get("intent_forecast") or {}).get("rounds") or [])
+    #
+    # Round 0 is deliberately skipped here: RunSimulator.cs builds it from
+    # owner.Monster?.NextMove, which is BY CONSTRUCTION identical to the
+    # per-enemy "intents" field already consumed above (round 0 exists on the
+    # wire as a self-check, matching the reference implementation — see
+    # RunSimulator.cs ~2581). Queuing it as forecast[0] would make
+    # _advance_enemy_intents (combat_step.py) replay the move an enemy just
+    # used instead of its actual next one — every later round would then be
+    # one turn stale. Enemy.intent_forecast's contract (combat_state.py:42)
+    # is explicit that [0] is the intent AFTER the upcoming one. Slicing
+    # (rather than enumerate-and-skip) also means a short/absent forecast
+    # ([] or a single round 0 only) degrades to an empty queue, not an
+    # index error.
+    forecast_rounds = ((state.get("intent_forecast") or {}).get("rounds") or [])[1:]
 
     # Enemies — in JSON order so target indices align
     for idx, e in enumerate(state.get("enemies") or []):
