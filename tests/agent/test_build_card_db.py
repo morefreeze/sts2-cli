@@ -33,9 +33,24 @@ def test_plural_picks_the_many_branch_above_one():
     assert out == "Draw 2 cards."
 
 
-def test_energy_icons_render_as_the_number():
+def test_energy_icons_render_the_noun_from_the_variable_name():
+    """"Gain 2." loses what the 2 is OF, and the effect parser cannot recover it.
+
+    The noun for the icon functions lives in the variable name, not the prose,
+    unlike diff() where the prose carries it ("Gain {Block:diff()} Block").
+    """
     out, _ = render("Gain {Energy:energyIcons()}.", {"Energy": 2})
-    assert out == "Gain 2."
+    assert out == "Gain 2 Energy."
+
+
+def test_star_icons_render_the_noun_and_respect_singular():
+    assert render("Gain {Stars:starIcons()}.", {"Stars": 3})[0] == "Gain 3 Stars."
+    assert render("Gain {Stars:starIcons()}.", {"Stars": 1})[0] == "Gain 1 Star."
+
+
+def test_diff_stays_a_bare_number_because_the_prose_has_the_noun():
+    out, _ = render("Gain {Block:diff()} Block.", {"Block": 8})
+    assert out == "Gain 8 Block."
 
 
 def test_if_upgraded_takes_the_base_branch():

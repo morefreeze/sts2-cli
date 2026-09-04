@@ -81,7 +81,8 @@ def render(description: str, variables: dict) -> tuple[str | None, list[str]]:
 
     Grammar (all observed in localization_eng/cards.json):
         {Var:diff()}                     -> value
-        {Var:energyIcons()}              -> value
+        {Var:energyIcons()}              -> "value Energy" (noun is in the var name)
+        {Var:starIcons()}                -> "value Star(s)"
         {Var:plural:one|many}            -> branch on value == 1; branches nest
         {IfUpgraded:show:A|B}            -> B, since we render the BASE card
         {InCombat:A|B}                   -> B, the out-of-combat form
@@ -126,7 +127,21 @@ def render(description: str, variables: dict) -> tuple[str | None, list[str]]:
             chosen = branches[0] if (singular or len(branches) == 1) else branches[-1]
             return expand(chosen)
         if name in variables and variables[name] is not None:
-            return str(variables[name])
+            value = variables[name]
+            # For the icon-rendering functions the semantic NOUN lives in the
+            # variable name, not the surrounding prose: "Gain {Energy:
+            # energyIcons()}." renders to "Gain 2." and the effect parser has no
+            # way to know 2 of WHAT. Emitting the noun is what makes gain_energy
+            # and the Regent star mechanic parseable at all. `diff()` and
+            # `inverseDiff()` are left as bare numbers on purpose -- there the
+            # noun IS in the prose ("Gain {Block:diff()} Block").
+            function = rest.strip()
+            if function == "energyIcons()":
+                return f"{value} Energy"
+            if function == "starIcons()":
+                singular = isinstance(value, (int, float)) and int(value) == 1
+                return f"{value} Star" if singular else f"{value} Stars"
+            return str(value)
         if name in _STRUCTURAL:
             return _STRUCTURAL[name]
         unresolved.append(name)
