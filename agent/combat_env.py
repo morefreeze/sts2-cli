@@ -331,6 +331,11 @@ _BASIC_CARD_IDS = frozenset({
 })
 
 
+def _run_episode_enabled() -> bool:
+    """STS2_RUN_EPISODE=1 makes one episode span a whole run, not one combat."""
+    return os.environ.get("STS2_RUN_EPISODE", "").strip().lower() in {"1", "true", "on"}
+
+
 def _card_threshold_lift() -> float:
     """Offset added to the card-reward score bar, from STS2_CARD_THRESHOLD_LIFT.
 
@@ -1301,6 +1306,48 @@ class CombatEnv(gym.Env):
         reward += self._combat_win_reward(state)
         self._record_combat_hp_loss(_player_hp(state))
         self._current_state = state
+        if _run_episode_enabled():
+            # RUN-LEVEL EPISODE (STS2_RUN_EPISODE=1). Default off.
+            #
+            # By default an episode is ONE COMBAT: this line returns
+            # terminated=True after every fight and reset() advances the run. So
+            # GAE never crosses a combat boundary and there is no credit
+            # assignment between fights -- the agent cannot learn "spend less HP
+            # here so floor 17 is survivable". The floor bonus in
+            # _combat_win_reward does scale with depth, but within an episode the
+            # agent cannot influence which floor it is on, so that term is a
+            # constant offset absorbed by the value baseline and contributes
+            # nothing to the policy gradient.
+            #
+            # Here the episode is the whole run instead: advance through the
+            # heuristic rooms to the next fight and keep going. Only game_over
+            # (or a technical failure) ends it. Needs a much longer discount
+            # horizon than the default gamma=0.99 -- see train.py --gamma.
+            nxt = self._advance_to_combat(state)
+            if nxt is not None and nxt.get("decision") == "combat_play":
+                self._init_combat_tracking(nxt)
+                self._current_state = nxt
+                self._combat_steps = 0
+                return self._encode(nxt), reward, False, False, {"combat_won": True}
+            # Run is over (natural game_over, or stuck/crash): terminate here and
+            # pay the terminal reward, mirroring the game_over branch above.
+            self._game_alive = False
+            if nxt is not None and nxt.get("decision") == "game_over":
+                reward += self._terminal_reward(nxt)
+                if nxt.get("victory", False):
+                    reward += self._combat_win_reward(nxt)
+                self._run_max_floor = max(self._run_max_floor, self._current_floor)
+                self._emit_run_outcome(nxt, bool(nxt.get("victory", False)),
+                                       status=_terminal_status_for(nxt))
+                info = self._game_over_info(nxt)
+            else:
+                self._emit_run_outcome(nxt or state, False,
+                                       status=_terminal_status_for(nxt))
+                info = {"floor": self._current_floor,
+                        "crashed": nxt is None,
+                        "stuck": bool(nxt and nxt.get("decision") == "stuck")}
+            self._kill_proc()
+            return last_obs, reward, True, False, info
         return last_obs, reward, True, False, {"floor": self._current_floor, "combat_won": True}
 
     def action_masks(self) -> np.ndarray:

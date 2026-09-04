@@ -703,6 +703,12 @@ def main():
                         help="Override PPO epochs per rollout (default: 1; typical PPO 10).")
     parser.add_argument("--clip-range", type=float, default=None,
                         help="Override PPO clip range (default: 0.05; typical PPO 0.2).")
+    parser.add_argument("--gamma", type=float, default=None,
+                        help="Override discount (default: 0.99). With STS2_RUN_EPISODE=1 an "
+                             "episode is a whole run (~500-2000 steps) and 0.99 has an "
+                             "effective horizon of ~100 steps, so the run's outcome never "
+                             "reaches early decisions; use 0.997-0.999. Changing gamma "
+                             "invalidates a loaded value function -- pass --reinit-value.")
     parser.add_argument("--save-dir", default=None,
                         help="Override checkpoint output dir (default: checkpoints/). "
                              "Use 'checkpoints_boss/' for boss-focused training.")
@@ -750,7 +756,8 @@ def main():
     ENT_COEF   = 0.08 if args.ent_coef is None else float(args.ent_coef)
     # Run10: 0.10→0.08 slight reduction for more exploitation at floor 15+.
     # --ent-coef overrides for boss-only training (recommended 0.15+ to escape stuck policy).
-    GAMMA      = 0.99   # REVERTED 2026-05-18: gamma=0.95 caused 3-day regression
+    GAMMA      = 0.99 if args.gamma is None else float(args.gamma)
+                        # REVERTED 2026-05-18: gamma=0.95 caused 3-day regression
                         # from 8827k baseline (13.1) → 10057k (11.0). Switching gamma
                         # on a loaded ckpt invalidates its value function (calibrated
                         # for ~100-step horizon), and shorter horizon under-rewards
