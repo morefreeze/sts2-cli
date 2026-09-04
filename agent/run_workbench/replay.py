@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -146,7 +147,7 @@ def _normalize_state(raw_state: Any) -> dict[str, Any]:
         "discard_pile_count",
     )
 
-    for key in ("options", "choices", "cards", "hand", "enemies"):
+    for key in ("options", "choices", "cards", "hand", "enemies", "orbs"):
         state[key] = _mapping_list(raw_state, key, f"state {key}")
     for option in state["options"]:
         _normalize_numeric_fields(option, "index")
@@ -162,6 +163,8 @@ def _normalize_state(raw_state: Any) -> dict[str, Any]:
             _normalize_numeric_fields(intent, "damage", "hits")
         for power in enemy["powers"]:
             _normalize_numeric_fields(power, "amount")
+    for orb in state["orbs"]:
+        _normalize_numeric_fields(orb, "index", "passive", "evoke")
     return state
 
 
@@ -425,6 +428,8 @@ def _collect_combat(
     if state.get("decision") != "combat_play":
         return
     snapshot = _combat_snapshot(state, source_index, protocol_step)
+    _resolve_pending_effects(room, snapshot)
+    room["_last_combat_snapshot"] = snapshot
     room["combat"]["turns"].append(
         {
             "step": source_index,
@@ -435,6 +440,7 @@ def _collect_combat(
             "enemy_names": [e.get("name") for e in snapshot["enemies"]],
             "enemies": snapshot["enemies"],
             "hand": snapshot["hand"],
+            "orbs": snapshot["orbs"],
         }
     )
     _update_combat_round(room, snapshot)
@@ -483,6 +489,16 @@ def _combat_snapshot(
                 "target_type": potion.get("target_type"),
             }
             for potion in player.get("potions") or []
+        ],
+        # Orbs live at the top level of the state dict (not under player).
+        "orbs": [
+            {
+                "index": orb.get("index"),
+                "type": orb.get("type") or orb.get("name"),
+                "passive": orb.get("passive"),
+                "evoke": orb.get("evoke"),
+            }
+            for orb in state.get("orbs") or []
         ],
         "enemies": [
             {
@@ -586,6 +602,120 @@ def _combat_action_row(action: dict[str, Any], source_state: dict[str, Any] | No
     return row
 
 
+def _hand_names(snapshot: dict[str, Any]) -> list[str]:
+    return [card.get("name") or card.get("id") or "?" for card in snapshot.get("hand") or [] if card]
+
+
+def _multiset_diff(before_names: list[str], after_names: list[str]) -> tuple[list[str], list[str]]:
+    """Diff two hands as multisets (a hand may legitimately hold duplicates)."""
+    before_counts = Counter(before_names)
+    after_counts = Counter(after_names)
+    added = list((after_counts - before_counts).elements())
+    removed = list((before_counts - after_counts).elements())
+    return added, removed
+
+
+def _scalar_delta(before_value: Any, after_value: Any) -> dict[str, Any] | None:
+    if not isinstance(before_value, (int, float)) or isinstance(before_value, bool):
+        return None
+    if not isinstance(after_value, (int, float)) or isinstance(after_value, bool):
+        return None
+    if before_value == after_value:
+        return None
+    return {"before": before_value, "after": after_value, "delta": after_value - before_value}
+
+
+def _enemy_hp_deltas(
+    before_enemies: list[dict[str, Any]], after_enemies: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    after_by_index = {enemy.get("index"): enemy for enemy in after_enemies}
+    deltas: list[dict[str, Any]] = []
+    for enemy in before_enemies:
+        index = enemy.get("index")
+        after_enemy = after_by_index.get(index)
+        # A vanished enemy was defeated by this action; report it at 0 HP
+        # rather than silently dropping the delta.
+        after_hp = after_enemy.get("hp") if after_enemy is not None else 0
+        delta = _scalar_delta(enemy.get("hp"), after_hp)
+        if delta is None:
+            continue
+        deltas.append(
+            {
+                "index": index,
+                "name": (after_enemy or enemy).get("name"),
+                **delta,
+            }
+        )
+    return deltas
+
+
+def _compute_action_effects(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    *,
+    spans_enemy_turn: bool,
+) -> dict[str, Any] | None:
+    """Diff two combat snapshots into a sparse effects dict.
+
+    Only sub-keys that actually changed are emitted so the UI stays quiet
+    for no-op deltas. Returns None (never a fabricated delta) when neither
+    snapshot is available, e.g. the killing blow of a fight has no
+    following combat_play snapshot to diff against.
+    """
+    if before is None or after is None:
+        return None
+
+    effects: dict[str, Any] = {}
+
+    enemy_hp = _enemy_hp_deltas(before.get("enemies") or [], after.get("enemies") or [])
+    if enemy_hp:
+        effects["enemy_hp"] = enemy_hp
+
+    block_delta = _scalar_delta(before.get("block"), after.get("block"))
+    if block_delta is not None:
+        effects["block"] = block_delta
+
+    hp_delta = _scalar_delta(before.get("hp"), after.get("hp"))
+    if hp_delta is not None:
+        effects["hp"] = hp_delta
+
+    before_orbs = before.get("orbs") or []
+    after_orbs = after.get("orbs") or []
+    if before_orbs != after_orbs:
+        effects["orbs"] = {"before": before_orbs, "after": after_orbs}
+
+    added, removed = _multiset_diff(_hand_names(before), _hand_names(after))
+    if added:
+        effects["cards_added"] = added
+    if removed:
+        effects["cards_removed"] = removed
+
+    if spans_enemy_turn:
+        effects["spans_enemy_turn"] = True
+
+    return effects or None
+
+
+def _resolve_pending_effects(room: dict[str, Any], after_snapshot: dict[str, Any]) -> None:
+    """Attach effect deltas to actions recorded since the last combat_play snapshot.
+
+    Usually there is exactly one pending row (the action that produced this
+    snapshot). If a mid-combat interlude (e.g. a card_select prompt) queued
+    more than one action without an observed state in between, they all
+    share the same "before" and are resolved against the same "after" —
+    coarser than ideal, but never fabricated and never crashes.
+    """
+    pending = room.pop("_pending_effect_rows", None)
+    if not pending:
+        return
+    for row, before_snapshot, spans_enemy_turn in pending:
+        effects = _compute_action_effects(
+            before_snapshot, after_snapshot, spans_enemy_turn=spans_enemy_turn
+        )
+        if effects:
+            row["effects"] = effects
+
+
 def _append_combat_action(room: dict[str, Any], action: dict[str, Any], source_state: dict[str, Any] | None, step: Any) -> None:
     active = room.get("_active_combat_round")
     if active is None:
@@ -593,7 +723,12 @@ def _append_combat_action(room: dict[str, Any], action: dict[str, Any], source_s
     action_name = action.get("action")
     if action_name in {"choose_option", "select_map_node", "select_card_reward"}:
         return
-    active["actions"].append(_combat_action_row(action, source_state, step))
+    row = _combat_action_row(action, source_state, step)
+    active["actions"].append(row)
+    before_snapshot = room.get("_last_combat_snapshot")
+    room.setdefault("_pending_effect_rows", []).append(
+        (row, before_snapshot, action_name == "end_turn")
+    )
 
 
 def _close_active_combat_round(
@@ -685,6 +820,11 @@ def _finalize_room(room: dict[str, Any]) -> None:
         room["status"] = "completed"
     room.pop("_seen_options", None)
     room.pop("_active_combat_round", None)
+    # Any action still pending here is the last action of the combat (e.g. the
+    # killing blow) with no following combat_play snapshot to diff against —
+    # leave it without an "effects" key rather than fabricating one.
+    room.pop("_pending_effect_rows", None)
+    room.pop("_last_combat_snapshot", None)
 
 
 def _verified_combat_action_stream(rounds: list[dict[str, Any]]) -> bool:

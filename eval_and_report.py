@@ -8,6 +8,7 @@ This script:
 4. Output is auto-delivered to Telegram by the cron system
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -15,6 +16,27 @@ import sys
 from datetime import datetime
 
 from agent.run_metadata import resolve_game_version, validate_ascension
+
+
+def latest_checkpoint(checkpoints_dir: str = "checkpoints") -> str:
+    """Find the newest checkpoint across the local checkpoint directories."""
+    checkpoint_dirs = [checkpoints_dir]
+    checkpoint_dirs.extend(
+        path for path in os.listdir(".")
+        if path.startswith("checkpoints_") and os.path.isdir(path)
+    )
+
+    checkpoints = []
+    for directory in checkpoint_dirs:
+        if not os.path.isdir(directory):
+            continue
+        checkpoints.extend(glob.glob(os.path.join(directory, "ppo_ironclad_*.zip")))
+        checkpoints.extend(
+            glob.glob(os.path.join(directory, "*", "ppo_ironclad_*.zip"))
+        )
+    if not checkpoints:
+        raise FileNotFoundError("No checkpoints found in any checkpoint directory")
+    return max(checkpoints, key=os.path.getmtime)
 
 
 def extract_steps(checkpoint_path: str) -> int:

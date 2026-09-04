@@ -64,3 +64,49 @@ def test_rl_agent_passes_action_mask_to_predict():
     call_kwargs = mock_model.predict.call_args[1]
     assert "action_masks" in call_kwargs
     assert call_kwargs["action_masks"].shape == (1, 41)
+
+
+def make_defense_scenario_state():
+    """A telegraphed near-lethal attack (30 dmg vs 20 HP) with a block card
+    in hand the policy is about to ignore in favor of a weak attack."""
+    return {
+        "decision": "combat_play", "energy": 3, "round": 1,
+        "hand": [
+            {"index": 0, "id": {"en": "STRIKE"}, "cost": 1, "can_play": True,
+             "target_type": "AnyEnemy", "type": "Attack", "stats": {"damage": 6}},
+            {"index": 1, "id": {"en": "DEFEND"}, "cost": 1, "can_play": True,
+             "target_type": "Self", "type": "Skill", "stats": {"block": 8}},
+        ],
+        "player": {"hp": 20, "max_hp": 80, "block": 0, "buffs": []},
+        "enemies": [{"hp": 30, "max_hp": 30, "block": 0,
+                     "intents": [{"type": "attack", "damage": 30, "hits": 1}],
+                     "buffs": []}],
+    }
+
+
+def test_rl_agent_act_applies_defense_override_over_policy_attack(monkeypatch):
+    from agent.rl_agent import RLAgent
+    monkeypatch.setenv("STS2_DEFENSE", "1")
+    # Policy picks action 0: play the weak attack at enemy 0, ignoring the
+    # incoming 30-damage hit into a 20-HP player.
+    mock_model = mock_ppo_model(0)
+
+    with patch("agent.rl_agent.MaskablePPO.load", return_value=mock_model):
+        agent = RLAgent("fake_path.zip", CARDS_JSON)
+
+    action = agent.act(make_defense_scenario_state())
+    # Override substitutes the block card (hand slot 1, untargeted).
+    assert action == {"cmd": "action", "action": "play_card", "args": {"card_index": 1}}
+
+
+def test_rl_agent_act_keeps_policy_action_when_defense_opted_out(monkeypatch):
+    from agent.rl_agent import RLAgent
+    monkeypatch.setenv("STS2_DEFENSE", "0")
+    mock_model = mock_ppo_model(0)
+
+    with patch("agent.rl_agent.MaskablePPO.load", return_value=mock_model):
+        agent = RLAgent("fake_path.zip", CARDS_JSON)
+
+    action = agent.act(make_defense_scenario_state())
+    assert action == {"cmd": "action", "action": "play_card",
+                       "args": {"card_index": 0, "target_index": 0}}

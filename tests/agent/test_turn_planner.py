@@ -2,9 +2,11 @@ from collections import Counter
 
 from agent.sim.combat_state import CombatState, Enemy
 from agent.sim.combat_step import _advance_enemy_intents, play_card
-from agent.turn_planner import (
+from agent.turn_planner import (hallway_danger_threshold, elite_danger_threshold,
+                                 
     apply_vantom_slippery_mask,
     build_sim_state,
+    defense_override_enabled,
     intent_defense_override,
     plan_action,
     vantom_slippery_override,
@@ -135,9 +137,49 @@ def test_defense_override_is_more_conservative_in_boss_and_elite_rooms():
     boss = {**base_state, "context": {"room_type": "Boss"}}
     elite = {**base_state, "context": {"room_type": "Elite"}}
 
-    assert intent_defense_override(regular) is None
+    # The hallway/elite ordering INVERTED on 2026-09-03 and this test caught it.
+    # It used to assert `regular is None` -- a 9-damage hit at 70/80 HP was below
+    # the old hallway bar of max(12.0, 0.18*80) = 14.4. The hallway bar is now
+    # max(5.0, 0.06*80) = 5.0, below the elite bar's max(6.0, 0.10*80) = 8.0, so
+    # a hallway fight blocks MORE readily than an elite one. That is deliberate
+    # and measured: the low hallway bar is worth +0.45..+1.47 floors on all five
+    # characters (see _HALLWAY_DANGER_FRAC), while sweeping the elite bar in both
+    # directions measured null (0.05/4 -> -0.017 p=0.88; 0.20/12 -> +0.229 p=0.11).
+    # There is no invariant that elite must be the more protective arm; the two
+    # are tuned independently against where the HP is actually lost.
+    assert hallway_danger_threshold(80) == 5.0
+    assert elite_danger_threshold(80) == 8.0
+
+    # All three block this 9-damage hit, since 9 clears both bars.
+    assert intent_defense_override(regular) == 7
     assert intent_defense_override(boss) == 7
     assert intent_defense_override(elite) == 7
+
+    # A 6-damage hit discriminates: over the hallway bar (5.0), under elite (8.0).
+    six = {
+        **base_state,
+        "enemies": [{**base_state["enemies"][0],
+                     "intents": [{"type": "attack", "damage": 6, "hits": 1}]}],
+    }
+    assert intent_defense_override({**six, "context": {"room_type": "Monster"}}) == 7
+    assert intent_defense_override({**six, "context": {"room_type": "Elite"}}) is None
+
+
+def test_defense_override_enabled_defaults_on(monkeypatch):
+    monkeypatch.delenv("STS2_DEFENSE", raising=False)
+    assert defense_override_enabled() is True
+
+
+def test_defense_override_enabled_stays_on_for_truthy_values(monkeypatch):
+    for value in ("1", "true", "on", "yes", "anything"):
+        monkeypatch.setenv("STS2_DEFENSE", value)
+        assert defense_override_enabled() is True
+
+
+def test_defense_override_enabled_opts_out_on_falsy_values(monkeypatch):
+    for value in ("0", "false", "off", "FALSE", "Off"):
+        monkeypatch.setenv("STS2_DEFENSE", value)
+        assert defense_override_enabled() is False
 
 
 def test_slippery_clamps_next_enemy_hp_loss_and_consumes_stacks():
@@ -577,3 +619,50 @@ def test_advance_enemy_intents_ignores_dead_enemies():
 
     # Dead enemies are skipped entirely — forecast untouched.
     assert e.intent_forecast == [{"type": "attack", "damage": 9, "hits": 2}]
+
+
+def test_rollout_planner_is_off_by_default(monkeypatch):
+    """STS2_PLANNER_ROLLOUT must default off — planner mode itself is off too."""
+    monkeypatch.delenv("STS2_PLANNER_ROLLOUT", raising=False)
+    from agent import turn_planner
+
+    assert turn_planner._rollout_turns() == 0
+
+
+def test_rollout_planner_turn_budget_is_configurable(monkeypatch):
+    """1-turn lookahead measured 0/24 at the Act 3 boss against the policy's
+    4/24, at every scoring weight — the horizon is the limit, so the horizon
+    has to be settable."""
+    from agent import turn_planner
+
+    monkeypatch.setenv("STS2_PLANNER_ROLLOUT", "8")
+    assert turn_planner._rollout_turns() == 8
+
+    monkeypatch.setenv("STS2_PLANNER_ROLLOUT", "garbage")
+    assert turn_planner._rollout_turns() == 0
+
+
+def test_test_subject_boss_hp_includes_all_three_forms():
+    """The sim has no respawn concept: combat_over() is true when every enemy
+    is at 0 HP, so at Test Subject it believes the fight ENDS when form 1's
+    100 HP is gone. Rollouts then "win" after ~100 damage and plan against a
+    fight that is really 100+200+300. Fold the unfought forms into the pool so
+    search at least sees the right length.
+    """
+    from agent.turn_planner import build_sim_state
+
+    state = {
+        "decision": "combat_play",
+        "context": {"act": 3, "floor": 15, "room_type": "Boss",
+                    "boss": {"id": "TEST_SUBJECT_BOSS"}},
+        "energy": 3,
+        "player": {"hp": 60, "max_hp": 80, "deck": []},
+        "hand": [],
+        "enemies": [{"index": 0, "name": {"en": "Test Subject"},
+                     "hp": 100, "max_hp": 100, "intents": []}],
+    }
+
+    sim, _meta = build_sim_state(state)
+
+    assert sim is not None
+    assert sim.enemies[0].hp == 600  # 100 + 200 + 300

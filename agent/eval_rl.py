@@ -19,7 +19,9 @@ from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv, greedy_action
 from agent.train import mask_fn
 from agent.card_scoring import score_card_in_deck, deck_quality_score
+from agent.turn_planner import defense_override_enabled
 from agent.run_metadata import (
+    experiment_from_checkpoint as _experiment_from_checkpoint,
     load_native_save_seed,
     resolve_game_version,
     validate_ascension,
@@ -33,14 +35,58 @@ _TECHNICAL_STATUSES = {"crash", "timeout", "stuck", "reset_failure", "invalid"}
 # PPO policy (Jun 11). Falls back to model.predict per-decision on any failure.
 # STS2_PLANNER=lethal → hybrid: planner only intervenes when it finds a
 # provable all-enemies-dead sequence this turn; policy plays everything else.
+#
+# Measured 2026-08-31, Ironclad a1, paired over 60 fixed seeds
+# (ppo_ironclad_400k): STS2_PLANNER=1 cut hallway HP **-16.8 per run**
+# (se 2.95, t -5.70) while elite HP rose +10.5 per run (se 3.29, t +3.18) on an
+# unchanged elite count (+0.08/run, n.s.) — net about -6 HP/run, floor
+# 9.00 -> 9.40 (p=0.32, underpowered at n=60).
+#
+# A room-gated "hallway only" mode was tried and REMOVED: restricting the
+# planner to monster rooms reproduced the elite penalty exactly (+10.38 vs
+# +10.48 per run; hallway vs full was n.s. on every metric, p>=0.71). The gate
+# provably fired — `context.room_type` is present on every combat_play decision
+# — so the elite cost is NOT the planner misplaying elites. It is carried in
+# from changed hallway play. Do not re-add a room gate without first explaining
+# that result.
+#
+# STALE AS OF 2026-09-03 — the note used to read "the planner only ever engages
+# for Ironclad: the sim card DB holds 84 Ironclad cards and nothing for the other
+# four, so plan_action returns None for them." data/cards_parsed_{defect,silent,
+# regent,necrobinder}.json now exist and combat_step._load_card_db layers them in,
+# so it DOES engage: driving plan_action on a recorded Regent run returned a move
+# on 54 of 67 combat_play states with 0 exceptions.
+#
+# It engages and it is a DISASTER. Paired, a1, 240 seeds/arm, planner off vs on:
+#   Regent       floor 14.540 -> 10.749  (-3.791, t=-10.14)  combat_wins -1.966
+#                hallway HP +1.06 (p=0.021), elite HP +5.30 (p=0.0030)
+#   Necrobinder  floor 12.301 ->  9.431  (-2.870, t= -9.80)
+# The largest effect measured in this campaign, in the wrong direction. The
+# generated per-character DBs carry only 79-86% effect coverage, so the planner
+# searches against a partly-wrong model of its own cards and confidently picks
+# bad lines — worse than not planning at all. Consistent with the standing rule
+# that the planner's value tracks sim fidelity per character.
+#
+# Do NOT enable STS2_PLANNER for Silent/Defect/Regent/Necrobinder, and do not
+# treat "build a card DB for character X" as sufficient to make it viable.
+# Raising effect coverage toward Ironclad's parity is the prerequisite.
+import random as _random
+# Measurement knob, default off. See the STS2_RANDOMIZE block in combat_env.
+_RANDOM_COMBAT = os.environ.get("STS2_RANDOM_COMBAT", "").strip().lower() in {"1", "true", "on"}
 _PLANNER_ENV = os.environ.get("STS2_PLANNER", "").lower()
 _PLANNER_ON = _PLANNER_ENV in ("1", "true", "on", "lethal")
 _PLANNER_LETHAL_ONLY = _PLANNER_ENV == "lethal"
 
-# STS2_DEFENSE=1 → intent-aware defense override (Jun 13). Narrow hybrid:
-# when an enemy telegraphs a dangerous attack and the policy isn't blocking,
-# insert the best block card. Leaves attack decisions to the policy.
-_DEFENSE_ON = os.environ.get("STS2_DEFENSE", "") in ("1", "true", "on")
+# Intent-aware defense override (Jun 13). Narrow hybrid: when an enemy
+# telegraphs a dangerous attack and the policy isn't blocking, insert the
+# best block card. Leaves attack decisions to the policy. Default ON as of
+# Aug 2026: confirmation run on 240 fixed seeds (ppo_defect_2248k,
+# eval_fixed_3000..3239) found STS2_DEFENSE=1 + STS2_ELITE_PREF=24 cut elite
+# HP/fight 29.1 -> 24.2 (paired -3.44 HP, se 1.03, p=0.0010) while *raising*
+# elite fights 231 -> 358 and avg_floor 17.50 -> 18.14. Opt out with
+# STS2_DEFENSE=0/false/off. See turn_planner.defense_override_enabled, which
+# rl_agent.py's live-play wrapper also reads so the two paths can't drift.
+_DEFENSE_ON = defense_override_enabled()
 _MIDACT_SNAPSHOT_DIR = "data/snapshots/midact_elite"
 
 
@@ -95,6 +141,22 @@ def _resolve_combat_snapshot_config(*, preset: str | None,
     return snapshot_dir, floors
 
 
+def _combat_hp_loss_fields(env) -> dict:
+    """Per-room HP-cost fields for one run, or {} when the env cannot report them.
+
+    Kept tolerant on purpose: eval drives whatever env object it is handed, and a
+    missing metric must never take down a result row.
+    """
+    reader = getattr(env, "_combat_hp_loss_summary", None)
+    if not callable(reader):
+        return {}
+    try:
+        summary = reader()
+    except Exception:
+        return {}
+    return summary if isinstance(summary, dict) else {}
+
+
 def classify_eval_result(*, timed_out: bool, run_won: bool, info: dict) -> str:
     """Classify one completed evaluation attempt."""
     if timed_out or info.get("timeout"):
@@ -132,11 +194,22 @@ def summarize_eval_results(results: list[dict], *, requested_n: int,
         count for status, count in counts.items()
         if status in _TECHNICAL_STATUSES
     )
+    # Per-room HP cost. Averaged over fights, not over runs, so a run that saw ten
+    # elites weighs its elites ten times — that is the per-fight cost we want.
+    # Rows predating this metric simply contribute nothing.
+    hp_loss: dict[str, float | None] = {}
+    for room in ("monster", "elite", "boss"):
+        total = sum(int(r.get(f"total_{room}_hp_loss") or 0) for r in valid)
+        fights = sum(int(r.get(f"{room}_combats") or 0) for r in valid)
+        hp_loss[f"avg_{room}_hp_loss"] = round(total / fights, 1) if fights else None
+        hp_loss[f"{room}_combats"] = fights
+
     return {
         "avg_floor": float(np.mean(floors)) if floors else 0.0,
         "max_floor": int(max(floors)) if floors else 0,
         "win_rate": float(np.mean(wins)) if wins else 0.0,
         "avg_combat_wins": float(np.mean(combat_wins)) if combat_wins else 0.0,
+        **hp_loss,
         "floors": floors,
         "n": len(valid),
         "valid_n": len(valid),
@@ -521,6 +594,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
     game_seed = None
     batch_id = str(batch_id or _default_eval_batch_id(checkpoint_name, character))
     checkpoint = (os.path.basename(str(checkpoint_name)) if checkpoint_name else None)
+    experiment = _experiment_from_checkpoint(checkpoint_name)
     evaluation_mode = "fixed" if fixed_seeds else "random"
     effective_scenario = scenario or ("native_save" if native_save_path else "full_run")
     native_save_seed = (
@@ -541,6 +615,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
         run_id = f"{batch_id}-{i:03d}-a{total_attempts:02d}"
         run_context = {
             "run_id": run_id,
+            "experiment": experiment,
             "checkpoint": checkpoint,
             "evaluation_mode": evaluation_mode,
             "scenario": effective_scenario,
@@ -677,7 +752,16 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                         except Exception:
                             action = None
                     if action is None:
-                        action, _ = model.predict(obs, deterministic=True, action_masks=masks)
+                        if _RANDOM_COMBAT:
+                            # Measurement arm (STS2_RANDOM_COMBAT=1): uniform random
+                            # LEGAL combat action instead of the policy. Prices what
+                            # the combat policy is worth over random, the mirror of
+                            # the STS2_RANDOMIZE out-of-combat leverage measurement.
+                            import numpy as _np
+                            legal = [i for i, m in enumerate(masks) if m]
+                            action = _random.choice(legal) if legal else 0
+                        else:
+                            action, _ = model.predict(obs, deterministic=True, action_masks=masks)
 
                     # Intent-aware defense override: only when policy isn't
                     # already blocking and a dangerous attack is incoming.
@@ -785,6 +869,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
             "included_in_gameplay": status in {"win", "dead"},
             "boss": game_boss_id or "?",
             "run_won": run_won,
+            **_combat_hp_loss_fields(env),
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
         attempt_results.append(attempt_row)
@@ -1041,6 +1126,11 @@ def main():
     print(f"max_floor      : {format_floor_label(stats['max_floor'])}")
     print(f"win_rate       : {stats['win_rate']:.0%}")
     print(f"avg_combat_wins: {stats['avg_combat_wins']:.1f}")
+    for room, label in (("monster", "小怪战损"), ("elite", "精英战损"), ("boss", "boss战损")):
+        avg = stats.get(f"avg_{room}_hp_loss")
+        fights = stats.get(f"{room}_combats") or 0
+        shown = "—" if avg is None else f"{avg:.1f} HP/场"
+        print(f"{label:<9}: {shown}  (n={fights})")
     print(f"floor dist     : {format_floor_labels(stats['floors'])}")
     per_boss = stats.get("per_boss") or {}
     if per_boss:

@@ -174,6 +174,21 @@ internal class LocLookup
     public string Potion(string entry) => Bilingual("potions", entry + ".title");
     public string Power(string entry) => Bilingual("powers", entry + ".title");
     public string Event(string entry) => Bilingual("events", entry + ".title");
+
+    /// <summary>
+    /// Display name for a boss encounter.
+    /// Prefer encounters.&lt;ID&gt;.title: the monsters table can carry an unresolved
+    /// SmartFormat template (TEST_SUBJECT.name is "Test Subject #C{Count}"), and a
+    /// raw {Count} must never reach the UI. Falls back to the monster name.
+    /// </summary>
+    public string BossName(string bossIdEntry, string monsterKey)
+    {
+        var title = Bilingual("encounters", bossIdEntry + ".title");
+        if (title != bossIdEntry + ".title" && !title.Contains('{'))
+            return title;
+        var monster = Monster(monsterKey);
+        return monster.Contains('{') ? title : monster;
+    }
     public string Act(string entry) => Bilingual("acts", entry + ".title");
 
     /// <summary>Resolve a full loc key like "TABLE.KEY.SUB" by searching all tables.</summary>
@@ -1056,6 +1071,15 @@ public class RunSimulator
         return p?.PlayerCombatState?.Phase == MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.Play;
     }
 
+    /// <summary>
+    /// An external prompt is waiting on the agent. Enemy turns can raise one: the Act 2
+    /// boss KnowledgeDemon calls CardSelectCmd.FromChooseACardScreen mid-turn to make the
+    /// player pick a curse. Nothing answers a prompt the end-turn wait loops cannot see,
+    /// so the combat parks forever with the turn loop alive and the executor idle.
+    /// </summary>
+    private bool HasPendingSelection =>
+        _cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null;
+
     private Dictionary<string, object?> DoEndTurn(Player player)
     {
         // A pending card / card-reward / bundle selection is an unresolved prompt; ending
@@ -1109,6 +1133,7 @@ public class RunSimulator
                     _syncCtx.Pump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
+                    if (HasPendingSelection) break;
                     if (IsPlayPhase()) break;
                     Thread.Sleep(5);
                 }
@@ -1117,6 +1142,14 @@ public class RunSimulator
         finally
         {
             YieldPatches.SuppressYield = false;
+        }
+
+        // The enemy turn raised a prompt. Hand it to the agent; the turn resumes on its
+        // own once the external select_cards feeds the selector's TCS.
+        if (HasPendingSelection)
+        {
+            Log("EndTurn paused: enemy turn opened a card selection");
+            return DetectDecisionPoint();
         }
 
         // Second fallback: if still stuck after SuppressYield window, cancel and retry.
@@ -1151,11 +1184,18 @@ public class RunSimulator
                     _syncCtx.Pump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
+                    if (HasPendingSelection) break;
                     if (IsPlayPhase()) break;
                     Thread.Sleep(10);
                 }
             }
             catch (Exception ex) { Log($"Cancel retry: {ex.Message}"); }
+
+            if (HasPendingSelection)
+            {
+                Log("EndTurn paused after retry: enemy turn opened a card selection");
+                return DetectDecisionPoint();
+            }
 
             // NUCLEAR OPTION: If STILL stuck after 2 attempts, use ThreadPool to force
             // the enemy turn processing to complete with SuppressYield permanently on.
@@ -1192,10 +1232,17 @@ public class RunSimulator
                         if (endTurnTask.IsCompleted) break;
                         if (_turnStarted.IsSet || _combatEnded.IsSet) break;
                         if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
+                        if (HasPendingSelection) break;
                         if (IsPlayPhase()) break;
                         Thread.Sleep(10);
                     }
                     YieldPatches.SuppressYield = false;
+
+                    if (HasPendingSelection)
+                    {
+                        Log("Nuclear fallback paused: enemy turn opened a card selection");
+                        return DetectDecisionPoint();
+                    }
 
                     // If still not play phase, try just waiting a bit more
                     if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
@@ -1204,9 +1251,18 @@ public class RunSimulator
                         {
                             _syncCtx.Pump();
                             Thread.Sleep(10);
+                            if (HasPendingSelection) break;
                             if (IsPlayPhase() || !CombatManager.Instance.IsInProgress || player.Creature.IsDead)
                                 break;
                         }
+                    }
+
+                    // Check before giving up: a prompt looks identical to a deadlock from
+                    // here — not in play phase, nothing running — but it is recoverable.
+                    if (HasPendingSelection)
+                    {
+                        Log("Nuclear fallback paused: enemy turn opened a card selection");
+                        return DetectDecisionPoint();
                     }
 
                     if (IsPlayPhase())
@@ -3571,7 +3627,7 @@ public class RunSimulator
                 ctx["boss"] = new Dictionary<string, object?>
                 {
                     ["id"] = bossIdEntry,
-                    ["name"] = _loc.Monster(monsterKey),
+                    ["name"] = _loc.BossName(bossIdEntry, monsterKey),
                 };
             }
         }
@@ -3629,6 +3685,9 @@ public class RunSimulator
         // Patch TalkCmd.Play to a no-op (issue #64). Monster speech-bubble VFX during
         // moves (e.g. BygoneEffigy.WakeMove) NRE in headless and break the enemy turn.
         PatchTalkCmd();
+        PatchSoulNexusAfterDeath();
+        PatchSandpitPower();
+        PatchTurnEndCardsDiagnostic();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3769,6 +3828,63 @@ public class RunSimulator
         }
     }
 
+    private static void PatchSandpitPower()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.sandpitpatch");
+            var powerType = typeof(CombatManager).Assembly.GetType(
+                "MegaCrit.Sts2.Core.Models.Powers.SandpitPower");
+            var method = powerType?.GetMethod(
+                "UpdateCreaturePositions",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
+            if (method == null)
+            {
+                Console.Error.WriteLine("[WARN] Could not find SandpitPower.UpdateCreaturePositions to patch");
+                return;
+            }
+            var prefix = typeof(YieldPatches).GetMethod(nameof(YieldPatches.SandpitUpdatePositionsPrefix),
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+            if (prefix != null)
+            {
+                harmony.Patch(method, new HarmonyMethod(prefix));
+                Console.Error.WriteLine("[INFO] Patched SandpitPower.UpdateCreaturePositions() to no-op (prevents turn-loop death)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] Failed to patch SandpitPower.UpdateCreaturePositions: {ex.Message}");
+        }
+    }
+
+    private static void PatchTurnEndCardsDiagnostic()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.turnendcardsdiag");
+            var method = typeof(CombatManager).GetMethod(
+                "DoTurnEndCards",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (method == null)
+            {
+                Console.Error.WriteLine("[WARN] Could not find CombatManager.DoTurnEndCards to instrument");
+                return;
+            }
+            var prefix = typeof(YieldPatches).GetMethod(nameof(YieldPatches.DoTurnEndCardsDiagPrefix),
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+            if (prefix != null)
+            {
+                harmony.Patch(method, new HarmonyMethod(prefix));
+                Console.Error.WriteLine("[INFO] Instrumented CombatManager.DoTurnEndCards (turn-loop deadlock diagnostics)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] Failed to instrument DoTurnEndCards: {ex.Message}");
+        }
+    }
+
     private static void PatchTalkCmd()
     {
         try
@@ -3793,6 +3909,38 @@ public class RunSimulator
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[WARN] Failed to patch TalkCmd.Play: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// SoulNexus.AfterDeath NREs headless (NCombatRoom.Instance is null) and takes the
+    /// combat turn loop with it, force-ending the run as "stuck". Body is VFX only.
+    /// </summary>
+    private static void PatchSoulNexusAfterDeath()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.soulnexuspatch");
+            var nexusType = typeof(CombatManager).Assembly.GetType(
+                "MegaCrit.Sts2.Core.Models.Monsters.SoulNexus");
+            var afterDeath = nexusType?.GetMethod("AfterDeath",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (afterDeath == null)
+            {
+                Console.Error.WriteLine("[WARN] Could not find SoulNexus.AfterDeath to patch");
+                return;
+            }
+            var prefix = typeof(YieldPatches).GetMethod(nameof(YieldPatches.SoulNexusAfterDeathPrefix),
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+            if (prefix != null)
+            {
+                harmony.Patch(afterDeath, new HarmonyMethod(prefix));
+                Console.Error.WriteLine("[INFO] Patched SoulNexus.AfterDeath() to no-op (prevents turn-loop death)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] Failed to patch SoulNexus.AfterDeath: {ex.Message}");
         }
     }
 
@@ -3971,10 +4119,75 @@ public class RunSimulator
         /// the EndTurn nuclear fallback / false game_over. The bubble is purely cosmetic and
         /// its return value is ignored by callers, so returning null is safe.
         /// </summary>
+        /// <summary>
+        /// Harmony prefix: no-op SoulNexus.AfterDeath. The body is pure VFX --
+        /// it unsubscribes its own Died handler and sets a Spine animation via
+        /// NCombatRoom.Instance, which is null in headless. The resulting NRE
+        /// propagates out of Creature.InvokeDiedEvent / CreatureCmd.Kill and
+        /// kills the whole combat turn loop, so the run is force-ended as
+        /// technical "stuck". Observed deterministically at A3F7 on
+        /// eval_fixed_27020 -- a seed that had previously CLEARED Act 3, i.e.
+        /// this silently destroys deep runs, which is exactly where depth
+        /// measurements are most expensive to lose. Same family and rationale
+        /// as TalkCmdPlayPrefix: skip a cosmetic method that resolves but
+        /// misbehaves headless.
+        /// </summary>
+        public static bool SoulNexusAfterDeathPrefix()
+        {
+            return false; // Skip original method -- VFX only, no gameplay effect
+        }
+
         public static bool TalkCmdPlayPrefix(ref MegaCrit.Sts2.Core.Nodes.Vfx.NSpeechBubbleVfx? __result)
         {
             __result = null;
             return false; // Skip original method
+        }
+
+        /// <summary>
+        /// Harmony prefix: no-op SandpitPower.UpdateCreaturePositions.
+        /// The method fails to JIT under the IL-patched engine
+        /// ("InvalidProgramException: The JIT compiler encountered invalid IL code"),
+        /// and because it runs from BeforeSideTurnEnd the throw kills the whole combat
+        /// turn loop — the engine then reports "the combat is stuck until the room is
+        /// restarted" and the run dies as a technical failure. It only reshuffles where
+        /// creatures are drawn, which headless has no use for, so skipping it is safe.
+        /// Same reasoning as TalkCmdPlayPrefix (issue #64).
+        /// </summary>
+        public static bool SandpitUpdatePositionsPrefix(ref Task __result)
+        {
+            __result = Task.CompletedTask;
+            return false; // Skip original method
+        }
+
+        /// <summary>
+        /// Harmony prefix: report which dependency of CombatManager.DoTurnEndCards is
+        /// missing before it throws. An NRE in there kills the whole turn loop — the
+        /// engine then logs "the combat is stuck until the room is restarted" and the
+        /// run is force-ended as a technical failure. That path never reaches
+        /// _dump_stuck, so nothing else records why. Logs only on anomaly.
+        /// </summary>
+        public static void DoTurnEndCardsDiagPrefix(object turnEndCards)
+        {
+            try
+            {
+                var count = (turnEndCards as System.Collections.ICollection)?.Count;
+                object? prefs = null;
+                string prefsState;
+                try
+                {
+                    prefs = MegaCrit.Sts2.Core.Saves.SaveManager.Instance?.PrefsSave;
+                    prefsState = prefs == null ? "NULL" : "ok";
+                }
+                catch (Exception ex) { prefsState = $"threw {ex.GetType().Name}"; }
+                if (turnEndCards != null && prefsState == "ok") return;
+                Console.Error.WriteLine(
+                    $"[DIAG] DoTurnEndCards: turnEndCards={(turnEndCards == null ? "NULL" : $"count={count}")}, "
+                    + $"PrefsSave={prefsState}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[DIAG] DoTurnEndCards diagnostic failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 

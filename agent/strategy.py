@@ -144,6 +144,18 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     max_hp = max(player.get("max_hp", 80), 1)
     hp_ratio = hp / max_hp
     floor = state.get("floor") or state.get("context", {}).get("floor", 0)
+    # NOTE on `floor`: `context.floor` is _runState.ActFloor — ACT-LOCAL. Two of
+    # the three bands below want exactly that (`heal_threshold` = "later in the
+    # act, heal more readily"; `pre_boss_zone` = each act's boss sits at floor
+    # 17). CRITICAL_HEAL is the odd one out: its comments describe act semantics
+    # ("Act 1: prioritize survival", "Act 2 body") that act-local floors do not
+    # implement — floors 1-9 of *every* act take the Act 1 band.
+    #
+    # MEASURED 2026-09-01 and it does not matter: keying CRITICAL_HEAL off the
+    # global floor instead scored 18.117 vs 18.333 over 60 paired seeds
+    # (17000+, Defect ppo_defect_2048k, a1) — diff -0.217, p=0.62. The
+    # inconsistency is real but behaviourally inert, so the code stays act-local
+    # rather than carrying a config switch for a null. Don't re-litigate it.
     deck = player.get("deck") or []
     boss = (state.get("context") or {}).get("boss") or {}
     boss_id = boss.get("id") if isinstance(boss, dict) else boss

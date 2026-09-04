@@ -27,6 +27,7 @@ _GAMEPLAY_STATUSES = frozenset({RunStatus.WIN, RunStatus.DEAD})
 TREND_SAMPLE_LIMIT = 512
 COMPARISON_DISTINCT_LIMIT = 4_096
 COMPARISON_TYPE_LABEL_LIMIT = 64
+COMPARISON_SEED_SAMPLE_LIMIT = 8
 
 
 def _to_json_value(value: Any) -> Any:
@@ -756,6 +757,25 @@ def _seed_details(records: tuple[RunRecord, ...]) -> _StringDetails:
     return _string_details(record.metadata.seed for record in records)
 
 
+def _render_seed_sample(seeds: Iterable[str]) -> str:
+    """Render a bounded, deterministic, human-readable seed sample.
+
+    Always reports the true total count and lists at most
+    ``COMPARISON_SEED_SAMPLE_LIMIT`` seed names, in sorted order, with an
+    explicit "+N more" marker whenever seeds are omitted from the sample.
+    """
+
+    ordered = sorted(seeds)
+    total = len(ordered)
+    sample = ordered[:COMPARISON_SEED_SAMPLE_LIMIT]
+    noun = "seed" if total == 1 else "seeds"
+    names = ", ".join(sample)
+    if total <= COMPARISON_SEED_SAMPLE_LIMIT:
+        return f"{total} {noun} ({names})"
+    omitted = total - len(sample)
+    return f"{total} {noun} ({names}, +{omitted} more)"
+
+
 def _seed_pairing_errors(
     accumulator: _ComparisonAccumulator, cohort: str
 ) -> tuple[str, ...]:
@@ -772,11 +792,11 @@ def _seed_pairing_errors(
             f"{_invalid_type_summary(attempts)}"
         )
     if not attempts.overflow and not results.overflow:
-        unresolved = sorted(attempts.values - results.values)
+        unresolved = attempts.values - results.values
         if unresolved:
             errors.append(
                 f"{cohort} seed set has attempts without valid gameplay results: "
-                f"{unresolved}"
+                f"{_render_seed_sample(unresolved)}"
             )
     return tuple(errors)
 
@@ -887,10 +907,22 @@ def compare_cohorts(
             reasons.extend(current_seed_errors)
             reasons.extend(baseline_seed_errors)
             if current_seeds != baseline_seeds:
-                reasons.append(
+                only_in_current = current_seeds - baseline_seeds
+                only_in_baseline = baseline_seeds - current_seeds
+                mismatch = (
                     "fixed seed set mismatch: "
-                    f"current={sorted(current_seeds)}, baseline={sorted(baseline_seeds)}"
+                    f"current has {len(current_seeds)} seeds, "
+                    f"baseline has {len(baseline_seeds)} seeds"
                 )
+                if only_in_current:
+                    mismatch += (
+                        f"; only in current: {_render_seed_sample(only_in_current)}"
+                    )
+                if only_in_baseline:
+                    mismatch += (
+                        f"; only in baseline: {_render_seed_sample(only_in_baseline)}"
+                    )
+                reasons.append(mismatch)
         elif not paired:
             notes.append(
                 "non-paired comparison: fixed seed sets differ or contain "

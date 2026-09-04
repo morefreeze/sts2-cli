@@ -49,11 +49,11 @@
   const DELTA_ITEM_DEPTH_LIMIT = 4;
   const mapState = {
     runId: '',
+    ref: null,
     actIndex: 0,
     opener: null,
     requestToken: 0,
     abortController: null,
-    dashboardHidden: null,
     positionedMapKey: '',
   };
   let activeDecisionAnchor = null;
@@ -913,6 +913,147 @@
     container.append(element('dt', { text: label }), element('dd', { text: value }));
   }
 
+  const INTENT_LABELS = {
+    attack: '攻击', block: '格挡', buff: '增益', debuff: '减益',
+    statuscard: '塞牌', stun: '眩晕', unknown: '未知',
+  };
+
+  function intentText(intent) {
+    if (!intent || typeof intent !== 'object') return '未知';
+    const kind = String(intent.type || '').toLowerCase();
+    const label = INTENT_LABELS[kind] || intent.type || '未知';
+    const damage = Number(intent.damage);
+    if (!Number.isFinite(damage) || damage <= 0) return label;
+    const hits = Number(intent.hits);
+    return Number.isFinite(hits) && hits > 1
+      ? `${label} ${damage}x${hits}` : `${label} ${damage}`;
+  }
+
+  function enemyLine(enemy) {
+    if (!enemy || typeof enemy !== 'object') return '';
+    // Boss names arrive with unresolved template vars, e.g.
+    // "Test Subject #C{Count}" -- strip the tail rather than show the raw token.
+    const name = String(enemy.name || '?').replace(/\s*#?\w*\{[^}]*\}/g, '').trim() || '?';
+    const intents = Array.isArray(enemy.intents) ? enemy.intents : [];
+    const intent = intents.length ? intents.map(intentText).join(' + ') : '未知';
+    const block = Number(enemy.block) > 0 ? ` 格挡${enemy.block}` : '';
+    const powers = Array.isArray(enemy.powers) && enemy.powers.length
+      ? ` [${enemy.powers.map((p) => `${p.name}${Number(p.amount) ? ` ${p.amount}` : ''}`).join(', ')}]`
+      : '';
+    return `${name} (${enemy.hp}/${enemy.max_hp})${block} → ${intent}${powers}`;
+  }
+
+  function handLine(hand) {
+    if (!Array.isArray(hand) || !hand.length) return '（空手牌）';
+    return hand.map((c) => `${c.name || c.id || '?'}(${c.cost === undefined ? '?' : c.cost})`).join('、');
+  }
+
+  function stripTemplate(value) {
+    return String(value || '').replace(/\s*#?\w*\{[^}]*\}/g, '').trim();
+  }
+
+  function effectsText(effects) {
+    if (!effects || typeof effects !== 'object') return '';
+    const bits = [];
+    (Array.isArray(effects.enemy_hp) ? effects.enemy_hp : []).forEach((e) => {
+      const delta = Number(e && e.delta);
+      if (Number.isFinite(delta) && delta !== 0) {
+        bits.push(`${stripTemplate(e.name) || '敌人'} ${delta > 0 ? '+' : ''}${delta}`);
+      }
+    });
+    const hp = effects.hp && Number(effects.hp.delta);
+    if (Number.isFinite(hp) && hp !== 0) bits.push(`自身生命 ${hp > 0 ? '+' : ''}${hp}`);
+    const block = effects.block && Number(effects.block.delta);
+    if (Number.isFinite(block) && block !== 0) bits.push(`格挡 ${block > 0 ? '+' : ''}${block}`);
+    return bits.length ? `  ⇒ ${bits.join('，')}` : '';
+  }
+
+  function actionText(entry) {
+    if (!entry || typeof entry !== 'object') return '?';
+    const effects = effectsText(entry.effects);
+    const raw = String(entry.label || '?');
+    const verb = raw.split(' ')[0];
+    if (entry.card && entry.card.name) {
+      const cost = entry.card.cost === undefined ? '?' : entry.card.cost;
+      const target = entry.target ? ` → ${stripTemplate(entry.target.name) || '敌人'}` : '';
+      return `打出 ${entry.card.name}(${cost})${target}${effects}`;
+    }
+    if (verb === 'end_turn') return `结束回合${effects}`;
+    if (verb === 'use_potion') return `使用药水${effects}`;
+    // select_cards and anything else: keep the recorded label, it is exact.
+    return `${raw}${effects}`;
+  }
+
+  function roundSummaryText(round) {
+    const start = (round && round.start_state) || {};
+    const end = (round && round.end_state) || {};
+    const from = Number(start.hp);
+    const to = Number(end.hp);
+    const parts = [`回合 ${round.round}`];
+    if (Number.isFinite(from)) {
+      const shown = Number.isFinite(to) && to !== from ? `${from} → ${to}` : `${from}`;
+      parts.push(`生命 ${shown}${Number.isFinite(start.max_hp) ? `/${start.max_hp}` : ''}`);
+    }
+    const loss = Number(round.hp_loss);
+    if (Number.isFinite(loss) && loss > 0) parts.push(`失去 ${loss}`);
+    if (Number(start.block) > 0) parts.push(`格挡 ${start.block}`);
+    if (Number.isFinite(Number(start.energy))) parts.push(`能量 ${start.energy}`);
+    return parts.join(' · ');
+  }
+
+  function appendRound(container, round) {
+    const details = element('details', { className: 'combat-round' });
+    details.append(element('summary', { text: roundSummaryText(round) }));
+    const start = (round && round.start_state) || {};
+    const enemies = Array.isArray(start.enemies) ? start.enemies : [];
+    if (enemies.length) {
+      const list = element('ul', { className: 'combat-enemies' });
+      enemies.forEach((enemy) => list.append(element('li', { text: enemyLine(enemy) })));
+      details.append(element('h5', { text: '敌人' }), list);
+    }
+    details.append(element('h5', { text: '手牌' }),
+                   element('p', { className: 'combat-hand', text: handLine(start.hand) }));
+    if (Array.isArray(start.orbs) && start.orbs.length) {
+      details.append(element('p', {
+        className: 'combat-orbs',
+        text: `充能球：${start.orbs.map((o) => o.type || '?').join('、')}`,
+      }));
+    }
+    const actions = Array.isArray(round.actions) ? round.actions : [];
+    details.append(element('h5', { text: `操作（${actions.length}）` }));
+    if (actions.length) {
+      const list = element('ol', { className: 'combat-actions' });
+      actions.forEach((a) => list.append(element('li', { text: actionText(a) })));
+      details.append(list);
+    } else {
+      details.append(element('p', { text: '（本回合无记录操作）' }));
+    }
+    container.append(details);
+  }
+
+  function appendCombatReplay(container, node) {
+    // The map payload has no combat data -- only `recorded_node_id`, which keys
+    // into the run payload run-view.js stashed on state. Absent (map opened
+    // directly, or a non-combat node) simply renders nothing.
+    const byNode = state && state.currentRunReplay;
+    const key = node && node.recorded_node_id;
+    if (!byNode || !key || !Object.prototype.hasOwnProperty.call(byNode, key)) return;
+    const entry = byNode[key];
+    const rounds = entry && entry.combat && Array.isArray(entry.combat.rounds)
+      ? entry.combat.rounds : [];
+    if (!rounds.length) return;
+    const section = element('section', { className: 'combat-replay' });
+    const headline = [`战斗回放 · ${rounds.length} 回合`];
+    if (entry.boss) headline.push(String(entry.boss).replace(/\s*#?\w*\{[^}]*\}/g, '').trim());
+    if (Number.isFinite(Number(entry.start_hp)) && Number.isFinite(Number(entry.end_hp))) {
+      headline.push(`生命 ${entry.start_hp} → ${entry.end_hp}`);
+    }
+    if (entry.status) headline.push(entry.status === 'won' ? '胜利' : String(entry.status));
+    section.append(element('h4', { text: headline.join(' · ') }));
+    rounds.forEach((round) => appendRound(section, round));
+    container.append(section);
+  }
+
   function selectNode(node, sourceElement = null) {
     const container = byId('selectedNodeSummary');
     clear(container);
@@ -925,6 +1066,7 @@
       appendDefinition(list, field.label, value === '—' ? '—' : `${value} · ${quality}`);
     });
     container.append(list);
+    appendCombatReplay(container, node);
     if (sourceElement) {
       byId('mapSvg').querySelectorAll('.map-node[data-selected="true"]').forEach((item) => item.removeAttribute('data-selected'));
       sourceElement.setAttribute('data-selected', 'true');
@@ -957,7 +1099,7 @@
         },
       });
       button.disabled = !act.available;
-      button.addEventListener('click', () => loadAct(mapState.runId, act.index, { historyMode: 'replace' }));
+      button.addEventListener('click', () => loadAct(mapState.ref, act.index, { historyMode: 'replace' }));
       if (act.index === payload.act.index && act.available) selectedTab = button;
       tabs.append(button);
     });
@@ -982,12 +1124,18 @@
     event.preventDefault();
     const nextActIndex = Number(availableTabs[nextIndex].dataset.actIndex);
     if (Number.isInteger(nextActIndex)) {
-      loadAct(mapState.runId, nextActIndex, { historyMode: 'replace', focusActTab: true });
+      loadAct(mapState.ref, nextActIndex, { historyMode: 'replace', focusActTab: true });
     }
   }
 
+  // The tree + content pane (#workbenchBody) and the map page (#runMapPage)
+  // are mutually exclusive top-level siblings -- showing one hides the
+  // other outright, which is also how the tree "collapses" to give the map
+  // horizontal room and how it is "restored" on exit. The app-level hash
+  // router (app.js) owns which batch/run is current; this only owns the
+  // visual toggle and focus handling.
   function showMapPage({ focusPage = true } = {}) {
-    const main = byId('dashboardMain');
+    const workbenchBody = byId('workbenchBody');
     const page = byId('runMapPage');
     const detailPanel = byId('detailPanel');
     const openerInsideDetail = mapState.opener && detailPanel.contains(mapState.opener);
@@ -998,10 +1146,7 @@
         mapState.opener = isUsableFocusTarget(restoredOpener) ? restoredOpener : null;
       }
     }
-    if (!mapState.dashboardHidden) {
-      mapState.dashboardHidden = Array.from(main.children).map((child) => ({ child, hidden: child.hidden }));
-    }
-    mapState.dashboardHidden.forEach(({ child }) => { child.hidden = child !== page; });
+    if (workbenchBody) workbenchBody.hidden = true;
     page.hidden = false;
     if (focusPage) page.focus();
   }
@@ -1017,24 +1162,37 @@
     if (mapState.abortController) mapState.abortController.abort();
     mapState.abortController = null;
     mapState.requestToken += 1;
-    const remembered = mapState.dashboardHidden;
-    if (remembered) remembered.forEach(({ child, hidden }) => { child.hidden = hidden; });
     byId('runMapPage').hidden = true;
-    mapState.dashboardHidden = null;
+    const workbenchBody = byId('workbenchBody');
+    if (workbenchBody) workbenchBody.hidden = false;
     const opener = mapState.opener;
     mapState.opener = null;
     if (isUsableFocusTarget(opener)) opener.focus();
-    else byId('dashboardMain').focus();
+    else {
+      const contentPane = byId('contentPane');
+      if (contentPane) contentPane.focus();
+    }
   }
 
-  function mapLocation(runId, actIndex) {
-    return `#run=${encodeURIComponent(runId)}&act=${actIndex}`;
+  // The app-level hash router (app.js) owns the visible URL
+  // (#/batch/<id>/run/<kind>:<id>); act-tab switches must not fight it, so
+  // pushState/replaceState calls below only ever carry the current URL
+  // unchanged -- they exist to satisfy loadAct's replace-not-push history
+  // contract, not to move the address bar.
+  function mapLocation() {
+    return `${location.pathname}${location.search}${location.hash}`;
   }
 
-  async function loadAct(runId, actIndex, {
+  async function loadAct(runRef, actIndex, {
     historyMode = 'none', opener = null, focusActTab = false,
   } = {}) {
-    runId = typeof runId === 'string' ? runId.trim() : '';
+    // Accepts either a bare run id string (kept for back-compat call
+    // sites) or a {kind, id} ref -- real catalog data addresses most runs
+    // by source_id, not run_id, so callers passing a ref keep that intact
+    // across act-tab switches via mapState.ref below.
+    const ref = typeof runRef === 'string' ? { kind: 'run', id: runRef.trim() } : (runRef || {});
+    const refKind = ref.kind === 'source' ? 'source' : 'run';
+    const runId = typeof ref.id === 'string' ? ref.id.trim() : '';
     if (!runId) {
       setStatus('无法打开地图：缺少对局 ID', 'error');
       return;
@@ -1047,6 +1205,7 @@
       ? { top: mapScroller.scrollTop, left: mapScroller.scrollLeft }
       : null;
     mapState.runId = runId;
+    mapState.ref = { kind: refKind, id: runId };
     mapState.actIndex = actIndex;
     showMapPage({ focusPage: !focusActTab });
     byId('runMapTitle').textContent = `对局 ${runId}`;
@@ -1068,7 +1227,8 @@
     mapState.abortController = controller;
     setStatus(`正在读取 ${runId} 地图…`, 'busy');
     try {
-      const payload = await getJSON(`/api/run/map?id=${encodeURIComponent(runId)}&act=${actIndex}`, { signal: controller.signal });
+      const queryKey = refKind === 'source' ? 'source' : 'id';
+      const payload = await getJSON(`/api/run/map?${queryKey}=${encodeURIComponent(runId)}&act=${actIndex}`, { signal: controller.signal });
       if (token !== mapState.requestToken) return;
       mapState.abortController = null;
       const selectedTab = renderActTabs(payload);
@@ -1091,19 +1251,26 @@
     }
   }
 
+  // The app-level hash router (app.js) owns navigation between the batch
+  // view and a run's map (#/batch/<id> vs #/batch/<id>/run/<kind>:<id>),
+  // including re-entering this page on back/forward via its own popstate
+  // listener. Prefer a real browser back so the address bar and any
+  // earlier scroll state pop naturally; a deep link straight into a run
+  // has nothing of ours to go back to, so fall back to an explicit
+  // navigate() to the owning batch.
   function closeMapPage() {
-    if (history.state && history.state.view === 'run-map' && history.state.fromDashboard) history.back();
-    else {
-      history.replaceState({ view: 'dashboard' }, '', `${location.pathname}${location.search}`);
-      showDashboardPage();
+    if (history.state && history.state.view === 'run') {
+      history.back();
+      return;
     }
-  }
-
-  function parseMapLocation() {
-    const params = new URLSearchParams(location.hash.replace(/^#/, ''));
-    const runId = params.get('run');
-    const act = Number(params.get('act') || 0);
-    return runId && Number.isInteger(act) && act >= 0 && act <= 3 ? { runId, actIndex: act } : null;
+    if (typeof navigate === 'function') {
+      const target = (typeof cohortRoute === 'function' && typeof state === 'object' && state && state.selectedCohortId)
+        ? cohortRoute(state.selectedCohortId)
+        : '#/';
+      navigate(target, { replace: true });
+      return;
+    }
+    showDashboardPage();
   }
 
   byId('mapBackButton').addEventListener('click', closeMapPage);
@@ -1120,25 +1287,24 @@
       closeMapPage();
     }
   });
-  window.addEventListener('popstate', (event) => {
-    const route = event.state && event.state.view === 'run-map'
-      ? { runId: event.state.runId, actIndex: event.state.actIndex }
-      : parseMapLocation();
-    if (route) loadAct(route.runId, route.actIndex, { historyMode: 'none' });
-    else showDashboardPage();
+  // A stray positioned popover should never survive a browser back/forward
+  // navigation; the app router (app.js) owns re-rendering the destination
+  // view on the same event.
+  window.addEventListener('popstate', () => {
+    hideDecisionPopover();
   });
 
   window.STS2Map = Object.freeze({
-    openRun(runId, opener = null) {
-      loadAct(runId, 0, { historyMode: 'push', opener });
+    // historyMode defaults to 'none' because the app router already
+    // pushed/replaced the #/batch/<id>/run/<kind>:<id> URL before calling
+    // this -- loadAct's own historyMode: 'push' path stays reachable for
+    // any future standalone caller but is not exercised from here.
+    openRun(ref, opener = null, { historyMode = 'none' } = {}) {
+      loadAct(ref, 0, { historyMode, opener });
     },
+    // The router calls this when leaving a run route. showMapPage() hides
+    // workbenchBody wholesale, so without the matching close the batch view
+    // stays buried under the map page and the tree never comes back.
+    showDashboardPage,
   });
-
-  const initialRoute = parseMapLocation();
-  if (initialRoute) {
-    history.replaceState({ view: 'run-map', ...initialRoute, fromDashboard: false }, '', location.href);
-    loadAct(initialRoute.runId, initialRoute.actIndex, { historyMode: 'none' });
-  } else {
-    history.replaceState({ view: 'dashboard' }, '', location.href);
-  }
 })();

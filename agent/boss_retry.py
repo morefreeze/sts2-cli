@@ -41,6 +41,12 @@ from agent.run_metadata import (
 )
 from agent.train import mask_fn
 
+# Mirrors eval_rl.py's planner switch so the two paths cannot drift.
+_PLANNER_ENV = os.environ.get("STS2_PLANNER", "").lower()
+_PLANNER_ON = _PLANNER_ENV in ("1", "true", "on", "lethal")
+_PLANNER_LETHAL_ONLY = _PLANNER_ENV == "lethal"
+
+
 
 def _player_hp(env: CombatEnv) -> int:
     st = env._current_state or {}
@@ -89,7 +95,24 @@ def _play_one(model, save_path: str, deterministic: bool, extra_obs: bool,
         info = {}
         while not done and steps < max_steps:
             masks = env_w.action_masks()
-            action, _ = model.predict(obs, deterministic=deterministic, action_masks=masks)
+            action = None
+            # Honour STS2_PLANNER the same way eval_rl.py's loop does, so a
+            # planner hypothesis can be tested against banked boss snapshots
+            # (10 fights per config) instead of ~237 full runs to harvest 3
+            # arrivals. Without this, boss_retry silently ignores the flag and
+            # every planner arm reads identical to baseline.
+            if _PLANNER_ON:
+                state_snap = env._current_state
+                if state_snap and state_snap.get("decision") == "combat_play":
+                    try:
+                        from agent.turn_planner import plan_action
+                        action = plan_action(state_snap, masks,
+                                             lethal_only=_PLANNER_LETHAL_ONLY)
+                    except Exception:
+                        action = None
+            if action is None:
+                action, _ = model.predict(obs, deterministic=deterministic,
+                                          action_masks=masks)
             obs, _r, terminated, truncated, info = env_w.step(int(action))
             done = terminated or truncated
             steps += 1

@@ -80,12 +80,15 @@ class Game:
     def __init__(self):
         self.lock = threading.Lock()
         self.step = 0
-        os.environ["STS2_GAME_DIR"] = os.path.expanduser(
+        # Don't clobber an explicit STS2_GAME_DIR — a caller may point at a
+        # different install (or a different platform's data dir) and the
+        # hardcoded path below is only a macOS/Steam default.
+        os.environ.setdefault("STS2_GAME_DIR", os.path.expanduser(
             "~/Library/Application Support/Steam/steamapps/common/"
-            "Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64")
+            "Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64"))
         self.proc = subprocess.Popen(
             [os.path.expanduser("~/.dotnet-arm64/dotnet"), "run", "--no-build",
-             "--project", "Sts2Headless/Sts2Headless.csproj"],
+             "--project", "src/Sts2Headless/Sts2Headless.csproj"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         def _forward_stderr():

@@ -1,972 +1,129 @@
 'use strict';
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
-const CLIENT_TREND_POINT_LIMIT = 256;
+// Bootstrap, hash router, shared app state, the source-catalog panel and the
+// detail drawer. View-specific rendering lives in tree.js / cohort-view.js /
+// runs-table.js / run-view.js; map.js renders the act map unchanged.
+
 const SOURCE_ERROR_EXAMPLE_LIMIT = 3;
-const SERVER_PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024;
-const FILE_UPLOAD_MAX_BYTES = 1 * 1024 * 1024;
-const TECHNICAL_STATUSES = new Set(['crash', 'timeout', 'stuck', 'reset_failure', 'invalid']);
-const SOURCE_LABELS = {
-  native_run: '原生游戏记录',
-  replay_jsonl: '回放日志',
-  deck_history: '牌组历史',
-  eval_results: '评估结果',
-  summary: '汇总记录',
-  unknown: '未知格式',
-};
-const FUNNEL_LABELS = {
-  all_runs: '全部记录',
-  floor_bearing: '有推进层数',
-  act1_boss_or_later: '第一幕 Boss',
-  act2_entry: '进入第二幕',
-  act2_boss_or_later: '第二幕 Boss',
-  act3_entry: '进入第三幕',
-  completion: '通关',
-};
-const STATUS_LABELS = {
-  win: '胜利',
-  dead: '正常结束',
-  crash: '崩溃',
-  timeout: '超时',
-  stuck: '卡死',
-  reset_failure: '重置失败',
-  invalid: '无效记录',
-  in_progress: '进行中',
-  unknown: '未知',
-};
-const CAPABILITY_LABELS = {
-  full_map: '完整地图分支',
-  visited_route: '已走路线',
-  node_rewards: '节点收益',
-  final_inventory: '最终牌组与遗物',
-  decisions: '决策记录',
-  turn_replay: '回合回放',
-};
+const SERVER_PARSE_BODY_MAX_BYTES = 128 * 1024 * 1024;
+const FILE_UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
 
 const state = {
+  tree: [],
   cohorts: [],
   sources: [],
+  selectedCohortId: '',
   currentMetrics: null,
   busy: false,
   detailRequestToken: 0,
   detailAbortController: null,
   detailOpener: null,
   uploadRequestToken: 0,
+  catalogOpen: false,
+  currentRunReplay: null,   // replay_by_node of the open run; see run-view.js
 };
 
-const byId = (id) => document.getElementById(id);
+// ---------------------------------------------------------------------
+// Hash router: #/  |  #/batch/<cohort_id>  |  #/batch/<cohort_id>/run/<kind>:<id>
+// ---------------------------------------------------------------------
 
-function element(tag, options = {}) {
-  const node = document.createElement(tag);
-  if (options.className) node.className = options.className;
-  if (options.text !== undefined) node.textContent = String(options.text);
-  if (options.attrs) {
-    Object.entries(options.attrs).forEach(([name, value]) => {
-      if (value !== undefined && value !== null) node.setAttribute(name, String(value));
-    });
+function cohortRoute(cohortId) {
+  return `#/batch/${encodeURIComponent(cohortId)}`;
+}
+
+function runRoute(cohortId, ref) {
+  const kind = ref && ref.kind === 'source' ? 'source' : 'run';
+  const id = ref && typeof ref.id === 'string' ? ref.id : '';
+  return `#/batch/${encodeURIComponent(cohortId || '-')}/run/${kind}:${encodeURIComponent(id)}`;
+}
+
+function parseRoute(hash) {
+  const raw = typeof hash === 'string' ? hash.replace(/^#/, '') : '';
+  if (!raw || raw === '/') return { view: 'root' };
+  const match = raw.match(/^\/batch\/([^/]+)(?:\/run\/([a-zA-Z0-9_-]+):(.+))?$/);
+  if (!match) return { view: 'root' };
+  const cohortId = decodeURIComponent(match[1]);
+  if (match[2] && match[3] !== undefined) {
+    return { view: 'run', cohortId, ref: { kind: match[2], id: decodeURIComponent(match[3]) } };
   }
-  return node;
+  return { view: 'batch', cohortId };
 }
 
-function svgElement(tag, attrs = {}) {
-  const node = document.createElementNS(SVG_NS, tag);
-  Object.entries(attrs).forEach(([name, value]) => node.setAttribute(name, String(value)));
-  return node;
+function navigate(hash, { replace = false } = {}) {
+  const route = parseRoute(hash);
+  // map.js's closeMapPage() checks history.state.view === 'run' to decide
+  // whether history.back() has somewhere of ours to land, rather than
+  // duplicating this router's route-parsing.
+  if (replace) history.replaceState({ view: route.view }, '', hash);
+  else history.pushState({ view: route.view }, '', hash);
+  applyRoute(route);
 }
 
-function clear(node) {
-  node.replaceChildren();
-}
-
-function setStatus(message, tone = 'ready') {
-  const node = byId('workbenchStatus');
-  node.textContent = message;
-  node.dataset.tone = tone;
-}
-
-function setBusy(isBusy) {
-  state.busy = isBusy;
-  byId('dashboardMain').setAttribute('aria-busy', String(isBusy));
-  ['currentCohort', 'baselineCohort', 'characterFilter', 'versionFilter',
-    'validityFilter', 'sourceFile', 'reloadButton'].forEach((id) => {
-    byId(id).disabled = isBusy;
-  });
-}
-
-async function getJSON(path, options = {}) {
-  const response = await fetch(path, options);
-  const text = await response.text();
-  let payload = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch (error) {
-    throw new Error(`服务返回了无法识别的内容（HTTP ${response.status}）`);
-  }
-  if (!response.ok) {
-    const error = new Error(payload.error || `请求失败（HTTP ${response.status}）`);
-    error.payload = payload;
-    throw error;
-  }
-  return payload;
-}
-
-function formatMissing(value, digits = 1) {
-  if (value === null || value === undefined || Number.isNaN(value)) return '—';
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? String(value) : value.toFixed(digits).replace(/\.0$/, '');
-  }
-  return String(value);
-}
-
-function formatRate(value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return '—';
-  return `${(Number(value) * 100).toFixed(1).replace(/\.0$/, '')}%`;
-}
-
-function formatBytes(value) {
-  if (typeof value !== 'number' || value < 0) return '—';
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatTime(value) {
-  if (typeof value !== 'number') return '时间未知';
-  const date = new Date(value * 1000);
-  return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN');
-}
-
-function setMetric(id, value, subtext) {
-  byId(id).textContent = value;
-  const sub = document.querySelector(`[data-subtext-for="${id}"]`);
-  if (sub) sub.textContent = subtext;
-}
-
-function setSelectOptions(select, options, emptyLabel, preferred) {
-  clear(select);
-  if (emptyLabel !== null) {
-    select.append(element('option', { text: emptyLabel, attrs: { value: '' } }));
-  }
-  options.forEach((option) => {
-    select.append(element('option', {
-      text: option.label,
-      attrs: { value: option.value },
-    }));
-  });
-  if (preferred && options.some((option) => option.value === preferred)) {
-    select.value = preferred;
-  }
-}
-
-function filterValue(cohort, key) {
-  const value = cohort.filters && cohort.filters[key];
-  return value === null || value === undefined || value === '' ? '未标注' : String(value);
-}
-
-function safeCohortId(cohort) {
-  try {
-    if (!cohort || typeof cohort !== 'object') return '';
-    const value = cohort.cohort_id;
-    return typeof value === 'string' ? value.trim() : '';
-  } catch (error) {
-    return '';
-  }
-}
-
-function gameVersionSegments(value) {
-  if (typeof value !== 'string' || !/^[vV]?\d+(?:\.\d+)*$/.test(value)) return null;
-  return value.replace(/^[vV]/, '').split('.');
-}
-
-function compareDecimalSegmentsDescending(left, right) {
-  const normalizedLeft = left.replace(/^0+(?=\d)/, '');
-  const normalizedRight = right.replace(/^0+(?=\d)/, '');
-  if (normalizedLeft.length !== normalizedRight.length) {
-    return normalizedRight.length - normalizedLeft.length;
-  }
-  if (normalizedLeft === normalizedRight) return 0;
-  return normalizedLeft > normalizedRight ? -1 : 1;
-}
-
-function compareGameVersionsDescending(left, right) {
-  const leftSegments = gameVersionSegments(left);
-  const rightSegments = gameVersionSegments(right);
-  if (!leftSegments || !rightSegments) {
-    if (leftSegments) return -1;
-    if (rightSegments) return 1;
-  } else {
-    const segmentCount = Math.max(leftSegments.length, rightSegments.length);
-    for (let index = 0; index < segmentCount; index += 1) {
-      const result = compareDecimalSegmentsDescending(
-        leftSegments[index] || '0',
-        rightSegments[index] || '0',
-      );
-      if (result) return result;
+function firstCohortIdInTree(tree) {
+  if (!Array.isArray(tree)) return '';
+  for (const version of tree) {
+    const characters = Array.isArray(version.characters) ? version.characters : [];
+    for (const character of characters) {
+      const cohorts = Array.isArray(character.cohorts) ? character.cohorts : [];
+      if (cohorts.length && typeof cohorts[0].cohort_id === 'string') return cohorts[0].cohort_id;
     }
   }
-  if (left === right) return 0;
-  return left < right ? -1 : 1;
+  return '';
 }
 
-function sortFilterValues(values, key) {
-  const sorted = [...values];
-  return key === 'game_version' ? sorted.sort(compareGameVersionsDescending) : sorted.sort();
+function showBatchView() {
+  state.catalogOpen = false;
+  byId('catalogToggle').setAttribute('aria-pressed', 'false');
+  byId('batchView').hidden = false;
+  byId('catalogView').hidden = true;
 }
 
-function filterValuesFromCohorts(cohorts, key) {
-  if (!Array.isArray(cohorts)) return [];
-  const values = [];
-  cohorts.forEach((cohort) => {
-    if (!safeCohortId(cohort)) return;
-    try {
-      values.push(filterValue(cohort, key));
-    } catch (error) {
-      // Ignore malformed descriptors without discarding the remaining cohorts.
-    }
-  });
-  return sortFilterValues(Array.from(new Set(values)), key);
+function showCatalogView() {
+  state.catalogOpen = true;
+  byId('catalogToggle').setAttribute('aria-pressed', 'true');
+  byId('batchView').hidden = true;
+  byId('catalogView').hidden = false;
 }
 
-function populateAxisFilter(id, key, allLabel) {
-  const select = byId(id);
-  const previous = select.value;
-  const values = filterValuesFromCohorts(state.cohorts, key);
-  setSelectOptions(select, values.map((value) => ({ value, label: value })), allLabel, previous);
-}
-
-function cohortsForSelectedVersion() {
-  if (!Array.isArray(state.cohorts)) return [];
-  const version = byId('versionFilter').value;
-  return state.cohorts.filter((cohort) => {
-    if (!safeCohortId(cohort)) return false;
-    try {
-      const cohortVersion = filterValue(cohort, 'game_version');
-      return !version || cohortVersion === version;
-    } catch (error) {
-      return false;
-    }
-  });
-}
-
-function updateCharacterFilterOptions() {
-  const select = byId('characterFilter');
-  const previous = select.value;
-  const values = filterValuesFromCohorts(cohortsForSelectedVersion(), 'character');
-  setSelectOptions(
-    select,
-    values.map((value) => ({ value, label: value })),
-    '全部角色',
-    previous,
-  );
-}
-
-function filteredCohorts() {
-  const character = byId('characterFilter').value;
-  const validity = byId('validityFilter').value;
-  return cohortsForSelectedVersion().filter((cohort) => {
-    try {
-      const cohortCharacter = filterValue(cohort, 'character');
-      if (character && cohortCharacter !== character) return false;
-      const technical = Number(cohort.technical_count || 0);
-      const gameplay = Number(cohort.run_count || 0) - technical;
-      if (validity === 'valid' && gameplay <= 0) return false;
-      if (validity === 'technical' && technical <= 0) return false;
-      return true;
-    } catch (error) {
-      return false;
-    }
-  });
-}
-
-function defaultBaselineCohortId(current, candidates) {
-  let currentId;
-  let baselineId;
-  try {
-    if (!current || typeof current !== 'object') return '';
-    const readiness = current.comparison_readiness;
-    if (!readiness || typeof readiness !== 'object' || readiness.ready !== true) return '';
-    if (typeof current.default_baseline_cohort_id !== 'string') return '';
-    currentId = safeCohortId(current);
-    baselineId = current.default_baseline_cohort_id.trim();
-  } catch (error) {
-    return '';
+async function applyRoute(route) {
+  // showDashboardPage lives inside map.js's IIFE, so it is reachable only
+  // through the STS2Map namespace -- a bare `typeof showDashboardPage` here
+  // is always 'undefined' and silently leaves the map page covering the
+  // batch view on the way back from a run.
+  if (window.STS2Map && typeof window.STS2Map.showDashboardPage === 'function') {
+    window.STS2Map.showDashboardPage();
   }
-  if (!currentId || !baselineId || baselineId === currentId || !Array.isArray(candidates)) return '';
-
-  let matches = 0;
-  try {
-    for (const candidate of candidates) {
-      try {
-        if (safeCohortId(candidate) === baselineId) matches += 1;
-      } catch (error) {
-        // Ignore malformed candidate descriptors and fail closed on ambiguity below.
-      }
-      if (matches > 1) return '';
-    }
-  } catch (error) {
-    return '';
-  }
-  return matches === 1 ? baselineId : '';
-}
-
-function comparisonAxisLabel(axis) {
-  const labels = {
-    character: '角色',
-    game_version: '游戏版本',
-    evaluation_mode: '评测模式',
-    scenario: '场景',
-    ascension: '进阶',
-    seed: '种子',
-    valid_results: '有效结果',
-  };
-  if (typeof axis !== 'string') return '未知轴';
-  return Object.prototype.hasOwnProperty.call(labels, axis) ? labels[axis] : axis;
-}
-
-function updateCohortHelp(current, baselineId) {
-  const currentHelp = byId('currentHelp');
-  const baselineHelp = byId('baselineHelp');
-  if (!current) {
-    currentHelp.textContent = '当前筛选没有匹配批次；版本来源：记录未提供';
-    baselineHelp.textContent = '当前没有可查看的训练批次';
-    return;
-  }
-
-  let readiness = null;
-  let source = null;
-  let serverDefaultId = '';
-  try {
-    readiness = current.comparison_readiness;
-    source = current.filters && current.filters.game_version_source;
-    serverDefaultId = typeof current.default_baseline_cohort_id === 'string'
-      ? current.default_baseline_cohort_id.trim()
-      : '';
-  } catch (error) {
-    readiness = null;
-    source = null;
-    serverDefaultId = '';
-  }
-  const labels = (key) => {
-    let axes;
-    try {
-      axes = readiness && readiness[key];
-    } catch (error) {
-      return [];
-    }
-    if (!Array.isArray(axes)) return [];
-    return Array.from(new Set(
-      axes.filter((axis) => typeof axis === 'string').map(comparisonAxisLabel),
-    ));
-  };
-  const missing = labels('missing_axes');
-  const mixed = labels('mixed_axes');
-  const invalid = labels('invalid_axes');
-  const issues = [
-    missing.length ? `缺少${missing.join('、')}` : '',
-    mixed.length ? `混合${mixed.join('、')}` : '',
-    invalid.length ? `无效${invalid.join('、')}` : '',
-  ].filter(Boolean);
-  const sourceLabel = source === 'cli'
-    ? '命令行'
-    : source === 'environment' ? '环境变量' : '记录未提供';
-  const orderingHelp = Number.isFinite(current.latest_at)
-    ? `服务端按时间排序；此批次最近记录于 ${formatTime(current.latest_at)}`
-    : '此批次时间未知；按服务端稳定顺序选择，不视为最新批次';
-  const sourceHelp = `版本来源：${sourceLabel}`;
-  currentHelp.textContent = `${orderingHelp}；${sourceHelp}`;
-
-  if (!readiness || readiness.ready !== true) {
-    const detail = issues.length ? `：${issues.join('；')}` : '';
-    baselineHelp.textContent = `元数据不完整，仅展示本批次${detail}`;
-  } else if (!baselineId) {
-    baselineHelp.textContent = '当前批次可查看，但暂无可直接比较的基线';
-  } else if (baselineId === serverDefaultId) {
-    baselineHelp.textContent = '已采用服务端验证的兼容基线；手动选择后仍会再次校验';
-  } else {
-    baselineHelp.textContent = '已选择基线；服务端将校验口径并提供精确原因';
-  }
-}
-
-function updateCohortOptions({ chooseDefaults = false, currentChanged = false } = {}) {
-  const currentSelect = byId('currentCohort');
-  const baselineSelect = byId('baselineCohort');
-  const previousCurrent = currentSelect.value;
-  const previousBaseline = baselineSelect.value;
-  const entries = filteredCohorts().map((cohort) => ({ cohort, id: safeCohortId(cohort) }))
-    .filter((entry) => entry.id);
-  const candidates = entries.map((entry) => entry.cohort);
-  const options = entries.map(({ cohort, id }) => ({
-    value: id,
-    label: `${cohort.label} · ${cohort.run_count} 局 · ${Number.isFinite(cohort.latest_at) ? formatTime(cohort.latest_at) : '时间未知'}`,
-  }));
-  let current = previousCurrent;
-  if (!entries.some((entry) => entry.id === current)) {
-    current = entries.length ? entries[0].id : '';
-  }
-  if (chooseDefaults && entries.length) current = entries[0].id;
-  setSelectOptions(currentSelect, options, candidates.length ? null : '没有匹配批次', current);
-  currentSelect.value = current;
-  const selectedEntry = entries.find((entry) => entry.id === current);
-  const selected = selectedEntry && selectedEntry.cohort;
-
-  let baseline = previousBaseline;
-  const baselineOptions = options.filter((option) => option.value !== current);
-  if (chooseDefaults || currentChanged || current !== previousCurrent) {
-    baseline = defaultBaselineCohortId(selected, candidates);
-  } else if (baseline && !baselineOptions.some((option) => option.value === baseline)) {
-    baseline = '';
-  }
-  setSelectOptions(baselineSelect, baselineOptions, '不比较基线', baseline);
-  baselineSelect.value = baseline;
-  updateCohortHelp(selected, baseline);
-}
-
-function resetMetrics() {
-  setMetric('avgFloor', '—', '没有可用批次');
-  setMetric('medianFloor', '—', '没有可用批次');
-  setMetric('maxFloor', '—', '没有可用批次');
-  setMetric('act2Rate', '—', '没有可用批次');
-  setMetric('validCount', '—', '没有可用批次');
-  setMetric('technicalCount', '—', '没有可用批次');
-  renderEmpty(byId('trendChart'), '没有可绘制的推进记录。');
-  renderEmpty(byId('funnelChart'), '没有可计算的推进漏斗。');
-  renderComparison(null);
-  renderAnomalies(null);
-  renderRepresentatives(null);
-}
-
-function renderSummary(summary) {
-  setMetric('avgFloor', formatMissing(summary.avg_global_floor),
-    `已知层数 ${summary.floor_n} / 有效对局 ${summary.valid_n}`);
-  setMetric('medianFloor', formatMissing(summary.median_global_floor),
-    `层数口径 ${summary.floor_n} 条`);
-  setMetric('maxFloor', formatMissing(summary.max_global_floor),
-    `最远值来自 ${summary.floor_n} 条已知层数`);
-  setMetric('act2Rate', formatRate(summary.act2_entry_rate),
-    `${summary.act2_entry_n} / ${summary.act2_entry_denominator} 条可判断记录`);
-  setMetric('validCount', formatMissing(summary.valid_n, 0),
-    `${summary.valid_n} / ${summary.all_n} 条全部记录`);
-  setMetric('technicalCount', formatMissing(summary.technical_n, 0),
-    `${summary.technical_n} / ${summary.all_n} 条全部记录，未混入平均值`);
-}
-
-function renderEmpty(container, message, className = 'empty-state') {
-  clear(container);
-  container.append(element('div', { className, text: message }));
-}
-
-function boundedTimestampedTrend(points, limit = CLIENT_TREND_POINT_LIMIT) {
-  const boundedLimit = Math.max(1, Math.floor(limit) || 1);
-  let timestampedInputN = 0;
-  for (const point of points) {
-    if (point && Number.isFinite(point.timestamp)) timestampedInputN += 1;
-  }
-  if (timestampedInputN === 0) return { points: [], timestampedInputN: 0 };
-
-  const selectedN = Math.min(timestampedInputN, boundedLimit);
-  const targetIndexes = [];
-  for (let index = 0; index < selectedN; index += 1) {
-    const target = selectedN === 1
-      ? 0
-      : Math.round(index * (timestampedInputN - 1) / (selectedN - 1));
-    targetIndexes.push(target);
-  }
-  const selected = [];
-  let finiteIndex = 0;
-  let targetIndex = 0;
-  for (const point of points) {
-    if (!point || !Number.isFinite(point.timestamp)) continue;
-    if (finiteIndex === targetIndexes[targetIndex]) {
-      selected.push(point);
-      targetIndex += 1;
-    }
-    finiteIndex += 1;
-    if (targetIndex >= targetIndexes.length) break;
-  }
-  return { points: selected, timestampedInputN };
-}
-
-function renderTrendProvenance(container, summary, renderedN, timestampedInputN) {
-  const eligibleN = Number.isFinite(summary.trend_eligible_n) ? summary.trend_eligible_n : timestampedInputN;
-  const timestampedN = Number.isFinite(summary.trend_timestamped_n) ? summary.trend_timestamped_n : timestampedInputN;
-  const unknownTimeN = Number.isFinite(summary.trend_unknown_time_n) ? summary.trend_unknown_time_n : Math.max(0, eligibleN - timestampedN);
-  const serverSampledN = Number.isFinite(summary.trend_sampled_n) ? summary.trend_sampled_n : timestampedInputN;
-  const serverLimit = Number.isFinite(summary.trend_sample_limit) ? summary.trend_sample_limit : '—';
-  const methods = {
-    all_timestamped: '全部有时间记录',
-    deterministic_hash: '服务端确定性抽样',
-  };
-  const method = methods[summary.trend_sampling_method] || summary.trend_sampling_method || '未标注';
-  const legend = element('div', {
-    className: 'chart-legend',
-    attrs: { 'aria-label': '趋势抽样口径' },
-  });
-  legend.append(
-    element('span', { className: 'legend-key', text: `绘制 ${renderedN} 点（前端上限 ${CLIENT_TREND_POINT_LIMIT}）` }),
-    element('span', { className: 'legend-key missing', text: `服务端样本 ${serverSampledN} / ${timestampedN} 个有时间记录（上限 ${serverLimit}）` }),
-    element('span', { className: 'legend-key technical', text: `总趋势口径 ${eligibleN}；${unknownTimeN} 个时间未知未绘制` }),
-    element('span', { text: `抽样方式：${method}${timestampedInputN > renderedN ? `；前端等距再抽样 ${renderedN} / ${timestampedInputN}` : ''}` }),
-  );
-  container.append(legend);
-}
-
-function renderTrend(summary) {
-  const container = byId('trendChart');
-  clear(container);
-  const rawTrend = Array.isArray(summary.trend) ? summary.trend : [];
-  const bounded = boundedTimestampedTrend(rawTrend);
-  const trend = bounded.points;
-  if (!trend.length) {
-    renderEmpty(container, rawTrend.length ? '趋势点缺少有效时间，未绘制到时间轴。' : '当前批次没有有时间记录的趋势点。');
-    renderTrendProvenance(container, summary, 0, bounded.timestampedInputN);
-    return;
-  }
-  const available = trend.filter((point) => Number.isFinite(point.global_floor));
-  const missing = trend.filter((point) => !Number.isFinite(point.global_floor));
-  const technical = trend.filter((point) => TECHNICAL_STATUSES.has(point.status));
-  if (!available.length) {
-    renderEmpty(container, `绘制样本共 ${trend.length} 条，但都缺少推进层数。`);
-    renderTrendProvenance(container, summary, trend.length, bounded.timestampedInputN);
-    return;
-  }
-
-  const width = 760;
-  const height = 230;
-  const margin = { top: 20, right: 18, bottom: 34, left: 42 };
-  const plotWidth = width - margin.left - margin.right;
-  const plotHeight = height - margin.top - margin.bottom;
-  let maxFloor = 1;
-  for (const point of available) {
-    if (point.global_floor > maxFloor) maxFloor = point.global_floor;
-  }
-  const x = (index) => margin.left + (trend.length === 1 ? plotWidth / 2 : index * plotWidth / (trend.length - 1));
-  const y = (value) => margin.top + plotHeight - (value / maxFloor) * plotHeight;
-  const svg = svgElement('svg', {
-    class: 'chart-svg', viewBox: `0 0 ${width} ${height}`,
-    role: 'img', 'aria-labelledby': 'trendTitle trendDescription',
-  });
-  const title = svgElement('title', { id: 'trendTitle' });
-  title.textContent = '当前批次有时间记录的最远推进层数样本';
-  const description = svgElement('desc', { id: 'trendDescription' });
-  description.textContent = `前端绘制 ${trend.length} 个有时间样本，其中 ${available.length} 个有层数、${missing.length} 个缺少层数。服务端有时间记录 ${summary.trend_timestamped_n} 个，时间未知 ${summary.trend_unknown_time_n} 个未绘制。`;
-  svg.append(title, description);
-
-  [0, 0.5, 1].forEach((ratio) => {
-    const lineY = margin.top + plotHeight * ratio;
-    svg.append(svgElement('line', {
-      x1: margin.left, y1: lineY, x2: width - margin.right, y2: lineY,
-      class: ratio === 1 ? 'chart-axis' : 'chart-gridline',
-    }));
-    const label = svgElement('text', { x: margin.left - 8, y: lineY + 3, class: 'chart-label', 'text-anchor': 'end' });
-    label.textContent = String(Math.round(maxFloor * (1 - ratio)));
-    svg.append(label);
-  });
-
-  let segment = [];
-  const appendSegment = () => {
-    if (segment.length > 1) {
-      svg.append(svgElement('polyline', { points: segment.join(' '), class: 'chart-line' }));
-    }
-    segment = [];
-  };
-  trend.forEach((point, index) => {
-    if (!Number.isFinite(point.global_floor)) {
-      appendSegment();
+  if (route.view === 'root') {
+    const firstId = firstCohortIdInTree(state.tree);
+    if (firstId) {
+      navigate(cohortRoute(firstId), { replace: true });
       return;
     }
-    const pointX = x(index);
-    const pointY = y(point.global_floor);
-    segment.push(`${pointX},${pointY}`);
-    const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
-    const runLabel = runId || '未提供对局 ID';
-    const attributes = {
-      cx: pointX, cy: pointY, r: 4.5, class: 'chart-point',
-      role: runId ? 'button' : 'img',
-      'aria-label': `${runLabel}，推进到 ${point.global_floor} 层，${STATUS_LABELS[point.status] || point.status}`,
-    };
-    if (runId) attributes.tabindex = '0';
-    const circle = svgElement('circle', attributes);
-    if (runId) {
-      circle.addEventListener('click', (event) => openRun(runId, event.currentTarget));
-      circle.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          openRun(runId, event.currentTarget);
-        }
-      });
-    }
-    svg.append(circle);
-  });
-  appendSegment();
-  const firstLabel = svgElement('text', { x: margin.left, y: height - 10, class: 'chart-label' });
-  firstLabel.textContent = '较早';
-  const lastLabel = svgElement('text', { x: width - margin.right, y: height - 10, class: 'chart-label', 'text-anchor': 'end' });
-  lastLabel.textContent = '较新';
-  svg.append(firstLabel, lastLabel);
-  container.append(svg);
-  renderTrendProvenance(container, summary, trend.length, bounded.timestampedInputN);
-
-  if (missing.length || technical.length) {
-    const notes = element('ul', { className: 'chart-notes' });
-    missing.slice(0, 5).forEach((point) => {
-      notes.append(element('li', { text: `${point.run_id || '未提供对局 ID'}：缺少推进层数（${STATUS_LABELS[point.status] || point.status}）` }));
-    });
-    technical.slice(0, 5).forEach((point) => {
-      notes.append(element('li', { text: `${point.run_id || '未提供对局 ID'}：技术失败 ${STATUS_LABELS[point.status] || point.status}` }));
-    });
-    container.append(notes);
-  }
-}
-
-function renderFunnel(summary) {
-  const container = byId('funnelChart');
-  clear(container);
-  const funnel = Array.isArray(summary.funnel) ? summary.funnel : [];
-  if (!funnel.length) {
-    renderEmpty(container, '当前批次没有漏斗数据。');
+    showBatchView();
+    state.selectedCohortId = '';
+    Tree.setSelected('');
+    CohortView.renderNoCohort();
     return;
   }
-  const width = 560;
-  const rowHeight = 40;
-  const height = Math.max(150, funnel.length * rowHeight + 26);
-  const barX = 150;
-  const barWidth = 190;
-  const svg = svgElement('svg', {
-    class: 'funnel-svg', viewBox: `0 0 ${width} ${height}`,
-    role: 'img', 'aria-labelledby': 'funnelTitle funnelDescription',
-  });
-  const title = svgElement('title', { id: 'funnelTitle' });
-  title.textContent = '当前批次推进转化漏斗';
-  const description = svgElement('desc', { id: 'funnelDescription' });
-  description.textContent = funnel.map((point) => {
-    const label = FUNNEL_LABELS[point.key] || point.key;
-    return `${label}：${point.count} / ${point.denominator}，${formatRate(point.rate)}`;
-  }).join('；');
-  svg.append(title, description);
-
-  funnel.forEach((point, index) => {
-    const centerY = 21 + index * rowHeight;
-    const finiteRate = Number.isFinite(point.rate);
-    const percent = finiteRate ? Math.max(0, Math.min(1, point.rate)) : 0;
-    const label = svgElement('text', {
-      x: 0, y: centerY + 4, class: 'funnel-label',
-    });
-    label.textContent = FUNNEL_LABELS[point.key] || point.key;
-    const track = svgElement('rect', {
-      x: barX, y: centerY - 7, width: barWidth, height: 12,
-      rx: 6, class: 'funnel-track',
-    });
-    const fill = svgElement('rect', {
-      x: barX, y: centerY - 7, width: barWidth * percent, height: 12,
-      rx: 6, class: 'funnel-fill',
-    });
-    const value = svgElement('text', {
-      x: barX + barWidth + 14, y: centerY + 4, class: 'funnel-value',
-    });
-    value.textContent = `${point.count} / ${point.denominator} · ${formatRate(point.rate)}`;
-    svg.append(label, track, fill, value);
-  });
-  container.append(svg);
-}
-
-function appendList(container, values) {
-  const list = element('ul');
-  values.forEach((value) => list.append(element('li', { text: value })));
-  container.append(list);
-}
-
-function deltaText(value, rate = false) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return { text: '—（数据不足）', direction: 'missing' };
-  }
-  const numeric = Number(value);
-  const rendered = rate ? `${Math.abs(numeric * 100).toFixed(1).replace(/\.0$/, '')} 个百分点` : formatMissing(Math.abs(numeric));
-  if (numeric > 0) return { text: `提升 ${rendered}`, direction: 'up' };
-  if (numeric < 0) return { text: `下降 ${rendered}`, direction: 'down' };
-  return { text: '持平', direction: 'flat' };
-}
-
-function renderComparison(comparison) {
-  const banner = byId('comparisonBanner');
-  const title = byId('comparisonTitle');
-  const body = banner.querySelector('[data-comparison-body]');
-  clear(body);
-  banner.dataset.tone = 'neutral';
-  if (!comparison) {
-    const current = currentCohortDescriptor();
-    const readiness = current && current.comparison_readiness;
-    if (readiness && readiness.ready === false) {
-      title.textContent = '元数据不完整';
-      body.append(element('p', { text: '历史记录仍可查看，但不会用于训练提升比较。' }));
-    } else {
-      title.textContent = '未选择基线';
-      body.append(element('p', { text: '当前批次可查看，但暂无可直接比较的基线。' }));
-    }
+  if (route.view === 'batch') {
+    showBatchView();
+    state.selectedCohortId = route.cohortId;
+    Tree.setSelected(route.cohortId);
+    await CohortView.render(route.cohortId);
     return;
   }
-  const reasons = Array.isArray(comparison.mismatch_reasons) ? comparison.mismatch_reasons : [];
-  const notes = Array.isArray(comparison.notes) ? comparison.notes : [];
-  if (!comparison.comparable) {
-    title.textContent = '当前与基线不可直接比较';
-    banner.dataset.tone = 'warning';
-    appendList(body, reasons.length ? reasons : ['服务端未提供可比原因。']);
-    if (notes.length) appendList(body, notes);
-    return;
+  if (route.view === 'run') {
+    if (route.cohortId && route.cohortId !== '-') state.selectedCohortId = route.cohortId;
+    Tree.setSelected(state.selectedCohortId);
+    await RunView.render(route.cohortId, route.ref);
   }
-
-  title.textContent = comparison.paired ? '同种子配对比较' : '口径一致的批次比较';
-  const deltas = [
-    ['平均推进', comparison.avg_global_floor_delta, false],
-    ['中位推进', comparison.median_global_floor_delta, false],
-    ['最远房间', comparison.max_global_floor_delta, false],
-    ['进入第二幕', comparison.act2_entry_rate_delta, true],
-    ['胜率', comparison.win_rate_delta, true],
-  ];
-  const grid = element('div', { className: 'delta-list' });
-  let positive = 0;
-  let negative = 0;
-  deltas.forEach(([label, value, rate]) => {
-    const delta = deltaText(value, rate);
-    if (delta.direction === 'up') positive += 1;
-    if (delta.direction === 'down') negative += 1;
-    const chip = element('div', { className: 'delta-chip', attrs: { 'data-direction': delta.direction } });
-    chip.append(element('span', { text: `${label} ` }), element('strong', { text: delta.text }));
-    grid.append(chip);
-  });
-  body.append(grid);
-  if (reasons.length) appendList(body, reasons);
-  if (notes.length) appendList(body, notes);
-  banner.dataset.tone = positive > negative ? 'good' : negative > positive ? 'warning' : 'neutral';
 }
 
-function anomalyRow(item) {
-  const row = element('div', { className: 'list-row' });
-  const main = element('div', { className: 'list-row-main' });
-  const marker = element('span', {
-    className: 'anomaly-marker', text: item.priority === 0 ? '!' : 'i',
-    attrs: { 'data-priority': item.priority === 0 ? 'high' : 'normal', 'aria-hidden': 'true' },
-  });
-  const content = element('div');
-  content.append(element('h3', { text: item.title }), element('p', { text: item.detail }));
-  main.append(marker, content);
-  row.append(main);
-  if (item.sourceId) {
-    const button = element('button', { text: '查看来源', attrs: { type: 'button' } });
-    button.addEventListener('click', (event) => openSource(item.sourceId, event.currentTarget));
-    row.append(button);
-  }
-  return row;
-}
+window.addEventListener('popstate', () => applyRoute(parseRoute(location.hash)));
 
-function renderAnomalies(metrics) {
-  const container = byId('anomalyList');
-  clear(container);
-  const items = [];
-  if (metrics) {
-    const summary = metrics.current;
-    if (summary.technical_n > 0) {
-      items.push({ priority: 0, title: `${summary.technical_n} 局技术失败`, detail: '崩溃、超时、卡死等记录已与正常游戏结果分开。' });
-    }
-    const missingFloors = Math.max(0, Number(summary.valid_n || 0) - Number(summary.valid_floor_n || 0));
-    if (missingFloors > 0) {
-      items.push({ priority: 1, title: `${missingFloors} 局缺少推进层数`, detail: '这些有效对局未进入平均值、中位数和 Act 2 分母。' });
-    }
-    if (metrics.comparison && !metrics.comparison.comparable) {
-      (metrics.comparison.mismatch_reasons || []).forEach((reason) => {
-        items.push({ priority: 2, title: '比较口径不一致', detail: reason });
-      });
-    }
-  }
-  const unknownSources = [];
-  const trainingSources = [];
-  state.sources.forEach((source) => {
-    const errorCount = Number.isFinite(source.error_count)
-      ? source.error_count
-      : (Array.isArray(source.errors) ? source.errors.length : 0);
-    const isUnknown = source.source_kind === 'unknown' || source.open_mode === 'error';
-    if (errorCount > 0 || isUnknown) {
-      (isUnknown ? unknownSources : trainingSources).push(source);
-    }
-  });
-  const appendSourceGroup = (sources, title) => {
-    if (!sources.length) return;
-    let errorCount = 0;
-    let errorsOmitted = 0;
-    const examples = [];
-    for (const source of sources) {
-      errorCount += Number.isFinite(source.error_count)
-        ? source.error_count
-        : (Array.isArray(source.errors) ? source.errors.length : 0);
-      errorsOmitted += Number.isFinite(source.errors_omitted) ? source.errors_omitted : 0;
-      for (const error of (source.errors || [])) {
-        if (examples.length >= SOURCE_ERROR_EXAMPLE_LIMIT) break;
-        examples.push(`${source.display_name}：${error}`);
-      }
-    }
-    const detailParts = [`${sources.length} 个来源，目录报告 ${errorCount} 个问题`];
-    if (examples.length) detailParts.push(`示例：${examples.join('；')}`);
-    const hiddenCount = Math.max(errorsOmitted, errorCount - examples.length);
-    if (hiddenCount > 0) detailParts.push(`其余 ${hiddenCount} 个未在异常列表展开`);
-    items.push({
-      priority: 3,
-      title,
-      detail: detailParts.join('。'),
-      sourceId: sources[0].source_id,
-    });
-  };
-  appendSourceGroup(unknownSources, '来源目录问题：未知或不可训练格式');
-  appendSourceGroup(trainingSources, '来源目录问题：训练记录读取提示');
-  items.sort((a, b) => a.priority - b.priority || a.title.localeCompare(b.title, 'zh-CN') || a.detail.localeCompare(b.detail, 'zh-CN'));
-  if (!items.length) {
-    renderEmpty(container, '当前 API 摘要和来源目录没有报告异常。');
-    return;
-  }
-  items.forEach((item) => container.append(anomalyRow(item)));
-}
-
-function currentCohortDescriptor() {
-  const value = byId('currentCohort').value;
-  const id = typeof value === 'string' ? value.trim() : '';
-  if (!id || !Array.isArray(state.cohorts)) return null;
-  return state.cohorts.find((cohort) => safeCohortId(cohort) === id) || null;
-}
-
-function stablePointKey(point) {
-  const sourceId = point && typeof point.source_id === 'string' ? point.source_id.trim() : '';
-  const runId = point && typeof point.run_id === 'string' ? point.run_id.trim() : '';
-  return `${sourceId}\u0000${runId}`;
-}
-
-function stablePointComesFirst(candidate, incumbent) {
-  return stablePointKey(candidate).localeCompare(stablePointKey(incumbent)) < 0;
-}
-
-function representativeCandidates(metrics, descriptor) {
-  const rawTrend = metrics && metrics.current && Array.isArray(metrics.current.trend) ? metrics.current.trend : [];
-  const trend = boundedTimestampedTrend(rawTrend).points;
-  const candidates = [];
-  const seen = new Set();
-  const anonymousPointKeys = new WeakMap();
-  let anonymousPointCounter = 0;
-  const add = (point, reason) => {
-    if (!point) return;
-    const sourceId = typeof point.source_id === 'string' ? point.source_id.trim() : '';
-    const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
-    let key = sourceId || runId ? stablePointKey(point) : '';
-    if (!key && typeof point === 'object') {
-      if (!anonymousPointKeys.has(point)) {
-        anonymousPointCounter += 1;
-        anonymousPointKeys.set(point, `anonymous:${anonymousPointCounter}`);
-      }
-      key = anonymousPointKeys.get(point);
-    }
-    if (seen.has(key)) return;
-    seen.add(key);
-    candidates.push({ point, reason });
-  };
-  let latestTimed = null;
-  let maxFloorPoint = null;
-  let minFloorPoint = null;
-  let missingFloorPoint = null;
-  for (const point of trend) {
-    if (Number.isFinite(point.timestamp) && (
-      !latestTimed
-      || point.timestamp > latestTimed.timestamp
-      || (point.timestamp === latestTimed.timestamp && stablePointComesFirst(point, latestTimed))
-    )) latestTimed = point;
-    if (Number.isFinite(point.global_floor)) {
-      if (!maxFloorPoint
-        || point.global_floor > maxFloorPoint.global_floor
-        || (point.global_floor === maxFloorPoint.global_floor && stablePointComesFirst(point, maxFloorPoint))) {
-        maxFloorPoint = point;
-      }
-      if (!minFloorPoint
-        || point.global_floor < minFloorPoint.global_floor
-        || (point.global_floor === minFloorPoint.global_floor && stablePointComesFirst(point, minFloorPoint))) {
-        minFloorPoint = point;
-      }
-    } else if (!missingFloorPoint || stablePointComesFirst(point, missingFloorPoint)) {
-      missingFloorPoint = point;
-    }
-  }
-  if (latestTimed) add(latestTimed, '趋势样本中最近');
-  else add(rawTrend[0], '趋势样本');
-  add(maxFloorPoint, '趋势样本中最远');
-  add(minFloorPoint, '趋势样本中最浅');
-  add(missingFloorPoint, '趋势样本中层数缺失');
-  if (!candidates.length && descriptor) {
-    const ids = Array.isArray(descriptor.representative_run_ids) && descriptor.representative_run_ids.length
-      ? descriptor.representative_run_ids
-      : (descriptor.run_ids || []);
-    const fallbackSource = (descriptor.source_refs || [])[0] || '';
-    ids.filter((runId) => typeof runId === 'string' && runId.trim()).slice(0, 3).forEach((runId) => {
-      add({ run_id: runId, source_id: fallbackSource, global_floor: null, status: 'unknown' }, '批次样本');
-    });
-  }
-  return candidates.slice(0, 5);
-}
-
-function resolvableSourceId(point) {
-  const raw = point && typeof point.source_id === 'string' ? point.source_id : '';
-  const candidates = raw.split(' | ').map((value) => value.trim()).filter(Boolean);
-  return candidates.find((sourceId) => state.sources.some((source) => source.source_id === sourceId)) || '';
-}
-
-function renderRepresentatives(metrics) {
-  const container = byId('representativeRuns');
-  clear(container);
-  const descriptor = currentCohortDescriptor();
-  if (!descriptor) {
-    renderEmpty(container, '选择批次后可抽查代表性对局。');
-    return;
-  }
-  const current = metrics && metrics.current ? metrics.current : {};
-  const browserSampleN = boundedTimestampedTrend(Array.isArray(current.trend) ? current.trend : []).points.length;
-  const serverSampleN = Number.isFinite(current.trend_sampled_n) ? current.trend_sampled_n : browserSampleN;
-  const timestampedN = Number.isFinite(current.trend_timestamped_n) ? current.trend_timestamped_n : serverSampleN;
-  container.append(element('p', {
-    className: 'section-note representative-note',
-    text: `以下最近/最远/最浅仅指趋势样本：浏览器检查 ${browserSampleN} 点，服务端返回 ${serverSampleN} / ${timestampedN} 个有时间记录；不代表全量对局极值。`,
-  }));
-  representativeCandidates(metrics, descriptor).forEach(({ point, reason }) => {
-    const row = element('div', { className: 'list-row' });
-    const content = element('div');
-    const runId = typeof point.run_id === 'string' ? point.run_id.trim() : '';
-    const sourceId = resolvableSourceId(point);
-    const identity = runId || sourceId || '不可定位';
-    content.append(
-      element('h3', { text: `${reason} · ${identity}` }),
-      element('p', { text: `推进 ${formatMissing(point.global_floor)} · ${STATUS_LABELS[point.status] || point.status || '状态未知'}` }),
-    );
-    row.append(content);
-    if (runId) {
-      const button = element('button', { text: '查看对局', attrs: { type: 'button' } });
-      button.addEventListener('click', (event) => openRun(runId, event.currentTarget));
-      row.append(button);
-    } else if (sourceId) {
-      const button = element('button', { text: '查看来源', attrs: { type: 'button' } });
-      button.addEventListener('click', (event) => openSource(sourceId, event.currentTarget));
-      row.append(button);
-    } else {
-      row.append(element('span', { className: 'badge', text: '不可定位：缺少对局与来源 ID' }));
-    }
-    container.append(row);
-  });
-  (descriptor.source_refs || []).slice(0, 3).forEach((sourceId) => {
-    const source = state.sources.find((candidate) => candidate.source_id === sourceId);
-    const row = element('div', { className: 'list-row' });
-    const content = element('div');
-    content.append(
-      element('h3', { text: source ? source.display_name : sourceId }),
-      element('p', { text: source ? `${SOURCE_LABELS[source.source_kind] || source.source_kind} · ${source.record_count} 条记录` : '批次来源' }),
-    );
-    const button = element('button', { text: '查看来源', attrs: { type: 'button' } });
-    button.addEventListener('click', (event) => openSource(sourceId, event.currentTarget));
-    row.append(content, button);
-    container.append(row);
-  });
-  if (!container.childElementCount) renderEmpty(container, '当前批次没有可定位的对局或来源。');
-}
+// ---------------------------------------------------------------------
+// Source catalog panel (topbar toggle swaps the content pane).
+// ---------------------------------------------------------------------
 
 function renderCatalog() {
   const container = byId('sourceCatalog');
@@ -1006,6 +163,16 @@ function renderCatalog() {
     row.append(identity, kind, metadata, button);
     container.append(row);
   });
+}
+
+// ---------------------------------------------------------------------
+// Detail drawer (source / uploaded-file inspection).
+// ---------------------------------------------------------------------
+
+function appendList(container, values) {
+  const list = element('ul');
+  values.forEach((value) => list.append(element('li', { text: value })));
+  container.append(list);
 }
 
 function appendKeyValues(container, values) {
@@ -1181,7 +348,7 @@ function closeDetail() {
   panel.inert = true;
   panel.hidden = true;
   if (isFocusable(opener)) opener.focus();
-  else byId('dashboardMain').focus();
+  else byId('contentPane').focus();
 }
 
 function focusableDetailElements() {
@@ -1238,82 +405,32 @@ async function openSource(sourceId, opener = null) {
   }
 }
 
-async function openRun(runId, opener = null) {
+// Navigates to the run-detail route for a bare run_id (trend points, the
+// detail drawer's "查看地图"/"查看对局" buttons). The run table addresses
+// runs through their `ref` object instead -- see runs-table.js -- because
+// real data has run_id: null for every row; this path only ever fires when
+// a source actually carries one.
+function openRun(runId, opener = null) {
   runId = typeof runId === 'string' ? runId.trim() : '';
   if (!runId) {
     setStatus('无法打开对局：缺少对局 ID', 'error');
     return;
   }
-  const { token, signal } = beginDetailRequest(opener);
-  setStatus('正在读取对局…', 'busy');
-  try {
-    const payload = await getJSON(`/api/run?id=${encodeURIComponent(runId)}`, { signal });
-    if (!isCurrentDetailRequest(token)) return;
-    state.detailAbortController = null;
-    if (runHasMapCapability(payload)
-      && window.STS2Map && typeof window.STS2Map.openRun === 'function') {
-      window.STS2Map.openRun(runId, opener);
-      return;
-    }
-    renderDetail(payload, `对局 ${runId}`, opener);
-    setStatus('已载入对局摘要');
-  } catch (error) {
-    if (!isCurrentDetailRequest(token) || error.name === 'AbortError') return;
-    state.detailAbortController = null;
-    renderDetail({ view: 'error', errors: [error.message] }, `对局 ${runId}`, opener);
-    setStatus(`对局读取失败：${error.message}`, 'error');
-  }
-}
-
-function restoreMetricsFocus(focusOpener, current, baseline) {
-  const selectionUnchanged = byId('currentCohort').value === current
-    && byId('baselineCohort').value === baseline;
-  if (!selectionUnchanged || !isFocusable(focusOpener)) return;
-  const active = document.activeElement;
-  if (active === focusOpener) return;
-  if (active && active !== document.body && active !== document.documentElement) return;
-  focusOpener.focus();
-}
-
-async function refreshMetrics() {
-  const current = byId('currentCohort').value;
-  const baseline = byId('baselineCohort').value;
-  if (!current) {
-    state.currentMetrics = null;
-    resetMetrics();
-    setStatus(state.cohorts.length ? '当前筛选没有匹配批次' : '已载入，但没有可统计的训练批次');
-    return;
-  }
-  const focusOpener = document.activeElement;
-  setBusy(true);
-  setStatus('正在计算训练进度…', 'busy');
-  try {
-    const query = new URLSearchParams({ current });
-    if (baseline) query.set('baseline', baseline);
-    const metrics = await getJSON(`/api/metrics?${query.toString()}`);
-    state.currentMetrics = metrics;
-    renderSummary(metrics.current);
-    renderTrend(metrics.current);
-    renderFunnel(metrics.current);
-    renderComparison(metrics.comparison);
-    renderAnomalies(metrics);
-    renderRepresentatives(metrics);
-    setStatus('已载入');
-  } catch (error) {
-    state.currentMetrics = null;
-    resetMetrics();
-    setStatus(`训练指标读取失败：${error.message}`, 'error');
-  } finally {
-    setBusy(false);
-    restoreMetricsFocus(focusOpener, current, baseline);
-  }
+  if (opener && opener.isConnected) state.detailOpener = opener;
+  navigate(runRoute(state.selectedCohortId, { kind: 'run', id: runId }));
 }
 
 async function uploadSelectedFile(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
   const opener = event.currentTarget || event.target;
-  // JSON escaping can expand input by up to 6x; 1 MiB plus envelope remains below the server's 10 MiB body cap.
+  // A full-run replay is what this control exists to open: one real Act 3 clear
+  // measures ~13.4 MiB, so the old 1 MiB cap rejected exactly the runs worth
+  // inspecting. The 6x expansion the old bound assumed came from Python's
+  // json.dumps(ensure_ascii=True) escaping non-ASCII as \uXXXX. The browser's
+  // serializer does NOT do that -- it emits UTF-8 raw and escapes only quote,
+  // backslash and control chars. Measured on two real replays: body 1.125x file.
+  // 32 MiB x 3 (pathological guard) plus envelope stays under the 128 MiB cap.
   if (file.size > FILE_UPLOAD_MAX_BYTES) {
     const message = `${file.name} 超过本地载入上限 ${formatBytes(FILE_UPLOAD_MAX_BYTES)}；为避免请求膨胀，未读取文件内容。`;
     const { token } = beginDetailRequest(opener);
@@ -1359,57 +476,79 @@ async function uploadSelectedFile(event) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------
+
 async function bootstrap() {
   setBusy(true);
   setStatus('正在读取训练记录…', 'busy');
   renderEmpty(byId('sourceCatalog'), '正在分类训练记录…', 'loading-state');
   try {
-    const [{ cohorts }, { sources }] = await Promise.all([getJSON('/api/cohorts'), getJSON('/api/catalog')]);
+    const [{ tree }, { cohorts }, { sources }] = await Promise.all([
+      getJSON('/api/tree'),
+      getJSON('/api/cohorts'),
+      getJSON('/api/catalog'),
+    ]);
+    state.tree = Array.isArray(tree) ? tree : [];
     state.cohorts = Array.isArray(cohorts) ? cohorts : [];
     state.sources = Array.isArray(sources) ? sources : [];
-    populateAxisFilter('versionFilter', 'game_version', '全部版本');
-    updateCharacterFilterOptions();
-    updateCohortOptions({ chooseDefaults: true });
+    Tree.render(state.tree);
     renderCatalog();
-    renderAnomalies(null);
     setBusy(false);
-    await refreshMetrics();
+    await applyRoute(parseRoute(location.hash));
+    setStatus('已载入');
   } catch (error) {
+    state.tree = [];
     state.cohorts = [];
     state.sources = [];
-    updateCohortOptions();
-    resetMetrics();
+    Tree.render([]);
     renderEmpty(byId('sourceCatalog'), `来源目录读取失败：${error.message}`, 'error-state');
     setStatus(`工作台载入失败：${error.message}`, 'error');
     setBusy(false);
   }
 }
 
-function filterChanged() {
-  updateCohortOptions({ chooseDefaults: true });
-  refreshMetrics();
+async function reloadAll() {
+  const previousHash = location.hash;
+  await bootstrap();
+  if (previousHash && previousHash !== location.hash) navigate(previousHash, { replace: true });
 }
 
-function versionFilterChanged() {
-  updateCharacterFilterOptions();
-  updateCohortOptions({ chooseDefaults: true });
-  refreshMetrics();
-}
-
-byId('characterFilter').addEventListener('change', filterChanged);
-byId('versionFilter').addEventListener('change', versionFilterChanged);
-byId('validityFilter').addEventListener('change', filterChanged);
-byId('currentCohort').addEventListener('change', () => {
-  updateCohortOptions({ currentChanged: true });
-  refreshMetrics();
+byId('catalogToggle').addEventListener('click', () => {
+  if (state.catalogOpen) {
+    showBatchView();
+    setStatus('已返回批次视图');
+  } else {
+    showCatalogView();
+    setStatus('已显示来源目录');
+  }
 });
 byId('baselineCohort').addEventListener('change', () => {
-  updateCohortHelp(currentCohortDescriptor(), byId('baselineCohort').value);
-  refreshMetrics();
+  CohortView.baselineChanged();
 });
 byId('sourceFile').addEventListener('change', uploadSelectedFile);
-byId('reloadButton').addEventListener('click', bootstrap);
+byId('reloadButton').addEventListener('click', reloadAll);
 byId('closeDetail').addEventListener('click', closeDetail);
 document.addEventListener('keydown', handleDetailKeydown);
 
-bootstrap();
+const skipLink = document.querySelector('.skip-link');
+if (skipLink) {
+  skipLink.addEventListener('click', (event) => {
+    // This router owns location.hash. Letting the anchor navigate would write
+    // '#contentPane', which parseRoute cannot match, so the user would be
+    // bounced back to the first batch instead of jumping to the content.
+    event.preventDefault();
+    const pane = byId('contentPane');
+    pane.classList.add('skip-focus');
+    pane.addEventListener('blur', () => pane.classList.remove('skip-focus'), { once: true });
+    pane.focus();
+  });
+}
+
+// app.js is a deferred script that runs before tree.js / cohort-view.js /
+// runs-table.js / run-view.js / map.js have been evaluated, so bootstrap must
+// not start here -- it would race those namespaces into existence and only
+// happen to win because it awaits the network first. DOMContentLoaded fires
+// after every deferred script has run.
+document.addEventListener('DOMContentLoaded', bootstrap);

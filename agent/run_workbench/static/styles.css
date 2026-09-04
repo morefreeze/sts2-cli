@@ -212,18 +212,19 @@ input:disabled {
   opacity: 0.58;
 }
 
-.dashboard {
+.workbench-body {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-columns: 300px minmax(0, 1fr);
+  align-items: start;
   gap: 18px;
   max-width: 1520px;
   margin: 0 auto;
   padding: 24px clamp(14px, 3vw, 42px) 60px;
 }
 
-.dashboard > * {
-  grid-column: 1 / -1;
+.workbench-body[hidden] {
+  display: none;
 }
 
 .panel,
@@ -238,8 +239,261 @@ input:disabled {
   padding: 20px;
 }
 
+.content-pane {
+  min-width: 0;
+}
+
+/* These containers carry tabindex="-1" purely so the router can move focus
+   into them on a view change; they are never reachable by Tab. Without this,
+   the programmatic focus() paints a browser outline around the whole pane on
+   every navigation. :focus-visible keeps a real ring if focus ever does
+   arrive by keyboard. */
+.content-pane:focus,
+.map-page:focus {
+  outline: none;
+}
+
+/* The ring is meaningful only when the user asked to jump here via the skip
+   link -- it shows where focus landed. Router-driven focus gets none. */
+.content-pane.skip-focus:focus {
+  outline: 2px solid var(--teal);
+  outline-offset: 3px;
+}
+
+.batch-view > * + * {
+  margin-top: 18px;
+}
+
+.batch-view[hidden],
+.catalog-view[hidden] {
+  display: none;
+}
+
+.batch-heading {
+  flex-wrap: wrap;
+}
+
+.filter-field-baseline {
+  display: flex;
+  min-width: 260px;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--slate-650);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.filter-field-baseline small {
+  color: var(--slate-500);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+/* --- Left navigation tree (游戏版本 > 角色 > 批次) --------------------- */
+
+.cohort-tree {
+  position: sticky;
+  top: 24px;
+  max-height: calc(100vh - 48px);
+  padding: 14px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 253, 247, 0.94);
+  box-shadow: var(--shadow);
+  scrollbar-gutter: stable;
+}
+
+.cohort-tree:focus-visible {
+  outline: 3px solid rgba(20, 118, 111, 0.3);
+  outline-offset: 2px;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tree-item:hover {
+  background: var(--teal-soft);
+}
+
+.tree-item:focus-visible {
+  outline: 3px solid rgba(20, 118, 111, 0.3);
+  outline-offset: -2px;
+}
+
+.tree-group {
+  margin-top: 4px;
+  color: var(--slate-800);
+  font-weight: 750;
+}
+
+.tree-twisty {
+  flex: 0 0 auto;
+  width: 12px;
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+.tree-group-label {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.tree-group-count {
+  flex: 0 0 auto;
+  color: var(--slate-500);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.tree-group-children {
+  margin-left: 10px;
+  padding-left: 16px;
+  border-left: 1px solid var(--line);
+}
+
+.tree-group-children[hidden] {
+  display: none;
+}
+
+.tree-leaf {
+  color: var(--slate-650);
+}
+
+.tree-leaf-label {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.tree-leaf-count {
+  flex: 0 0 auto;
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+.tree-leaf-unarchived {
+  color: var(--slate-500);
+  font-style: italic;
+}
+
+.tree-badge-technical {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.tree-leaf[aria-current="true"] {
+  background: var(--teal);
+  color: #fff;
+  font-weight: 750;
+}
+
+.tree-leaf[aria-current="true"] .tree-leaf-count,
+.tree-leaf[aria-current="true"] .tree-leaf-unarchived {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.tree-leaf[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* --- Run table --------------------------------------------------------- */
+
+.run-meta {
+  margin-bottom: 16px;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.runs-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.runs-table th,
+.runs-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.runs-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-strong);
+  color: var(--slate-650);
+  font-size: 11px;
+}
+
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 750;
+}
+
+.table-sort-button[aria-sort="ascending"],
+.table-sort-button[aria-sort="descending"] {
+  color: var(--teal-dark);
+}
+
+.runs-table-row {
+  cursor: pointer;
+}
+
+.runs-table-row:hover {
+  background: var(--teal-soft);
+}
+
+.runs-table-row:focus-visible {
+  outline: 3px solid rgba(20, 118, 111, 0.3);
+  outline-offset: -2px;
+}
+
+.runs-table-row[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.runs-table-no-map-note {
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+#catalogToggle[aria-pressed="true"] {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+}
+
 .map-page {
   min-width: 0;
+  max-width: 1520px;
+  margin: 24px auto 60px;
 }
 
 .map-page[hidden] {
@@ -595,36 +849,6 @@ input:disabled {
 .quiet-button {
   padding: 7px 13px;
   background: transparent;
-}
-
-.filter-grid {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 13px;
-}
-
-.filter-grid .filter-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  color: var(--slate-650);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.filter-field-scope,
-.filter-field-cohort {
-  grid-column: span 6;
-}
-
-.filter-field-validity {
-  grid-column: span 3;
-}
-
-.filter-grid small {
-  color: var(--slate-500);
-  font-size: 10px;
-  font-weight: 500;
 }
 
 select {
@@ -1145,16 +1369,24 @@ pre {
     justify-content: flex-start;
   }
 
-  .dashboard {
+  .workbench-body {
+    grid-template-columns: 1fr;
     padding: 16px 10px 42px;
+  }
+
+  /* Collapse the left tree into a bounded, scrollable drawer above the
+     content pane instead of a fixed-width sidebar. */
+  .cohort-tree {
+    position: static;
+    max-height: 260px;
   }
 
   .panel {
     padding: 15px;
   }
 
-  .filter-field-validity {
-    grid-column: span 6;
+  .filter-field-baseline {
+    min-width: 0;
   }
 
   .metric-card {
@@ -1193,9 +1425,13 @@ pre {
 }
 
 @media (max-width: 480px) {
-  .filter-grid .filter-field,
   .metric-card {
     grid-column: 1 / -1;
+  }
+
+  .batch-heading {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .section-heading {
@@ -1224,3 +1460,15 @@ pre {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Combat replay inside the map node panel (map.js appendCombatReplay). */
+.combat-replay { margin-top: 1rem; border-top: 1px solid var(--border, #333); padding-top: .75rem; }
+.combat-replay h4 { margin: 0 0 .5rem; font-size: .95rem; }
+.combat-replay h5 { margin: .5rem 0 .25rem; font-size: .8rem; opacity: .75; font-weight: 600; }
+.combat-round { margin-bottom: .35rem; border: 1px solid var(--border, #333); border-radius: 4px; padding: .35rem .5rem; }
+.combat-round > summary { cursor: pointer; font-variant-numeric: tabular-nums; }
+.combat-round[open] > summary { margin-bottom: .4rem; }
+.combat-enemies, .combat-actions { margin: 0 0 .35rem; padding-left: 1.2rem; }
+.combat-enemies li, .combat-actions li { margin: .1rem 0; }
+.combat-hand, .combat-orbs { margin: 0 0 .35rem; }
+.combat-actions { font-family: var(--mono, ui-monospace, monospace); font-size: .78rem; }

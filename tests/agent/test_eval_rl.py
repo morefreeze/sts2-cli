@@ -7,6 +7,7 @@ from agent.eval_rl import (
     _VerboseCombatEnv,
     _build_parser,
     _default_eval_batch_id,
+    _experiment_from_checkpoint,
     _resolve_combat_snapshot_config,
     _write_boss_deck_record,
     _write_combat_record,
@@ -56,6 +57,52 @@ def test_default_eval_batch_ids_do_not_collide_with_frozen_timestamp(monkeypatch
     assert first.startswith("eval-model_14000k-20260803T120000-")
     assert second.startswith("eval-model_14000k-20260803T120000-")
     assert first != second
+
+
+def test_experiment_from_checkpoint_none_and_blank_input():
+    assert _experiment_from_checkpoint(None) is None
+    assert _experiment_from_checkpoint("") is None
+    assert _experiment_from_checkpoint("   ") is None
+
+
+def test_experiment_from_checkpoint_strips_checkpoints_prefix():
+    assert (
+        _experiment_from_checkpoint("checkpoints_best/ppo_ironclad_13255k.zip")
+        == "best"
+    )
+    assert (
+        _experiment_from_checkpoint(
+            "checkpoints_noadvisor_mix/ppo_ironclad_13255k.zip"
+        )
+        == "noadvisor_mix"
+    )
+
+
+def test_experiment_from_checkpoint_distinguishes_colliding_basenames():
+    # Same checkpoint basename lives under two different experiment dirs --
+    # only the parent directory (with checkpoints_ stripped) tells them apart.
+    best = _experiment_from_checkpoint("checkpoints_best/ppo_ironclad_13255k.zip")
+    noadvisor = _experiment_from_checkpoint(
+        "checkpoints_noadvisor_mix/ppo_ironclad_13255k.zip"
+    )
+    assert best != noadvisor
+
+
+def test_experiment_from_checkpoint_bare_checkpoints_dir_is_not_an_experiment():
+    assert _experiment_from_checkpoint("checkpoints/model.zip") is None
+
+
+def test_experiment_from_checkpoint_with_no_directory_component_is_none():
+    # No parent directory at all resolves (via abspath) to the current
+    # working directory -- not a real experiment either.
+    assert _experiment_from_checkpoint("model.zip") is None
+
+
+def test_experiment_from_checkpoint_returns_genuine_parent_directory():
+    assert (
+        _experiment_from_checkpoint("/tmp/some_experiment_dir/model.zip")
+        == "some_experiment_dir"
+    )
 
 
 def test_format_floor_label_uses_act_relative_floor():
@@ -537,6 +584,7 @@ def test_run_eval_logs_every_retry_attempt_with_stable_schema(monkeypatch, tmp_p
         context
         == {
             "run_id": row["run_id"],
+            "experiment": None,
             "checkpoint": "model_14000k.zip",
             "evaluation_mode": "fixed",
             "scenario": "full_run",

@@ -76,6 +76,22 @@ def _parse_sentence(s: str) -> tuple[list[Effect], list[str]]:
 
     # Order matters — match more-specific patterns before generic.
 
+    # --- Orbs (Defect): "Channel N <Orb>." / "Evoke your rightmost Orb." ----
+    # Defect's core mechanic. Matched before the generic rules because
+    # "Channel 1 Frost" would otherwise fall through to unparsed, which is how
+    # a fifth of the Defect card pool ended up modelling as a no-op.
+    m = re.match(r"Channel\s+(\d+)\s+(\w+)", s, re.I)
+    if m:
+        effects.append({"kind": "channel", "orb": m.group(2).title(),
+                        "amount": int(m.group(1))})
+        return effects, unparsed
+    m = re.match(r"Evoke\s+your\s+(?:rightmost\s+)?Orb(?:\s+(\w+))?", s, re.I)
+    if m:
+        times = 2 if (m.group(1) or "").lower() == "twice" else 1
+        effects.append({"kind": "evoke", "times": times})
+        return effects, unparsed
+
+
     # --- Multi-hit attack: "Deal N damage X times." (X is var or int) -----
     m = re.match(r"Deal\s+(\d+)\s+damage\s+(?:to\s+ALL\s+enemies\s+)?(\d+|X)\s+times?", s, re.I)
     if m:

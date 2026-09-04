@@ -6,6 +6,15 @@ public class CanvasItem : Node
     public Color Modulate { get; set; } = Color.White;
     public Color SelfModulate { get; set; } = Color.White;
     public bool Visible { get; set; } = true;
+
+    // Method forms of the modulate properties. The engine calls these directly
+    // (TestSubject.SetColor does), and without them the whole calling method fails
+    // to resolve with MissingMethodException — which, from inside the combat turn
+    // loop, kills the loop and strands the combat.
+    public void SetSelfModulate(Color color) => SelfModulate = color;
+    public Color GetSelfModulate() => SelfModulate;
+    public void SetModulate(Color color) => Modulate = color;
+    public Color GetModulate() => Modulate;
     public virtual void Show() => Visible = true;
     public virtual void Hide() => Visible = false;
     public bool IsVisibleInTree() => Visible;

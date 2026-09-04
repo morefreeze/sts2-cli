@@ -40,7 +40,11 @@ signal.signal(signal.SIGTERM, _cleanup_and_exit)
 signal.signal(signal.SIGINT,  _cleanup_and_exit)
 from sb3_contrib.common.wrappers import ActionMasker
 from agent.combat_env import CombatEnv
-from agent.run_metadata import resolve_game_version, validate_ascension
+from agent.run_metadata import (
+    experiment_from_directory,
+    resolve_game_version,
+    validate_ascension,
+)
 
 CARDS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "localization_eng", "cards.json")
 CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints")
@@ -415,8 +419,15 @@ class TrainCallback(BaseCallback):
 
 def run_eval(model, character: str, n_games: int = 5, *, ascension: int = 0,
              checkpoint: str = None, game_version: str = None,
-             game_version_source: str = None) -> dict:
-    """Run n_games full evaluation runs (multiple combats each). Returns stats dict."""
+             game_version_source: str = None, experiment: str = None,
+             game_log: bool = False) -> dict:
+    """Run n_games full evaluation runs (multiple combats each). Returns stats dict.
+
+    game_log writes a replay JSONL per eval game into logs/, which the training
+    workbench then groups into a batch keyed on (experiment, checkpoint). It is
+    off by default because training evaluates on a timer and the replays add up
+    fast; --game-log opts in when the runs are worth inspecting.
+    """
     if type(game_version) is not str or not game_version.strip():
         raise ValueError("game_version must be a non-empty string")
     game_version = game_version.strip()
@@ -432,6 +443,7 @@ def run_eval(model, character: str, n_games: int = 5, *, ascension: int = 0,
         # fixed_seed makes eval deterministic across checkpoints for fair comparison
         fixed_seed = f"eval_fixed_{i}"
         run_context = {
+            "experiment": experiment,
             "checkpoint": checkpoint,
             "evaluation_mode": "fixed",
             "scenario": "full_run",
@@ -445,6 +457,7 @@ def run_eval(model, character: str, n_games: int = 5, *, ascension: int = 0,
             seed_prefix=f"eval_{i}",
             max_floor=0,
             run_context=run_context,
+            game_log=game_log,
         )
         env_wrapped = ActionMasker(env, mask_fn)
         obs, _ = env_wrapped.reset()
@@ -480,8 +493,11 @@ def run_eval(model, character: str, n_games: int = 5, *, ascension: int = 0,
                 if last_info.get("victory"):
                     run_won = True
 
+        # Prefer the run's global floor. info["floor"] is act-local, so it saturates
+        # at 17 in every act and cannot tell an Act 1 death from an Act 3 clear —
+        # which made this metric read flat across checkpoints regardless of progress.
+        floors.append(max(max_floor, env.run_max_global_floor))
         env_wrapped.close()
-        floors.append(max_floor)
         combat_wins.append(ep_combat_wins)
         wins.append(1 if run_won else 0)
     return {
@@ -651,6 +667,11 @@ def main():
     parser.add_argument("--hp-curriculum-values", default=None,
                         help="Comma-separated HP phases for --hp-curriculum; 'natural' means "
                              "no override. Example: 100,90,80,72. Implies --hp-curriculum.")
+    parser.add_argument("--game-log", action="store_true",
+                        help="Write a replay JSONL per periodic-eval game into "
+                             "logs/, so the training workbench (port 8765) can "
+                             "show these runs. Off by default: evals run on a "
+                             "timer and the replays accumulate quickly.")
     parser.add_argument("--eval-freq",   type=int, default=50_000,
                         help="Run full eval every N steps (0=disable)")
     parser.add_argument("--load-save",   default=None,
@@ -670,6 +691,18 @@ def main():
     parser.add_argument("--ent-coef", type=float, default=None,
                         help="Override entropy coefficient (default: 0.08 hardcoded). "
                              "Use higher (e.g. 0.15) for boss-only training to escape policy collapse.")
+    # Update-rate overrides. Every one of LR/N_EPOCHS/CLIP_RANGE was individually
+    # lowered to suppress some past instability, and together they throttle the
+    # policy to a standstill: measured over 514 updates / 1.3M steps on Ironclad,
+    # approx_kl ~3e-5 (PPO targets ~1e-2, i.e. 300x below) and clip_fraction ~0
+    # (zero in 284 of 514 updates), which is why 400k -> 1505k moves avg_floor by
+    # +0.09. These make the throttle testable without changing the defaults.
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Override learning rate (default: 2e-5 hardcoded; typical PPO 3e-4).")
+    parser.add_argument("--n-epochs", type=int, default=None,
+                        help="Override PPO epochs per rollout (default: 1; typical PPO 10).")
+    parser.add_argument("--clip-range", type=float, default=None,
+                        help="Override PPO clip range (default: 0.05; typical PPO 0.2).")
     parser.add_argument("--save-dir", default=None,
                         help="Override checkpoint output dir (default: checkpoints/). "
                              "Use 'checkpoints_boss/' for boss-focused training.")
@@ -691,6 +724,10 @@ def main():
     global CHECKPOINT_DIR, HP_CURRICULUM_SCHEDULE
     if args.save_dir:
         CHECKPOINT_DIR = os.path.abspath(args.save_dir)
+    # Named from the save directory rather than a checkpoint file (basenames
+    # collide across experiments), and resolved only after --save-dir has been
+    # applied -- reading it earlier would label every run "checkpoints".
+    resolved_experiment = experiment_from_directory(CHECKPOINT_DIR)
     if args.hp_curriculum_values:
         try:
             HP_CURRICULUM_SCHEDULE = _parse_hp_curriculum_values(args.hp_curriculum_values)
@@ -706,6 +743,10 @@ def main():
     BATCH_SIZE = 128    # was 256
     N_EPOCHS   = 1      # was 2 — halves per-chunk VF gradient updates, prevents fl≤6 ev overshoot
     LR         = 2e-5   # restored for fresh 512x512 training (May 8) — 1e-5 was for 3706k continuation
+    if args.lr is not None:
+        LR = float(args.lr)
+    if args.n_epochs is not None:
+        N_EPOCHS = int(args.n_epochs)
     ENT_COEF   = 0.08 if args.ent_coef is None else float(args.ent_coef)
     # Run10: 0.10→0.08 slight reduction for more exploitation at floor 15+.
     # --ent-coef overrides for boss-only training (recommended 0.15+ to escape stuck policy).
@@ -715,7 +756,7 @@ def main():
                         # for ~100-step horizon), and shorter horizon under-rewards
                         # long-term deck/relic setup needed for boss (floor 17).
     GAE_LAMBDA = 0.95   # REVERTED 2026-05-18 paired with gamma revert.
-    CLIP_RANGE = 0.05
+    CLIP_RANGE = 0.05 if args.clip_range is None else float(args.clip_range)
     VF_COEF    = 0.10
 
     initial_floor = CURRICULUM_SCHEDULE[0][1] if args.curriculum else 0
@@ -762,8 +803,15 @@ def main():
         print(f"  profile={args.profile} snapshot_curriculum={args.snapshot_curriculum} "
               f"mix_save_envs={current_mix_save_envs} hp_curriculum={args.hp_curriculum} "
               f"ent_coef={ENT_COEF} eval_freq={args.eval_freq} save_dir={CHECKPOINT_DIR}")
+    # Report the HP terms actually in force. These are read from STS2_HP_REWARD at
+    # reward time in CombatEnv, so a hardcoded banner silently misreports every
+    # HP-preservation run — and a wrong readout is how you end up tuning blind.
+    _hp_preserve = os.environ.get("STS2_HP_REWARD") == "1"
     print(f"  n_steps={N_STEPS} batch={BATCH_SIZE} lr={LR} ent={ENT_COEF} "
-          f"hp_penalty=-0.50 floor_bonus=0.10×floor(cap1.5) hp_curve=quadratic")
+          f"hp_penalty={-1.2 if _hp_preserve else -0.50} "
+          f"win_hp_coef={5.0 if _hp_preserve else 3.0} "
+          f"hp_preserve={'on' if _hp_preserve else 'off'} "
+          f"floor_bonus=0.10×floor(cap1.5) hp_curve=quadratic")
     if load_saves:
         for s in load_saves:
             print(f"  load_save: {s}")
@@ -917,6 +965,8 @@ def main():
                     checkpoint=os.path.basename(ckpt),
                     game_version=resolved_game_version.value,
                     game_version_source=resolved_game_version.source,
+                    experiment=resolved_experiment,
+                    game_log=args.game_log,
                 )
                 print(f"  [eval] avg_floor={stats['avg_floor']:.1f} "
                       f"max_floor={stats['max_floor']} "
@@ -974,6 +1024,8 @@ def main():
             checkpoint=last_checkpoint,
             game_version=resolved_game_version.value,
             game_version_source=resolved_game_version.source,
+            experiment=resolved_experiment,
+            game_log=args.game_log,
         )
         print(f"  avg_floor={stats['avg_floor']:.1f} max_floor={stats['max_floor']} "
               f"win_rate={stats['win_rate']:.0%} avg_combats={stats['avg_combat_wins']:.1f}")

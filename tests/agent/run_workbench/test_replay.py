@@ -228,6 +228,204 @@ def test_parse_game_progress_builds_round_based_combat_replay():
     assert replay["end_state"]["hp"] == 64
     assert [card["name"] for card in replay["end_state"]["hand"]] == ["Defend", "Strike"]
     assert replay["hp_loss"] == 6
+
+
+def _defect_combat_state(step, *, hp, block, round_, energy, hand, orbs, enemies):
+    """A combat_play state for a Defect-style fight with explicit block/orbs.
+
+    `_state`'s **extra kwargs land on the top-level state dict (matching
+    where `orbs` actually lives in the protocol), so `block` needs a direct
+    poke into `player` afterwards.
+    """
+    entry = _state(
+        step,
+        "combat_play",
+        1,
+        2,
+        "Monster",
+        hp,
+        round=round_,
+        energy=energy,
+        hand=hand,
+        orbs=orbs,
+        enemies=enemies,
+    )
+    entry["data"]["player"]["block"] = block
+    return entry
+
+
+def test_parse_game_progress_combat_turn_snapshot_includes_orbs():
+    orbs = [
+        {"index": 0, "type": "Lightning", "passive": 4, "evoke": 9},
+        {"index": 1, "type": "Frost", "passive": 2, "evoke": 5},
+    ]
+    entries = [
+        _defect_combat_state(
+            1,
+            hp=59,
+            block=0,
+            round_=1,
+            energy=3,
+            hand=[{"index": 0, "id": "CARD.STRIKE", "name": "Strike"}],
+            orbs=orbs,
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 30, "max_hp": 30}],
+        ),
+    ]
+
+    room = parse_game_progress(entries)["rooms"][0]
+
+    assert room["combat"]["turns"][0]["orbs"] == [
+        {"index": 0, "type": "Lightning", "passive": 4, "evoke": 9},
+        {"index": 1, "type": "Frost", "passive": 2, "evoke": 5},
+    ]
+
+
+def test_parse_game_progress_computes_enemy_hp_and_block_effect_deltas():
+    hand = [
+        {"index": 0, "id": "CARD.IRON_WAVE", "name": "Iron Wave", "cost": 1, "type": "Attack"},
+    ]
+    entries = [
+        _defect_combat_state(
+            1,
+            hp=59,
+            block=0,
+            round_=1,
+            energy=3,
+            hand=hand,
+            orbs=[],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 30, "max_hp": 30, "block": 0}],
+        ),
+        _action(1, "play_card", card_index=0, target_index=0),
+        _defect_combat_state(
+            2,
+            hp=59,
+            block=5,
+            round_=1,
+            energy=2,
+            hand=[],
+            orbs=[],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 25, "max_hp": 30, "block": 0}],
+        ),
+    ]
+
+    room = parse_game_progress(entries)["rooms"][0]
+    action = room["combat"]["rounds"][0]["actions"][0]
+
+    assert action["effects"]["enemy_hp"] == [
+        {"index": 0, "name": "Fuzzy", "before": 30, "after": 25, "delta": -5}
+    ]
+    assert action["effects"]["block"] == {"before": 0, "after": 5, "delta": 5}
+    # hp didn't change, so it must stay absent rather than clutter the delta
+    # with a no-op {"before": 59, "after": 59, "delta": 0}.
+    assert "hp" not in action["effects"]
+
+
+def test_parse_game_progress_multiset_diff_handles_duplicate_hand_cards():
+    # Two identical Chills in hand; playing one must be detected as a real
+    # removal. A naive set-based diff would see {"Chill"} - {"Chill"} == {}
+    # and wrongly report nothing removed.
+    entries = [
+        _defect_combat_state(
+            1,
+            hp=59,
+            block=0,
+            round_=1,
+            energy=3,
+            hand=[
+                {"index": 0, "id": "CARD.CHILL", "name": "Chill", "cost": 0, "type": "Skill"},
+                {"index": 1, "id": "CARD.CHILL", "name": "Chill", "cost": 0, "type": "Skill"},
+            ],
+            orbs=[{"index": 0, "type": "Lightning", "passive": 4, "evoke": 9}],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 30, "max_hp": 30}],
+        ),
+        _action(1, "play_card", card_index=0),
+        _defect_combat_state(
+            2,
+            hp=59,
+            block=0,
+            round_=1,
+            energy=3,
+            hand=[
+                {"index": 0, "id": "CARD.CHILL", "name": "Chill", "cost": 0, "type": "Skill"},
+            ],
+            orbs=[{"index": 0, "type": "Frost", "passive": 2, "evoke": 5}],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 30, "max_hp": 30}],
+        ),
+    ]
+
+    room = parse_game_progress(entries)["rooms"][0]
+    action = room["combat"]["rounds"][0]["actions"][0]
+
+    assert action["effects"]["cards_removed"] == ["Chill"]
+    assert "cards_added" not in action["effects"]
+    assert action["effects"]["orbs"] == {
+        "before": [{"index": 0, "type": "Lightning", "passive": 4, "evoke": 9}],
+        "after": [{"index": 0, "type": "Frost", "passive": 2, "evoke": 5}],
+    }
+
+
+def test_parse_game_progress_marks_spans_enemy_turn_on_end_turn_effects():
+    entries = [
+        _defect_combat_state(
+            1,
+            hp=59,
+            block=6,
+            round_=1,
+            energy=1,
+            hand=[],
+            orbs=[],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 30, "max_hp": 30}],
+        ),
+        _action(1, "end_turn"),
+        _defect_combat_state(
+            2,
+            hp=53,
+            block=0,
+            round_=2,
+            energy=3,
+            hand=[{"index": 0, "id": "CARD.DEFEND", "name": "Defend"}],
+            orbs=[],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 30, "max_hp": 30}],
+        ),
+    ]
+
+    room = parse_game_progress(entries)["rooms"][0]
+    end_turn_action = room["combat"]["rounds"][0]["actions"][0]
+
+    assert end_turn_action["label"] == "end_turn"
+    assert end_turn_action["effects"]["spans_enemy_turn"] is True
+    # The enemy's attack landed during this span, not from a card the player played.
+    assert end_turn_action["effects"]["hp"] == {"before": 59, "after": 53, "delta": -6}
+    assert end_turn_action["effects"]["block"] == {"before": 6, "after": 0, "delta": -6}
+
+
+def test_parse_game_progress_omits_effects_for_last_combat_action_without_crash():
+    # The killing blow of a fight has no following combat_play snapshot to
+    # diff against (the next state is card_reward). Must not crash, and must
+    # not fabricate a delta.
+    entries = [
+        _defect_combat_state(
+            1,
+            hp=59,
+            block=0,
+            round_=1,
+            energy=3,
+            hand=[{"index": 0, "id": "CARD.STRIKE", "name": "Strike"}],
+            orbs=[],
+            enemies=[{"index": 0, "name": "Fuzzy", "hp": 6, "max_hp": 30}],
+        ),
+        _action(1, "play_card", card_index=0, target_index=0),
+        _state(2, "card_reward", 1, 2, "Monster", 59, cards=[]),
+    ]
+
+    progress = parse_game_progress(entries)
+    room = progress["rooms"][0]
+    action = room["combat"]["rounds"][0]["actions"][0]
+
+    assert "effects" not in action
+    json.dumps(progress, allow_nan=False)
+
+
 def test_parse_game_progress_extracts_a2f4_metadata_and_coverage():
     entries = _read_fixture("replay_a2f4_excerpt.jsonl")
 

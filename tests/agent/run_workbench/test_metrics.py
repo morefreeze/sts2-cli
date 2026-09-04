@@ -1040,6 +1040,121 @@ def test_strict_pairing_rejects_different_seed_sets_and_missing_seeds():
     assert any("current seed set" in reason and "missing" in reason for reason in missing.mismatch_reasons)
 
 
+def test_render_seed_sample_lists_every_name_within_the_limit():
+    result = metrics_module._render_seed_sample(
+        ["eval_fixed_4", "eval_fixed_1", "eval_fixed_3"]
+    )
+
+    assert result == "3 seeds (eval_fixed_1, eval_fixed_3, eval_fixed_4)"
+    assert "more" not in result
+
+
+def test_render_seed_sample_bounds_names_and_reports_accurate_overflow():
+    seeds = [f"eval_fixed_{index}" for index in range(31)]
+
+    result = metrics_module._render_seed_sample(seeds)
+
+    assert result.startswith("31 seeds (")
+    assert "+23 more" in result
+    names_section = result.split("(", 1)[1].rsplit(")", 1)[0]
+    listed_names = [
+        name.strip() for name in names_section.split(",") if "more" not in name
+    ]
+    assert len(listed_names) == metrics_module.COMPARISON_SEED_SAMPLE_LIMIT
+    assert listed_names == sorted(seeds)[: metrics_module.COMPARISON_SEED_SAMPLE_LIMIT]
+
+
+def test_render_seed_sample_is_deterministic_and_stays_bounded_for_large_sets():
+    seeds = [f"eval_fixed_{index}" for index in range(986)]
+
+    first = metrics_module._render_seed_sample(seeds)
+    second = metrics_module._render_seed_sample(list(reversed(seeds)))
+
+    assert first == second
+    assert first.startswith("986 seeds (")
+    assert "+978 more" in first
+    assert len(first) < 400
+
+
+def test_unresolved_seed_reason_is_bounded_with_overflow_marker():
+    current = [_run("valid", seed="valid-seed")] + [
+        _run(f"crash-{index}", status=RunStatus.CRASH, seed=f"crash-seed-{index:04d}")
+        for index in range(30)
+    ]
+    baseline = [_run("baseline", seed="valid-seed")]
+
+    result = compare_cohorts(current, baseline)
+
+    assert result.comparable is False
+    unresolved_reasons = [
+        reason
+        for reason in result.mismatch_reasons
+        if "attempts without valid gameplay results" in reason
+    ]
+    assert len(unresolved_reasons) == 1
+    reason = unresolved_reasons[0]
+    assert reason.startswith(
+        "current seed set has attempts without valid gameplay results: "
+    )
+    assert "30 seeds" in reason
+    assert "+22 more" in reason
+    assert len(reason) < 400
+
+
+def test_fixed_seed_set_mismatch_reports_difference_not_full_dump():
+    current = [_run(f"current-{index}", seed=f"seed-{index:04d}") for index in range(5)]
+    baseline = [
+        _run(f"baseline-{index}", seed=f"seed-{index:04d}") for index in range(3, 8)
+    ]
+
+    result = compare_cohorts(current, baseline)
+
+    assert result.comparable is False
+    mismatch_reasons = [
+        reason
+        for reason in result.mismatch_reasons
+        if reason.startswith("fixed seed set mismatch: ")
+    ]
+    assert len(mismatch_reasons) == 1
+    reason = mismatch_reasons[0]
+    assert "current has 5 seeds, baseline has 5 seeds" in reason
+    assert "only in current: 3 seeds (seed-0000, seed-0001, seed-0002)" in reason
+    assert "only in baseline: 3 seeds (seed-0005, seed-0006, seed-0007)" in reason
+
+
+def test_fixed_seed_set_mismatch_omits_empty_side():
+    current = [_run(f"current-{index}", seed=f"seed-{index:04d}") for index in range(5)]
+    baseline = [_run(f"baseline-{index}", seed=f"seed-{index:04d}") for index in range(3)]
+
+    result = compare_cohorts(current, baseline)
+
+    reason = next(
+        r for r in result.mismatch_reasons if r.startswith("fixed seed set mismatch: ")
+    )
+    assert "only in current: 2 seeds (seed-0003, seed-0004)" in reason
+    assert "only in baseline" not in reason
+
+
+def test_many_seed_mismatch_reasons_stay_within_a_sane_length_bound():
+    current = [_run(f"current-{index}", seed=f"eval_fixed_{index}") for index in range(986)]
+    baseline = [
+        _run(f"baseline-{index}", seed=f"eval_fixed_{index + 986}") for index in range(986)
+    ]
+
+    result = compare_cohorts(current, baseline)
+
+    assert result.comparable is False
+    assert result.mismatch_reasons
+    # Regression guard for the 986-seed dump bug: the old code embedded a raw
+    # repr() of both full seed lists (tens of thousands of characters,
+    # rendered twice). A two-sided mismatch samples at most
+    # COMPARISON_SEED_SAMPLE_LIMIT names per side, so 500 chars leaves ample
+    # headroom while still being orders of magnitude smaller than the dump.
+    for reason in result.mismatch_reasons:
+        assert len(reason) < 500, reason
+    json.dumps(result.to_dict(), allow_nan=False)
+
+
 def test_non_paired_comparison_is_allowed_but_visibly_labeled():
     result = compare_cohorts(
         [_run("current", floor=21, seed="current")],

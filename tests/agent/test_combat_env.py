@@ -2784,6 +2784,87 @@ def test_run_outcome_logging_failure_is_visible_and_retryable(monkeypatch, tmp_p
     assert [row["event"] for row in rows].count("outcome") == 1
 
 
+def test_dead_outcome_books_fatal_combat_exactly_once_across_repeated_calls(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    env._current_combat_room_type = "Monster"
+    env._combat_entry_hp = 30
+
+    env._emit_run_outcome({}, victory=False, status="dead")
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    summary = env._combat_hp_loss_summary()
+    assert summary["monster_combats"] == 1
+    assert summary["total_monster_hp_loss"] == 30
+
+
+def test_dead_outcome_books_fatal_combat_once_even_when_logging_keeps_failing(
+    monkeypatch, tmp_path
+):
+    """Regression for the fatal-combat double-booking bug: outcome logging
+    raising took the early-return branch before _run_outcome_emitted was set,
+    so a retried _emit_run_outcome re-booked the same death every time. Seen
+    in production as one combat counted 73x, inflating the reported
+    hallway-fight HP-loss average ~60% (true 11.3 -> reported 18.3 HP)."""
+    env, history_path = _recording_env(monkeypatch, tmp_path)
+    env._current_combat_room_type = "Monster"
+    env._combat_entry_hp = 30
+    real_open = open
+
+    def flaky_open(path, *args, **kwargs):
+        if path == str(history_path):
+            raise OSError("disk unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(combat_env, "open", flaky_open, raising=False)
+
+    with pytest.warns(RuntimeWarning, match="disk unavailable"):
+        env._emit_run_outcome({}, victory=False, status="dead")
+
+    # Outcome logging failed on the disk write, so _run_outcome_emitted is
+    # still False (the caller is expected to retry) — but the fatal combat
+    # must already be booked and guarded by its own flag.
+    assert env._run_outcome_emitted is False
+    assert env._fatal_combat_booked is True
+
+    with pytest.warns(RuntimeWarning, match="disk unavailable"):
+        env._emit_run_outcome({}, victory=False, status="dead")
+
+    summary = env._combat_hp_loss_summary()
+    assert summary["monster_combats"] == 1
+    assert summary["total_monster_hp_loss"] == 30
+
+
+def test_fresh_run_can_rebook_fatal_combat_after_previous_run_booked_one(
+    monkeypatch, tmp_path
+):
+    env, _ = _recording_env(monkeypatch, tmp_path)
+    env._current_combat_room_type = "Monster"
+    env._combat_entry_hp = 30
+    env._emit_run_outcome({}, victory=False, status="dead")
+    assert env._fatal_combat_booked is True
+
+    env.dry_run = False
+    state = combat_env._dummy_combat_state()
+    monkeypatch.setattr(env, "_kill_proc", lambda: None)
+    monkeypatch.setattr(env, "_start_proc", lambda: None)
+    monkeypatch.setattr(env, "_send", lambda command: state)
+    monkeypatch.setattr(env, "_advance_to_combat", lambda current: current)
+
+    env.reset()
+
+    assert env._fatal_combat_booked is False
+
+    env._current_combat_room_type = "Monster"
+    env._combat_entry_hp = 20
+    env._emit_run_outcome({}, victory=False, status="dead")
+
+    summary = env._combat_hp_loss_summary()
+    assert summary["monster_combats"] == 1
+    assert summary["total_monster_hp_loss"] == 20
+
+
 class _DelegatingAppendFile:
     def __init__(self, file_obj):
         self._file = file_obj
@@ -3580,3 +3661,442 @@ def test_non_vantom_mid_act_rest_keeps_must_smith_override():
     action = rest_site_action(state, _rest_options())
 
     assert action["args"]["option_index"] == 0
+
+
+def _event_state(hp=75, gold=257, floor=15):
+    """An event_choice decision shaped like the Jungle Maze Adventure page."""
+    return {
+        "decision": "event_choice",
+        "event_name": "Jungle Maze Adventure",
+        "context": {"act": 1, "floor": floor, "room_type": "Event"},
+        "player": {"hp": hp, "max_hp": 75, "gold": gold},
+        "options": [
+            {"index": 0, "title": "Solo Quest", "is_locked": False},
+            {"index": 1, "title": "Join Forces", "is_locked": False},
+        ],
+    }
+
+
+def _choose(index):
+    return {"cmd": "action", "action": "choose_option", "args": {"option_index": index}}
+
+
+def test_decision_signature_only_covers_event_choices():
+    assert CombatEnv._decision_signature(_event_state()) is not None
+    assert CombatEnv._decision_signature({"decision": "map_select"}) is None
+    assert CombatEnv._decision_signature(None) is None
+
+
+def test_decision_signature_tracks_player_progress():
+    base = _event_state()
+    assert CombatEnv._decision_signature(base) == CombatEnv._decision_signature(_event_state())
+    assert CombatEnv._decision_signature(base) != CombatEnv._decision_signature(
+        _event_state(gold=308)
+    )
+
+
+def test_inert_option_is_retired_only_after_repeat_offence():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_state()
+    sig = CombatEnv._decision_signature(state)
+    inert = {}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        env._note_inert_option(inert, state, sig, _choose(1), _event_state())
+        # One strike is not enough — the option is still offered.
+        assert env._without_inert_options(state, inert) is state
+        env._note_inert_option(inert, state, sig, _choose(1), _event_state())
+
+    masked = env._without_inert_options(state, inert)
+    assert masked["options"][1]["is_locked"] is True
+    assert masked["options"][0]["is_locked"] is False
+    # The caller's state is never mutated.
+    assert state["options"][1]["is_locked"] is False
+
+
+def test_option_that_changes_state_is_never_retired():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_state()
+    sig = CombatEnv._decision_signature(state)
+    inert = {}
+    for _ in range(5):
+        # Solo Quest really does take HP and grant gold, so it always advances.
+        env._note_inert_option(inert, state, sig, _choose(0), _event_state(hp=57, gold=414))
+    assert env._without_inert_options(state, inert) is state
+
+
+def test_retired_option_makes_the_policy_choose_another():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_state()
+    sig = CombatEnv._decision_signature(state)
+    inert = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for _ in range(CombatEnv._INERT_OPTION_STRIKES):
+            env._note_inert_option(inert, state, sig, _choose(1), _event_state())
+
+    picked = greedy_action(env._without_inert_options(state, inert))
+    assert picked["action"] == "choose_option"
+    assert picked["args"]["option_index"] == 0
+
+
+def test_all_options_inert_falls_through_to_leaving_the_room():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_state()
+    sig = CombatEnv._decision_signature(state)
+    inert = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for index in (0, 1):
+            for _ in range(CombatEnv._INERT_OPTION_STRIKES):
+                env._note_inert_option(inert, state, sig, _choose(index), _event_state())
+
+    assert greedy_action(env._without_inert_options(state, inert))["action"] == "leave_room"
+
+
+def test_non_choose_option_commands_are_not_tracked():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_state()
+    sig = CombatEnv._decision_signature(state)
+    inert = {}
+    for _ in range(5):
+        env._note_inert_option(
+            inert, state, sig, {"cmd": "action", "action": "leave_room"}, _event_state()
+        )
+    assert inert == {}
+
+
+def test_retiring_an_inert_option_warns_once():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = _event_state()
+    sig = CombatEnv._decision_signature(state)
+    inert = {}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(6):
+            env._note_inert_option(inert, state, sig, _choose(1), _event_state())
+    messages = [str(w.message) for w in caught if w.category is RuntimeWarning]
+    assert len(messages) == 1
+    assert "Jungle Maze Adventure" in messages[0]
+
+
+def test_run_max_global_floor_counts_across_acts():
+    """The act-local floor saturates at 17; the run metric must not."""
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    assert env.run_max_global_floor == 1
+
+    # Act 1 floor 17 and Act 3 floor 17 share an act-local floor but differ globally.
+    env._track_run_floor({"context": {"floor": 17, "global_floor": 17}})
+    assert env.run_max_global_floor == 17
+    env._track_run_floor({"context": {"floor": 17, "global_floor": 51}})
+    assert env.run_max_global_floor == 51
+
+    # It is a high-water mark: going back down must not lower it.
+    env._track_run_floor({"context": {"floor": 3, "global_floor": 3}})
+    assert env.run_max_global_floor == 51
+
+
+def test_combat_hp_loss_buckets_by_room_type():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_combat_room_type = "Monster"
+    env._combat_entry_hp = 70
+    env._record_combat_hp_loss(58)          # 12 lost
+    env._current_combat_room_type = "Elite"
+    env._combat_entry_hp = 58
+    env._record_combat_hp_loss(20)          # 38 lost
+
+    summary = env._combat_hp_loss_summary()
+    assert summary["avg_monster_hp_loss"] == 12
+    assert summary["monster_combats"] == 1
+    assert summary["avg_elite_hp_loss"] == 38
+    assert summary["elite_combats"] == 1
+    # A room type never fought reports None rather than a misleading zero.
+    assert summary["avg_boss_hp_loss"] is None
+    assert summary["boss_combats"] == 0
+
+
+def test_combat_hp_loss_averages_over_fights_and_ignores_healing_gains():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    for entry, end in ((70, 50), (60, 40)):
+        env._current_combat_room_type = "Monster"
+        env._combat_entry_hp = entry
+        env._record_combat_hp_loss(end)
+    # Finishing above entry HP (potion/relic heal) is a cost of 0, never negative.
+    env._current_combat_room_type = "Monster"
+    env._combat_entry_hp = 40
+    env._record_combat_hp_loss(55)
+
+    summary = env._combat_hp_loss_summary()
+    assert summary["monster_combats"] == 3
+    assert summary["total_monster_hp_loss"] == 40
+    assert summary["avg_monster_hp_loss"] == round(40 / 3, 2)
+
+
+def test_unknown_room_types_are_not_counted():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_combat_room_type = "RestSite"
+    env._combat_entry_hp = 70
+    env._record_combat_hp_loss(10)
+    summary = env._combat_hp_loss_summary()
+    assert summary["monster_combats"] == 0
+    assert summary["elite_combats"] == 0
+    assert summary["boss_combats"] == 0
+
+
+def test_combat_hp_loss_resets_between_runs():
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    env._current_combat_room_type = "Elite"
+    env._combat_entry_hp = 80
+    env._record_combat_hp_loss(30)
+    assert env._combat_hp_loss_summary()["elite_combats"] == 1
+    env._reset_combat_hp_loss()
+    assert env._combat_hp_loss_summary()["elite_combats"] == 0
+    assert env._combat_hp_loss_summary()["avg_elite_hp_loss"] is None
+
+
+def test_elite_route_bias_defaults_on_and_is_overridable(monkeypatch):
+    """Elites are routed around without a bias; the default must actually apply."""
+    from agent import map_planner
+
+    monkeypatch.delenv("STS2_ELITE_PREF", raising=False)
+    assert map_planner._elite_pref() == map_planner.ELITE_PREF_DEFAULT
+    assert map_planner.ELITE_PREF_DEFAULT > 0
+
+    monkeypatch.setenv("STS2_ELITE_PREF", "3.5")
+    assert map_planner._elite_pref() == 3.5
+    # An override of 0 must mean "no bias", not "fall back to the default".
+    monkeypatch.setenv("STS2_ELITE_PREF", "0")
+    assert map_planner._elite_pref() == 0.0
+    # Garbage must not crash route planning mid-run.
+    monkeypatch.setenv("STS2_ELITE_PREF", "not-a-number")
+    assert map_planner._elite_pref() == map_planner.ELITE_PREF_DEFAULT
+
+
+def test_elite_route_bias_is_off_once_swarming_elites_is_active(monkeypatch):
+    """Ascension 1 enables SwarmingElites (more elite rooms) and nothing else.
+
+    Seeking elites pays when they are scarce and stops paying when they are
+    everywhere: measured on ppo_defect_2048k at a1 over 235 paired seeds,
+    dropping the bias moved avg_floor 16.345 -> 19.681 (+3.34, se 0.515,
+    t=6.48) with elite HP/fight flat (27.34 vs 26.85, p=0.67).
+    """
+    from agent import map_planner
+
+    monkeypatch.delenv("STS2_ELITE_PREF", raising=False)
+    assert map_planner._elite_pref(ascension=0) == map_planner.ELITE_PREF_DEFAULT
+    assert map_planner._elite_pref(ascension=1) == 0.0
+    # SwarmingElites stays on for every higher ascension.
+    assert map_planner._elite_pref(ascension=5) == 0.0
+
+
+def test_elite_route_bias_env_override_beats_the_ascension_default(monkeypatch):
+    from agent import map_planner
+
+    monkeypatch.setenv("STS2_ELITE_PREF", "16")
+    assert map_planner._elite_pref(ascension=0) == 16.0
+    assert map_planner._elite_pref(ascension=1) == 16.0
+
+
+def test_node_delta_drops_the_elite_bias_at_ascension_1(monkeypatch):
+    """The ascension-aware default is worthless unless it reaches node_delta."""
+    from agent import map_planner
+
+    monkeypatch.delenv("STS2_ELITE_PREF", raising=False)
+    kwargs = dict(row=3, hp=70, max_hp=80, gold=100, deck_strength=0.5, deck_size=15)
+    a0 = map_planner.node_delta("elite", ascension=0, **kwargs)
+    a1 = map_planner.node_delta("elite", ascension=1, **kwargs)
+    assert a0 - a1 == map_planner.ELITE_PREF_DEFAULT
+
+
+def test_choose_map_node_routes_with_the_env_ascension(monkeypatch):
+    """choose_map_node must pass the run's ascension down to the router.
+
+    Without this the a1 default never applies in a real run, which is exactly
+    how the bias kept costing ~3.3 floors while looking configured correctly.
+    """
+    from agent import map_planner
+
+    monkeypatch.delenv("STS2_ELITE_PREF", raising=False)
+    seen: dict = {}
+    real_plan = map_planner.plan_next_node
+
+    def spy(map_json, hp, max_hp, gold, **kwargs):
+        seen.update(kwargs)
+        return real_plan(map_json, hp, max_hp, gold, **kwargs)
+
+    monkeypatch.setattr(map_planner, "plan_next_node", spy)
+
+    class _Env:
+        ascension = 1
+
+        def _send(self, _cmd):
+            return {"type": "map", "rows": []}
+
+    map_planner.choose_map_node(_Env(), {"player": {"hp": 70, "max_hp": 80}})
+
+    assert seen.get("ascension") == 1
+
+
+def test_elite_bias_makes_elite_nodes_more_attractive(monkeypatch):
+    from agent import map_planner
+
+    kwargs = dict(row=3, hp=70, max_hp=80, gold=100, deck_strength=0.5, deck_size=15)
+    monkeypatch.setenv("STS2_ELITE_PREF", "0")
+    unbiased = map_planner.node_delta("elite", **kwargs)
+    monkeypatch.setenv("STS2_ELITE_PREF", "16")
+    biased = map_planner.node_delta("elite", **kwargs)
+    assert biased == unbiased + 16
+    # The bias must not leak into other room types.
+    assert map_planner.node_delta("restsite", **kwargs) == \
+        map_planner.node_delta("restsite", **kwargs)
+
+
+def test_monster_bias_defaults_to_neutral(monkeypatch):
+    """Monster routing was measured as self-defeating, so it stays off by default."""
+    from agent import map_planner
+
+    monkeypatch.delenv("STS2_MONSTER_PREF", raising=False)
+    assert map_planner._monster_pref() == 0.0
+
+
+def test_rest_site_critical_heal_bands_are_act_local():
+    """Document the shipped behaviour: the bands key on the ACT-LOCAL floor.
+
+    `context.floor` is `_runState.ActFloor`, so floor 5 of Act 2 takes the
+    band whose comment reads "Act 1: prioritize survival" (CRITICAL_HEAL 0.55).
+    At 50% HP that forces a heal even though a must-smith card is present.
+    """
+    state = {
+        "decision": "rest_site",
+        "context": {"act": 2, "floor": 5},
+        "player": {"hp": 40, "max_hp": 80, "deck": _must_smith_deck()},
+    }
+
+    action = rest_site_action(state, _rest_options())
+
+    assert action["args"]["option_index"] == 1  # HEAL
+
+
+def test_card_reward_threshold_lift_raises_the_skip_bar(monkeypatch):
+    """Deck bloat is the measured failure mode at the Act 3 boss.
+
+    The default bar is 5.5/6.0 against _TIER_BASE where tier B is exactly 6.0,
+    so essentially every offered card clears it and score-driven skips went
+    50 -> 0 when the advisor data grew to 507 cards. Real Act 3 boss entries
+    carry 27-29 card decks with ~4 block cards. STS2_CARD_THRESHOLD_LIFT makes
+    that bar tunable so it can be A/B'd on the fixed engine, where — unlike the
+    build the original threshold was tuned on — card choice has consequences.
+    """
+    state = _late_card_reward_state()
+    # Floor 12 trips the Act 1 quality gate, which filters the synthetic cards
+    # and short-circuits to skip before the threshold is ever used.
+    state["floor"] = 5
+    seen = {}
+
+    def fake_pick(cards, *, threshold, deck):
+        seen["threshold"] = threshold
+        return 0
+
+    monkeypatch.setattr(combat_env, "pick_best_card", fake_pick)
+    monkeypatch.delenv("STS2_CARD_THRESHOLD_LIFT", raising=False)
+    greedy_action(state)
+    base = seen["threshold"]
+
+    monkeypatch.setenv("STS2_CARD_THRESHOLD_LIFT", "1.5")
+    greedy_action(state)
+    assert seen["threshold"] == base + 1.5
+
+
+def test_card_reward_threshold_lift_ignores_garbage(monkeypatch):
+    state = _late_card_reward_state()
+    # Floor 12 trips the Act 1 quality gate, which filters the synthetic cards
+    # and short-circuits to skip before the threshold is ever used.
+    state["floor"] = 5
+    seen = {}
+
+    def fake_pick(cards, *, threshold, deck):
+        seen["threshold"] = threshold
+        return 0
+
+    monkeypatch.setattr(combat_env, "pick_best_card", fake_pick)
+    monkeypatch.delenv("STS2_CARD_THRESHOLD_LIFT", raising=False)
+    greedy_action(state)
+    base = seen["threshold"]
+
+    monkeypatch.setenv("STS2_CARD_THRESHOLD_LIFT", "not-a-number")
+    greedy_action(state)
+    assert seen["threshold"] == base
+
+
+
+def test_combat_win_floor_bonus_uses_global_floor_not_act_local():
+    """The floor bonus read `_current_floor`, which is the ACT-LOCAL floor.
+
+    `RunContext()` sets `floor` to `_runState.ActFloor`, so it restarts at 1
+    every act. That made the bonus pay ~1.4 at the end of Act 1 and **0.0** on
+    entering Act 2 — the reward actively punished act progression, and reaching
+    global floor 49 paid exactly what floor 15 paid. It is the most plausible
+    reason PPO measured −0.03 floors over 400 paired seeds: there was no
+    gradient toward depth past the first act.
+
+    `_run_max_floor` already holds the correct global floor (see
+    `run_max_global_floor`), so the fix is to score against that.
+    """
+    env = CombatEnv(cards_json=CARDS_JSON, dry_run=True)
+    state = {"player": {"hp": 60, "max_hp": 80, "deck": []}}
+    env._combat_start_player_max_hp = 80
+
+    # End of Act 1: act-local 15 == global 15, so this is unchanged.
+    env._current_floor = 15
+    env._run_max_floor = 15
+    env._milestones_paid = {5, 10, 15}
+    end_of_act1 = env._combat_win_reward(state)
+
+    # Start of Act 2: act-local resets to 1, but the run is 18 floors deep.
+    env._current_floor = 1
+    env._run_max_floor = 18
+    env._milestones_paid = {5, 10, 15}
+    start_of_act2 = env._combat_win_reward(state)
+
+    assert start_of_act2 > end_of_act1
+
+
+def test_in_act2_is_derived_from_the_act_not_the_act_local_floor(monkeypatch):
+    """`in_act2 = floor >= 16` reads the ACT-LOCAL floor, so it is true in the
+    last two floors of EVERY act and false through most of Act 2 — the opposite
+    of what the name says. Same root cause as the act-local floor bonus.
+
+    Card-reward thresholds and shop buy thresholds both gate on it.
+    """
+    state = _late_card_reward_state()
+    state["floor"] = 3          # act-local floor 3 ...
+    state["act"] = 2            # ... but genuinely in Act 2
+    seen = {}
+
+    def fake_pick(cards, *, threshold, deck):
+        seen["threshold"] = threshold
+        return 0
+
+    monkeypatch.setattr(combat_env, "pick_best_card", fake_pick)
+    monkeypatch.delenv("STS2_CARD_THRESHOLD_LIFT", raising=False)
+    greedy_action(state)
+    act2_threshold = seen["threshold"]
+
+    state["act"] = 1
+    greedy_action(state)
+    act1_threshold = seen["threshold"]
+
+    # deck_size is 15 (<18), so Act 2 takes the 5.5 branch and Act 1 the 5.5
+    # branch too — but the deck-size-18 split only exists on the Act 2 path, so
+    # the two must at least be computed from the act, not coincide by accident.
+    assert act2_threshold == 5.5
+    assert act1_threshold == 5.5
+    # The real assertion: a big Act 2 deck must use the Act 2 rule.
+    state["player"]["deck_size"] = 20
+    state["act"] = 2
+    greedy_action(state)
+    assert seen["threshold"] == 6.0     # Act 2 + deck>=18
+    state["act"] = 1
+    greedy_action(state)
+    assert seen["threshold"] == 6.5     # Act 1 + deck>=18

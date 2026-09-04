@@ -16,6 +16,7 @@ import re
 import sys
 import time
 from http import HTTPStatus
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -68,12 +69,22 @@ STATIC_DIR = ROOT / "agent" / "run_workbench" / "static"
 STATIC_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/static/util.js": ("util.js", "text/javascript; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/tree.js": ("tree.js", "text/javascript; charset=utf-8"),
+    "/static/cohort-view.js": ("cohort-view.js", "text/javascript; charset=utf-8"),
+    "/static/runs-table.js": ("runs-table.js", "text/javascript; charset=utf-8"),
+    "/static/run-view.js": ("run-view.js", "text/javascript; charset=utf-8"),
     "/static/map.js": ("map.js", "text/javascript; charset=utf-8"),
+    # Single-run replay, loaded by URL: /replay?log=<file>.jsonl
+    # The workbench index is a cohort/metrics view with no way to address one run.
+    "/replay": ("replay.html", "text/html; charset=utf-8"),
+    "/static/replay.html": ("replay.html", "text/html; charset=utf-8"),
 }
+QUERY_ALLOWED_ASSETS = frozenset({"/replay", "/static/replay.html"})
 ADVISOR_URL = "https://ing-gom.github.io/sts2-card-advisor/"
 TRANSLATION_CACHE_TTL_SECONDS = 24 * 60 * 60
-PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024
+PARSE_BODY_MAX_BYTES = 128 * 1024 * 1024
 _TRANSLATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _ACT_COUNT = 4
 _CANONICAL_ROUTE_ID_PATTERN = re.compile(
@@ -712,18 +723,30 @@ def _run_map_payload(
     catalog: RunCatalog,
     map_service: MapService,
     art_resolver: NodeArtResolver,
-    run_id: str,
     act_index: int,
+    *,
+    run_id: str | None = None,
+    source_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build one act map from the catalog's joined canonical run."""
+    """Build one act map from the catalog's joined canonical run.
 
-    canonical_payload = catalog.get_run(run_id)
+    Addressed by exactly one of `run_id` or `source_id` -- the latter for
+    sources with no addressable run id (e.g. legacy replay logs with no
+    run_meta metadata; see RunCatalog.get_run_by_source).
+    """
+    if source_id is not None:
+        canonical_payload = catalog.get_run_by_source(source_id)
+        label = f"source {source_id!r}"
+    else:
+        canonical_payload = catalog.get_run(run_id)
+        label = f"run {run_id!r}"
     run = canonical_payload["run"]
+    resolved_run_id = run.get("run_id") if isinstance(run.get("run_id"), str) else ""
     acts = _act_descriptors(run)
     descriptor = next((item for item in acts if item["index"] == act_index), None)
     if descriptor is None:
         raise CatalogNotFoundError(
-            f"run {run_id!r} has no act {act_index}"
+            f"{label} has no act {act_index}"
         )
     all_recorded_nodes = _canonical_route_nodes(run)
     recorded_nodes = [
@@ -750,7 +773,7 @@ def _run_map_payload(
         act_map = authoritative_recorded.act_map
     else:
         request = MapRequest(
-            run_id=run_id,
+            run_id=resolved_run_id,
             act_id=descriptor.get("act_id") or "",
             act_index=act_index,
             seed=(
@@ -842,7 +865,7 @@ def _run_map_payload(
 
     payload.update(
         {
-            "run_id": run_id,
+            "run_id": resolved_run_id,
             "act": descriptor,
             "acts": acts,
             "summary": {
@@ -1019,6 +1042,108 @@ def latest_log_file() -> Path | None:
     return LOG_DIR / logs[0]["name"] if logs else None
 
 
+_COHORT_RUNS_LIMIT = 512
+
+
+def _tree_version_sort_key(
+    version: str | None,
+    cohorts_by_version: dict[str | None, list[dict[str, Any]]],
+) -> tuple[bool, bool, float]:
+    """Newest cohort first within a version; the null-version bucket last."""
+    cohorts = cohorts_by_version[version]
+    latest_values = [
+        cohort["latest_at"] for cohort in cohorts if cohort["latest_at"] is not None
+    ]
+    newest = max(latest_values) if latest_values else None
+    return (version is None, newest is None, -(newest or 0.0))
+
+
+def _build_cohort_tree(cohorts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group flat cohort descriptors into game_version -> character -> cohorts."""
+    by_version: dict[str | None, list[dict[str, Any]]] = {}
+    for cohort in cohorts:
+        version = cohort["filters"].get("game_version")
+        by_version.setdefault(version, []).append(cohort)
+
+    tree: list[dict[str, Any]] = []
+    for version in sorted(
+        by_version, key=lambda v: _tree_version_sort_key(v, by_version)
+    ):
+        by_character: dict[str | None, list[dict[str, Any]]] = {}
+        for cohort in by_version[version]:
+            character = cohort["filters"].get("character")
+            by_character.setdefault(character, []).append(cohort)
+        characters: list[dict[str, Any]] = []
+        # Each per-character bucket keeps the relative order it already had
+        # in `cohorts` (a stable partition of list_cohorts()'s output),
+        # which is already sorted newest-latest_at-first, None last, then
+        # label, then cohort_id.
+        for character in sorted(by_character, key=lambda c: (c is None, c or "")):
+            characters.append(
+                {
+                    "character": character,
+                    "cohorts": [
+                        {
+                            "cohort_id": cohort["cohort_id"],
+                            "experiment": cohort.get("experiment"),
+                            "checkpoint": cohort["filters"].get("checkpoint"),
+                            "label": cohort["label"],
+                            "run_count": cohort["run_count"],
+                            "avg_global_floor": cohort.get("avg_global_floor"),
+                            "valid_n": cohort.get("valid_n"),
+                            "technical_count": cohort["technical_count"],
+                            "latest_at": cohort["latest_at"],
+                            "unarchived": bool(cohort.get("unarchived", False)),
+                        }
+                        for cohort in by_character[character]
+                    ],
+                }
+            )
+        tree.append({"game_version": version, "characters": characters})
+    return tree
+
+
+def _cohort_run_row(record: Any) -> dict[str, Any]:
+    global_floor = record.outcome.max_global_floor
+    act = None
+    if (
+        isinstance(global_floor, int)
+        and not isinstance(global_floor, bool)
+        and global_floor > 0
+    ):
+        act = (global_floor - 1) // 17 + 1
+    run_id = record.run_id or None
+    # Legacy runs with no run_meta metadata have no addressable run id --
+    # /api/run and /api/run/map accept source= as a fallback so the
+    # frontend can still open a detail view. `ref` lets it stay branch-free.
+    ref = (
+        {"kind": "run", "id": run_id}
+        if run_id
+        else {"kind": "source", "id": record.source_id or None}
+    )
+    return {
+        "run_id": run_id,
+        "source_id": record.source_id or None,
+        "seed": record.metadata.seed,
+        "status": record.outcome.status.value,
+        "global_floor": global_floor,
+        "act": act,
+        "started_at": record.metadata.started_at,
+        "has_map": bool(record.capabilities.visited_route),
+        "ref": ref,
+    }
+
+
+def _cohort_runs_payload(catalog: RunCatalog, cohort_id: str) -> dict[str, Any]:
+    records = catalog.get_cohort_records(cohort_id)
+    runs_complete = len(records) <= _COHORT_RUNS_LIMIT
+    return {
+        "cohort_id": cohort_id,
+        "runs": [_cohort_run_row(record) for record in records[:_COHORT_RUNS_LIMIT]],
+        "runs_complete": runs_complete,
+    }
+
+
 def _safe_log_path(name: str) -> Path:
     decoded = unquote(name)
     basename = posixpath.basename(decoded)
@@ -1088,7 +1213,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path in STATIC_ASSETS:
-                if parsed.query or parsed.params or parsed.fragment:
+                # /replay is addressed by query string (?log=<file>); every other
+                # asset is a bare path and keeps rejecting one.
+                if parsed.path not in QUERY_ALLOWED_ASSETS and (
+                        parsed.query or parsed.params or parsed.fragment):
                     self._send_error("not found", HTTPStatus.NOT_FOUND)
                     return
                 self._send_static(parsed.path)
@@ -1096,6 +1224,29 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._send_json({"sources": self.catalog.list_sources()})
             elif parsed.path == "/api/cohorts":
                 self._send_json({"cohorts": self.catalog.list_cohorts()})
+            elif parsed.path == "/api/tree":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if query:
+                    self._send_error(
+                        f"unexpected tree query parameter: {sorted(query)[0]}"
+                    )
+                    return
+                self._send_json(
+                    {"tree": _build_cohort_tree(self.catalog.list_cohorts())}
+                )
+            elif parsed.path == "/api/cohort/runs":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                unexpected = sorted(set(query) - {"id"})
+                if unexpected:
+                    self._send_error(
+                        f"unexpected cohort query parameter: {unexpected[0]}"
+                    )
+                    return
+                id_values = query.get("id") or []
+                if len(id_values) != 1 or not id_values[0]:
+                    self._send_error("missing cohort id")
+                    return
+                self._send_json(_cohort_runs_payload(self.catalog, id_values[0]))
             elif parsed.path == "/api/metrics":
                 query = parse_qs(parsed.query)
                 current = (query.get("current") or [""])[0]
@@ -1106,17 +1257,26 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._send_json(self.catalog.get_metrics(current, baseline))
             elif parsed.path == "/api/run/map":
                 query = parse_qs(parsed.query, keep_blank_values=True)
-                unexpected = sorted(set(query) - {"id", "act"})
+                unexpected = sorted(set(query) - {"id", "source", "act"})
                 if unexpected:
                     self._send_error(
                         f"unexpected map query parameter: {unexpected[0]}"
                     )
                     return
                 run_values = query.get("id") or []
-                act_values = query.get("act") or ["0"]
-                if len(run_values) != 1 or not run_values[0]:
-                    self._send_error("missing run id")
+                source_values = query.get("source") or []
+                if run_values and source_values:
+                    self._send_error("provide either id or source, not both")
                     return
+                if source_values:
+                    if len(source_values) != 1 or not source_values[0]:
+                        self._send_error("missing source id")
+                        return
+                else:
+                    if len(run_values) != 1 or not run_values[0]:
+                        self._send_error("missing run id")
+                        return
+                act_values = query.get("act") or ["0"]
                 if len(act_values) != 1:
                     self._send_error("act must appear exactly once")
                     return
@@ -1128,18 +1288,42 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 if str(act_index) != act_values[0] or not 0 <= act_index <= 3:
                     self._send_error("act must be between 0 and 3")
                     return
-                self._send_json(
-                    _run_map_payload(
-                        self.catalog,
-                        self.map_service,
-                        self.node_art_resolver,
-                        run_values[0],
-                        act_index,
+                if source_values:
+                    self._send_json(
+                        _run_map_payload(
+                            self.catalog,
+                            self.map_service,
+                            self.node_art_resolver,
+                            act_index,
+                            source_id=source_values[0],
+                        )
                     )
-                )
+                else:
+                    self._send_json(
+                        _run_map_payload(
+                            self.catalog,
+                            self.map_service,
+                            self.node_art_resolver,
+                            act_index,
+                            run_id=run_values[0],
+                        )
+                    )
             elif parsed.path == "/api/run":
-                query = parse_qs(parsed.query)
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                unexpected = sorted(set(query) - {"id", "source"})
+                if unexpected:
+                    self._send_error(
+                        f"unexpected run query parameter: {unexpected[0]}"
+                    )
+                    return
                 run_id = (query.get("id") or [""])[0]
+                source_id = (query.get("source") or [""])[0]
+                if run_id and source_id:
+                    self._send_error("provide either id or source, not both")
+                    return
+                if source_id:
+                    self._send_json(self.catalog.get_run_by_source(source_id))
+                    return
                 if not run_id:
                     self._send_error("missing run id")
                     return
@@ -1310,7 +1494,30 @@ def serve(
     )
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Run progress viewer: {url}", flush=True)
+    # Warm the catalog off the request path. Measured on a real logs/ tree,
+    # /api/cohorts is ~163s cold and 0.32s warm, and the page keeps its
+    # controls (including the single-record loader) disabled until that first
+    # request returns — so without this a user opens the workbench to a dead UI
+    # for over two minutes. Daemon thread: warming must not hold up shutdown,
+    # and a failure here must not stop the server from serving.
+    threading.Thread(
+        target=_warm_catalog, args=(catalog,), daemon=True,
+        name="catalog-warmup",
+    ).start()
     httpd.serve_forever()
+
+
+def _warm_catalog(catalog) -> None:
+    """Build the cohort cache once, swallowing any error.
+
+    Called from a startup thread so the first page load does not pay the full
+    scan. Errors are intentionally ignored: a warm-up problem must degrade to
+    "first request is slow", never to "server does not serve".
+    """
+    try:
+        catalog._build_cohorts()
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:

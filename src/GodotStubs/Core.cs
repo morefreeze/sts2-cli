@@ -51,6 +51,20 @@ public class Node : GodotObject
 
     public Node? GetParent() => _parent;
 
+    /// <summary>
+    /// Position among the parent's children, or 0 when unparented. Real Godot takes
+    /// an includeInternal flag; internal children do not exist here, so it is ignored.
+    /// Required because ReattachPower.DoFadeOutOnAllSegments calls it — a missing
+    /// member there fails the whole method and kills the combat turn loop.
+    /// </summary>
+    public int GetIndex(bool includeInternal = false)
+    {
+        var siblings = _parent?._children;
+        if (siblings == null) return 0;
+        var index = siblings.IndexOf(this);
+        return index < 0 ? 0 : index;
+    }
+
     public Godot.Collections.Array<Node> GetChildren(bool includeInternal = false)
     {
         return new Godot.Collections.Array<Node>(_children);

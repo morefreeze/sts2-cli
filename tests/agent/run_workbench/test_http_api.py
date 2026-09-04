@@ -470,6 +470,281 @@ def test_surrogate_run_id_is_not_exposed_by_http_catalog_or_metrics(
     assert all(point["run_id"] != surrogate for point in metrics["current"]["trend"])
 
 
+_TREE_COHORT_KEYS = {
+    "cohort_id",
+    "experiment",
+    "checkpoint",
+    "label",
+    "run_count",
+    "avg_global_floor",
+    "valid_n",
+    "technical_count",
+    "latest_at",
+    "unarchived",
+}
+
+
+def test_tree_groups_by_version_then_character_with_null_version_always_last(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "event": "eval_result",
+        "status": "dead",
+        "max_global_floor": 8,
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+    }
+    records = [
+        {
+            **common,
+            "run_id": "v1-iron",
+            "character": "Ironclad",
+            "game_version": "v1",
+            "checkpoint": "ckpt-1",
+            "seed": "a",
+            "ts": 10,
+        },
+        {
+            **common,
+            "run_id": "v1-silent",
+            "character": "Silent",
+            "game_version": "v1",
+            "checkpoint": "ckpt-1",
+            "seed": "b",
+            "ts": 5,
+        },
+        {
+            **common,
+            "run_id": "v2-iron",
+            "character": "Ironclad",
+            "game_version": "v2",
+            "checkpoint": "ckpt-2",
+            "seed": "c",
+            "ts": 20,
+        },
+        {
+            # No game_version at all -- has the newest ts of any record, but
+            # the null-version bucket must still sort last regardless.
+            **common,
+            "run_id": "noversion",
+            "character": "Ironclad",
+            "checkpoint": "ckpt-3",
+            "seed": "d",
+            "ts": 999,
+        },
+    ]
+    _write_jsonl(tmp_path / "eval.jsonl", records)
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(base, "/api/tree")
+
+    assert status == 200
+    tree = payload["tree"]
+    versions = [entry["game_version"] for entry in tree]
+    # v2's cohort (latest_at=20) is newer than v1's (latest_at=10), so it
+    # sorts first; the null-version bucket sorts last no matter its ts.
+    assert versions == ["v2", "v1", None]
+
+    v1_entry = next(entry for entry in tree if entry["game_version"] == "v1")
+    character_names = [character["character"] for character in v1_entry["characters"]]
+    assert character_names == ["Ironclad", "Silent"]
+
+    for entry in tree:
+        for character in entry["characters"]:
+            for cohort in character["cohorts"]:
+                assert set(cohort) == _TREE_COHORT_KEYS
+                assert cohort["unarchived"] is False
+
+
+def test_tree_rejects_unexpected_query_parameters(tmp_path: Path) -> None:
+    with _server(_catalog(tmp_path)) as base:
+        status, payload = _request(base, "/api/tree?foo=bar")
+
+    assert status == 400
+    assert "unexpected tree query parameter" in payload["error"]
+
+
+def test_cohort_runs_returns_bounded_rows_with_derived_act_and_has_map(
+    tmp_path: Path,
+) -> None:
+    native_record = {
+        "run_id": "native-run-1",
+        "build_id": "v1",
+        "seed": "seed-native",
+        "checkpoint": "ckpt-native",
+        "evaluation_mode": "fixed",
+        "scenario": "standard",
+        "status": "dead",
+        "max_global_floor": 7,
+        "players": [{"character": "Silent"}],
+        "map_point_history": [{"id": "n1", "floor": 7}],
+    }
+    (tmp_path / "native.run").write_text(json.dumps(native_record), encoding="utf-8")
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {
+                "event": "eval_result",
+                "run_id": "eval-run-1",
+                "status": "dead",
+                "max_global_floor": 20,
+                "character": "Ironclad",
+                "game_version": "v1",
+                "checkpoint": "ckpt-a",
+                "evaluation_mode": "fixed",
+                "scenario": "full_run",
+                "ascension": 0,
+                "seed": "seed-eval",
+                "started_at": 12.5,
+            }
+        ],
+    )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, tree_payload = _request(base, "/api/tree")
+        cohorts_by_checkpoint = {
+            cohort["checkpoint"]: cohort["cohort_id"]
+            for entry in tree_payload["tree"]
+            for character in entry["characters"]
+            for cohort in character["cohorts"]
+        }
+        eval_status, eval_payload = _request(
+            base, f"/api/cohort/runs?id={cohorts_by_checkpoint['ckpt-a']}"
+        )
+        native_status, native_payload = _request(
+            base, f"/api/cohort/runs?id={cohorts_by_checkpoint['ckpt-native']}"
+        )
+
+    assert status == 200
+    assert eval_status == native_status == 200
+
+    assert eval_payload["cohort_id"] == cohorts_by_checkpoint["ckpt-a"]
+    assert eval_payload["runs_complete"] is True
+    eval_rows = eval_payload["runs"]
+    assert len(eval_rows) == 1
+    eval_row = eval_rows[0]
+    assert eval_row["run_id"] == "eval-run-1"
+    assert eval_row["seed"] == "seed-eval"
+    assert eval_row["status"] == "dead"
+    assert eval_row["global_floor"] == 20
+    assert eval_row["act"] == 2
+    assert eval_row["started_at"] == 12.5
+    assert eval_row["has_map"] is False
+    assert eval_row["source_id"] is not None
+    assert eval_row["ref"] == {"kind": "run", "id": "eval-run-1"}
+
+    native_rows = native_payload["runs"]
+    assert len(native_rows) == 1
+    native_row = native_rows[0]
+    assert native_row["run_id"] == "native-run-1"
+    assert native_row["global_floor"] == 7
+    assert native_row["act"] == 1
+    assert native_row["has_map"] is True
+    assert native_row["ref"] == {"kind": "run", "id": "native-run-1"}
+
+
+def test_cohort_runs_query_validation_and_404(tmp_path: Path) -> None:
+    with _server(_catalog(tmp_path)) as base:
+        missing_status, missing_payload = _request(base, "/api/cohort/runs")
+        extra_status, extra_payload = _request(base, "/api/cohort/runs?id=x&extra=1")
+        unknown_status, unknown_payload = _request(
+            base, "/api/cohort/runs?id=does-not-exist"
+        )
+
+    assert missing_status == 400
+    assert "missing cohort id" in missing_payload["error"]
+    assert extra_status == 400
+    assert "unexpected cohort query parameter" in extra_payload["error"]
+    assert unknown_status == 404
+
+
+def test_run_and_map_accept_source_addressing_for_runs_with_no_run_id(
+    tmp_path: Path,
+) -> None:
+    """Legacy replay logs with no run_meta header have no addressable run
+    id (run_id == ""). /api/run and /api/run/map must still be able to
+    reach the same canonical run /api/source already exposes, via
+    source=<source_id> instead of id=<run_id>."""
+    records = [
+        {"type": "state", "ts": 1, "data": {"context": {"act": 1, "floor": 2}}},
+        {"type": "action", "ts": 2, "data": {"cmd": "end_turn"}},
+        {"type": "state", "ts": 3, "status": "dead", "max_global_floor": 7},
+    ]
+    _write_jsonl(tmp_path / "legacy.jsonl", records)
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        _, sources_payload = _request(base, "/api/catalog")
+        source_id = sources_payload["sources"][0]["source_id"]
+
+        run_status, run_payload = _request(base, f"/api/run?source={source_id}")
+        map_status, map_payload = _request(
+            base, f"/api/run/map?source={source_id}&act=0"
+        )
+        id_conflict_status, _ = _request(
+            base, f"/api/run?id=whatever&source={source_id}"
+        )
+        unknown_status, _ = _request(base, "/api/run?source=does-not-exist")
+
+    assert run_status == 200
+    assert run_payload["run"]["run_id"] == ""
+    assert run_payload["run"]["outcome"]["status"] == "dead"
+
+    assert map_status == 200
+    for key in ("nodes", "edges", "alignment", "run_id", "act", "acts", "summary"):
+        assert key in map_payload
+    assert map_payload["run_id"] == ""
+
+    assert id_conflict_status == 400
+    assert unknown_status == 404
+
+
+def test_run_and_map_reject_both_id_and_source_together(tmp_path: Path) -> None:
+    with _server(_catalog(tmp_path)) as base:
+        run_status, run_payload = _request(
+            base, "/api/run?id=native-1&source=whatever"
+        )
+        map_status, map_payload = _request(
+            base, "/api/run/map?id=native-1&source=whatever&act=0"
+        )
+
+    assert run_status == 400
+    assert "provide either id or source" in run_payload["error"]
+    assert map_status == 400
+    assert "provide either id or source" in map_payload["error"]
+
+
+def test_run_rejects_unexpected_query_parameters(tmp_path: Path) -> None:
+    with _server(_catalog(tmp_path)) as base:
+        status, payload = _request(base, "/api/run?id=native-1&foo=bar")
+
+    assert status == 400
+    assert "unexpected run query parameter" in payload["error"]
+
+
+def test_run_by_source_rejects_a_summary_source_with_no_runs(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    summary_source_id = next(
+        source["source_id"]
+        for source in catalog.list_sources()
+        if source["source_kind"] == "summary"
+    )
+
+    with _server(catalog) as base:
+        status, payload = _request(base, f"/api/run?source={summary_source_id}")
+
+    assert status == 400
+    assert "contains 0 runs" in payload["error"]
+
+
+def test_run_by_id_behavior_is_unchanged_by_source_addressing(tmp_path: Path) -> None:
+    with _server(_catalog(tmp_path)) as base:
+        status, payload = _request(base, "/api/run?id=native-1")
+
+    assert status == 200
+    assert payload["run"]["run_id"] == "native-1"
+
+
 def test_http_ascii_fail_safe_round_trips_valid_chinese_payload(tmp_path: Path) -> None:
     _write_jsonl(
         tmp_path / "训练.jsonl",
@@ -1043,6 +1318,7 @@ def test_recorded_decisions_fixture_roundtrips_through_authoritative_map_http(
         "started_at": 1,
         "ended_at": 3,
         "game_version_source": "cli",
+        "experiment": None,
     }
     assert service.requests == []
     assert map_payload["full_map"] is True
@@ -2988,7 +3264,12 @@ def test_only_the_globally_last_route_node_is_terminal_across_acts(
         ("/api/run/map", "missing run id"),
         ("/api/run/map?id=native-1&act=x", "act must be an integer"),
         ("/api/run/map?id=native-1&act=-1", "act must be between"),
-        ("/api/run/map?id=native-1&act=0&source=anything", "unexpected map query"),
+        ("/api/run/map?id=native-1&act=0&foo=anything", "unexpected map query"),
+        (
+            "/api/run/map?id=native-1&act=0&source=anything",
+            "provide either id or source",
+        ),
+        ("/api/run/map?source=", "missing source id"),
     ],
 )
 def test_run_map_query_is_strictly_validated(

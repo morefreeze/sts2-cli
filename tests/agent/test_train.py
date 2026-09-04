@@ -233,6 +233,11 @@ def test_training_eval_passes_versioned_fixed_run_context(monkeypatch):
         def action_masks(self):
             return [True]
 
+        # CombatEnv exposes this as a property; run_eval reads it to score the
+        # run, so the fake has to model it or the eval never reaches its
+        # assertions.
+        run_max_global_floor = 7
+
         def step(self, action):
             return [0.0], 0.0, True, False, {"floor": 7}
 
@@ -252,6 +257,8 @@ def test_training_eval_passes_versioned_fixed_run_context(monkeypatch):
         n_games=1,
         ascension=10,
         checkpoint="ppo_ironclad_25k.zip",
+        experiment="noadvisor_mix",
+        game_log=True,
         **VERSION_FIELDS,
     )
 
@@ -263,7 +270,11 @@ def test_training_eval_passes_versioned_fixed_run_context(monkeypatch):
             "seed": "eval_fixed_0",
             "seed_prefix": "eval_0",
             "max_floor": 0,
+            "game_log": True,
             "run_context": {
+                # experiment distinguishes checkpoints whose basenames collide
+                # across training runs; the workbench groups batches on it.
+                "experiment": "noadvisor_mix",
                 "checkpoint": "ppo_ironclad_25k.zip",
                 "evaluation_mode": "fixed",
                 "scenario": "full_run",

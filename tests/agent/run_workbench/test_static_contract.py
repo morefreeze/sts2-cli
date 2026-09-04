@@ -107,12 +107,13 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
     parser.feed(html)
 
     required_ids = [
-        "currentCohort",
+        "cohortTree",
+        "contentPane",
+        "batchView",
+        "catalogView",
         "baselineCohort",
-        "characterFilter",
-        "versionFilter",
-        "validityFilter",
         "sourceFile",
+        "catalogToggle",
         "avgFloor",
         "medianFloor",
         "maxFloor",
@@ -123,10 +124,12 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
         "funnelChart",
         "comparisonBanner",
         "anomalyList",
-        "representativeRuns",
+        "runsTable",
         "sourceCatalog",
         "workbenchStatus",
         "runMapPage",
+        "runMeta",
+        "mapBackButton",
         "actTabs",
         "mapFallback",
         "mapSvg",
@@ -136,16 +139,18 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
         "mapDecisionBody",
         "actSummary",
         "selectedNodeSummary",
+        "detailPanel",
     ]
     assert all(item in parser.ids for item in required_ids)
+    # The tree precedes the content pane (browse-then-inspect), and the
+    # batch view's metrics precede its run table (summary before detail).
     layout_order = [
         "workbenchStatus",
         "sourceFile",
-        "versionFilter",
-        "characterFilter",
-        "currentCohort",
+        "cohortTree",
+        "contentPane",
+        "batchView",
         "baselineCohort",
-        "validityFilter",
         "avgFloor",
         "medianFloor",
         "maxFloor",
@@ -156,47 +161,56 @@ def test_shell_uses_external_assets_and_stable_landmark_order():
         "funnelChart",
         "comparisonBanner",
         "anomalyList",
-        "representativeRuns",
+        "runsTable",
+        "catalogView",
         "sourceCatalog",
     ]
     assert [parser.ids.index(item) for item in layout_order] == sorted(
         parser.ids.index(item) for item in layout_order
     )
-    assert {"header", "main", "section", "aside"}.issubset(parser.landmarks)
+    assert {"header", "main", "nav", "section", "aside"}.issubset(parser.landmarks)
     assert any(link.get("href") == "/static/styles.css" for link in parser.links)
-    assert any(script.get("src") == "/static/app.js" for script in parser.scripts)
     script_sources = [script.get("src") for script in parser.scripts]
-    assert "/static/map.js" in script_sources
+    for src in (
+        "/static/util.js",
+        "/static/app.js",
+        "/static/tree.js",
+        "/static/cohort-view.js",
+        "/static/runs-table.js",
+        "/static/run-view.js",
+        "/static/map.js",
+    ):
+        assert src in script_sources
+    # util.js is the shared-helper base: it must load before every module
+    # that calls byId/element/getJSON/... at top-level-adjacent code.
+    assert script_sources.index("/static/util.js") == 0
+    # map.js is deliberately last: app.js and the view modules reference
+    # window.STS2Map only from inside callbacks that run after all deferred
+    # scripts have executed, so load order does not need to match that, but
+    # app.js before map.js is still required by loadAct's history contract.
     assert script_sources.index("/static/app.js") < script_sources.index("/static/map.js")
+    assert script_sources[-1] == "/static/map.js"
     assert "<style" not in html.lower()
     assert not any(script.get("src") is None for script in parser.scripts)
     assert any(label.get("for") == "sourceFile" for label in parser.labels)
     assert any(region.get("id") == "workbenchStatus" for region in parser.live_regions)
     assert '<nav id="actTabs" class="act-tabs" role="tablist"' in html
+    assert 'id="cohortTree"' in html
     assert "训练进度" in html
     assert "正在读取训练记录…" in html
     assert not hasattr(viewer, "HTML")
 
 
-def test_filter_panel_orders_scope_before_cohorts():
+def test_tree_nav_precedes_batch_content_and_batch_view_precedes_catalog():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    panel = html[
-        html.index('<section class="panel filter-panel"') : html.index(
-            '<section class="metrics-section"'
-        )
-    ]
-    positions = [
-        panel.index('id="versionFilter"'),
-        panel.index('id="characterFilter"'),
-        panel.index('id="currentCohort"'),
-        panel.index('id="baselineCohort"'),
-        panel.index('id="validityFilter"'),
-    ]
 
-    assert positions == sorted(positions)
+    assert html.index('id="cohortTree"') < html.index('id="contentPane"')
+    assert html.index('id="batchView"') < html.index('id="catalogView"')
+    assert html.index('id="baselineCohort"') < html.index('id="avgFloor"')
+    assert html.index('id="anomalyList"') < html.index('id="runsTable"')
 
 
-def test_filter_panel_uses_semantic_grid_spans_at_responsive_breakpoints():
+def test_workbench_body_and_tree_use_semantic_grid_spans_at_responsive_breakpoints():
     css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
     desktop = css[: css.index("@media")]
     tablet_start = css.index("@media (max-width: 760px)")
@@ -205,26 +219,24 @@ def test_filter_panel_uses_semantic_grid_spans_at_responsive_breakpoints():
     mobile = css[mobile_start:]
 
     assert re.search(
-        r"\.filter-field-scope,\s*\.filter-field-cohort\s*"
-        r"\{[^}]*grid-column:\s*span 6;",
+        r"\.workbench-body\s*\{[^}]*grid-template-columns:\s*300px minmax\(0, 1fr\);",
         desktop,
         re.DOTALL,
     )
+    # Narrow widths collapse the two-column shell to one column and turn
+    # the tree into a bounded, scrollable drawer instead of a sidebar.
     assert re.search(
-        r"\.filter-field-validity\s*"
-        r"\{[^}]*grid-column:\s*span 3;",
-        desktop,
-        re.DOTALL,
-    )
-    assert re.search(
-        r"\.filter-field-validity\s*"
-        r"\{[^}]*grid-column:\s*span 6;",
+        r"\.workbench-body\s*\{[^}]*grid-template-columns:\s*1fr;",
         tablet,
         re.DOTALL,
     )
     assert re.search(
-        r"\.filter-grid\s+\.filter-field\s*(?:,\s*[^{}]+)?\s*"
-        r"\{[^}]*grid-column:\s*1\s*/\s*-1;",
+        r"\.cohort-tree\s*\{[^}]*max-height:\s*260px;",
+        tablet,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.metric-card\s*\{[^}]*grid-column:\s*1\s*/\s*-1;",
         mobile,
         re.DOTALL,
     )
@@ -1735,26 +1747,37 @@ def test_static_routes_reject_unknown_traversal_encoding_and_queries(tmp_path: P
 
 
 def test_app_bootstraps_apis_and_renders_server_owned_comparison():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    cohort_script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
+    runs_table_script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    run_view_script = (STATIC_DIR / "run-view.js").read_text(encoding="utf-8")
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    map_script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    # map.js owns the /api/run/map request; run-view.js delegates to it via
+    # STS2Map.openRun rather than issuing the query itself.
+    everything = (
+        app_script + cohort_script + runs_table_script + run_view_script + map_script
+    )
 
-    assert "Promise.all" in script
-    assert "getJSON('/api/cohorts')" in script
-    assert "getJSON('/api/catalog')" in script
-    assert "await refreshMetrics()" in script
-    for endpoint in ("/api/metrics", "/api/source", "/api/run", "/api/parse"):
-        assert endpoint in script
-    assert "comparison.mismatch_reasons" in script
-    assert "comparison.notes" in script
-    assert "payload.view" in script
-    assert "formatMissing" in script
-    assert "return '—'" in script or 'return "—"' in script
-    assert "act2_entry_denominator" in script
-    assert "technical_n" in script
-    assert "createElementNS" in script
+    assert "Promise.all" in app_script
+    assert "getJSON('/api/tree')" in app_script
+    assert "getJSON('/api/cohorts')" in app_script
+    assert "getJSON('/api/catalog')" in app_script
+    assert "Tree.render(state.tree)" in app_script
+    for endpoint in ("/api/metrics", "/api/source", "/api/run", "/api/parse", "/api/cohort/runs", "/api/run/map"):
+        assert endpoint in everything, endpoint
+    assert "comparison.mismatch_reasons" in cohort_script
+    assert "comparison.notes" in cohort_script
+    assert "payload.view" in app_script
+    assert "formatMissing" in util_script
+    assert "return '—'" in util_script or 'return "—"' in util_script
+    assert "act2_entry_denominator" in cohort_script
+    assert "technical_n" in cohort_script
+    assert "createElementNS" in util_script
 
 
 def test_baseline_default_uses_server_descriptor_without_client_axis_logic():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     helper = _javascript_section(
         script, "function defaultBaselineCohortId", "function comparisonAxisLabel"
     )
@@ -1768,9 +1791,9 @@ def test_baseline_default_uses_server_descriptor_without_client_axis_logic():
 
 
 def test_default_baseline_helper_is_pure_and_fails_closed_on_bad_descriptors():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     identity = _javascript_section(
-        script, "function safeCohortId", "function filterValuesFromCohorts"
+        script, "function safeCohortId", "function currentCohortDescriptor"
     )
     helper = _javascript_section(
         script, "function defaultBaselineCohortId", "function comparisonAxisLabel"
@@ -1845,9 +1868,9 @@ def test_default_baseline_helper_is_pure_and_fails_closed_on_bad_descriptors():
 
 def test_comparison_help_is_neutral_complete_and_redrawn_without_duplication():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     help_section = _javascript_section(
-        script, "function comparisonAxisLabel", "function updateCohortOptions"
+        script, "function comparisonAxisLabel", "function baselineCandidates"
     )
 
     for wording in (
@@ -1857,9 +1880,6 @@ def test_comparison_help_is_neutral_complete_and_redrawn_without_duplication():
         "missing_axes",
         "mixed_axes",
         "invalid_axes",
-        "版本来源：${sourceLabel}",
-        "命令行",
-        "环境变量",
     ):
         assert wording in script
     for axis, label in (
@@ -1872,587 +1892,453 @@ def test_comparison_help_is_neutral_complete_and_redrawn_without_duplication():
         ("valid_results", "有效结果"),
     ):
         assert f"{axis}: '{label}'" in help_section
-    assert "currentHelp.textContent}" not in help_section
-    assert 'select id="currentCohort" aria-describedby="currentHelp"' in html
+    # There is no more per-cohort "currentHelp" -- the batch title itself
+    # is the only current-cohort indicator now; only baselineHelp remains.
     assert 'select id="baselineCohort" aria-describedby="baselineHelp"' in html
-    assert 'id="currentHelp"' in html and 'id="baselineHelp"' in html
+    assert 'id="baselineHelp"' in html
     assert html.count('aria-live="polite"') >= 5
-    assert "当前批次可查看，但暂无可直接比较的基线" in html
+    # The shell ships the pre-selection placeholder only. Every comparison
+    # verdict above is written into baselineHelp by cohort-view.js once a
+    # batch is chosen, so the shell must not hard-code one of them as if it
+    # were already true.
+    assert "选择批次后可比较基线" in html
+    assert "当前批次可查看，但暂无可直接比较的基线" not in html
 
 
 def test_cohort_options_preserve_manual_choice_and_only_default_on_current_change():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     identity = _javascript_section(
-        script, "function safeCohortId", "function filterValuesFromCohorts"
+        script, "function safeCohortId", "function currentCohortDescriptor"
     )
     selector = _javascript_section(
-        script, "function defaultBaselineCohortId", "function resetMetrics"
+        script, "function defaultBaselineCohortId", "function baselineChanged"
     )
-    listener = _javascript_section(script, "function filterChanged", "bootstrap();")
+    render_fn = _javascript_section(script, "let lastRenderedCohortId", "function renderNoCohort")
 
-    assert (
-        "function updateCohortOptions({ chooseDefaults = false, currentChanged = false } = {})"
-        in selector
-    )
-    assert "updateCohortOptions({ currentChanged: true })" in listener
-    assert (
-        "updateCohortHelp(currentCohortDescriptor(), byId('baselineCohort').value)"
-        in listener
-    )
+    assert "function renderBaselineSelect(current, { forceDefault = false } = {})" in selector
+    assert "forceDefault: lastRenderedCohortId !== cohortId" in render_fn
     assert "nearestDistinctCohortId" not in selector
 
     payload = _run_node_json(
         f"""
         const nodes = {{
-          currentCohort: {{ value: '', optionValues: [] }},
           baselineCohort: {{ value: '', optionValues: [] }},
-          currentHelp: {{ textContent: '' }},
           baselineHelp: {{ textContent: '' }},
         }};
         const byId = (id) => nodes[id];
         const formatTime = (value) => `time-${{value}}`;
-        let candidates = [];
-        const filteredCohorts = () => candidates;
         function setSelectOptions(select, options, emptyLabel, preferred) {{
           select.optionValues = options.map((option) => option.value);
-          select.emptyLabel = emptyLabel;
           select.value = '';
           if (preferred && options.some((option) => option.value === preferred)) {{
             select.value = preferred;
           }}
         }}
-        {identity}
-        {selector}
         const ready = {{ ready: true, missing_axes: [], mixed_axes: [], invalid_axes: [] }};
-        const cohort = (id, defaultId, extra = {{}}) => ({{
+        const cohort = (id, signature, defaultId) => ({{
           cohort_id: id,
           label: `cohort-${{id}}`,
           run_count: 2,
           latest_at: id.charCodeAt(0),
-          filters: {{ game_version_source: 'cli' }},
-          comparison_readiness: ready,
+          comparison_readiness: {{ ...ready, comparison_signature: signature }},
           default_baseline_cohort_id: defaultId,
-          ...extra,
         }});
-        const a = cohort('a', 'b');
-        const b = cohort('b', 'a');
-        const c = cohort('c', null);
-        candidates = [a, b, c];
+        const a = cohort('a', 'sig-1', 'b');
+        const b = cohort('b', 'sig-1', 'a');
+        const c = cohort('c', 'sig-1', null);
+        const other = cohort('other', 'sig-2', null);
+        const state = {{ cohorts: [a, b, c, other] }};
+        {identity}
+        {selector}
 
-        updateCohortOptions({{ chooseDefaults: true }});
-        const initial = {{
-          current: nodes.currentCohort.value,
-          baseline: nodes.baselineCohort.value,
-          currentOptions: [...nodes.currentCohort.optionValues],
-          baselineOptions: [...nodes.baselineCohort.optionValues],
-        }};
+        const initialBaseline = renderBaselineSelect(a);
+        const initialOptions = [...nodes.baselineCohort.optionValues];
+        const initialHelp = nodes.baselineHelp.textContent;
 
         nodes.baselineCohort.value = 'c';
-        updateCohortOptions();
-        const manual = nodes.baselineCohort.value;
+        const manualBaseline = renderBaselineSelect(a, {{ forceDefault: false }});
         const manualHelp = nodes.baselineHelp.textContent;
 
-        nodes.baselineCohort.value = '';
-        updateCohortOptions();
-        const blank = nodes.baselineCohort.value;
-        const helpOnce = nodes.currentHelp.textContent;
-        updateCohortOptions();
-        const helpTwice = nodes.currentHelp.textContent;
-
-        nodes.baselineCohort.value = 'c';
-        candidates = [a, b];
-        updateCohortOptions();
-        const staleManual = nodes.baselineCohort.value;
-
-        candidates = [a, b, c];
-        nodes.currentCohort.value = 'b';
-        nodes.baselineCohort.value = 'c';
-        updateCohortOptions({{ currentChanged: true }});
-        const explicitCurrentChange = {{
-          current: nodes.currentCohort.value,
-          baseline: nodes.baselineCohort.value,
-        }};
-
-        nodes.currentCohort.value = 'missing';
-        nodes.baselineCohort.value = 'c';
-        updateCohortOptions();
-        const implicitCurrentChange = {{
-          current: nodes.currentCohort.value,
-          baseline: nodes.baselineCohort.value,
-        }};
-
-        candidates = [a, c];
-        nodes.currentCohort.value = 'a';
-        nodes.baselineCohort.value = '';
-        updateCohortOptions({{ chooseDefaults: true }});
-        const filteredServerDefault = nodes.baselineCohort.value;
+        const forcedBaseline = renderBaselineSelect(b, {{ forceDefault: true }});
 
         console.log(JSON.stringify({{
-          initial,
-          manual,
-          manualHelp,
-          blank,
-          helpStable: helpOnce === helpTwice,
-          helpOnce,
-          staleManual,
-          explicitCurrentChange,
-          implicitCurrentChange,
-          filteredServerDefault,
+          initialBaseline, initialOptions, initialHelp, manualBaseline, manualHelp, forcedBaseline,
         }}));
         """
     )
 
-    assert payload["initial"] == {
-        "current": "a",
-        "baseline": "b",
-        "currentOptions": ["a", "b", "c"],
-        "baselineOptions": ["b", "c"],
-    }
-    assert payload["manual"] == "c"
+    assert payload["initialBaseline"] == "b"
+    assert payload["initialOptions"] == ["b", "c"]
+    assert payload["initialHelp"] == "已采用服务端验证的兼容基线；手动选择后仍会再次校验"
+    # Manual choice survives a re-render of the *same* cohort.
+    assert payload["manualBaseline"] == "c"
     assert payload["manualHelp"] == "已选择基线；服务端将校验口径并提供精确原因"
-    assert payload["blank"] == ""
-    assert payload["helpStable"] is True
-    assert payload["helpOnce"].count("版本来源：命令行") == 1
-    assert payload["staleManual"] == ""
-    assert payload["explicitCurrentChange"] == {"current": "b", "baseline": "a"}
-    assert payload["implicitCurrentChange"] == {"current": "a", "baseline": "b"}
-    assert payload["filteredServerDefault"] == ""
+    # Switching cohorts re-defaults even though 'c' is still a valid option
+    # for cohort b -- forceDefault, not option membership, decides this.
+    assert payload["forcedBaseline"] == "a"
 
 
-def test_version_filter_cascades_character_and_cohort_candidates():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    filters = _javascript_section(
-        script, "function setSelectOptions", "function defaultBaselineCohortId"
-    )
-    cohort_options = _javascript_section(
-        script, "function updateCohortOptions", "function resetMetrics"
-    )
-    bootstrap = _javascript_section(script, "async function bootstrap", "function filterChanged")
-    listeners = _javascript_section(script, "function filterChanged", "bootstrap();")
-
-    assert bootstrap.index("populateAxisFilter('versionFilter'") < bootstrap.index(
-        "updateCharacterFilterOptions()"
-    ) < bootstrap.index("updateCohortOptions({ chooseDefaults: true })")
-    version_handler = _javascript_section(
-        listeners, "function versionFilterChanged", "byId('characterFilter')"
-    )
-    assert version_handler.index("updateCharacterFilterOptions()") < version_handler.index(
-        "updateCohortOptions({ chooseDefaults: true })"
-    ) < version_handler.index("refreshMetrics()")
-    assert (
-        "byId('versionFilter').addEventListener('change', versionFilterChanged);"
-        in listeners
-    )
-    assert "byId('characterFilter').addEventListener('change', filterChanged);" in listeners
-    assert "byId('validityFilter').addEventListener('change', filterChanged);" in listeners
-
-    payload = _run_node_json(
-        f"""
-        function makeSelect(value = '') {{
-          return {{
-            value,
-            children: [],
-            replaceChildren() {{ this.children = []; this.value = ''; }},
-            append(option) {{
-              this.children.push(option);
-              if (this.children.length === 1) this.value = option.value;
-            }},
-          }};
-        }}
-        const nodes = {{
-          versionFilter: makeSelect(),
-          characterFilter: makeSelect(),
-          validityFilter: makeSelect(),
-          currentCohort: makeSelect(),
-          baselineCohort: makeSelect(),
-        }};
-        const byId = (id) => nodes[id];
-        const clear = (node) => node.replaceChildren();
-        const element = (tag, options = {{}}) => ({{
-          tag,
-          textContent: options.text === undefined ? '' : String(options.text),
-          value: String(options.attrs.value),
-        }});
-        const formatTime = (value) => `time-${{value}}`;
-        const updateCohortHelp = () => {{}};
-        const defaultBaselineCohortId = () => '';
-        const state = {{ cohorts: [] }};
-        {filters}
-        {cohort_options}
-
-        const cohort = (id, version, character, technical = 0) => ({{
-          cohort_id: id,
-          label: id,
-          run_count: 2,
-          technical_count: technical,
-          latest_at: id.length,
-          filters: {{ game_version: version, character }},
-        }});
-        state.cohorts = [
-          cohort('v1-iron', 'v1', 'Ironclad'),
-          cohort('v1-necro', 'v1', 'Necrobinder'),
-          cohort('v2-iron', 'v2', 'Ironclad'),
-        ];
-
-        nodes.versionFilter.value = 'v1';
-        nodes.characterFilter.value = 'Necrobinder';
-        updateCharacterFilterOptions();
-        const v1 = {{
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          character: nodes.characterFilter.value,
-        }};
-
-        nodes.versionFilter.value = 'v2';
-        updateCharacterFilterOptions();
-        const v2 = {{
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          character: nodes.characterFilter.value,
-        }};
-        updateCohortOptions({{ chooseDefaults: true }});
-        const selectedV2 = {{
-          currentOptions: nodes.currentCohort.children.map((option) => option.value),
-          current: nodes.currentCohort.value,
-        }};
-
-        nodes.versionFilter.value = '';
-        updateCharacterFilterOptions();
-        const allVersions = {{
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          character: nodes.characterFilter.value,
-        }};
-
-        nodes.versionFilter.value = 'v2';
-        nodes.validityFilter.value = 'technical';
-        updateCharacterFilterOptions();
-        updateCohortOptions({{ chooseDefaults: true }});
-        const empty = {{
-          currentOptions: nodes.currentCohort.children.map((option) => option.value),
-          current: nodes.currentCohort.value,
-          baseline: nodes.baselineCohort.value,
-        }};
-
-        state.cohorts = null;
-        updateCharacterFilterOptions();
-        const malformed = {{
-          versionCandidates: cohortsForSelectedVersion().length,
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          character: nodes.characterFilter.value,
-          filteredCandidates: filteredCohorts().length,
-        }};
-
-        console.log(JSON.stringify({{ v1, v2, selectedV2, allVersions, empty, malformed }}));
-        """
-    )
-
-    assert payload == {
-        "v1": {
-            "characterOptions": ["", "Ironclad", "Necrobinder"],
-            "character": "Necrobinder",
-        },
-        "v2": {"characterOptions": ["", "Ironclad"], "character": ""},
-        "selectedV2": {"currentOptions": ["v2-iron"], "current": "v2-iron"},
-        "allVersions": {
-            "characterOptions": ["", "Ironclad", "Necrobinder"],
-            "character": "",
-        },
-        "empty": {"currentOptions": [""], "current": "", "baseline": ""},
-        "malformed": {
-            "versionCandidates": 0,
-            "characterOptions": [""],
-            "character": "",
-            "filteredCandidates": 0,
-        },
-    }
+_FAKE_TREE_DOM = """
+function makeNode(tag) {
+  const node = {
+    tag, className: '', textContent: '', hidden: false,
+    _attrs: {}, children: [], parentElement: null,
+    setAttribute(name, value) { this._attrs[name] = String(value); },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null;
+    },
+    removeAttribute(name) { delete this._attrs[name]; },
+    append(...items) {
+      items.forEach((item) => {
+        if (item === null || item === undefined) return;
+        if (typeof item !== 'object') { this.textContent += String(item); return; }
+        item.parentElement = this;
+        this.children.push(item);
+      });
+    },
+    addEventListener() {},
+    querySelectorAll(selector) {
+      const out = [];
+      const roleMatch = selector.match(/^\\[role="([^"]+)"\\]$/);
+      const walk = (node) => {
+        node.children.forEach((child) => {
+          if (roleMatch && child._attrs.role === roleMatch[1]) out.push(child);
+          walk(child);
+        });
+      };
+      walk(this);
+      return out;
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+  };
+  return node;
+}
+function collectText(node) {
+  return node.textContent + node.children.map(collectText).join('');
+}
+const document = { createElement: (tag) => makeNode(tag) };
+const window = {};
+const CSS = { escape: (value) => value };
+const treeNode = makeNode('nav');
+const nodes = { cohortTree: treeNode };
+function byId(id) { return nodes[id]; }
+function clear(node) { node.children = []; node.textContent = ''; node.parentElement = null; }
+function renderEmpty(container, message) { clear(container); container.textContent = message; }
+function formatMissing(value, digits) {
+  return value === null || value === undefined ? '\\u2014' : String(value);
+}
+function navigate() {}
+function cohortRoute(id) { return `#/batch/${id}`; }
+"""
 
 
-def test_filter_values_sort_game_versions_by_numeric_segments_descending():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    filters = _javascript_section(
-        script, "function setSelectOptions", "function defaultBaselineCohortId"
-    )
+def test_tree_renders_version_character_cohort_nesting_in_server_order():
+    """The tree must reproduce /api/tree's order verbatim -- newest-first
+    within a version, with the null game_version bucket last -- and must
+    never re-sort client-side (the old numeric-version-descending sort is
+    gone along with the dropdown filters it used to serve)."""
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    tree_script = (STATIC_DIR / "tree.js").read_text(encoding="utf-8")
+    element_fn = _javascript_section(util_script, "function element(tag", "function svgElement")
+
+    assert "sort(" not in tree_script
+    assert "compareGameVersionsDescending" not in tree_script
+    tree_source = tree_script.replace("window.Tree = (() => {", "const Tree = (() => {", 1)
 
     payload = _run_node_json(
         f"""
-        const versions = [
-          'v0.99.10', 'v1.9.2', 'nightly', 'v0.107.1', 'V2.0',
-          'v0.9.12', 'v1.10.0', 'v0.103.2', '2', 'v0.10.0',
-          'v1.9.12', undefined, 'v2.0', 'v1.10',
+        {_FAKE_TREE_DOM}
+        {element_fn}
+        {tree_source}
+
+        const cohortA = {{
+          cohort_id: 'a', label: 'Batch A', run_count: 5, technical_count: 0,
+          latest_at: 100, unarchived: false,
+        }};
+        const cohortB = {{
+          cohort_id: 'b', label: 'Batch B', run_count: 3, technical_count: 2,
+          latest_at: 50, unarchived: true,
+        }};
+        const cohortC = {{
+          cohort_id: 'c', label: 'Batch C', run_count: 1, technical_count: 0,
+          latest_at: 10, unarchived: false,
+        }};
+        // Deliberately NOT numerically descending (0.50.0 before 0.111.0)
+        // to prove the tree renders whatever order the server sent rather
+        // than re-deriving one client-side. The null-version bucket is
+        // last, per the API contract.
+        const tree = [
+          {{ game_version: '0.50.0', characters: [
+            {{ character: 'Ironclad', cohorts: [cohortA] }},
+          ] }},
+          {{ game_version: '0.111.0', characters: [
+            {{ character: null, cohorts: [cohortB] }},
+          ] }},
+          {{ game_version: null, characters: [
+            {{ character: 'Silent', cohorts: [cohortC] }},
+          ] }},
         ];
-        const characters = ['Watcher', 'Ironclad', 'Necrobinder'];
-        const state = {{ cohorts: versions.map((version, index) => ({{
-          cohort_id: `cohort-${{index}}`,
-          filters: {{
-            game_version: version,
-            character: characters[index % characters.length],
-          }},
-        }})) }};
-        {filters}
+
+        Tree.render(tree);
+        const text = collectText(treeNode);
         console.log(JSON.stringify({{
-          versions: filterValuesFromCohorts(state.cohorts, 'game_version'),
-          characters: filterValuesFromCohorts(state.cohorts, 'character'),
+          text,
+          treeitemCount: treeNode.querySelectorAll('[role="treeitem"]').length,
+          technicalBadgePresent: text.includes('2 技术失败'),
         }}));
         """
     )
 
-    assert payload == {
-        "versions": [
-            "2",
-            "V2.0",
-            "v2.0",
-            "v1.10",
-            "v1.10.0",
-            "v1.9.12",
-            "v1.9.2",
-            "v0.107.1",
-            "v0.103.2",
-            "v0.99.10",
-            "v0.10.0",
-            "v0.9.12",
-            "nightly",
-            "未标注",
-        ],
-        "characters": ["Ironclad", "Necrobinder", "Watcher"],
-    }
+    text = payload["text"]
+    order = ["0.50.0", "Ironclad", "Batch A", "0.111.0", "Batch B", "Silent", "Batch C"]
+    positions = [text.index(fragment) for fragment in order]
+    assert positions == sorted(positions), text
+    # 3 version groups + 3 character groups + 3 cohort leaves = 9 treeitems.
+    assert payload["treeitemCount"] == 9
+    assert payload["technicalBadgePresent"] is True
 
 
-def test_axis_helpers_skip_malformed_cohorts_without_losing_valid_values():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    filters = _javascript_section(
-        script, "function setSelectOptions", "function defaultBaselineCohortId"
-    )
+_FAKE_TABLE_DOM = """
+function makeNode(tag) {
+  const node = {
+    tag, className: '', textContent: '', hidden: false,
+    _attrs: {}, children: [], parentElement: null, _listeners: {},
+    setAttribute(name, value) { this._attrs[name] = String(value); },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null;
+    },
+    removeAttribute(name) { delete this._attrs[name]; },
+    append(...items) {
+      items.forEach((item) => {
+        if (item === null || item === undefined) return;
+        if (typeof item !== 'object') { this.textContent += String(item); return; }
+        item.parentElement = this;
+        this.children.push(item);
+      });
+    },
+    replaceChildren(...items) { this.children = []; this.textContent = ''; this.append(...items); },
+    addEventListener(type, handler) {
+      (this._listeners[type] = this._listeners[type] || []).push(handler);
+    },
+    dispatchClick() { (this._listeners.click || []).forEach((handler) => handler({})); },
+    querySelectorAll(selector) {
+      const out = [];
+      const walk = (node) => {
+        node.children.forEach((child) => {
+          if (selector === '*' || child.tag === selector) out.push(child);
+          walk(child);
+        });
+      };
+      walk(this);
+      return out;
+    },
+  };
+  return node;
+}
+const document = { createElement: (tag) => makeNode(tag) };
+const tableContainer = makeNode('div');
+const nodes = { runsTable: tableContainer, runsTableNotice: makeNode('p') };
+function byId(id) { return nodes[id]; }
+"""
+
+
+def test_runs_table_sorts_by_floor_and_status_with_missing_values_last():
+    """Sortable by 推进层数 and 状态, per the batch-view run table spec."""
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    sorted_rows = _javascript_section(script, "function sortedRows", "function headerCell")
 
     payload = _run_node_json(
         f"""
-        function makeSelect(value = '') {{
-          return {{
-            value,
-            children: [],
-            replaceChildren() {{ this.children = []; this.value = ''; }},
-            append(option) {{
-              this.children.push(option);
-              if (this.children.length === 1) this.value = option.value;
-            }},
-          }};
-        }}
-        const nodes = {{
-          versionFilter: makeSelect(),
-          characterFilter: makeSelect(),
-          validityFilter: makeSelect(),
-        }};
-        const byId = (id) => nodes[id];
-        const clear = (node) => node.replaceChildren();
-        const element = (tag, options = {{}}) => ({{
-          tag,
-          textContent: options.text === undefined ? '' : String(options.text),
-          value: String(options.attrs.value),
-        }});
-        const validCohort = {{
-          cohort_id: 'valid',
-          run_count: 2,
-          technical_count: 0,
-          filters: {{ game_version: 'v1', character: 'Ironclad' }},
-        }};
-        const state = {{ cohorts: [null, 42, validCohort] }};
-        {filters}
-
-        populateAxisFilter('versionFilter', 'game_version', '全部版本');
-        nodes.versionFilter.value = 'v1';
-        updateCharacterFilterOptions();
-        nodes.characterFilter.value = 'Ironclad';
-        const mixedDescriptors = {{
-          versionOptions: nodes.versionFilter.children.map((option) => option.value),
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          versionCandidates: cohortsForSelectedVersion().map((cohort) => cohort.cohort_id),
-          filteredCandidates: filteredCohorts().map((cohort) => cohort.cohort_id),
-        }};
-
-        const throwingVersion = {{
-          cohort_id: 'throwing-version',
-          get filters() {{ throw new Error('bad version getter'); }},
-        }};
-        const throwingCharacter = {{
-          cohort_id: 'throwing-character',
-          run_count: 2,
-          technical_count: 0,
-          filters: {{
-            game_version: 'v1',
-            get character() {{ throw new Error('bad character getter'); }},
-          }},
-        }};
-        const throwingCount = {{
-          cohort_id: 'throwing-count',
-          run_count: 2,
-          get technical_count() {{ throw new Error('bad count getter'); }},
-          filters: {{ game_version: 'v1', character: 'Ironclad' }},
-        }};
-        state.cohorts = [throwingVersion, throwingCharacter, throwingCount, validCohort];
-        populateAxisFilter('versionFilter', 'game_version', '全部版本');
-        nodes.versionFilter.value = 'v1';
-        updateCharacterFilterOptions();
-        nodes.characterFilter.value = 'Ironclad';
-        const throwingGetters = {{
-          versionOptions: nodes.versionFilter.children.map((option) => option.value),
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          versionCandidates: cohortsForSelectedVersion().map((cohort) => cohort.cohort_id),
-          filteredCandidates: filteredCohorts().map((cohort) => cohort.cohort_id),
-        }};
-        nodes.characterFilter.value = '';
-        throwingGetters.allCharacterCandidates = filteredCohorts()
-          .map((cohort) => cohort.cohort_id);
-        nodes.versionFilter.value = '';
-        throwingGetters.allVersionCandidates = cohortsForSelectedVersion()
-          .map((cohort) => cohort.cohort_id);
-        throwingGetters.allScopeCandidates = filteredCohorts()
-          .map((cohort) => cohort.cohort_id);
-
-        state.cohorts = null;
-        populateAxisFilter('versionFilter', 'game_version', '全部版本');
-        updateCharacterFilterOptions();
-        const nonArray = {{
-          versionOptions: nodes.versionFilter.children.map((option) => option.value),
-          characterOptions: nodes.characterFilter.children.map((option) => option.value),
-          versionCandidates: cohortsForSelectedVersion().length,
-          filteredCandidates: filteredCohorts().length,
-        }};
-
-        console.log(JSON.stringify({{ mixedDescriptors, throwingGetters, nonArray }}));
+        let sortKey = null;
+        let sortDir = 'desc';
+        const STATUS_LABELS = {{ win: 'A-win', crash: 'B-crash', dead: 'C-dead' }};
+        {sorted_rows}
+        const rows = [
+          {{ seed: 'a', status: 'win', global_floor: 12 }},
+          {{ seed: 'b', status: 'crash', global_floor: null }},
+          {{ seed: 'c', status: 'dead', global_floor: 40 }},
+        ];
+        sortKey = null;
+        const unsorted = sortedRows(rows).map((row) => row.seed);
+        sortKey = 'global_floor'; sortDir = 'desc';
+        const byFloorDesc = sortedRows(rows).map((row) => row.seed);
+        sortKey = 'global_floor'; sortDir = 'asc';
+        const byFloorAsc = sortedRows(rows).map((row) => row.seed);
+        sortKey = 'status'; sortDir = 'asc';
+        const byStatusAsc = sortedRows(rows).map((row) => row.seed);
+        console.log(JSON.stringify({{ unsorted, byFloorDesc, byFloorAsc, byStatusAsc }}));
         """
     )
 
-    assert payload == {
-        "mixedDescriptors": {
-            "versionOptions": ["", "v1"],
-            "characterOptions": ["", "Ironclad"],
-            "versionCandidates": ["valid"],
-            "filteredCandidates": ["valid"],
-        },
-        "throwingGetters": {
-            "versionOptions": ["", "v1"],
-            "characterOptions": ["", "Ironclad"],
-            "versionCandidates": ["throwing-character", "throwing-count", "valid"],
-            "filteredCandidates": ["valid"],
-            "allCharacterCandidates": ["valid"],
-            "allVersionCandidates": ["throwing-character", "throwing-count", "valid"],
-            "allScopeCandidates": ["valid"],
-        },
-        "nonArray": {
-            "versionOptions": [""],
-            "characterOptions": [""],
-            "versionCandidates": 0,
-            "filteredCandidates": 0,
-        },
-    }
+    assert payload["unsorted"] == ["a", "b", "c"]
+    # A missing floor carries no ranking information, so it sorts last in
+    # BOTH directions rather than crowding the top of the ascending view.
+    assert payload["byFloorDesc"] == ["c", "a", "b"]
+    assert payload["byFloorAsc"] == ["a", "c", "b"]
+    # Status labels above are deliberately alphabetic (A/B/C-prefixed) so
+    # the localeCompare ordering is unambiguous without depending on
+    # Chinese collation specifics.
+    assert payload["byStatusAsc"] == ["a", "b", "c"]
 
 
-def test_cohort_identity_guards_options_current_descriptor_and_comparison():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    filters = _javascript_section(
-        script, "function setSelectOptions", "function defaultBaselineCohortId"
+def test_runs_table_renders_missing_values_as_dash_never_zero_or_blank():
+    """Missing run fields render as em dash; a genuine 0 (e.g. floor 0)
+    must still render as '0', never collapse into the missing-value dash
+    or an empty cell."""
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    status_labels = _javascript_section(util_script, "const STATUS_LABELS", "const CAPABILITY_LABELS")
+    element_fn = _javascript_section(util_script, "function element(tag", "function svgElement")
+    clear_fn = _javascript_section(util_script, "function clear(node)", "function setStatus")
+    render_empty_fn = _javascript_section(util_script, "function renderEmpty", "function setSelectOptions")
+    table_section = _javascript_section(script, "function missingCell", "async function render")
+
+    # Scope this to missingCell itself: the surrounding section legitimately
+    # compares a sort comparator's result against 0, which is unrelated to
+    # how a run's own 0 value is rendered.
+    missing_cell = _javascript_section(script, "function missingCell", "function sortedRows")
+    assert "=== 0" not in missing_cell  # 0 must not be special-cased into a dash
+    assert "!value" not in missing_cell  # nor collapsed by a falsy check
+
+    payload = _run_node_json(
+        f"""
+        {_FAKE_TABLE_DOM}
+        {status_labels}
+        {element_fn}
+        {clear_fn}
+        {render_empty_fn}
+        function formatTime(value) {{ return `T${{value}}`; }}
+        let sortKey = null;
+        let sortDir = 'desc';
+        {table_section}
+
+        const rows = [
+          {{
+            seed: null, status: null, global_floor: null, act: null, started_at: null,
+            has_map: false, ref: {{ kind: 'source', id: 's1' }},
+          }},
+          {{
+            seed: 'zero-seed', status: 'win', global_floor: 0, act: 1, started_at: 100,
+            has_map: true, ref: {{ kind: 'run', id: 'r1' }},
+          }},
+        ];
+        renderTable(rows);
+        const dataRows = tableContainer.querySelectorAll('tr').slice(1);
+        const cells = dataRows.map((tr) => tr.children.map((td) => td.textContent));
+        console.log(JSON.stringify(cells));
+        """
     )
-    cohort_options = _javascript_section(
-        script, "function updateCohortOptions", "function resetMetrics"
+
+    missing_row, zero_row = payload
+    # seed, status, floor, act (indexes 1-4) are all missing -> dash, never blank.
+    assert missing_row[1:5] == ["—", "—", "—", "—"]
+    assert "" not in missing_row[1:5]
+    assert "0" not in missing_row[1:5]
+    # A real floor of 0 renders as '0', not as the missing-value dash.
+    assert zero_row[3] == "0"
+
+
+def test_runs_table_rows_address_via_ref_never_a_bare_run_id():
+    """Every real run on disk has run_id: null; rows must be addressed
+    through the ref object the API already resolved, never by reading
+    row.run_id directly."""
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    status_labels = _javascript_section(util_script, "const STATUS_LABELS", "const CAPABILITY_LABELS")
+    element_fn = _javascript_section(util_script, "function element(tag", "function svgElement")
+    clear_fn = _javascript_section(util_script, "function clear(node)", "function setStatus")
+    render_empty_fn = _javascript_section(util_script, "function renderEmpty", "function setSelectOptions")
+    table_section = _javascript_section(script, "function missingCell", "async function render")
+
+    assert "row.run_id" not in script
+    assert "ref.id" in script
+    assert "ref.kind" in script
+
+    payload = _run_node_json(
+        f"""
+        {_FAKE_TABLE_DOM}
+        {status_labels}
+        {element_fn}
+        {clear_fn}
+        {render_empty_fn}
+        function formatTime(value) {{ return `T${{value}}`; }}
+        let sortKey = null;
+        let sortDir = 'desc';
+        {table_section}
+
+        const state = {{ selectedCohortId: 'cohort-x' }};
+        const navigateCalls = [];
+        function navigate(hash) {{ navigateCalls.push(hash); }}
+        function runRoute(cohortId, ref) {{
+          return `#/batch/${{cohortId}}/run/${{ref.kind}}:${{ref.id}}`;
+        }}
+        const rows = [
+          {{
+            seed: 's', status: 'win', global_floor: 1, act: 1, started_at: 1,
+            run_id: null, source_id: 'legacy-source-1', has_map: true,
+            ref: {{ kind: 'source', id: 'legacy-source-1' }},
+          }},
+        ];
+        renderTable(rows);
+        const dataRow = tableContainer.querySelectorAll('tr').slice(1)[0];
+        const disabledBeforeClick = dataRow.getAttribute('aria-disabled');
+        dataRow.dispatchClick();
+        console.log(JSON.stringify({{ navigateCalls, disabledBeforeClick }}));
+        """
+    )
+
+    assert payload["navigateCalls"] == ["#/batch/cohort-x/run/source:legacy-source-1"]
+    assert payload["disabledBeforeClick"] is None
+
+
+def test_cohort_identity_guards_current_descriptor_and_comparison():
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
+    identity = _javascript_section(
+        script, "function safeCohortId", "function currentCohortDescriptor"
+    )
+    current_descriptor = _javascript_section(
+        script, "function currentCohortDescriptor", "function defaultBaselineCohortId"
     )
     comparison = _javascript_section(
         script, "function renderComparison", "function anomalyRow"
-    )
-    current_descriptor = _javascript_section(
-        script, "function currentCohortDescriptor", "function stablePointKey"
     )
 
     payload = _run_node_json(
         f"""
         function makeNode() {{
-          return {{
-            textContent: '', dataset: {{}}, children: [], value: '',
-            append(...children) {{ this.children.push(...children); }},
-          }};
-        }}
-        function makeSelect() {{
-          const select = makeNode();
-          select.replaceChildren = function replaceChildren() {{
-            this.children = [];
-            this.value = '';
-          }};
-          select.append = function append(option) {{
-            this.children.push(option);
-            if (this.children.length === 1) this.value = option.value;
-          }};
-          return select;
+          // `dataset` is a real element property; renderComparison writes the
+          // banner tone through it, so the stub must expose one.
+          return {{ textContent: '', children: [], dataset: {{}}, append(...children) {{ this.children.push(...children); }} }};
         }}
         const comparisonBody = makeNode();
         const comparisonBanner = makeNode();
         comparisonBanner.querySelector = () => comparisonBody;
-        const nodes = {{
-          versionFilter: makeSelect(),
-          characterFilter: makeSelect(),
-          validityFilter: makeSelect(),
-          currentCohort: makeSelect(),
-          baselineCohort: makeSelect(),
-          comparisonBanner,
-          comparisonTitle: makeNode(),
-        }};
+        const nodes = {{ comparisonBanner, comparisonTitle: makeNode() }};
         const byId = (id) => nodes[id];
-        const clear = (node) => {{
-          if (typeof node.replaceChildren === 'function') node.replaceChildren();
-          else node.children = [];
-        }};
+        const clear = (node) => {{ node.children = []; }};
         const element = (tag, options = {{}}) => {{
           const node = makeNode();
-          node.tag = tag;
           node.textContent = options.text === undefined ? '' : String(options.text);
-          node.value = options.attrs && options.attrs.value !== undefined
-            ? String(options.attrs.value)
-            : '';
           return node;
         }};
-        const formatTime = (value) => `time-${{value}}`;
-        const updateCohortHelp = () => {{}};
-        const defaultBaselineCohortId = () => '';
+        const appendList = (container, values) => container.append({{
+          values: [...values], textContent: values.join('|'),
+        }});
         const valid = {{
-          cohort_id: 'valid-cohort',
-          label: 'valid',
-          run_count: 2,
-          technical_count: 0,
-          latest_at: 2,
-          filters: {{ game_version: 'v1', character: 'Ironclad' }},
-          comparison_readiness: {{ ready: false }},
+          cohort_id: 'valid-cohort', label: 'valid', comparison_readiness: {{ ready: false }},
         }};
-        const missingId = {{
-          label: 'missing-id',
-          run_count: 1,
-          technical_count: 0,
-          filters: {{ game_version: 'v1', character: 'Ironclad' }},
-        }};
-        const whitespaceId = {{
-          cohort_id: '   ',
-          label: 'whitespace-id',
-          run_count: 1,
-          technical_count: 0,
-          filters: {{ game_version: 'v1', character: 'Ironclad' }},
-        }};
+        const missingId = {{ label: 'missing-id' }};
+        const whitespaceId = {{ cohort_id: '   ', label: 'whitespace-id' }};
         const throwingId = {{
-          get cohort_id() {{ throw new Error('bad cohort id getter'); }},
-          label: 'throwing-id',
-          run_count: 1,
-          technical_count: 0,
-          filters: {{ game_version: 'v1', character: 'Ironclad' }},
+          get cohort_id() {{ throw new Error('bad cohort id getter'); }}, label: 'throwing-id',
         }};
         const malformed = [null, 42, missingId, whitespaceId, throwingId];
-        const state = {{ cohorts: [...malformed, valid] }};
-        {filters}
-        {cohort_options}
+        const state = {{ cohorts: [...malformed, valid], selectedCohortId: 'valid-cohort' }};
+        {identity}
         {current_descriptor}
         {comparison}
 
-        nodes.versionFilter.value = 'v1';
-        nodes.characterFilter.value = 'Ironclad';
-        updateCohortOptions({{ chooseDefaults: true }});
-        const selection = {{
-          candidates: filteredCohorts().map((cohort) => cohort.cohort_id),
-          options: nodes.currentCohort.children.map((option) => option.value),
-          current: nodes.currentCohort.value,
-          descriptor: currentCohortDescriptor() === valid,
-        }};
+        const found = currentCohortDescriptor() === valid;
 
         renderComparison(null);
         const rendered = {{
@@ -2463,197 +2349,110 @@ def test_cohort_identity_guards_options_current_descriptor_and_comparison():
         const descriptorCases = [];
         for (const descriptor of malformed) {{
           state.cohorts = [descriptor];
-          nodes.currentCohort.value = 'valid-cohort';
           descriptorCases.push(currentCohortDescriptor() === null);
         }}
         state.cohorts = null;
         descriptorCases.push(currentCohortDescriptor() === null);
+        state.cohorts = [valid];
+        state.selectedCohortId = '   ';
+        descriptorCases.push(currentCohortDescriptor() === null);
 
-        console.log(JSON.stringify({{ selection, rendered, descriptorCases }}));
+        console.log(JSON.stringify({{ found, rendered, descriptorCases }}));
         """
     )
 
-    assert payload == {
-        "selection": {
-            "candidates": ["valid-cohort"],
-            "options": ["valid-cohort"],
-            "current": "valid-cohort",
-            "descriptor": True,
-        },
-        "rendered": {
-            "title": "元数据不完整",
-            "body": ["历史记录仍可查看，但不会用于训练提升比较。"],
-        },
-        "descriptorCases": [True, True, True, True, True, True],
+    assert payload["found"] is True
+    assert payload["rendered"] == {
+        "title": "元数据不完整",
+        "body": ["历史记录仍可查看，但不会用于训练提升比较。"],
     }
+    assert payload["descriptorCases"] == [True] * 7
 
 
-def test_character_and_validity_changes_choose_server_first_candidate():
+def test_hash_router_parses_root_batch_and_run_routes():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    filters = _javascript_section(
-        script, "function setSelectOptions", "function defaultBaselineCohortId"
-    )
-    cohort_options = _javascript_section(
-        script, "function updateCohortOptions", "function resetMetrics"
-    )
-    filter_changed = _javascript_section(
-        script, "function filterChanged", "function versionFilterChanged"
-    )
+    routing = _javascript_section(script, "function cohortRoute", "function navigate")
+
+    assert "function parseRoute" in routing
+    assert "function runRoute" in routing
 
     payload = _run_node_json(
         f"""
-        function makeSelect(value = '') {{
-          return {{
-            value,
-            children: [],
-            replaceChildren() {{ this.children = []; this.value = ''; }},
-            append(option) {{
-              this.children.push(option);
-              if (this.children.length === 1) this.value = option.value;
-            }},
-          }};
-        }}
-        const nodes = {{
-          versionFilter: makeSelect(),
-          characterFilter: makeSelect(),
-          validityFilter: makeSelect(),
-          currentCohort: makeSelect(),
-          baselineCohort: makeSelect(),
-        }};
-        const byId = (id) => nodes[id];
-        const clear = (node) => node.replaceChildren();
-        const element = (tag, options = {{}}) => ({{
-          tag,
-          textContent: options.text === undefined ? '' : String(options.text),
-          value: String(options.attrs.value),
-        }});
-        const formatTime = (value) => `time-${{value}}`;
-        const updateCohortHelp = () => {{}};
-        const defaultBaselineCohortId = () => '';
-        let refreshCount = 0;
-        const refreshMetrics = () => {{ refreshCount += 1; }};
-        const state = {{ cohorts: [
-          {{
-            cohort_id: 'server-first-iron',
-            label: 'server-first-iron',
-            run_count: 2,
-            technical_count: 0,
-            latest_at: 2,
-            filters: {{ game_version: 'v1', character: 'Ironclad' }},
-          }},
-          {{
-            cohort_id: 'server-second-necro',
-            label: 'server-second-necro',
-            run_count: 2,
-            technical_count: 2,
-            latest_at: 1,
-            filters: {{ game_version: 'v1', character: 'Necrobinder' }},
-          }},
-        ] }};
-        {filters}
-        {cohort_options}
-        {filter_changed}
-
-        nodes.versionFilter.value = 'v1';
-        nodes.characterFilter.value = 'Necrobinder';
-        filterChanged();
-        const narrowCharacter = nodes.currentCohort.value;
-
-        nodes.characterFilter.value = '';
-        filterChanged();
-        const wideCharacter = {{
-          current: nodes.currentCohort.value,
-          options: nodes.currentCohort.children.map((option) => option.value),
-        }};
-
-        nodes.currentCohort.value = 'server-first-iron';
-        nodes.validityFilter.value = 'technical';
-        filterChanged();
-        const narrowValidity = nodes.currentCohort.value;
-
-        nodes.validityFilter.value = '';
-        filterChanged();
-        const wideValidity = {{
-          current: nodes.currentCohort.value,
-          options: nodes.currentCohort.children.map((option) => option.value),
-        }};
-
+        {routing}
         console.log(JSON.stringify({{
-          narrowCharacter,
-          wideCharacter,
-          narrowValidity,
-          wideValidity,
-          refreshCount,
+          root: parseRoute(''),
+          rootSlash: parseRoute('#/'),
+          batch: parseRoute('#/batch/coh-1'),
+          runBySource: parseRoute('#/batch/coh-1/run/source:src%2F1'),
+          runById: parseRoute('#/batch/coh-1/run/run:r1'),
+          malformed: parseRoute('#/nonsense'),
+          roundTripBatch: cohortRoute('coh 1'),
+          roundTripRun: runRoute('coh-1', {{ kind: 'source', id: 'a/b' }}),
+          roundTripRunNoCohort: runRoute('', {{ kind: 'run', id: 'z' }}),
         }}));
         """
     )
 
-    assert payload == {
-        "narrowCharacter": "server-second-necro",
-        "wideCharacter": {
-            "current": "server-first-iron",
-            "options": ["server-first-iron", "server-second-necro"],
-        },
-        "narrowValidity": "server-second-necro",
-        "wideValidity": {
-            "current": "server-first-iron",
-            "options": ["server-first-iron", "server-second-necro"],
-        },
-        "refreshCount": 4,
+    assert payload["root"] == {"view": "root"}
+    assert payload["rootSlash"] == {"view": "root"}
+    assert payload["batch"] == {"view": "batch", "cohortId": "coh-1"}
+    assert payload["runBySource"] == {
+        "view": "run", "cohortId": "coh-1", "ref": {"kind": "source", "id": "src/1"},
     }
-    assert "updateCohortOptions({ chooseDefaults: true })" in filter_changed
+    assert payload["runById"] == {
+        "view": "run", "cohortId": "coh-1", "ref": {"kind": "run", "id": "r1"},
+    }
+    assert payload["malformed"] == {"view": "root"}
+    assert payload["roundTripBatch"] == "#/batch/coh%201"
+    assert payload["roundTripRun"] == "#/batch/coh-1/run/source:a%2Fb"
+    assert payload["roundTripRunNoCohort"] == "#/batch/-/run/run:z"
 
 
 def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     identity = _javascript_section(
-        script, "function safeCohortId", "function filterValuesFromCohorts"
+        script, "function safeCohortId", "function currentCohortDescriptor"
+    )
+    current_descriptor = _javascript_section(
+        script, "function currentCohortDescriptor", "function defaultBaselineCohortId"
     )
     comparison = _javascript_section(
         script, "function renderComparison", "function anomalyRow"
-    )
-    current_descriptor = _javascript_section(
-        script, "function currentCohortDescriptor", "function stablePointKey"
     )
 
     payload = _run_node_json(
         f"""
         function makeNode() {{
-          return {{
-            textContent: '', dataset: {{}}, children: [],
-            append(...children) {{ this.children.push(...children); }},
-          }};
+          // `dataset` is a real element property; renderComparison writes the
+          // banner tone through it, so the stub must expose one.
+          return {{ textContent: '', children: [], dataset: {{}}, append(...children) {{ this.children.push(...children); }} }};
         }}
         const body = makeNode();
         const banner = makeNode();
         banner.querySelector = () => body;
         const title = makeNode();
-        const currentSelect = {{ value: 'incomplete' }};
-        const nodes = {{
-          comparisonBanner: banner,
-          comparisonTitle: title,
-          currentCohort: currentSelect,
-        }};
+        const nodes = {{ comparisonBanner: banner, comparisonTitle: title }};
         const byId = (id) => nodes[id];
         const clear = (node) => {{ node.children = []; }};
-        const element = (tag, options = {{}}) => ({{
-          tag,
-          textContent: options.text === undefined ? '' : String(options.text),
-          dataset: {{}},
-          children: [],
-          append(...children) {{ this.children.push(...children); }},
-        }});
+        const element = (tag, options = {{}}) => {{
+          const node = makeNode();
+          node.textContent = options.text === undefined ? '' : String(options.text);
+          return node;
+        }};
         const appendList = (container, values) => container.append({{
-          tag: 'ul', values: [...values], textContent: values.join('|'),
+          values: [...values], textContent: values.join('|'),
         }});
         const formatMissing = String;
         function deltaText(value) {{
           return {{ text: String(value), direction: 'flat' }};
         }}
-        const state = {{ cohorts: [
-          {{ cohort_id: 'incomplete', comparison_readiness: {{ ready: false }} }},
-          {{ cohort_id: 'ready', comparison_readiness: {{ ready: true }} }},
-        ] }};
+        const state = {{
+          cohorts: [
+            {{ cohort_id: 'incomplete', comparison_readiness: {{ ready: false }} }},
+            {{ cohort_id: 'ready', comparison_readiness: {{ ready: true }} }},
+          ],
+          selectedCohortId: 'incomplete',
+        }};
         {identity}
         {current_descriptor}
         {comparison}
@@ -2663,7 +2462,7 @@ def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
           title: title.textContent,
           body: body.children.map((child) => child.textContent),
         }};
-        currentSelect.value = 'ready';
+        state.selectedCohortId = 'ready';
         renderComparison(null);
         const ready = {{
           title: title.textContent,
@@ -2699,19 +2498,37 @@ def test_render_comparison_null_distinguishes_incomplete_and_ready_current():
     }
 
 
-def test_current_default_uses_server_latest_order_instead_of_label_order():
+def test_root_route_selects_first_cohort_in_tree_order():
+    """#/ (default) auto-selects the first batch in the tree -- server
+    order, not any client-side re-derivation."""
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    selector = _javascript_section(
-        script, "function updateCohortOptions", "function resetMetrics"
+    helper = _javascript_section(script, "function firstCohortIdInTree", "function showBatchView")
+
+    assert "for (const version of tree)" in helper
+    assert ".sort(" not in helper
+
+    payload = _run_node_json(
+        f"""
+        {helper}
+        const withCohorts = [
+          {{ characters: [{{ cohorts: [] }}, {{ cohorts: [{{ cohort_id: 'first' }}, {{ cohort_id: 'second' }}] }}] }},
+          {{ characters: [{{ cohorts: [{{ cohort_id: 'third' }}] }}] }},
+        ];
+        const empty = [{{ characters: [{{ cohorts: [] }}] }}];
+        console.log(JSON.stringify({{
+          first: firstCohortIdInTree(withCohorts),
+          none: firstCohortIdInTree(empty),
+          malformed: firstCohortIdInTree(null),
+        }}));
+        """
     )
 
-    assert "entries[0].id" in selector
-    assert "candidates[candidates.length - 1].cohort_id" not in selector
+    assert payload == {"first": "first", "none": "", "malformed": ""}
 
 
 def test_funnel_is_an_accessible_inline_svg_with_explicit_denominators():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    funnel = _javascript_section(script, "function renderFunnel", "function appendList")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
+    funnel = _javascript_section(script, "function renderFunnel", "function deltaText")
 
     assert "svgElement('svg'" in funnel
     assert "role: 'img'" in funnel
@@ -2725,28 +2542,8 @@ def test_funnel_is_an_accessible_inline_svg_with_explicit_denominators():
     assert "Number.isFinite" in funnel
 
 
-def test_representative_recency_requires_a_finite_timestamp():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    representatives = _javascript_section(
-        script, "function representativeCandidates", "function renderRepresentatives"
-    )
-
-    assert "最近一局" not in representatives
-    assert "Number.isFinite(point.timestamp)" in representatives
-    assert "boundedTimestampedTrend(rawTrend).points" in representatives
-    assert "for (const point of trend)" in representatives
-    assert "stablePointKey(point)" in representatives
-    assert "point.timestamp > latestTimed.timestamp" in representatives
-    assert "趋势样本中最近" in representatives
-    assert "趋势样本中最远" in representatives
-    assert "趋势样本中最浅" in representatives
-    assert "趋势样本" in representatives
-    assert "[..." not in representatives
-    assert ".sort(" not in representatives
-
-
 def test_trend_rendering_is_bounded_timestamped_and_explains_sampling():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     bounding = _javascript_section(
         script, "function boundedTimestampedTrend", "function renderTrendProvenance"
     )
@@ -2768,160 +2565,161 @@ def test_trend_rendering_is_bounded_timestamped_and_explains_sampling():
     assert "较早" in trend and "较新" in trend
 
 
-def test_current_default_trusts_server_latest_order_without_inventing_time():
-    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    cohorts = _javascript_section(script, "function updateCohortOptions", "function resetMetrics")
+def test_new_static_assets_are_served_and_allowlisted(tmp_path: Path):
+    viewer_source = Path(viewer.__file__).read_text(encoding="utf-8")
+    new_files = ["util.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js"]
+    for name in new_files:
+        assert (
+            f'"/static/{name}": ("{name}", "text/javascript; charset=utf-8")'
+            in viewer_source
+        )
+        assert f"/static/{name}" not in viewer.QUERY_ALLOWED_ASSETS
 
-    assert "entries[0].id" in cohorts
-    assert "candidates[candidates.length - 1]" not in cohorts
-    assert "latest_at" in cohorts
-    assert "时间未知" in cohorts
-    assert "默认选择列表中最新的可用批次" not in html
+    with _server(tmp_path) as base:
+        for name in new_files:
+            status, content_type, body = _get(base, f"/static/{name}")
+            assert status == 200, name
+            assert content_type == "text/javascript; charset=utf-8"
+            assert body == (STATIC_DIR / name).read_bytes()
 
 
-def test_representatives_never_request_an_empty_run_id():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    candidates = _javascript_section(
-        script, "function representativeCandidates", "function renderRepresentatives"
+def test_runs_table_rows_without_map_capability_stay_clickable():
+    """has_map: false rows must still be clickable -- they route to the
+    run view same as any other row, just without a map to show there."""
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    status_labels = _javascript_section(util_script, "const STATUS_LABELS", "const CAPABILITY_LABELS")
+    element_fn = _javascript_section(util_script, "function element(tag", "function svgElement")
+    clear_fn = _javascript_section(util_script, "function clear(node)", "function setStatus")
+    render_empty_fn = _javascript_section(util_script, "function renderEmpty", "function setSelectOptions")
+    table_section = _javascript_section(script, "function missingCell", "async function render")
+
+    payload = _run_node_json(
+        f"""
+        {_FAKE_TABLE_DOM}
+        {status_labels}
+        {element_fn}
+        {clear_fn}
+        {render_empty_fn}
+        function formatTime(value) {{ return `T${{value}}`; }}
+        let sortKey = null;
+        let sortDir = 'desc';
+        {table_section}
+        const state = {{ selectedCohortId: 'c' }};
+        const navigateCalls = [];
+        function navigate(hash) {{ navigateCalls.push(hash); }}
+        function runRoute(cohortId, ref) {{ return `#/batch/${{cohortId}}/run/${{ref.kind}}:${{ref.id}}`; }}
+        const rows = [
+          {{
+            seed: 's', status: 'dead', global_floor: 5, act: 1, started_at: 1,
+            has_map: false, ref: {{ kind: 'source', id: 'no-map-1' }},
+          }},
+        ];
+        renderTable(rows);
+        const row = tableContainer.querySelectorAll('tr').slice(1)[0];
+        row.dispatchClick();
+        console.log(JSON.stringify({{
+          navigateCalls,
+          classHasNoMap: row.className.includes('runs-table-row-no-map'),
+        }}));
+        """
     )
-    rows = _javascript_section(script, "function renderRepresentatives", "function renderCatalog")
-    open_run = _javascript_section(script, "async function openRun", "async function refreshMetrics")
 
-    assert "source_id" in candidates and "run_id" in candidates
-    assert "seen.add(key)" in candidates
-    assert "new WeakMap" in candidates
-    assert "anonymousPointKeys" in candidates
-    assert "anonymousPointCounter" in candidates
-    assert "if (runId)" in rows
-    assert "不可定位" in rows
-    assert "openSource(sourceId, event.currentTarget)" in rows
-    assert "openRun(runId, event.currentTarget)" in rows
-    assert "if (!runId)" in open_run
-    assert "不代表全量对局极值" in rows
-    assert "trend_sampled_n" in rows
-    assert "trend_timestamped_n" in rows
+    assert payload["navigateCalls"] == ["#/batch/c/run/source:no-map-1"]
+    assert payload["classHasNoMap"] is True
 
 
-def test_open_run_uses_map_only_when_canonical_run_has_route_capability():
+def test_open_run_navigates_to_the_run_view_route_for_the_selected_cohort():
+    """openRun (used by trend points and the source-detail drawer's 查看地图
+    button) is now a thin router shim: it never fetches or touches
+    window.STS2Map itself -- run-view.js does that once the route lands."""
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
     assert "function runHasMapCapability" in script
-    capability = _javascript_section(
-        script, "function runHasMapCapability", "function renderCanonicalRun"
-    )
     canonical = _javascript_section(
         script, "function renderCanonicalRun", "function renderDetail"
     )
     open_run = _javascript_section(
-        script, "async function openRun", "async function refreshMetrics"
+        script, "function openRun(runId", "async function uploadSelectedFile"
     )
     assert "if (mapAvailable" in canonical
+    assert "openRun(run.run_id, event.currentTarget)" in canonical
+    assert "window.STS2Map" not in open_run
+    assert "getJSON" not in open_run
 
     payload = _run_node_json(
         f"""
-        (async () => {{
-          const calls = [];
-          const state = {{ detailAbortController: {{}} }};
-          const opener = {{ id: 'trend-point' }};
-          let response = null;
-          const window = {{
-            STS2Map: {{
-              openRun(runId, candidate) {{
-                calls.push({{ type: 'map', runId, opener: candidate && candidate.id }});
-              }},
-            }},
-          }};
-          function beginDetailRequest(candidate) {{
-            calls.push({{ type: 'begin', opener: candidate && candidate.id }});
-            return {{ token: 1, signal: {{}} }};
-          }}
-          function isCurrentDetailRequest(token) {{ return token === 1; }}
-          async function getJSON(path) {{
-            calls.push({{ type: 'fetch', path }});
-            return response;
-          }}
-          function renderDetail(value, title, candidate) {{
-            calls.push({{
-              type: 'detail', title, runId: value.run.run_id,
-              opener: candidate && candidate.id,
-            }});
-          }}
-          function setStatus(message, kind) {{ calls.push({{ type: 'status', message, kind }}); }}
-          {capability}
-          {open_run}
+        const calls = [];
+        const state = {{ selectedCohortId: 'cohort-1', detailOpener: null }};
+        function navigate(hash) {{ calls.push({{ type: 'navigate', hash }}); }}
+        function runRoute(cohortId, ref) {{ return `#/batch/${{cohortId}}/run/${{ref.kind}}:${{ref.id}}`; }}
+        function setStatus(message, kind) {{ calls.push({{ type: 'status', message, kind }}); }}
+        {open_run}
 
-          response = {{
-            view: 'run',
-            run: {{ run_id: 'deck-only', capabilities: {{ visited_route: false, full_map: false }} }},
-          }};
-          await openRun('deck-only', opener);
-          response = {{
-            view: 'run',
-            run: {{ run_id: 'native-route', capabilities: {{ visited_route: true, full_map: false }} }},
-          }};
-          await openRun('native-route', opener);
-          console.log(JSON.stringify(calls));
-        }})().catch((error) => {{ console.error(error); process.exit(1); }});
+        const opener = {{ isConnected: true, id: 'trend-point' }};
+        openRun('  run-42  ', opener);
+        openRun('');
+        console.log(JSON.stringify({{ calls, opener: state.detailOpener && state.detailOpener.id }}));
         """
     )
 
-    assert [call["type"] for call in payload].count("fetch") == 2
-    assert [call for call in payload if call["type"] == "detail"] == [
-        {
-            "type": "detail",
-            "title": "对局 deck-only",
-            "runId": "deck-only",
-            "opener": "trend-point",
-        }
-    ]
-    assert [call for call in payload if call["type"] == "map"] == [
-        {
-            "type": "map",
-            "runId": "native-route",
-            "opener": "trend-point",
-        }
-    ]
-    assert any(
-        call["type"] == "status" and call["message"] == "已载入对局摘要"
-        for call in payload
-    )
+    assert payload["calls"][0] == {"type": "navigate", "hash": "#/batch/cohort-1/run/run:run-42"}
+    assert payload["opener"] == "trend-point"
+    assert {"type": "status", "message": "无法打开对局：缺少对局 ID", "kind": "error"} in payload["calls"]
 
 
-def test_representative_candidates_dedupe_only_the_same_anonymous_point():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    bounding = _javascript_section(
-        script, "function boundedTimestampedTrend", "function renderTrendProvenance"
-    )
-    representatives = _javascript_section(
-        script, "function stablePointKey", "function renderRepresentatives"
-    )
-    probe = f"""
-const CLIENT_TREND_POINT_LIMIT = 256;
-{bounding}
-{representatives}
-const shared = {{ timestamp: 3, global_floor: 10, label: 'shared' }};
-const low = {{ timestamp: 1, global_floor: 1, label: 'low' }};
-const missing = {{ timestamp: 2, global_floor: null, label: 'missing' }};
-const repeated = representativeCandidates({{ current: {{ trend: [shared, shared, shared] }} }}, null);
-const distinct = representativeCandidates({{ current: {{ trend: [shared, low, missing] }} }}, null);
-if (repeated.length !== 1 || repeated[0].point !== shared) process.exit(11);
-if (distinct.length !== 3) process.exit(12);
-if (new Set(distinct.map((candidate) => candidate.point)).size !== 3) process.exit(13);
-"""
+def test_runs_table_sort_button_reflects_active_column_via_aria_sort():
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    status_labels = _javascript_section(util_script, "const STATUS_LABELS", "const CAPABILITY_LABELS")
+    element_fn = _javascript_section(util_script, "function element(tag", "function svgElement")
+    clear_fn = _javascript_section(util_script, "function clear(node)", "function setStatus")
+    render_empty_fn = _javascript_section(util_script, "function renderEmpty", "function setSelectOptions")
+    table_section = _javascript_section(script, "function missingCell", "async function render")
 
-    result = subprocess.run(
-        ["node", "-e", probe], capture_output=True, text=True, check=False
+    payload = _run_node_json(
+        f"""
+        {_FAKE_TABLE_DOM}
+        {status_labels}
+        {element_fn}
+        {clear_fn}
+        {render_empty_fn}
+        function formatTime(value) {{ return `T${{value}}`; }}
+        let sortKey = null;
+        let sortDir = 'desc';
+        {table_section}
+        const rows = [
+          {{ seed: 'a', status: 'win', global_floor: 5, act: 1, started_at: 1, ref: {{ kind: 'run', id: 'r1' }} }},
+        ];
+
+        renderTable(rows);
+        const buttonsBefore = tableContainer.querySelectorAll('button').map((b) => b.getAttribute('aria-sort'));
+
+        sortKey = 'global_floor';
+        sortDir = 'asc';
+        renderTable(rows);
+        const floorButton = tableContainer.querySelectorAll('button')[1];
+
+        console.log(JSON.stringify({{
+          buttonsBefore,
+          floorAriaSort: floorButton.getAttribute('aria-sort'),
+        }}));
+        """
     )
 
-    assert result.returncode == 0, result.stderr
+    assert payload["buttonsBefore"] == ["none", "none"]
+    assert payload["floorAriaSort"] == "ascending"
 
 
 def test_detail_requests_are_latest_only_and_drawer_restores_focus():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    requests = _javascript_section(script, "function beginDetailRequest", "async function refreshMetrics")
+    # refreshMetrics moved to cohort-view.js; the drawer block in app.js now
+    # ends at the upload handler.
+    requests = _javascript_section(
+        script, "function beginDetailRequest", "async function uploadSelectedFile"
+    )
 
     assert 'role="dialog"' in html
     assert 'aria-modal="true"' in html
@@ -2953,13 +2751,14 @@ def test_detail_requests_are_latest_only_and_drawer_restores_focus():
 
 def test_metrics_refresh_captures_focus_before_busy_and_restores_after_enable():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    cohort_script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     assert "function isFocusable" in script
-    assert "function restoreMetricsFocus" in script
+    assert "function restoreMetricsFocus" in cohort_script
     refresh = _javascript_section(
-        script, "async function refreshMetrics", "async function uploadSelectedFile"
+        cohort_script, "async function refreshMetrics", "let lastRenderedCohortId"
     )
     focus_helper = _javascript_section(
-        script, "function isFocusable", "function handleDetailKeydown"
+        script, "function isFocusable", "function closeDetail"
     )
 
     assert "const focusOpener = document.activeElement" in refresh
@@ -2968,8 +2767,11 @@ def test_metrics_refresh_captures_focus_before_busy_and_restores_after_enable():
     )
     assert "finally" in refresh
     assert refresh.index("setBusy(false)") < refresh.index("restoreMetricsFocus(")
-    assert "byId('currentCohort').value === current" in script
-    assert "byId('baselineCohort').value === baseline" in script
+    # There is no longer a currentCohort select to compare against; the
+    # selected cohort id is the single source of truth for "is this still the
+    # request the user is looking at", and it guards both the focus
+    # restoration and every render inside refreshMetrics.
+    assert "state.selectedCohortId !== cohortId" in cohort_script
     assert "candidate.isConnected" in focus_helper
     assert "typeof candidate.focus" in focus_helper and "'function'" in focus_helper
     assert "closest('[hidden], [inert], [aria-hidden=\"true\"]')" in focus_helper
@@ -2979,16 +2781,17 @@ def test_metrics_refresh_captures_focus_before_busy_and_restores_after_enable():
 
 def test_metrics_refresh_focus_restoration_is_safe_latest_context_only():
     script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    cohort_script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
     assert "function isFocusable" in script
-    assert "function restoreMetricsFocus" in script
+    assert "function restoreMetricsFocus" in cohort_script
     focus_helper = _javascript_section(
-        script, "function isFocusable", "function handleDetailKeydown"
+        script, "function isFocusable", "function closeDetail"
     )
     restore_helper = _javascript_section(
-        script, "function restoreMetricsFocus", "async function refreshMetrics"
+        cohort_script, "function restoreMetricsFocus", "async function refreshMetrics"
     )
     refresh = _javascript_section(
-        script, "async function refreshMetrics", "async function uploadSelectedFile"
+        cohort_script, "async function refreshMetrics", "let lastRenderedCohortId"
     )
 
     payload = _run_node_json(
@@ -3019,22 +2822,25 @@ def test_metrics_refresh_focus_restoration_is_safe_latest_context_only():
           }}
           document.body = makeElement('body');
           document.documentElement = makeElement('html');
-          const currentSelect = makeElement('currentCohort');
+          // The current-cohort dropdown is gone: the left tree selects the
+          // batch and state.selectedCohortId is the identity. reloadButton
+          // stands in as the second busy-toggled control.
+          const reloadButton = makeElement('reloadButton');
           const baselineSelect = makeElement('baselineCohort');
           const elsewhere = makeElement('elsewhere');
           const nodes = {{
-            currentCohort: currentSelect,
+            reloadButton,
             baselineCohort: baselineSelect,
           }};
           const byId = (id) => nodes[id];
-          const controls = [currentSelect, baselineSelect];
+          const controls = [reloadButton, baselineSelect];
           function setBusy(isBusy) {{
             controls.forEach((control) => {{ control.disabled = isBusy; }});
             if (isBusy && controls.includes(document.activeElement)) {{
               document.activeElement = document.body;
             }}
           }}
-          const state = {{ cohorts: [{{}}], currentMetrics: null }};
+          const state = {{ cohorts: [{{}}], currentMetrics: null, selectedCohortId: null }};
           let status = '';
           const setStatus = (message) => {{ status = message; }};
           const resetMetrics = () => {{}};
@@ -3051,44 +2857,46 @@ def test_metrics_refresh_focus_restoration_is_safe_latest_context_only():
           {restore_helper}
           {refresh}
 
-          currentSelect.value = 'current-a';
+          state.selectedCohortId = 'current-a';
           baselineSelect.value = 'baseline-a';
-          document.activeElement = currentSelect;
-          await refreshMetrics();
-          const currentRestored = document.activeElement === currentSelect;
+          document.activeElement = reloadButton;
+          await refreshMetrics('current-a');
+          const currentRestored = document.activeElement === reloadButton;
 
           document.activeElement = baselineSelect;
-          await refreshMetrics();
+          await refreshMetrics('current-a');
           const baselineRestored = document.activeElement === baselineSelect;
 
-          const currentFocusBeforeElsewhere = currentSelect.focusCalls;
+          const currentFocusBeforeElsewhere = reloadButton.focusCalls;
           const baselineFocusBeforeElsewhere = baselineSelect.focusCalls;
           document.activeElement = elsewhere;
-          await refreshMetrics();
+          await refreshMetrics('current-a');
           const elsewherePreserved = document.activeElement === elsewhere
-            && currentSelect.focusCalls === currentFocusBeforeElsewhere
+            && reloadButton.focusCalls === currentFocusBeforeElsewhere
             && baselineSelect.focusCalls === baselineFocusBeforeElsewhere;
 
           document.activeElement = baselineSelect;
           getJSONImpl = async () => {{ throw new Error('metrics failed'); }};
-          await refreshMetrics();
+          await refreshMetrics('current-a');
           const errorRestored = document.activeElement === baselineSelect
             && status === '训练指标读取失败：metrics failed';
 
+          // The user picks a different batch in the tree while the request is
+          // in flight: the stale response must neither render nor steal focus.
           let resolveStale;
           getJSONImpl = () => new Promise((resolve) => {{ resolveStale = resolve; }});
-          document.activeElement = currentSelect;
-          const staleRequest = refreshMetrics();
-          currentSelect.value = 'current-b';
+          document.activeElement = reloadButton;
+          const staleRequest = refreshMetrics('current-a');
+          state.selectedCohortId = 'current-b';
           resolveStale(metrics);
           await staleRequest;
           const staleSelectionDidNotRestore = document.activeElement === document.body;
 
-          currentSelect.value = 'current-b';
+          state.selectedCohortId = 'current-b';
           let resolveMoved;
           getJSONImpl = () => new Promise((resolve) => {{ resolveMoved = resolve; }});
-          document.activeElement = currentSelect;
-          const movedRequest = refreshMetrics();
+          document.activeElement = reloadButton;
+          const movedRequest = refreshMetrics('current-b');
           document.activeElement = elsewhere;
           resolveMoved(metrics);
           await movedRequest;
@@ -3144,11 +2952,19 @@ def test_upload_size_guard_precedes_read_and_has_server_margin():
     viewer_source = Path(viewer.__file__).read_text(encoding="utf-8")
     upload = _javascript_section(script, "async function uploadSelectedFile", "async function bootstrap")
 
-    assert viewer.PARSE_BODY_MAX_BYTES == 10 * 1024 * 1024
+    # A full-run replay is the artifact this control exists to open, and one
+    # real Act 3 clear measures ~13.4 MiB — so a 1 MiB cap rejected exactly the
+    # runs worth inspecting. Raised to 32 MiB (~2.4x the largest real replay).
+    assert viewer.PARSE_BODY_MAX_BYTES == 128 * 1024 * 1024
     assert "length > PARSE_BODY_MAX_BYTES" in viewer_source
-    assert "const SERVER_PARSE_BODY_MAX_BYTES = 10 * 1024 * 1024" in script
-    assert "const FILE_UPLOAD_MAX_BYTES = 1 * 1024 * 1024" in script
-    assert 1 * 1024 * 1024 * 6 + 64 * 1024 < viewer.PARSE_BODY_MAX_BYTES
+    assert "const SERVER_PARSE_BODY_MAX_BYTES = 128 * 1024 * 1024" in script
+    assert "const FILE_UPLOAD_MAX_BYTES = 32 * 1024 * 1024" in script
+    # Envelope margin. The old bound assumed 6x JSON expansion, which came from
+    # Python's json.dumps(ensure_ascii=True) escaping non-ASCII as \uXXXX. The
+    # browser does NOT do that -- JSON.stringify emits UTF-8 raw and escapes
+    # only quote/backslash/control chars. Measured on two real replays the POST
+    # body is 1.125x the file. 3x is kept as a pathological-input guard.
+    assert 32 * 1024 * 1024 * 3 + 64 * 1024 < viewer.PARSE_BODY_MAX_BYTES
     guard_index = upload.index("file.size > FILE_UPLOAD_MAX_BYTES")
     read_index = upload.index("await file.text()")
     stringify_index = upload.index("JSON.stringify")
@@ -3159,8 +2975,10 @@ def test_upload_size_guard_precedes_read_and_has_server_margin():
 
 
 def test_catalog_anomalies_are_grouped_and_bounded():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    anomalies = _javascript_section(script, "function renderAnomalies", "function currentCohortDescriptor")
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
+    anomalies = _javascript_section(
+        script, "function renderAnomalies", "function restoreMetricsFocus"
+    )
 
     assert "SOURCE_ERROR_EXAMPLE_LIMIT" in script
     assert "error_count" in anomalies
@@ -3198,7 +3016,16 @@ def test_large_source_summary_has_an_honest_detail_view():
 
 
 def test_app_does_not_reparse_sources_or_inject_untrusted_html():
-    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    # The injection and re-parsing bans apply to every view module, not just
+    # app.js -- splitting the bundle must not open a hole in one of the parts.
+    modules = {
+        name: (STATIC_DIR / name).read_text(encoding="utf-8")
+        for name in (
+            "util.js", "app.js", "tree.js",
+            "cohort-view.js", "runs-table.js", "run-view.js",
+        )
+    }
+    script = "".join(modules.values())
     lowered = script.lower()
 
     assert ".innerhtml" not in lowered
@@ -3210,6 +3037,218 @@ def test_app_does_not_reparse_sources_or_inject_untrusted_html():
     assert "splitlines" not in lowered
     assert "split('\\n')" not in script
     assert 'split("\\n")' not in script
-    assert "source_kind" in script
-    assert "JSON.parse" in script  # HTTP responses only; source text is posted untouched.
-    assert "file.text()" in script
+    assert "source_kind" in modules["app.js"]
+    # HTTP responses only; source text is posted untouched.
+    assert "JSON.parse" in modules["util.js"]
+    assert "file.text()" in modules["app.js"]
+
+
+def test_baseline_menu_offers_only_server_comparable_batches():
+    """The baseline picker is populated from the server's comparison
+    signature, never from a client-side axis comparison. A batch the server
+    has not declared comparable must not be offerable as a baseline, because
+    the resulting delta would be meaningless."""
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
+    candidates = _javascript_section(
+        script, "function baselineCandidates", "function updateBaselineHelp"
+    )
+
+    # Comparability is read from the server descriptor only.
+    assert "comparison_signature" in candidates
+    for axis in ("evaluation_mode", "ascension", "scenario", "game_version"):
+        assert axis not in candidates, f"client-side axis logic leaked in: {axis}"
+
+    payload = _run_node_json(
+        f"""
+        function safeCohortId(cohort) {{
+          return cohort && typeof cohort.cohort_id === 'string' ? cohort.cohort_id.trim() : '';
+        }}
+        const ready = (signature) => ({{ comparison_signature: signature }});
+        const state = {{ cohorts: [
+          {{ cohort_id: 'cur', comparison_readiness: ready('sig-a') }},
+          {{ cohort_id: 'same', comparison_readiness: ready('sig-a') }},
+          {{ cohort_id: 'other', comparison_readiness: ready('sig-b') }},
+          {{ cohort_id: 'unready', comparison_readiness: ready(null) }},
+          {{ cohort_id: 'malformed', comparison_readiness: null }},
+        ] }};
+        {candidates}
+
+        const current = state.cohorts[0];
+        const comparable = baselineCandidates(current).map(safeCohortId);
+        // A batch the server could not sign is comparable to nothing at all,
+        // including other unsigned batches.
+        const fromUnready = baselineCandidates(state.cohorts[3]).map(safeCohortId);
+        const fromMalformed = baselineCandidates(state.cohorts[4]).map(safeCohortId);
+        const fromGarbage = baselineCandidates(null).map(safeCohortId);
+        console.log(JSON.stringify({{ comparable, fromUnready, fromMalformed, fromGarbage }}));
+        """
+    )
+
+    assert payload["comparable"] == ["same"], "only a matching signature is offerable"
+    assert payload["fromUnready"] == []
+    assert payload["fromMalformed"] == []
+    assert payload["fromGarbage"] == []
+
+
+def test_baseline_help_explains_why_no_baseline_is_offerable():
+    """With an empty picker the user must still learn why -- an empty menu
+    with no explanation is how the old dashboard hid incomplete metadata."""
+    script = (STATIC_DIR / "cohort-view.js").read_text(encoding="utf-8")
+    help_section = _javascript_section(
+        script, "function updateBaselineHelp", "function renderBaselineSelect"
+    )
+
+    assert "元数据不完整，仅展示本批次" in help_section
+    assert "当前批次可查看，但暂无可直接比较的基线" in help_section
+    assert "missing_axes" in help_section
+    assert "mixed_axes" in help_section
+    assert "invalid_axes" in help_section
+
+
+def test_view_modules_never_shadow_a_shared_util_helper():
+    """util.js's helpers are plain globals, so a same-named function declared
+    inside a view module's IIFE silently shadows the shared one for that whole
+    module.
+
+    This is not hypothetical: cohort-view.js once declared a zero-argument
+    renderEmpty() for "no batch selected", which captured every
+    renderEmpty(container, message) call meant for util.js. Because the real
+    logs carry no timestamps, the trend chart always took its empty-state
+    branch, so selecting any batch wiped the batch view a moment after it
+    rendered -- and every static assertion still passed.
+    """
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    shared = set(re.findall(r"^function (\w+)", util_script, re.MULTILINE))
+    shared |= set(re.findall(r"^const ([A-Z][A-Z0-9_]*)\s*=", util_script, re.MULTILINE))
+    assert "renderEmpty" in shared, "guard is only meaningful if util.js still exports it"
+
+    offenders = []
+    for name in ("app.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js"):
+        script = (STATIC_DIR / name).read_text(encoding="utf-8")
+        declared = set(re.findall(r"^\s+function (\w+)", script, re.MULTILINE))
+        declared |= set(re.findall(r"^\s+(?:const|let|var) (\w+)\s*=", script, re.MULTILINE))
+        for clash in sorted(declared & shared):
+            offenders.append(f"{name} shadows util.js helper '{clash}'")
+
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_leaving_a_run_route_closes_the_map_page_through_the_map_namespace():
+    """showMapPage() hides #workbenchBody wholesale, so the router must call
+    the matching close when it leaves a run route.
+
+    showDashboardPage is declared inside map.js's IIFE and is therefore NOT a
+    global. A bare `typeof showDashboardPage === 'function'` guard in app.js
+    is always false, which left the map page covering the batch view and the
+    tree collapsed after pressing 返回.
+    """
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    map_script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+
+    # Reachable: exported on the namespace rather than assumed global.
+    assert "showDashboardPage," in map_script or "showDashboardPage:" in map_script
+    assert "window.STS2Map.showDashboardPage" in app_script
+    assert "typeof showDashboardPage === 'function'" not in app_script
+
+    # Called from the router, before it dispatches to any view.
+    route_fn = _javascript_section(
+        app_script, "async function applyRoute", "window.addEventListener('popstate'"
+    )
+    assert "showDashboardPage()" in route_fn
+    assert route_fn.index("showDashboardPage()") < route_fn.index("route.view === 'root'")
+
+
+def test_bootstrap_waits_for_every_deferred_view_module():
+    """app.js is deferred and evaluated BEFORE tree.js / cohort-view.js /
+    runs-table.js / run-view.js / map.js, so calling bootstrap() at the bottom
+    of app.js races those namespaces into existence and only wins because it
+    awaits the network first. DOMContentLoaded fires after every deferred
+    script has run."""
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    assert "document.addEventListener('DOMContentLoaded', bootstrap)" in app_script
+    assert not re.search(r"^bootstrap\(\);", app_script, re.MULTILINE), (
+        "bootstrap must not be invoked at app.js top level"
+    )
+
+    # The race only exists because app.js is ordered before the modules it
+    # calls into; assert that ordering so this test keeps its meaning.
+    order = re.findall(r'<script src="/static/([\w.-]+)"', html)
+    assert order.index("app.js") < order.index("tree.js")
+    assert order.index("app.js") < order.index("map.js")
+    for module in ("util.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js", "map.js"):
+        assert module in order, module
+
+
+def test_skip_link_jumps_without_hijacking_the_hash_router():
+    """The skip link's href is a fragment, but this app's router owns
+    location.hash. Letting the anchor navigate writes '#contentPane', which
+    parseRoute cannot match, so it degrades to the root route and bounces the
+    user to the first batch instead of jumping to the content they were
+    already reading."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+
+    assert 'class="skip-link" href="#contentPane"' in html
+    handler = _javascript_section(
+        app_script, "const skipLink", "document.addEventListener('DOMContentLoaded'"
+    )
+    assert "preventDefault()" in handler
+    assert "byId('contentPane')" in handler and ".focus()" in handler
+
+    # Router-driven focus must not paint a ring; the skip link's own jump must.
+    assert ".content-pane:focus" in css
+    assert ".content-pane.skip-focus:focus" in css
+    assert "skip-focus" in handler
+
+
+def test_combat_replay_renders_card_names_targets_and_effects():
+    """The node panel's fight view must read as play, not as raw protocol.
+
+    The recorded action carries `label` ("play_card card_index=3"), which is
+    unreadable on its own, plus `card`, `target` and `effects` that make it
+    legible. Boss names arrive with unresolved template vars
+    ("Test Subject #C{Count}") and must be stripped, not shown raw.
+    """
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    section = _javascript_section(script, "function stripTemplate", "function roundSummaryText")
+    result = _run_node_json(
+        f"""
+        {section}
+        const played = {{
+          label: 'play_card card_index=3 target_index=0',
+          card: {{ name: 'Maul', cost: 1 }},
+          target: {{ name: 'Test Subject #C{{Count}}' }},
+          effects: {{ enemy_hp: [{{ name: 'Test Subject #C{{Count}}', delta: -22 }}] }},
+        }};
+        const ended = {{
+          label: 'end_turn',
+          effects: {{
+            hp: {{ delta: -15 }}, block: {{ delta: 2 }},
+            enemy_hp: [{{ name: 'Test Subject #C{{Count}}', delta: -19 }}],
+          }},
+        }};
+        const untargeted = {{ label: 'play_card card_index=1', card: {{ name: 'Defragment', cost: 1 }} }};
+        const unknown = {{ label: 'select_cards indices=2' }};
+        const zeroDelta = {{ label: 'end_turn', effects: {{ hp: {{ delta: 0 }} }} }};
+        console.log(JSON.stringify({{
+          played: actionText(played),
+          ended: actionText(ended),
+          untargeted: actionText(untargeted),
+          unknown: actionText(unknown),
+          zeroDelta: actionText(zeroDelta),
+          stripped: stripTemplate('Test Subject #C{{Count}}'),
+        }}));
+        """
+    )
+    assert result["played"] == "打出 Maul(1) → Test Subject  ⇒ Test Subject -22"
+    assert result["ended"] == "结束回合  ⇒ Test Subject -19，自身生命 -15，格挡 +2"
+    # No target recorded -> no arrow, and no effects -> no trailing clause.
+    assert result["untargeted"] == "打出 Defragment(1)"
+    # Unrecognised verbs keep the exact recorded label rather than inventing one.
+    assert result["unknown"] == "select_cards indices=2"
+    # A zero delta is not an effect; it must not render an empty "⇒".
+    assert result["zeroDelta"] == "结束回合"
+    assert result["stripped"] == "Test Subject"

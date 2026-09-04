@@ -265,26 +265,44 @@ def _adapt_replay(
     starts = [_first_number(row, "ts") for row in records]
     timestamps = [value for value in starts if value is not None]
     start_action = _replay_start_action(records)
+    # The run_meta header is the only place experiment/checkpoint/scenario
+    # exist: the start_run action describes the *game*, and knows nothing about
+    # the eval harness that launched it. Consulted last so the parser summary
+    # and start action keep their existing precedence.
+    run_meta = _replay_run_meta(records)
     ascension = _replay_ascension(summary, "ascension")
     if ascension is None:
         ascension = _replay_ascension(start_action, "ascension")
+    if ascension is None:
+        ascension = _replay_ascension(run_meta, "ascension")
     modifiers = _replay_modifiers(summary)
     if modifiers is None:
         modifiers = _replay_modifiers(start_action)
     metadata = RunMetadata(
         character=_replay_text(summary, "character")
-        or _replay_text(start_action, "character"),
+        or _replay_text(start_action, "character")
+        or _replay_text(run_meta, "character"),
         seed=_replay_text(summary, "seed")
-        or _replay_text(start_action, "seed"),
+        or _replay_text(start_action, "seed")
+        or _replay_text(run_meta, "seed"),
         game_version=_replay_text(summary, "game_version", "build_id")
-        or _replay_text(start_action, "game_version", "build_id"),
-        game_version_source=_metadata_version_source(summary, start_action),
+        or _replay_text(start_action, "game_version", "build_id")
+        or _replay_text(run_meta, "game_version", "build_id"),
+        game_version_source=_metadata_version_source(
+            summary, start_action, run_meta
+        ),
         checkpoint=_first_text(summary, "checkpoint")
-        or _first_text(start_action, "checkpoint"),
+        or _first_text(start_action, "checkpoint")
+        or _first_text(run_meta, "checkpoint"),
+        experiment=_first_text(summary, "experiment")
+        or _first_text(start_action, "experiment")
+        or _first_text(run_meta, "experiment"),
         evaluation_mode=_first_text(summary, "evaluation_mode")
-        or _first_text(start_action, "evaluation_mode"),
+        or _first_text(start_action, "evaluation_mode")
+        or _first_text(run_meta, "evaluation_mode"),
         scenario=_first_text(summary, "scenario")
-        or _first_text(start_action, "scenario"),
+        or _first_text(start_action, "scenario")
+        or _first_text(run_meta, "scenario"),
         ascension=ascension,
         modifiers=modifiers or (),
         started_at=min(timestamps) if timestamps else None,
@@ -757,6 +775,18 @@ def _replay_start_action(records: list[dict[str, Any]]) -> dict[str, Any]:
         data = row["data"]
         if _first_text(data, "cmd", "decision") == "start_run":
             return data
+    return {}
+
+
+def _replay_run_meta(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """The run_meta header eval_rl.py writes as the first line of a game log.
+
+    Its fields sit at the top level of the record, not under ``data`` the way
+    action rows nest theirs.
+    """
+    for row in records:
+        if row.get("type") == "run_meta":
+            return row
     return {}
 
 

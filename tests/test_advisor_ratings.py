@@ -1,34 +1,243 @@
-from agent.build_advisor_ratings import parse_cards
+from agent.build_advisor_ratings import build_card_db, parse_cards
 
-SAMPLE_HTML = '''
-<script>
-const ANCHOR_BY_BUILD = {"build A": [
-{"id": "CARD.PHANTOM_BLADES", "title": "x", "character": "SILENT", "type": "Power",
- "cost": 1, "rarity": "Uncommon", "tier": "B", "axes": ["SCALING", "SHIV"],
- "anchor_score": 9.7, "signals": {"S1_multiplier": 3.0}},
-{"id": "CARD.AGGRESSION", "character": "IRONCLAD", "type": "Power", "cost": 1,
- "rarity": "Rare", "tier": "B", "axes": ["SCALING", "RANDOM"], "anchor_score": 8.0},
-{"id": "CARD.PHANTOM_BLADES", "character": "SILENT", "tier": "B", "axes": ["SCALING", "SHIV"],
- "anchor_score": 9.7}
-]};
-</script>
-'''
+
+def _row(**attrs) -> str:
+    """Build a single `<tr class="card-row" ...>` fixture row.
+
+    Every real row carries the same fixed set of data-* attributes,
+    so give every fixture row sane defaults and let callers override.
+    """
+    defaults = dict(
+        card_id="CARD.PHANTOM_BLADES",
+        card_name="팬텀 블레이드",
+        card_axes="SCALING,SHIV",
+        card_tier="B",
+        card_cost="1",
+        star_cost="0",
+        card_ev="9.7",
+        card_tags="",
+        card_desc="desc line 1\ndesc line 2",
+        upg_desc="upgraded desc",
+        upg_cost="1",
+        upg_axes="SCALING,SHIV,UPGRADED",
+        card_damage="-1",
+        card_block="-1",
+        card_vars="",
+        upg_damage="-1",
+        upg_block="-1",
+        upg_vars="",
+        card_type="Power",
+        card_rarity="Uncommon",
+        card_versions="v0.103.2,v0.103.3",
+        anchor_tier="2",
+        anchor_score="9.7",
+        anchor_axis="SHIV",
+        sim_best_scenario="",
+        owner_char="사일런트",
+        origin_char="사일런트",
+    )
+    defaults.update(attrs)
+    attr_str = " ".join(f'data-{k.replace("_", "-")}="{v}"' for k, v in defaults.items())
+    return (
+        f'<tr class="card-row" {attr_str}>'
+        f'<td>row body, never parsed</td></tr>'
+    )
 
 
 def test_parse_cards_extracts_and_dedupes():
-    cards = parse_cards(SAMPLE_HTML)
+    # base row wins over a same-id "+"-suffixed (upgraded) row, regardless
+    # of document order.
+    html = (
+        _row(card_id="CARD.PHANTOM_BLADES", card_name="팬텀 블레이드+", card_tier="A")
+        + _row(card_id="CARD.PHANTOM_BLADES", card_name="팬텀 블레이드", card_tier="B")
+        + _row(card_id="CARD.AGGRESSION", card_name="어그레션", card_tier="B",
+               owner_char="아이언클래드", origin_char="아이언클래드",
+               card_axes="SCALING,RANDOM", anchor_score="8.0")
+    )
+    cards = parse_cards(html)
     # normalized keys (CARD. stripped, upper-cased), deduped by id
     assert set(cards) == {"PHANTOM_BLADES", "AGGRESSION"}
     pb = cards["PHANTOM_BLADES"]
-    assert pb["tier"] == "B"
+    assert pb["tier"] == "B"  # base row wins, not the "+" row seen first
     assert pb["axes"] == ["SCALING", "SHIV"]
     assert pb["character"] == "SILENT"
     assert pb["anchor_score"] == 9.7
 
 
+def test_parse_cards_keeps_upg_row_when_no_base_row_exists():
+    html = _row(card_id="CARD.SOLO_UPG", card_name="솔로+", card_tier="A")
+    cards = parse_cards(html)
+    assert "SOLO_UPG" in cards
+    assert cards["SOLO_UPG"]["tier"] == "A"
+
+
 def test_parse_cards_skips_blank_tier():
-    html = '<script>x = {"id": "CARD.FOO", "tier": "", "axes": []};</script>'
+    html = _row(card_tier="")
     assert parse_cards(html) == {}
+
+
+def test_parse_cards_filters_hangul_axes():
+    html = _row(card_axes="SCALING,강화 가치,SHIV")
+    cards = parse_cards(html)
+    assert cards["PHANTOM_BLADES"]["axes"] == ["SCALING", "SHIV"]
+
+
+def test_parse_cards_maps_korean_character_names():
+    cases = [
+        ("아이언클래드", "IRONCLAD"),
+        ("사일런트", "SILENT"),
+        ("디펙트", "DEFECT"),
+        ("네크로바인더", "NECROBINDER"),
+        ("리젠트", "REGENT"),
+        ("공용", "SHARED"),
+    ]
+    for kr, en in cases:
+        html = _row(card_id=f"CARD.T_{en}", owner_char=kr, origin_char=kr)
+        cards = parse_cards(html)
+        assert cards[f"T_{en}"]["character"] == en
+
+
+def test_parse_cards_uses_origin_not_owner_char():
+    # Shared cards are rendered once per character *context*: six identical
+    # rows whose data-owner-char names the context. Only data-origin-char
+    # says the card is shared, so the character must come from origin —
+    # otherwise a shared card is filed under whichever context sorted first.
+    html = "".join(
+        _row(card_id="CARD.SHARED_ONE", owner_char=kr, origin_char="공용")
+        for kr in ("사일런트", "아이언클래드", "리젠트")
+    )
+    cards = parse_cards(html)
+    assert cards["SHARED_ONE"]["character"] == "SHARED"
+
+
+def test_parse_cards_drops_unknown_origin_char():
+    # the advisor page occasionally leaves an unresolved template literal
+    # in the character attributes; such rows must be dropped, not given a
+    # bogus character.
+    html = _row(origin_char="${CSS.escape(char)}")
+    assert parse_cards(html) == {}
+
+
+def test_parse_cards_na_damage_block_become_none():
+    html = _row(card_damage="-1", card_block="-1")
+    cards = parse_cards(html)
+    assert cards["PHANTOM_BLADES"]["damage"] is None
+    assert cards["PHANTOM_BLADES"]["block"] is None
+
+
+def test_parse_cards_damage_block_present():
+    html = _row(card_damage="5", card_block="8")
+    cards = parse_cards(html)
+    assert cards["PHANTOM_BLADES"]["damage"] == 5
+    assert cards["PHANTOM_BLADES"]["block"] == 8
+
+
+def test_parse_cards_parses_vars():
+    html = _row(card_vars="Cards:1,Damage:5")
+    cards = parse_cards(html)
+    assert cards["PHANTOM_BLADES"]["vars"] == {"Cards": 1, "Damage": 5}
+
+
+def test_parse_cards_empty_vars_is_empty_dict():
+    html = _row(card_vars="")
+    cards = parse_cards(html)
+    assert cards["PHANTOM_BLADES"]["vars"] == {}
+
+
+def test_parse_cards_extra_fields():
+    html = _row(card_ev="14.4", card_cost="2", card_type="Skill", card_rarity="Rare",
+                card_versions="v0.103.2,v0.103.3,v0.107.1")
+    cards = parse_cards(html)
+    card = cards["PHANTOM_BLADES"]
+    assert card["ev"] == 14.4
+    assert card["cost"] == 2
+    assert card["type"] == "Skill"
+    assert card["rarity"] == "Rare"
+    assert card["versions"] == ["v0.103.2", "v0.103.3", "v0.107.1"]
+
+
+def test_parse_cards_unparseable_cost_is_none():
+    html = _row(card_cost="X")  # the advisor uses "X" for variable-cost cards
+    cards = parse_cards(html)
+    assert cards["PHANTOM_BLADES"]["cost"] is None
+
+
+# --- build_card_db (data/card_db_advisor.json) ----------------------------
+
+def test_build_card_db_has_full_field_set():
+    html = _row(card_id="CARD.PHANTOM_BLADES", card_axes="SCALING,SHIV",
+                upg_axes="SCALING,SHIV,UPGRADED", card_cost="1", upg_cost="0",
+                card_damage="-1", upg_damage="8", card_block="-1", upg_block="-1")
+    db = build_card_db(html)
+    card = db["PHANTOM_BLADES"]
+    assert set(card) == {
+        "cost", "type", "rarity", "tier", "ev", "damage", "block", "vars",
+        "axes", "upg_axes", "upg_cost", "upg_damage", "upg_block",
+        "character", "versions",
+    }
+    assert card["axes"] == ["SCALING", "SHIV"]
+    assert card["upg_axes"] == ["SCALING", "SHIV", "UPGRADED"]
+    assert card["cost"] == 1
+    assert card["upg_cost"] == 0
+    assert card["damage"] is None      # -1 sentinel -> None
+    assert card["upg_damage"] == 8
+    assert card["block"] is None
+    assert card["upg_block"] is None   # -1 sentinel -> None
+
+
+def test_build_card_db_dedupes_base_row_wins_like_parse_cards():
+    html = (
+        _row(card_id="CARD.PHANTOM_BLADES", card_name="팬텀 블레이드+", card_tier="A",
+             upg_axes="UPGRADED_ONLY")
+        + _row(card_id="CARD.PHANTOM_BLADES", card_name="팬텀 블레이드", card_tier="B",
+               upg_axes="BASE_ROW_UPG")
+    )
+    db = build_card_db(html)
+    assert db["PHANTOM_BLADES"]["tier"] == "B"  # base row wins, same as parse_cards
+    assert db["PHANTOM_BLADES"]["upg_axes"] == ["BASE_ROW_UPG"]
+
+
+def test_build_card_db_skips_blank_tier_and_unknown_char_same_as_parse_cards():
+    assert build_card_db(_row(card_tier="")) == {}
+    assert build_card_db(_row(origin_char="${CSS.escape(char)}")) == {}
+
+
+def test_build_card_db_and_parse_cards_agree_on_card_set():
+    # Both are built from the same _dedupe_rows() pass over the same rows,
+    # so the set of surviving card ids must always match exactly.
+    html = (
+        _row(card_id="CARD.PHANTOM_BLADES")
+        + _row(card_id="CARD.AGGRESSION", owner_char="아이언클래드", origin_char="아이언클래드")
+        + _row(card_tier="")  # dropped
+    )
+    assert set(build_card_db(html)) == set(parse_cards(html))
+
+
+def test_build_card_db_filters_hangul_from_upg_axes():
+    html = _row(upg_axes="SCALING,강화 가치,SHIV")
+    db = build_card_db(html)
+    assert db["PHANTOM_BLADES"]["upg_axes"] == ["SCALING", "SHIV"]
+
+
+def test_build_card_db_real_advisor_html_matches_established_facts():
+    # Established facts from the task spec (already-downloaded advisor.html
+    # snapshot): 507 unique cards; IRONCLAD 85 + SHARED 79 = 164; 92 distinct
+    # axes among IRONCLAD+SHARED cards.
+    import os as _os2
+    path = _os2.path.expanduser("~/.sts2-train/data/advisor.html")
+    if not _os2.path.exists(path):
+        import pytest as _pytest
+        _pytest.skip("no local advisor.html snapshot")
+    with open(path, encoding="utf-8") as f:
+        html = f.read()
+    db = build_card_db(html)
+    assert len(db) == 507
+    ironclad_shared = {cid: r for cid, r in db.items()
+                       if r["character"] in ("IRONCLAD", "SHARED")}
+    assert len(ironclad_shared) == 164
+    axis_vocab = {a for r in ironclad_shared.values() for a in r["axes"]}
+    assert len(axis_vocab) == 92
+    assert set(db) == set(parse_cards(html))
 
 
 from agent import card_scoring

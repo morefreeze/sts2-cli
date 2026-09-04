@@ -150,6 +150,7 @@ class _CompactRun:
     seed: str | None = None
     game_version: str | None = None
     game_version_source: str | None = None
+    experiment: str | None = None
     checkpoint: str | None = None
     evaluation_mode: str | None = None
     scenario: str | None = None
@@ -233,6 +234,7 @@ class _CompactRun:
                 seed=self.seed,
                 game_version=self.game_version,
                 game_version_source=self.game_version_source,
+                experiment=self.experiment,
                 checkpoint=self.checkpoint,
                 evaluation_mode=self.evaluation_mode,
                 scenario=self.scenario,
@@ -456,6 +458,75 @@ class RunCatalog:
                 "run": payload,
                 "sources": sorted(sources, key=lambda item: item["source_id"]),
                 "errors": _scrub_paths(list(dict.fromkeys(errors)), path_ids),
+            }
+
+    def get_run_by_source(self, source_id: str) -> dict[str, Any]:
+        """Resolve the one canonical run in a source that has no usable run
+        id of its own (e.g. a legacy replay log with no run_meta header).
+
+        Reuses the same normalization get_source() uses, rather than
+        fabricating a synthetic run id, so it stays exact. A replay JSONL
+        source is always exactly one run (unlike deck_history/eval_results,
+        which can interleave thousands of runs per file), so a large one is
+        fully rescanned the same way get_run(run_id) already does for
+        REPLAY_JSONL -- source-addressing must not go dead on the ~20% of
+        real logs that exceed INDEX_RECORD_LIMIT. Non-replay sources still
+        require records_complete, since a full parse of an arbitrarily
+        large multi-run file as "one run" would be wrong and unbounded.
+        Raises CatalogError (400) if the source cannot be resolved to
+        exactly one run, and CatalogNotFoundError (404) for an unknown
+        source id.
+        """
+        if not isinstance(source_id, str) or not source_id:
+            raise CatalogError("source id must be a non-empty string")
+        with self._lock:
+            self._refresh()
+            source = self._sources.get(source_id)
+            if source is None:
+                raise CatalogNotFoundError(f"unknown source id: {source_id}")
+            if source.entry["open_mode"] == "error":
+                raise CatalogError(
+                    f"source {source_id!r} could not be opened as a run"
+                )
+            errors: list[str] = []
+            if source.records_complete:
+                adapted = self._adapt(source)
+            elif source.descriptor.kind is SourceKind.REPLAY_JSONL:
+                all_records, scan_errors = _scan_jsonl_run(
+                    source.path, "", include_all=True
+                )
+                errors.extend(scan_errors)
+                adapted = adapt_records(
+                    source.path.name,
+                    all_records,
+                    descriptor=SourceDescriptor(
+                        source.descriptor.kind,
+                        len(all_records),
+                        source.descriptor.message,
+                    ),
+                    replay_parser=self.replay_parser,
+                    source_path=source.path,
+                )
+            else:
+                raise CatalogError(
+                    f"source {source_id!r} is too large to resolve as a "
+                    "single run without a run id; address a specific run "
+                    "by id instead"
+                )
+            errors.extend(adapted.errors)
+            records = self._public_records(source, adapted)
+            if len(records) != 1:
+                raise CatalogError(
+                    f"source {source_id!r} contains {len(records)} runs; "
+                    "address a specific run by id instead"
+                )
+            redactions = _source_redactions(source)
+            payload = _scrub_paths(records[0].to_dict(), redactions)
+            return {
+                "view": "run",
+                "run": payload,
+                "sources": [deepcopy(source.entry)],
+                "errors": _scrub_paths(list(dict.fromkeys(errors)), redactions),
             }
 
     def list_cohorts(self) -> list[dict[str, Any]]:
@@ -837,16 +908,32 @@ class RunCatalog:
         grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
         for record in eligible:
             metadata = _item_metadata(record)
+            experiment = metadata.experiment
             checkpoint = metadata.checkpoint
-            fallback = checkpoint or f"source:{record.source_id}"
-            key = (
-                fallback,
-                metadata.character,
-                metadata.game_version,
-                metadata.evaluation_mode,
-                metadata.scenario,
-                metadata.ascension,
-            )
+            if checkpoint is None and experiment is None:
+                # No checkpoint and no experiment: this run cannot be
+                # attributed to any training/eval batch. Collapse all such
+                # runs into one cohort per (character, ascension) rather
+                # than exploding into one cohort per source file.
+                key = (
+                    None,
+                    None,
+                    metadata.character,
+                    None,
+                    None,
+                    None,
+                    metadata.ascension,
+                )
+            else:
+                key = (
+                    experiment,
+                    checkpoint,
+                    metadata.character,
+                    metadata.game_version,
+                    metadata.evaluation_mode,
+                    metadata.scenario,
+                    metadata.ascension,
+                )
             grouped.setdefault(key, []).append(record)
 
         descriptors: list[dict[str, Any]] = []
@@ -855,13 +942,15 @@ class RunCatalog:
             grouped.items(), key=lambda item: _sortable_key(item[0])
         ):
             (
-                checkpoint_or_source,
+                experiment,
+                checkpoint,
                 character,
                 version,
                 mode,
                 scenario,
                 ascension,
             ) = key
+            unarchived = experiment is None and checkpoint is None
             cohort_id = _cohort_id(key)
             ordered = tuple(
                 sorted(group, key=lambda record: (record.run_id, record.source_id))
@@ -887,12 +976,6 @@ class RunCatalog:
                 for record in ordered
                 if (timestamp := _item_timestamp(record)) is not None
             ]
-            checkpoint = (
-                checkpoint_or_source
-                if isinstance(checkpoint_or_source, str)
-                and not checkpoint_or_source.startswith("source:")
-                else None
-            )
             version_source_evidence = _GameVersionSourceEvidence()
             for record in ordered:
                 run_id = _safe_run_id(record.run_id)
@@ -915,24 +998,56 @@ class RunCatalog:
                 "scenario": _safe_catalog_scalar(scenario),
                 "ascension": ascension,
             }
-            readiness = describe_comparison_readiness(
-                self._iter_cohort_records(ordered)
-            )
-            label_parts = [
-                _safe_catalog_scalar(checkpoint or checkpoint_or_source),
-                _safe_catalog_scalar(character),
-                _safe_catalog_scalar(version),
-                _safe_catalog_scalar(mode),
-                _safe_catalog_scalar(scenario),
-                f"A{ascension}"
+            # Materialize once: readiness and the summary below both consume
+            # the whole iterator, and re-deriving it would double the work.
+            # NOT `cohort_records`: that name is already the
+            # cohort_id -> records mapping built above for get_cohort_records.
+            summarized = list(self._iter_cohort_records(ordered))
+            readiness = describe_comparison_readiness(summarized)
+            # Same helper (and therefore the same valid-run / missing-floor
+            # rules) the metric cards use, so the number shown next to a batch
+            # in the tree always equals the 平均推进 card on its detail page.
+            summary = summarize_cohort(summarized)
+            safe_experiment = _safe_catalog_scalar(experiment)
+            safe_character = _safe_catalog_scalar(character)
+            # Project convention: A<act>F<floor>a<ascension>, e.g. A2F12a10 is
+            # act 2, floor 12, ascension 10. Case carries the meaning -- upper
+            # A is the act, lower a is the ascension -- so a cohort, which has
+            # an ascension but no act or floor, is labelled "a0" / "a?".
+            ascension_label = (
+                f"a{ascension}"
                 if type(ascension) is int and ascension >= 0
-                else "A?",
-            ]
+                else "a?"
+            )
+            if unarchived:
+                # Ascension is the only axis still distinguishing otherwise
+                # metadata-less runs (e.g. "未归档 · Defect" for ascension=0
+                # vs. ascension unknown) -- without it two unarchived
+                # cohorts for the same character render as identical labels.
+                base = (
+                    f"未归档 · {safe_character}" if safe_character else "未归档"
+                )
+                label = f"{base} · {ascension_label}"
+            else:
+                label_parts = [
+                    safe_experiment,
+                    _safe_catalog_scalar(checkpoint),
+                    safe_character,
+                    _safe_catalog_scalar(version),
+                    _safe_catalog_scalar(mode),
+                    _safe_catalog_scalar(scenario),
+                    ascension_label,
+                ]
+                label = " · ".join(str(value) for value in label_parts if value)
             descriptors.append(
                 {
                     "cohort_id": cohort_id,
-                    "label": " · ".join(str(value) for value in label_parts if value),
+                    "label": label,
+                    "avg_global_floor": summary.avg_global_floor,
+                    "valid_n": summary.valid_n,
                     "filters": filters,
+                    "experiment": safe_experiment,
+                    "unarchived": unarchived,
                     "comparison_readiness": readiness.to_dict(),
                     "default_baseline_cohort_id": None,
                     "run_count": len(ordered),
@@ -1128,6 +1243,7 @@ def _item_metadata(record: _CohortItem) -> RunMetadata:
         seed=record.seed,
         game_version=record.game_version,
         game_version_source=record.game_version_source,
+        experiment=record.experiment,
         checkpoint=record.checkpoint,
         evaluation_mode=record.evaluation_mode,
         scenario=record.scenario,
@@ -1286,7 +1402,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                     "hp_at_entry",
                 }.issubset(record)
                 record_run_ids = _lightweight_run_ids([record])
-                is_replay_row = record_type in {"state", "action"}
+                is_replay_row = record_type in {"state", "action", "run_meta"}
                 is_replay_candidate = is_replay_row or event in {
                     "outcome",
                     "result",
@@ -1468,6 +1584,7 @@ def _update_compact_metadata(
         ("character", ("character",)),
         ("seed", ("seed",)),
         ("game_version", ("game_version", "build_id")),
+        ("experiment", ("experiment",)),
         ("checkpoint", ("checkpoint",)),
         ("evaluation_mode", ("evaluation_mode",)),
         ("scenario", ("scenario",)),
@@ -1539,6 +1656,7 @@ def _update_compact_replay_metadata(
         ("character", ("character",)),
         ("seed", ("seed",)),
         ("game_version", ("game_version", "build_id")),
+        ("experiment", ("experiment",)),
         ("checkpoint", ("checkpoint",)),
         ("evaluation_mode", ("evaluation_mode",)),
         ("scenario", ("scenario",)),

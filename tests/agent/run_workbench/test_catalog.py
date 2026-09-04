@@ -1144,11 +1144,13 @@ def test_ascension_levels_form_distinct_stable_catalog_cohorts(tmp_path: Path):
         next(
             part
             for part in cohort["label"].split(" · ")
-            if part.startswith("A")
+            # Lower-case a is the ascension; upper-case A is the act
+            # (A2F12a10 = act 2, floor 12, ascension 10).
+            if part.startswith("a")
         )
         for cohort in first
     }
-    assert ascension_labels == {"A0", "A20"}
+    assert ascension_labels == {"a0", "a20"}
     compared = catalog.get_metrics(first[0]["cohort_id"], first[1]["cohort_id"])
     assert compared["comparison"]["comparable"] is False
     assert any(
@@ -3763,3 +3765,264 @@ def test_no_map_card_pick_never_claims_compact_node_rewards(
     assert large_run.capabilities.visited_route is False
     assert large_run.capabilities.node_rewards is False
     assert large_run.capabilities.decisions is True
+
+
+# --- run_meta header cohort grouping -----------------------------------
+#
+# python/game_log.py now writes one top-level "run_meta" header line per
+# replay log (see GameLogger._write_run_meta_header). These fixtures mimic
+# that real shape: the per-step state/action rows carry NO top-level
+# metadata at all (the actual GameLogger bug this closes), only the header
+# (when present) or a "start_run" action's nested data (the pre-existing
+# fallback that already worked for character/seed/ascension).
+
+
+def _run_meta_header(run_id: str, **fields: object) -> dict:
+    header = {"type": "run_meta", "ts": 100.0, "run_id": run_id}
+    for key, value in fields.items():
+        if value is not None:
+            header[key] = value
+    return header
+
+
+def _headerless_replay_body(
+    *, floor: int = 4, status: str = "dead", max_global_floor: int = 7
+) -> list[dict]:
+    """state/action rows with no top-level metadata anywhere, matching the
+    real (buggy) GameLogger shape this feature fixes."""
+    return [
+        {
+            "type": "state",
+            "ts": 1,
+            "data": {"decision": "combat_play", "context": {"act": 1, "floor": floor}},
+        },
+        {"type": "action", "ts": 2, "data": {"cmd": "end_turn"}},
+        {"type": "state", "ts": 3, "status": status, "max_global_floor": max_global_floor},
+    ]
+
+
+def _legacy_replay_body(
+    *,
+    character: str,
+    seed: str,
+    ascension: int | None = 0,
+    floor: int = 4,
+    status: str = "dead",
+    max_global_floor: int = 7,
+) -> list[dict]:
+    """A pre-run_meta log: character/seed/ascension only ever appear nested
+    inside the start_run action, exactly like a real legacy GameLogger file
+    with no batch metadata (checkpoint/experiment/game_version/...).
+
+    ascension=None omits the key entirely -- some real legacy logs predate
+    ascension being included in start_run at all, which is the real-world
+    source of the "未归档 · Defect" / "未归档 · Defect" label collision.
+    """
+    start_run_data = {"cmd": "start_run", "character": character, "seed": seed}
+    if ascension is not None:
+        start_run_data["ascension"] = ascension
+    return [
+        {"type": "action", "ts": 1, "data": start_run_data},
+        *_headerless_replay_body(
+            floor=floor, status=status, max_global_floor=max_global_floor
+        ),
+    ]
+
+
+def test_run_meta_header_groups_replay_files_by_experiment_and_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    common = dict(
+        character="Ironclad",
+        seed="seed-a",
+        checkpoint="ckpt-1",
+        experiment="exp-a",
+        ascension=0,
+        game_version="v1",
+        evaluation_mode="fixed",
+        scenario="full_run",
+    )
+    root = tmp_path / "runs"
+    root.mkdir()
+    _write_jsonl(
+        root / "a.jsonl", [_run_meta_header("run-a", **common), *_headerless_replay_body()]
+    )
+    _write_jsonl(
+        root / "b.jsonl", [_run_meta_header("run-b", **common), *_headerless_replay_body()]
+    )
+
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+    cohorts = catalog.list_cohorts()
+
+    assert len(cohorts) == 1
+    cohort = cohorts[0]
+    assert cohort["run_count"] == 2
+    assert cohort["experiment"] == "exp-a"
+    assert cohort["filters"]["checkpoint"] == "ckpt-1"
+    assert cohort["filters"]["character"] == "Ironclad"
+    assert cohort["unarchived"] is False
+    assert cohort["run_ids"] != []
+    assert set(cohort["run_ids"]) == {"run-a", "run-b"}
+
+
+def test_run_meta_header_same_checkpoint_different_experiment_do_not_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    root = tmp_path / "runs"
+    root.mkdir()
+    header_a = _run_meta_header(
+        "run-a", character="Ironclad", checkpoint="shared.zip", experiment="exp-a"
+    )
+    header_b = _run_meta_header(
+        "run-b", character="Ironclad", checkpoint="shared.zip", experiment="exp-b"
+    )
+    _write_jsonl(root / "a.jsonl", [header_a, *_headerless_replay_body()])
+    _write_jsonl(root / "b.jsonl", [header_b, *_headerless_replay_body()])
+
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+    cohorts = catalog.list_cohorts()
+
+    assert len(cohorts) == 2
+    checkpoints = {cohort["filters"]["checkpoint"] for cohort in cohorts}
+    experiments = {cohort["experiment"] for cohort in cohorts}
+    run_counts = {cohort["run_count"] for cohort in cohorts}
+    assert checkpoints == {"shared.zip"}
+    assert experiments == {"exp-a", "exp-b"}
+    assert run_counts == {1}
+
+
+def test_get_run_by_source_rescans_large_replay_sources_in_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """~20% of real logs/ files exceed INDEX_RECORD_LIMIT. get_run_by_source
+    must still resolve them (via a full unfiltered rescan, exactly like
+    get_run(run_id) already does for REPLAY_JSONL) rather than only working
+    for small files -- source-addressing must not go dead for these too."""
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    root = tmp_path / "runs"
+    root.mkdir()
+    _write_jsonl(root / "large.jsonl", _headerless_replay_body())
+
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+    source_id = catalog.list_sources()[0]["source_id"]
+    indexed = catalog._sources[source_id]
+    assert indexed.records_complete is False  # sanity: exercises the large-file path
+
+    payload = catalog.get_run_by_source(source_id)
+
+    assert payload["view"] == "run"
+    assert payload["run"]["run_id"] == ""
+    assert payload["run"]["outcome"]["status"] == "dead"
+    # _replay_parser's summary reports the first row's floor (4), not the
+    # terminal row's (7) -- this just pins the fixture's known behavior.
+    assert payload["run"]["outcome"]["max_global_floor"] == 4
+
+
+def test_get_run_by_source_rejects_a_large_multi_run_deck_history_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike REPLAY_JSONL, a deck_history/eval_results file legitimately
+    interleaves many runs -- a full unfiltered parse would silently merge
+    them into one wrong "run", so it must stay a clear 400 instead."""
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    root = tmp_path / "runs"
+    root.mkdir()
+    records = [
+        {
+            "event": "outcome",
+            "run_id": f"run-{index}",
+            "status": "dead",
+            "max_global_floor": index + 1,
+        }
+        for index in range(5)
+    ]
+    _write_jsonl(root / "deck_history.jsonl", records)
+
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+    source_id = catalog.list_sources()[0]["source_id"]
+    indexed = catalog._sources[source_id]
+    assert indexed.records_complete is False
+
+    with pytest.raises(catalog_module.CatalogError, match="too large"):
+        catalog.get_run_by_source(source_id)
+
+
+def test_metadata_less_replay_files_collapse_into_one_unarchived_cohort_per_character(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    root = tmp_path / "runs"
+    root.mkdir()
+    _write_jsonl(
+        root / "ironclad-1.jsonl",
+        _legacy_replay_body(character="Ironclad", seed="seed-1"),
+    )
+    _write_jsonl(
+        root / "ironclad-2.jsonl",
+        _legacy_replay_body(character="Ironclad", seed="seed-2"),
+    )
+    _write_jsonl(
+        root / "silent-1.jsonl",
+        _legacy_replay_body(character="Silent", seed="seed-3"),
+    )
+
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+    cohorts = catalog.list_cohorts()
+
+    assert len(cohorts) == 2
+    by_character = {cohort["filters"]["character"]: cohort for cohort in cohorts}
+    assert set(by_character) == {"Ironclad", "Silent"}
+    for cohort in cohorts:
+        assert cohort["unarchived"] is True
+        assert cohort["filters"]["checkpoint"] is None
+        assert cohort["experiment"] is None
+        assert "未归档" in cohort["label"]
+    assert by_character["Ironclad"]["run_count"] == 2
+    assert by_character["Silent"]["run_count"] == 1
+
+
+def test_unarchived_cohorts_with_different_ascension_get_distinct_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: two real unarchived cohorts for the same character but
+    different ascension (0 vs. unknown, because some legacy logs predate
+    ascension being logged at all in start_run) used to both render as the
+    exact same "未归档 · Defect" label -- indistinguishable in the tree."""
+    monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", 2)
+    root = tmp_path / "runs"
+    root.mkdir()
+    for index in range(3):
+        _write_jsonl(
+            root / f"defect-a0-{index}.jsonl",
+            _legacy_replay_body(
+                character="Defect", seed=f"seed-a0-{index}", ascension=0
+            ),
+        )
+    for index in range(2):
+        _write_jsonl(
+            root / f"defect-noasc-{index}.jsonl",
+            _legacy_replay_body(
+                character="Defect", seed=f"seed-noasc-{index}", ascension=None
+            ),
+        )
+
+    catalog = RunCatalog([root], replay_parser=_replay_parser)
+    cohorts = catalog.list_cohorts()
+
+    defect_cohorts = [
+        cohort for cohort in cohorts if cohort["filters"]["character"] == "Defect"
+    ]
+    assert len(defect_cohorts) == 2
+    labels = [cohort["label"] for cohort in defect_cohorts]
+    assert len(set(labels)) == len(labels), f"colliding cohort labels: {labels}"
+    assert set(labels) == {"未归档 · Defect · a0", "未归档 · Defect · a?"}
+
+    by_label = {cohort["label"]: cohort for cohort in defect_cohorts}
+    assert by_label["未归档 · Defect · a0"]["run_count"] == 3
+    assert by_label["未归档 · Defect · a?"]["run_count"] == 2
+
+    # No two cohorts in the whole (real-shaped) fixture set share a label.
+    all_labels = [cohort["label"] for cohort in cohorts]
+    assert len(set(all_labels)) == len(all_labels), f"colliding labels: {all_labels}"

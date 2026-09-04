@@ -158,3 +158,32 @@ def test_valid_ascension_is_returned(ascension: int) -> None:
 def test_invalid_ascension_is_rejected(ascension: object) -> None:
     with pytest.raises(ValueError, match=r"0\.\.10"):
         validate_ascension(ascension)
+
+
+def test_experiment_from_directory_names_the_training_run() -> None:
+    """Training knows its save directory, so it names the experiment from that
+    rather than from a checkpoint file inside it."""
+    from agent.run_metadata import experiment_from_directory
+
+    assert experiment_from_directory("checkpoints_noadvisor_mix") == "noadvisor_mix"
+    assert experiment_from_directory("/abs/path/checkpoints_act2_boss") == "act2_boss"
+    # A trailing separator must not erase the name.
+    assert experiment_from_directory("checkpoints_best/") == "best"
+    # The bare default directory is not an experiment.
+    assert experiment_from_directory("checkpoints") is None
+    assert experiment_from_directory(None) is None
+    assert experiment_from_directory("   ") is None
+
+
+def test_experiment_from_directory_and_checkpoint_agree() -> None:
+    """Training labels from the directory, eval from a checkpoint inside it.
+    They must produce the same label or the same training run would split into
+    two batches in the workbench."""
+    from agent.run_metadata import (
+        experiment_from_checkpoint,
+        experiment_from_directory,
+    )
+
+    assert experiment_from_directory("checkpoints_noadvisor_mix") == (
+        experiment_from_checkpoint("checkpoints_noadvisor_mix/ppo_ironclad_13255k.zip")
+    )

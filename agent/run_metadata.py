@@ -83,6 +83,41 @@ def _nonempty_text(value: object, *, name: str) -> str | None:
     return text or None
 
 
+def _strip_experiment_dir(name: str) -> str | None:
+    """Normalize one checkpoint directory name into an experiment label."""
+    if name.startswith("checkpoints_"):
+        name = name[len("checkpoints_"):]
+    if not name or name == "checkpoints" or name == os.path.basename(os.getcwd()):
+        return None
+    return name
+
+
+def experiment_from_checkpoint(checkpoint_name: str | None) -> str | None:
+    """Return the experiment label from a checkpoint path's parent directory.
+
+    Checkpoint basenames collide across experiments (e.g. the same
+    ``ppo_ironclad_13255k.zip`` exists under both ``checkpoints_best/`` and
+    ``checkpoints_noadvisor_mix/``), so the parent directory -- with any
+    ``checkpoints_`` prefix stripped -- is what actually distinguishes them.
+    """
+    if checkpoint_name is None or not str(checkpoint_name).strip():
+        return None
+    return _strip_experiment_dir(
+        os.path.basename(os.path.dirname(os.path.abspath(str(checkpoint_name))))
+    )
+
+
+def experiment_from_directory(directory: str | None) -> str | None:
+    """Return the experiment label for a checkpoint *directory* itself.
+
+    Training already knows its save directory, so it names the experiment
+    directly instead of going through a checkpoint file inside it.
+    """
+    if directory is None or not str(directory).strip():
+        return None
+    return _strip_experiment_dir(os.path.basename(os.path.abspath(str(directory))))
+
+
 def build_run_context(
     game_version: ResolvedGameVersion | None,
     *,

@@ -19,6 +19,7 @@ caller / validator can detect "this simulation diverged from reality".
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import random
@@ -44,12 +45,37 @@ def _load_card_db() -> dict[str, dict]:
     # Index by id (the wiki slug) and also by uppercased-with-underscores form
     # used by the game ("STRIKE_IRONCLAD", "BASH" etc.).
     db: dict[str, dict] = {}
-    for c in data["cards"]:
-        cid = c["id"]  # e.g. "strike-ironclad"
-        db[cid] = c
-        # Game-engine form
-        game_id = cid.upper().replace("-", "_")
-        db[game_id] = c
+
+    def _index(cards: list[dict], *, overwrite: bool) -> None:
+        for c in cards:
+            cid = c["id"]  # e.g. "strike-ironclad"
+            keys = [cid, cid.upper().replace("-", "_")]  # slug + game-engine form
+            game_id = c.get("game_id")
+            if game_id:
+                keys.append(game_id)
+            for key in keys:
+                if overwrite or key not in db:
+                    db[key] = c
+
+    _index(data["cards"], overwrite=True)
+    # Generated per-character data (agent/sim/build_card_db.py) is layered
+    # UNDER the wiki-derived Ironclad file: those 84 entries are the ones the
+    # sim was validated against, so they stay authoritative and Ironclad
+    # behaviour cannot regress. Everything else was previously absent, which
+    # left turn_planner inert for four of five characters.
+    # STS2_SIM_CARD_DB_EXTRA=0 restores the Ironclad-only DB. This is not a
+    # cosmetic switch: get_card_data also backs intent_defense_override's
+    # _card_block_amount/_card_damage_amount fallbacks, which are DEFAULT ON, so
+    # adding characters changes live play and has to be measurable.
+    if os.environ.get("STS2_SIM_CARD_DB_EXTRA", "1").strip().lower() in ("0", "false", "off"):
+        _CARD_DB = db
+        return db
+    for extra in sorted(glob.glob("data/cards_parsed_*.json")):
+        try:
+            with open(extra) as f:
+                _index(json.load(f).get("cards") or [], overwrite=False)
+        except (OSError, ValueError, KeyError):
+            continue  # a malformed generated file must not break live play
     _CARD_DB = db
     return db
 
@@ -179,6 +205,16 @@ def apply_effect(state: CombatState, effect: dict[str, Any],
     """
     rng = rng or random.Random(state.rng_seed)
     kind = effect.get("kind")
+
+    if kind == "channel":
+        for _ in range(int(effect.get("amount", 1) or 1)):
+            state.channel(str(effect.get("orb") or "Frost"))
+        return
+
+    if kind == "evoke":
+        for _ in range(int(effect.get("times", 1) or 1)):
+            state.evoke(rng)
+        return
 
     if kind == "deal_damage":
         dmg = _modify_outgoing_damage(state, effect["amount"])
@@ -512,6 +548,16 @@ def end_turn(state: CombatState, rng: random.Random | None = None) -> None:
     fire_powers(state, "on_turn_end", rng)
     from agent.sim.relics import fire_relics as _fire_relics_te
     _fire_relics_te(state, "turn_end")
+    # 1b. Orb passives (Defect) — fire BEFORE enemies act, since Frost block
+    # is meant to absorb the incoming attack this turn and Lightning chips in
+    # the same turn it was channelled.
+    state.fire_orb_passives(rng)
+    # 1c. Burn-style status cards held in hand damage the player at end of
+    # turn, ignoring block. Tracked as a count in statuses because these cards
+    # are not in the sim card DB and so never enter state.hand.
+    _burns = int(state.statuses.get("_burn_in_hand", 0) or 0)
+    if _burns > 0:
+        state.hp -= _burns * 2
     # 2. Enemies act
     for e in state.enemies:
         if e.hp <= 0:

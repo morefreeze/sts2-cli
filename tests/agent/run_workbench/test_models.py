@@ -204,6 +204,7 @@ def test_run_metadata_serializes_game_version_source_next_to_version() -> None:
         "is_multiplayer": None,
         "started_at": None,
         "ended_at": None,
+        "experiment": None,
     }
 
 

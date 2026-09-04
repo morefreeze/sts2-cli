@@ -16,11 +16,102 @@ back to the heuristic HpAwareMapStrategy on any failure.
 """
 from __future__ import annotations
 
+import os
+
+
+def _env_pref(name: str) -> float:
+    """Read a route-bias override from the environment; 0.0 when unset/invalid."""
+    try:
+        return float(os.environ.get(name, "") or 0.0)
+    except ValueError:
+        return 0.0
+
+
+def _monster_pref() -> float:
+    """Route bias toward hallway fights, from STS2_MONSTER_PREF (default 0.0)."""
+    return _env_pref("STS2_MONSTER_PREF")
+
+
+# Elites were being routed around almost entirely — 0.5 fights per run — because
+# node_delta scores them -13..-21 against a rest site's +14, and the +2.0 relic
+# term does not come close to closing that. Measured on 100 fixed seeds
+# (ppo_defect_2248k), biasing toward them raised elite fights 48 -> 113 (2.35x)
+# while average elite HP cost went 27.4 -> 27.2 and run depth was unchanged:
+# the relics pay for the HP. Swept 0/8/12/16/24; fight count rises monotonically
+# with the bias, HP cost stays flat, and depth starts eroding past 16 — BUT
+# that 16 sweep predates the intent-defense override (STS2_DEFENSE) and
+# doesn't hold up alone: raising the bias without it is a loser. On its own,
+# STS2_ELITE_PREF=24 scored avg_floor 16.63 vs an 18.53 baseline and cost
+# +7.62 HP more per run to elites (100 seeds, p=0.015) — its per-fight average
+# only looked cheap because those runs never reached Act 3, where the
+# baseline paid ~46 HP/fight. The bias only pays once STS2_DEFENSE has
+# lowered the per-fight cost first (Aug 2026, 240 fixed seeds,
+# ppo_defect_2248k, eval_fixed_3000..3239): STS2_DEFENSE=1 +
+# STS2_ELITE_PREF=24 together took elite fights 231 -> 358 (+55%) while
+# cutting elite HP/fight 29.1 -> 24.2 (paired, -3.44 HP/fight, se 1.03,
+# p=0.0010) and *raising* avg_floor 17.50 -> 18.14. STS2_ELITE_PREF=28 was
+# also tried (394 fights, 23.8 HP/fight) and rejected: not significantly
+# cheaper than 24 (-0.18 HP, p=0.67) and it costs depth (avg_floor 17.32,
+# below both the 24 arm and the baseline). 24 requires the defense override
+# on to earn its keep — do not raise this default without it.
+# ...and all of the above is an ASCENSION-0 result. Ascension 1 turns on
+# SwarmingElites (and nothing else — the AscensionLevel enum is a ladder of
+# named modifiers, with ToughEnemies at 8 and DeadlyEnemies at 9), so elites
+# stop being scarce. A bias that pays to seek them when the map offers ~0.5 per
+# run does not survive that, and measurement agrees: ppo_defect_2048k at a1
+# over 235 paired fresh seeds (9000..9239) scored avg_floor 16.345 with the
+# bias and 19.681 without it (+3.34, se 0.515, t=6.48, p<0.0001), with
+# combat_wins 7.37 -> 8.54 (t=5.37) corroborating and elite HP/fight flat
+# (27.34 vs 26.85, p=0.67) — i.e. this is routing, not combat. A 60-seed pilot
+# at prefs 24/12/0 showed the same effect monotonically (16.40/18.43/19.48).
+# Zero is the OPTIMUM, not merely better than 24: going negative (actively
+# routing away from elites) adds nothing. 60 paired seeds (13000+): 0 vs -8
+# scored floor 18.200 vs 17.967 (p=0.41), 0 vs -16 scored 18.200 vs 18.417
+# (p=0.48). Removing the bias is the whole win — do not re-sweep below 0.
+# Caution on absolute numbers in this comment: the pref-0 arm measured 18.2,
+# 19.7 and 21.9 on three different seed sets, so a single 60-seed mean carries
+# roughly +/-2 floors of seed-set variation. Only paired diffs are comparable.
+ELITE_PREF_DEFAULT = 24.0
+ELITE_PREF_SWARMING_ELITES = 0.0
+
+
+# Two shapes of conditional elite bias were measured and rejected; the flat bias
+# beat both. Recorded so they are not retried.
+#
+# 1. Row-weighted (spend the bias on late rows). Motivated by cost-by-floor
+#    F6-9=31.5, F10-13=23.5, F14-17=19.1 HP. Result 25.6 HP over 94 fights vs the
+#    flat bias's 25.3 over 100. The row/cost relationship is confounded: runs that
+#    reach late rows are the ones already going well, so the row was a symptom of
+#    a strong run, not a cause of a cheap fight, and routing cannot transfer it.
+# 2. Readiness-gated on entry HP and deck strength. Result 28.8 HP over 58 fights.
+#    The entry-HP signal that motivated it is a censoring artifact: low-HP elites
+#    average 19.0 HP only because 13 of 34 ended in death, capping recordable loss.
+
+
+def _elite_pref(ascension: int = 0) -> float:
+    """Route bias toward elite fights; STS2_ELITE_PREF overrides the default.
+
+    The default is ascension-dependent: SwarmingElites switches on at ascension
+    1, and the bias is a loser once it does (see ELITE_PREF_SWARMING_ELITES).
+    ``ascension`` defaults to 0 so callers that cannot supply it keep the
+    measured ascension-0 behaviour.
+    """
+    raw = os.environ.get("STS2_ELITE_PREF")
+    if raw is not None and raw != "":
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    if type(ascension) is int and ascension >= 1:
+        return ELITE_PREF_SWARMING_ELITES
+    return ELITE_PREF_DEFAULT
+
 # Expected HP delta per node type — now DECK-STRENGTH AWARE (Phase g):
 # a strong deck clears mobs at -4 HP, a weak one bleeds -13. strength is
 # deck_5turn_burst normalized: 1.0 = strong (≥150 burst), 0.0 = weak (≤50).
 def node_delta(ntype: str, row: int, hp: int, max_hp: int, gold: int,
-               deck_strength: float = 0.5, deck_size: int = 15) -> float:
+               deck_strength: float = 0.5, deck_size: int = 15,
+               ascension: int = 0) -> float:
     t = (ntype or "").lower()
     if t == "monster":
         base = (-6.0 if row < 6 else -8.0)
@@ -29,11 +120,16 @@ def node_delta(ntype: str, row: int, hp: int, max_hp: int, gold: int,
         # decays once the deck matures.
         reward = 3.0 if (deck_size < 15 and row < 8) else (
             1.5 if deck_size < 18 else 0.5)
-        return scaled + reward
+        # STS2_MONSTER_PREF shifts how attractive hallway fights are, for tuning
+        # the fight-count / HP-cost trade-off. Measured: Act 1 mobs cost ~9 HP
+        # but Act 2 mobs ~18, and the gap is deck strength — so paying a little
+        # HP for extra early card rewards can lower the *later* cost. Default 0
+        # leaves the shipped behaviour untouched.
+        return scaled + reward + _monster_pref()
     if t == "elite":
         base = (-13.0 if row < 9 else -20.0)
         scaled = base - (1.0 - deck_strength) * 8.0    # weak deck pays +8 more
-        return scaled + 2.0   # relic value baked in (replaces tie-break only)
+        return scaled + 2.0 + _elite_pref(ascension)
     if t in ("restsite", "rest"):
         return 0.6 * 0.30 * max_hp
     if t in ("event", "unknown", "ancient"):
@@ -49,7 +145,19 @@ def node_delta(ntype: str, row: int, hp: int, max_hp: int, gold: int,
 
 def _elite_bonus(n_elites: int, expected_hp: float, comfort: float) -> float:
     """Relic value of elites — only counts when the path keeps us above the
-    comfort HP (no point getting relics if we die or limp to the boss)."""
+    comfort HP (no point getting relics if we die or limp to the boss).
+
+    NOTE on the flat 72 comfort gate in plan_next_node: starting max HP is
+    character-dependent (Ironclad 80, Defect 75, Regent 75, Silent 70,
+    Necrobinder 66), so 72 is unreachable at FULL health for Silent and
+    Necrobinder and needs >=96% HP for Defect/Regent — this bonus is dead or
+    near-dead for most of the roster. That is a real defect, and it is also
+    IRRELEVANT: the bonus caps at 1.5 * min(n_elites, 2) = 3.0 against elite
+    node costs of -13..-28, far too small to flip a route. Measured
+    2026-09-02, scaling the gate to 0.85 * max_hp over 240 paired seeds each:
+    Regent 13.916 vs 13.916 (bit-identical), Necrobinder 12.675 vs 12.675.
+    Do not re-litigate the threshold; if elite routing needs changing, change
+    node_delta, not this tiebreak."""
     if expected_hp < comfort:
         return 0.0
     return 1.5 * min(n_elites, 2)
@@ -59,7 +167,8 @@ def plan_next_node(map_json: dict, hp: int, max_hp: int, gold: int,
                    comfort_hp: float = 72.0,
                    beam_width: int = 6,
                    deck_strength: float = 0.5,
-                   deck_size: int = 15) -> tuple[tuple[int, int], dict] | None:
+                   deck_size: int = 15,
+                   ascension: int = 0) -> tuple[tuple[int, int], dict] | None:
     """Return ((col,row) of best immediate child, route_info) or None.
 
     route_info: {"mobs": int, "elites": int, "rests": int} — composition of
@@ -110,7 +219,7 @@ def plan_next_node(map_json: dict, hp: int, max_hp: int, gold: int,
         if sn is None:
             return -1e9, (0, 0, 0)
         d0 = node_delta(sn.get("type", ""), int(sn.get("row", 0)), hp, max_hp,
-                        gold, deck_strength, deck_size)
+                        gold, deck_strength, deck_size, ascension)
         h0 = min(float(hp) + d0, float(max_hp))
         comp0 = _comp_add((0, 0, 0), sn.get("type", ""))
         beams: dict[tuple[int, int], list] = defaultdict(list)
@@ -145,7 +254,8 @@ def plan_next_node(map_json: dict, hp: int, max_hp: int, gold: int,
                             best_terminal = (score, comp)
                     continue
                 d = node_delta(chn.get("type", ""), int(chn.get("row", 0)),
-                               hp, max_hp, gold, deck_strength, deck_size)
+                               hp, max_hp, gold, deck_strength, deck_size,
+                               ascension)
                 is_el = 1 if (chn.get("type", "").lower() == "elite") else 0
                 merged = beams[ch_coord]
                 for (ehp, nel, comp) in states:
@@ -200,8 +310,11 @@ def choose_map_node(env, state: dict) -> dict | None:
         gold = int(player.get("gold", 0) or 0)
         deck = player.get("deck") or []
         strength, dsize = _deck_strength(deck)
+        # The run's ascension decides the elite route bias, so it has to come
+        # from the env rather than defaulting — see _elite_pref.
         result = plan_next_node(m, hp, max_hp, gold,
-                                 deck_strength=strength, deck_size=dsize)
+                                 deck_strength=strength, deck_size=dsize,
+                                 ascension=int(getattr(env, "ascension", 0) or 0))
         if result is None:
             return None
         pick, route = result

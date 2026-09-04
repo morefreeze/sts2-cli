@@ -406,6 +406,10 @@ class RunMetadata:
     started_at: float | None = None
     ended_at: float | None = None
     game_version_source: str | None = None
+    # Appended after game_version_source (not "next to checkpoint") to
+    # preserve the locked positional argument order asserted by
+    # test_run_metadata_preserves_legacy_positional_argument_order.
+    experiment: str | None = None
 
 
 @dataclass(frozen=True)

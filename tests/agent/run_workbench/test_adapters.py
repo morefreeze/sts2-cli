@@ -1860,3 +1860,66 @@ def test_adapter_output_remains_json_safe() -> None:
     run = adapt_path(FIXTURES / "native_run.json").runs[0]
 
     json.dumps(run.to_dict(), allow_nan=False)
+
+
+def _eval_replay_records() -> list[dict]:
+    """The shape agent/eval_rl.py --game-log actually writes.
+
+    experiment/checkpoint/evaluation_mode/scenario exist ONLY on the run_meta
+    header -- the start_run action carries character/seed/ascension but knows
+    nothing about the eval harness that launched it.
+    """
+    return [
+        {
+            "type": "run_meta",
+            "ts": 1788154087.9,
+            "run_id": "eval-ppo_defect_2048k-20260831T132807-9985ccd8-000-a01",
+            "experiment": "ckpt_defect",
+            "checkpoint": "ppo_defect_2048k.zip",
+            "character": "Defect",
+            "seed": "eval_fixed_0",
+            "game_version": "v0.111.0",
+            "game_version_source": "cli",
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+        },
+        {
+            "type": "action",
+            "ts": 1788154088.0,
+            "data": {
+                "cmd": "start_run",
+                "run_id": "eval-ppo_defect_2048k-20260831T132807-9985ccd8-000-a01",
+                "character": "Defect",
+                "seed": "eval_fixed_0",
+                "ascension": 1,
+            },
+        },
+        {
+            "type": "state",
+            "ts": 1788154089.0,
+            "status": "dead",
+            "data": {
+                "run_id": "eval-ppo_defect_2048k-20260831T132807-9985ccd8-000-a01"
+            },
+        },
+    ]
+
+
+def test_replay_metadata_reads_checkpoint_from_run_meta_header() -> None:
+    run = adapt_records(
+        "eval-replay.jsonl",
+        _eval_replay_records(),
+        replay_parser=parse_game_progress,
+    ).runs[0]
+
+    assert run.metadata.checkpoint == "ppo_defect_2048k.zip"
+
+
+def test_replay_metadata_reads_experiment_from_run_meta_header() -> None:
+    run = adapt_records(
+        "eval-replay.jsonl",
+        _eval_replay_records(),
+        replay_parser=parse_game_progress,
+    ).runs[0]
+
+    assert run.metadata.experiment == "ckpt_defect"

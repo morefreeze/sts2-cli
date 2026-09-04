@@ -90,6 +90,14 @@ class CombatState:
     relics: list[str] = field(default_factory=list)
     potions: list[str] = field(default_factory=list)
 
+    # ── Orbs (Defect) ──────────────────────────────────────────────────────
+    # Defect's core mechanic and previously absent from this sim entirely, so a
+    # Defect deck was unrepresentable and search could never compete with the
+    # trained policy on it. Orbs are a fixed-size ring: channelling into a full
+    # ring evokes the leftmost to make room.
+    orbs: list[str] = field(default_factory=list)
+    orb_slots: int = 3
+
     # RNG — explicit so rollouts are reproducible per-seed
     rng_seed: int | None = None
 
@@ -97,6 +105,69 @@ class CombatState:
     def clone(self) -> "CombatState":
         """Deep copy suitable for branching MC rollouts."""
         return copy.deepcopy(self)
+
+
+    # ── orbs ────────────────────────────────────────────────────────────────
+    # Passive fires at end of the player's turn; evoke fires when the orb
+    # leaves the ring. Values follow the shipped card text (Frost 2/5,
+    # Lightning 3/8, Dark charges 6 then hits for its charge, Plasma 1/2).
+    _ORB_PASSIVE = {"Frost": 2, "Lightning": 3, "Dark": 6, "Plasma": 1}
+    _ORB_EVOKE = {"Frost": 5, "Lightning": 8, "Plasma": 2}
+
+    def channel(self, orb: str) -> None:
+        """Add an orb, evoking the leftmost first when the ring is full."""
+        if self.orb_slots <= 0:
+            return
+        if len(self.orbs) >= self.orb_slots:
+            self.evoke(None, index=0)
+        self.orbs.append(orb)
+
+    def _living_enemy_indices(self) -> list[int]:
+        return [i for i, e in enumerate(self.enemies) if e.hp > 0]
+
+    def evoke(self, rng=None, index: int = -1) -> str | None:
+        """Remove one orb and apply its evoke effect. None if the ring is empty.
+
+        Defaults to the rightmost, which is what "Evoke your rightmost Orb"
+        (Dualcast, Multi-Cast) means; `index=0` is the eviction case.
+        """
+        if not self.orbs:
+            return None
+        orb = self.orbs.pop(index)
+        if orb == "Frost":
+            self.block += self._ORB_EVOKE["Frost"]
+        elif orb == "Lightning":
+            idxs = self._living_enemy_indices()
+            if idxs:
+                pick = idxs[0] if rng is None else rng.choice(idxs)
+                self.damage_enemy(pick, self._ORB_EVOKE["Lightning"])
+        elif orb == "Dark":
+            idxs = self._living_enemy_indices()
+            if idxs:
+                weakest = min(idxs, key=lambda i: self.enemies[i].hp)
+                self.damage_enemy(weakest, self.statuses.get("_dark_charge", 6))
+        elif orb == "Plasma":
+            self.energy += self._ORB_EVOKE["Plasma"]
+        return orb
+
+    def fire_orb_passives(self, rng=None) -> None:
+        """End-of-player-turn passive tick for every orb in the ring."""
+        for orb in list(self.orbs):
+            if orb == "Frost":
+                self.block += self._ORB_PASSIVE["Frost"]
+                self.statuses["_orb_block_last_turn"] = (
+                    self.statuses.get("_orb_block_last_turn", 0)
+                    + self._ORB_PASSIVE["Frost"])
+            elif orb == "Lightning":
+                idxs = self._living_enemy_indices()
+                if idxs:
+                    pick = idxs[0] if rng is None else rng.choice(idxs)
+                    self.damage_enemy(pick, self._ORB_PASSIVE["Lightning"])
+            elif orb == "Dark":
+                self.statuses["_dark_charge"] = (
+                    self.statuses.get("_dark_charge", 0) + self._ORB_PASSIVE["Dark"])
+            elif orb == "Plasma":
+                self.energy += self._ORB_PASSIVE["Plasma"]
 
     def alive(self) -> bool:
         return self.hp > 0

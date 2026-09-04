@@ -217,6 +217,26 @@ def _score_shop_potion(potion: dict) -> float:
     return score
 
 
+# EVENT MAGNITUDE-BLINDNESS: known, real, and NOT worth fixing (measured 2026-09-03).
+# _score_event_option below matches keywords on title+description, but options carry
+# UNRESOLVED templates -- "Gain {Gold} Gold. Lose {HpLoss} HP." -- with the numbers in a
+# sibling `vars` dict it never reads, so "lose 8 HP for 80 gold" and "lose 30 HP for 5 gold"
+# score identically. 96% of recorded decisions carry vars and 22% score as exact ties broken
+# arbitrarily by max().
+#
+# A magnitude term was built and measured anyway. Two things to know before rebuilding it:
+#  1. `vars` is EVENT-level, copied onto every option -- all three Tea of Discourtesy options
+#     carry the same BoneTeaCost/EmberTeaCost, and both Dense Vegetation options carry
+#     Heal=24 though only "Rest" heals. Summing it verbatim adds an identical constant to
+#     every option and cancels in the argmax: it changed 1 of 23 decisions, that one spurious.
+#     Correct attribution is "count a var only if the option's OWN description references it
+#     by name", which binds properly -- 8.9% of choices over 296 logs / 79 decisions.
+#  2. It still made things WORSE. 240 paired seeds/character, magnitude term off vs on:
+#       Necrobinder  12.287 -> 11.879  (-0.408, p=0.052)
+#       Regent       14.584 -> 14.210  (-0.374, p=0.057)
+#       Ironclad     10.992 -> 10.967  (-0.025, p=0.81)
+#     All three negative. Removed rather than shipped default-off, per the same rule that
+#     retired the deck-size penalty: a knob measured harmful is worse than a null one.
 def _score_event_option(opt: dict) -> float:
     """Score an event option by keyword analysis. Higher = better."""
     import re as _re
@@ -299,9 +319,93 @@ def _score_event_option(opt: dict) -> float:
     return score
 
 
+# The 10 starter Strike/Defend IDs — one pair per character, straight out of
+# localization_eng/cards.json. Kept as an explicit set (not a STRIKE_/DEFEND_
+# prefix test) so a future non-basic card sharing the prefix can't be purged.
+_BASIC_CARD_IDS = frozenset({
+    "STRIKE_IRONCLAD", "DEFEND_IRONCLAD",
+    "STRIKE_SILENT", "DEFEND_SILENT",
+    "STRIKE_DEFECT", "DEFEND_DEFECT",
+    "STRIKE_REGENT", "DEFEND_REGENT",
+    "STRIKE_NECROBINDER", "DEFEND_NECROBINDER",
+})
+
+
+def _card_threshold_lift() -> float:
+    """Offset added to the card-reward score bar, from STS2_CARD_THRESHOLD_LIFT.
+
+    Default 0.0 leaves the shipped behaviour untouched. Garbage is ignored
+    rather than raised: this runs inside the per-decision hot path of a live
+    run, and a typo in an env var must not kill a multi-hour eval.
+    """
+    raw = os.environ.get("STS2_CARD_THRESHOLD_LIFT")
+    if raw is None or raw == "":
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
+# STS2_RANDOMIZE: comma-separated decision types whose choice is replaced by a
+# uniform random legal choice. This is a MEASUREMENT tool, not a feature -- it
+# quantifies how much leverage each out-of-combat decision actually carries. The
+# cost of randomizing a decision upper-bounds nothing on its own, but a decision
+# where random == heuristic is one that barely matters, so no policy (learned or
+# otherwise) can win floors there. Used to decide whether handing out-of-combat
+# decisions to the RL policy is worth a rewrite, and if so, which one first.
+# Deterministic per (seed, decision) so arms stay reproducible.
+_RANDOMIZE_DECISIONS = frozenset(
+    d.strip() for d in os.environ.get("STS2_RANDOMIZE", "").split(",") if d.strip()
+)
+
+
+def _random_choice_for(state: dict) -> dict | None:
+    """Uniform random legal action for a randomized decision type, else None."""
+    decision = state.get("decision", "")
+    if decision not in _RANDOMIZE_DECISIONS:
+        return None
+    rng = random
+    if decision == "map_select":
+        choices = state.get("choices") or []
+        if not choices:
+            return None
+        c = rng.choice(choices)
+        return {"cmd": "action", "action": "select_map_node",
+                "args": {"col": c.get("col"), "row": c.get("row")}}
+    if decision == "card_reward":
+        cards = state.get("cards") or []
+        # include "skip" as a legal option so this is a fair random policy
+        pick = rng.randint(-1, len(cards) - 1) if cards else -1
+        if pick < 0:
+            return {"cmd": "action", "action": "skip_card_reward"}
+        idx = (cards[pick] or {}).get("index", pick)
+        return {"cmd": "action", "action": "select_card_reward",
+                "args": {"card_index": idx}}
+    if decision == "event_choice":
+        opts = [o for o in (state.get("options") or []) if not o.get("is_locked")]
+        if not opts:
+            return None
+        return {"cmd": "action", "action": "choose_option",
+                "args": {"option_index": rng.choice(opts).get("index")}}
+    if decision == "rest_site":
+        # rest_site_action returns choose_option/option_index (see strategy.py),
+        # NOT a rest-specific action -- match it exactly or the engine rejects.
+        opts = [o for o in (state.get("options") or []) if o.get("is_enabled", True)]
+        if not opts:
+            return None
+        return {"cmd": "action", "action": "choose_option",
+                "args": {"option_index": rng.choice(opts).get("index")}}
+    return None
+
+
 def greedy_action(state: dict) -> dict:
     """Greedy heuristic for non-combat decisions. Used during training and by coordinator."""
     decision = state.get("decision", "")
+    if _RANDOMIZE_DECISIONS:
+        _rnd = _random_choice_for(state)
+        if _rnd is not None:
+            return _rnd
     if _decision_advisor_enabled():
         advised = _decision_advisor.choose(state)
         if advised is not None:
@@ -318,13 +422,54 @@ def greedy_action(state: dict) -> dict:
             deck = state.get("player", {}).get("deck") or []
             deck_size = state.get("player", {}).get("deck_size", len(deck) or 10)
             floor = state.get("floor") or state.get("context", {}).get("floor", 1)
-            in_act2 = isinstance(floor, int) and floor >= 16
+            # Derive from the ACT, not the act-local floor. `floor` here is
+            # `_runState.ActFloor`, so `floor >= 16` is true in the last two
+            # floors of EVERY act and false through most of Act 2 — the
+            # opposite of the name. Same root cause as the act-local floor
+            # bonus in _combat_win_reward.
+            _act = state.get("act") or (state.get("context") or {}).get("act")
+            in_act2 = isinstance(_act, int) and _act >= 2
             if in_act2:
                 threshold = 5.5 if deck_size < 18 else 6.0
             elif deck_size >= 18:
                 threshold = 6.5
             else:
                 threshold = 5.5
+            # These bars sit at/below _TIER_BASE["B"] == 6.0, so almost every
+            # offered card clears them — score-driven skips measured 50 -> 0
+            # once the advisor data grew to 507 cards, and real Act 3 boss
+            # entries carry 27-29 card decks holding ~4 block cards. Raising
+            # the bar was rejected once, but that test ran on the pre-v0.111
+            # build where card rewards added nothing, i.e. where card choice
+            # provably had no consequence. STS2_CARD_THRESHOLD_LIFT makes it
+            # re-testable on the fixed engine without changing the default.
+            #
+            # RE-TESTED 2026-09-01 ON THE FIXED ENGINE — still null, keep 0.
+            # Defect ppo_defect_2048k at a1, paired, 60 fresh seeds per arm:
+            #   lift +1.00 -> floor +0.000 (se 0.024, p=1.00)
+            #   lift +1.75 -> floor +0.133 (se 0.135, p=0.32)
+            #   lift +2.50 -> floor +0.117 (se 0.154, p=0.45)
+            #   lift +3.50 -> floor +0.083 (se 0.595, p=0.89)
+            # At +3.50 the bar is 9.0, above _TIER_BASE["A"], so most offers are
+            # skipped — the variance jump (se 0.154 -> 0.595) confirms behaviour
+            # really changed. Depth did not. So the 27-29 card decks seen at real
+            # Act 3 boss entries are not what loses that fight, and trimming the
+            # deck via this threshold is not a lever. Do not re-sweep it.
+            #
+            # A DECK-SIZE-SCALED gate was then built and measured, on the theory
+            # that a flat bar cannot bind because pick_best_card TOTALS run
+            # ~15-18 (base score is capped at 10, but set/tag/archetype/
+            # combat-type bonuses stack on top) while this bar is at most 6.5.
+            # A term growing with deck size does bind — and it is WORSE:
+            # target 18, slope 3.0, Defect ppo_defect_2048k at a1, 60 paired
+            # fresh seeds (21000+) scored floor 20.183 -> 19.733
+            # (-0.450, se 0.195, t=-2.31, p=0.021) with combat_wins
+            # 8.717 -> 8.517 (p=0.019). Removed rather than shipped default-off:
+            # a knob measured harmful is worse to leave lying around than a null
+            # one. The marginal card is still net-positive value, so skipping it
+            # costs more power than the tighter deck returns. Deck size is a
+            # SYMPTOM of deep runs, not the cause of the boss loss.
+            threshold += _card_threshold_lift()
             # Provide game-state context for MC rollout (no-op when STS2_MC_ROLLOUT
             # is off — the v2 predictor path doesn't read it).
             from agent.card_scoring import set_mc_context as _set_mc_ctx
@@ -446,7 +591,9 @@ def greedy_action(state: dict) -> dict:
                     return {"cmd": "action", "action": "buy_potion",
                             "args": {"potion_index": sp.get("index", 0)}}
 
-        in_act2 = isinstance(floor, int) and floor >= 16
+        # See the card-reward site: act-local floor >= 16 is not "in Act 2".
+        _act = state.get("act") or (state.get("context") or {}).get("act")
+        in_act2 = isinstance(_act, int) and _act >= 2
         deck = state.get("player", {}).get("deck", []) or []
 
         # === Basic-card dead-weight purge (Jun 13) ===
@@ -455,8 +602,35 @@ def greedy_action(state: dict) -> dict:
         # card value, so a good shop card blocked removal. Strike/Defend are
         # dead weight at ANY deck size — purge them first, unconditionally,
         # until ≤2 remain.
-        n_basic = sum(1 for c in deck
-                      if _card_id_norm(c) in ("STRIKE_IRONCLAD", "DEFEND_IRONCLAD"))
+        #
+        # This matches only Ironclad's two basic IDs, so for the other four
+        # characters n_basic is ALWAYS 0 and the purge never fires. That is a
+        # genuine defect — verified on recorded decks, a Defect deck holding 7
+        # basics (4 DEFEND_DEFECT + 3 STRIKE_DEFECT) computes n_basic=0 while an
+        # Ironclad deck holding 9 computes 9 — and it is the same shape as
+        # ELITE_PREF and the hallway danger threshold: built for one character,
+        # silently inert for the rest.
+        #
+        # It is left as the DEFAULT anyway, because correcting it is not an
+        # improvement. Measured 2026-09-03, 240 paired seeds per character,
+        # against arms produced by this exact code on the same seeds:
+        #   Ironclad (control, n_basic 9->9)  0.000  se 0.000  <- bit-identical
+        #   Defect       20.713 -> 22.038   +1.325  p=0.0082
+        #   Silent       12.185 -> 12.382   +0.197  p=0.35
+        #   Necrobinder  12.276 -> 12.218   -0.059  p=0.81
+        #   Regent       14.479 -> 13.752   -0.727  p=0.0023
+        # Mean +0.147 across five, driven entirely by Defect — the one character
+        # that already clears Act 3 — while significantly regressing Regent, one
+        # that does not. Purging basics suits a thin orb deck; for Regent the
+        # removal gold is better spent buying. Opt in with STS2_BASIC_PURGE_ALL=1
+        # (a real knob, not dead config: it moves Defect +1.33 and Regent -0.73).
+        # A per-character rule fitted to n=1 positive / 1 negative / 2 null would
+        # be overfitting, so none is shipped.
+        _basic_ids = (_BASIC_CARD_IDS
+                      if os.environ.get("STS2_BASIC_PURGE_ALL", "").strip().lower()
+                      in {"1", "true", "on"}
+                      else ("STRIKE_IRONCLAD", "DEFEND_IRONCLAD"))
+        n_basic = sum(1 for c in deck if _card_id_norm(c) in _basic_ids)
         if removal_cost and gold >= removal_cost and n_basic >= 3:
             return {"cmd": "action", "action": "remove_card"}
 
@@ -645,6 +819,7 @@ class CombatEnv(gym.Env):
             os.path.join(PROJECT_ROOT, "data", "deck_history.jsonl"))
         # Per-run state for the predictor: max floor seen, milestones captured
         self._run_max_floor = 1
+        self._reset_combat_hp_loss()
         self._run_context = dict(run_context or {})
         self._capture_run_maps = self._run_context.get("capture_map") is True
         self._run_map_snapshots: dict[int, dict] = {}
@@ -664,6 +839,13 @@ class CombatEnv(gym.Env):
         self._run_start_emitted = False
         self._run_started_at = time.time()
         self._run_outcome_emitted = False
+        # Separate from _run_outcome_emitted: that flag legitimately stays False
+        # when outcome logging raises (caller retries _emit_run_outcome), but the
+        # fatal combat must still be booked only once. Without this, a run whose
+        # outcome logging fails repeatedly re-books the same death every retry —
+        # seen in production as one combat counted 73x, inflating hallway-fight
+        # HP-loss averages ~60% (11.3 -> 18.3 measured HP).
+        self._fatal_combat_booked = False
         self._run_logging_errors: list[str] = []
         self._run_map_capture_failure_active = False
         self._run_milestone_records: list = []  # buffered rows until outcome known
@@ -741,6 +923,7 @@ class CombatEnv(gym.Env):
         self._run_counter += 1
         self._milestones_paid.clear()  # new run — re-arm deck-quality milestones
         self._run_max_floor = 1
+        self._reset_combat_hp_loss()
         self._run_id = str(
             self._run_context.get("run_id")
             or f"r{int(time.time()*1000) % 10**9:09d}_{random.randint(0, 9999):04d}"
@@ -750,6 +933,7 @@ class CombatEnv(gym.Env):
         self._run_start_emitted = False
         self._run_started_at = time.time()
         self._run_outcome_emitted = False
+        self._fatal_combat_booked = False
         self._run_milestone_records = []
         self._run_card_pick_records = []
         self._run_map_snapshots = {}
@@ -851,12 +1035,44 @@ class CombatEnv(gym.Env):
             if _p not in _sys.path:
                 _sys.path.insert(0, _p)
             from game_log import GameLogger
-            self._game_logger = GameLogger(self.character, run_seed, enabled=True)
+            self._game_logger = GameLogger(
+                self.character, run_seed, enabled=True,
+                run_context=self._run_context,
+            )
         except Exception:
             self._game_logger = None      # logging must never break a run
 
+    def _flush_map_snapshots_to_game_log(self) -> None:
+        """Emit captured act maps into the replay before it is closed.
+
+        `_serialized_run_map_snapshots()` is consumed only by the
+        DECK_HISTORY_PATH branch, so a --game-log replay carried no map rows at
+        all and the workbench showed "缺失 · 完整地图分支" for every act. The
+        workbench keys its map view on event == "map_snapshot", so the row shape
+        here must match what `_serialized_run_map_snapshots` emits.
+        """
+        logger = self._game_logger
+        if logger is None or not self._run_map_snapshots:
+            return
+        for act in sorted(self._run_map_snapshots):
+            snapshot = self._run_map_snapshots[act]
+            try:
+                logger.log_map_snapshot({
+                    "event": "map_snapshot",
+                    "act": act,
+                    "map": snapshot["map"],
+                    "visited_nodes": snapshot["visited_nodes"],
+                    "ts": snapshot.get("ts"),
+                })
+            except Exception:
+                return   # logging must never break a run
+
     def _close_game_log(self):
         if self._game_logger is not None:
+            try:
+                self._flush_map_snapshots_to_game_log()
+            except Exception:
+                pass
             try:
                 self._game_logger.close()
             except Exception:
@@ -1045,6 +1261,7 @@ class CombatEnv(gym.Env):
                 self._emit_run_outcome(state, bool(state.get("victory", False)),
                                        status=_terminal_status_for(state))
                 return last_obs, r, True, False, self._game_over_info(state)
+
             self._current_state = state
             return self._encode(state), reward, False, False, {}
 
@@ -1082,6 +1299,7 @@ class CombatEnv(gym.Env):
 
         # Combat ended (transitioned to card_reward, map_select, etc.) — we won
         reward += self._combat_win_reward(state)
+        self._record_combat_hp_loss(_player_hp(state))
         self._current_state = state
         return last_obs, reward, True, False, {"floor": self._current_floor, "combat_won": True}
 
@@ -1112,6 +1330,12 @@ class CombatEnv(gym.Env):
         return mask
 
     def close(self):
+        # Close the replay first: it flushes the run's captured act maps, and
+        # nothing else calls _close_game_log for the FINAL run of a process
+        # (_open_game_log only closes the *previous* one). Without this a
+        # single-game eval produced a replay with no map rows even when capture
+        # had succeeded.
+        self._close_game_log()
         self._kill_proc()
 
     def set_max_floor(self, max_floor: int) -> None:
@@ -1150,6 +1374,7 @@ class CombatEnv(gym.Env):
         self._current_floor = int(floor) if isinstance(floor, (int, float)) and floor > 0 else 1
         self._track_run_floor(state)
         hp = state.get("player", {}).get("hp", self._combat_start_player_max_hp)
+        self._combat_entry_hp = int(hp)
         self._combat_entry_hp_ratio = hp / self._combat_start_player_max_hp
         self._dealt_damage_this_turn = False  # fresh combat starts with no damage logged
         # Capture room_type at combat start: by the time _combat_win_reward fires,
@@ -1162,6 +1387,67 @@ class CombatEnv(gym.Env):
             self._pending_boss_entry_reward = (hp - BOSS_ENTRY_HP_FLOOR) * BOSS_ENTRY_HP_WEIGHT
         else:
             self._pending_boss_entry_reward = 0.0
+
+    # Room types tracked separately for per-run HP-loss reporting. Boss is kept
+    # apart because a boss fight's cost is not comparable to a hallway fight's.
+    _HP_LOSS_ROOMS = ("Monster", "Elite", "Boss")
+
+    def _reset_combat_hp_loss(self) -> None:
+        self._combat_hp_loss = {room: [0, 0] for room in self._HP_LOSS_ROOMS}
+
+    def _record_combat_hp_loss(self, end_hp: int) -> None:
+        """Book one finished combat's HP cost against its room type.
+
+        Entry-minus-exit, so healing mid-fight correctly reduces the cost and a
+        fight that killed the player books the full entry HP. Combats that ended
+        as technical failures are not recorded — their exit HP is meaningless.
+        """
+        bucket = self._combat_hp_loss.get(self._current_combat_room_type)
+        if bucket is None:
+            return
+        entry = getattr(self, "_combat_entry_hp", None)
+        if not isinstance(entry, int):
+            return
+        lost = max(0, entry - max(0, int(end_hp)))
+        bucket[0] += lost
+        bucket[1] += 1
+        self._dump_combat_hp_loss(lost, entry)
+
+    def _dump_combat_hp_loss(self, lost: int, entry_hp: int) -> None:
+        """Append one finished fight to STS2_HP_LOSS_DUMP, when set.
+
+        Aggregates alone cannot say whether a high average comes from expensive
+        fights or from fighting in the wrong places, which is what route tuning
+        needs to know. Mirrors STS2_STUCK_DUMP; a no-op without the env var.
+        """
+        path = os.environ.get("STS2_HP_LOSS_DUMP")
+        if not path:
+            return
+        try:
+            row = {
+                "room_type": self._current_combat_room_type,
+                "global_floor": int(self._run_max_floor),
+                "act_floor": int(self._current_floor),
+                "entry_hp": int(entry_hp),
+                "hp_lost": int(lost),
+                "run_id": getattr(self, "_run_id", None),
+                "seed": getattr(self, "_run_seed", None),
+            }
+            with open(path, "a") as fh:
+                fh.write(json.dumps(row, default=str) + "\n")
+        except Exception:
+            pass
+
+    def _combat_hp_loss_summary(self) -> dict:
+        """Per-run averages, as {avg_monster_hp_loss, monster_combats, ...}."""
+        summary: dict = {}
+        for room in self._HP_LOSS_ROOMS:
+            total, count = self._combat_hp_loss.get(room, (0, 0))
+            key = room.lower()
+            summary[f"{key}_combats"] = count
+            summary[f"avg_{key}_hp_loss"] = round(total / count, 2) if count else None
+            summary[f"total_{key}_hp_loss"] = total
+        return summary
 
     @staticmethod
     def _global_floor_from_state(state: dict | None, fallback: int = 1) -> int:
@@ -1186,6 +1472,17 @@ class CombatEnv(gym.Env):
             int(self._run_max_floor),
             self._global_floor_from_state(state, fallback=self._run_max_floor),
         )
+
+    @property
+    def run_max_global_floor(self) -> int:
+        """Deepest global floor this run reached, counting across acts.
+
+        The per-step ``info["floor"]`` is the act-local floor and so tops out at 17
+        in every act — averaging it hides whether a run died in Act 1 or cleared
+        into Act 3. This is the same number ``_emit_run_outcome`` reports as
+        ``max_floor``, which is what eval_rl records as ``max_global_floor``.
+        """
+        return int(self._run_max_floor)
 
     def _shaping_reward(self, next_state: dict) -> float:
         cur_enemy_hp = _total_enemy_hp(next_state)
@@ -1327,10 +1624,27 @@ class CombatEnv(gym.Env):
         _win_hp_coef = 5.0 if _os_w.environ.get("STS2_HP_REWARD") == "1" else 3.0
         reward = _win_hp_coef * hp_ratio * hp_ratio
         # Floor bonus: Act 1 (floor≤15) = 0.10/floor; Act 2+ gets +0.15/floor above 15.
-        if self._current_floor <= 15:
-            floor_bonus = (self._current_floor - 1) * 0.10
+        #
+        # Scored on the GLOBAL floor. This used `_current_floor`, which is the
+        # ACT-LOCAL floor (`RunContext()` sets it from `_runState.ActFloor`), so
+        # it restarted at 1 every act: the bonus paid 1.4 at the end of Act 1
+        # and 0.0 on entering Act 2 — a 45% cut to the combat-win reward
+        # (3.0875 → 1.6875) for *advancing an act* — and global floor 49 paid
+        # exactly what floor 15 paid. There was no gradient toward depth past
+        # Act 1, which is the most plausible reason PPO measured −0.03 floors
+        # over 400 paired seeds while sitting at a floor 11–14 plateau, i.e.
+        # right where the bonus stopped paying. `_run_max_floor` already holds
+        # the global floor (see `run_max_global_floor`); max() guards the case
+        # where `_track_run_floor` has not run yet for this combat.
+        #
+        # NOTE this changes the reward SCALE — resume training with
+        # `--reinit-value` (and ideally `--vf-pretrain-chunks 2`) or the stale
+        # critic corrupts GAE advantages.
+        floor_for_bonus = max(int(self._run_max_floor), int(self._current_floor))
+        if floor_for_bonus <= 15:
+            floor_bonus = (floor_for_bonus - 1) * 0.10
         else:
-            floor_bonus = 1.4 + (self._current_floor - 15) * 0.15
+            floor_bonus = 1.4 + (floor_for_bonus - 15) * 0.15
         reward += floor_bonus
         # Deck-quality milestone bonus — paid ONCE per run when crossing each
         # of {5, 10, 15} for the first time, scaled by deck quality 0–10.
@@ -1479,6 +1793,7 @@ class CombatEnv(gym.Env):
             ),
             "character": self.character,
             "ascension": self.ascension,
+            "experiment": self._run_context.get("experiment"),
             "checkpoint": self._run_context.get("checkpoint"),
             "evaluation_mode": self._run_context.get("evaluation_mode"),
             "scenario": self._run_context.get("scenario"),
@@ -2326,6 +2641,12 @@ class CombatEnv(gym.Env):
             final_status = "invalid"
         technical_failure_kind = (final_status if final_status in technical_statuses
                                   else None)
+        # A genuine defeat ends the fight the player was in at 0 HP; book it so the
+        # fatal combat counts toward that room type's cost. Technical failures are
+        # skipped — the run did not really finish that combat.
+        if final_status == "dead" and not self._fatal_combat_booked:
+            self._record_combat_hp_loss(0)
+            self._fatal_combat_booked = True
         outcome = {
             **self._run_metadata_row("outcome"),
             "max_floor": int(self._run_max_floor),
@@ -2333,6 +2654,7 @@ class CombatEnv(gym.Env):
             "boss": getattr(self, "_run_boss_id", None),
             "status": final_status,
             "technical_failure_kind": technical_failure_kind,
+            **self._combat_hp_loss_summary(),
             "ts": time.time(),
         }
         if self._deck_history_path:
@@ -2458,6 +2780,16 @@ class CombatEnv(gym.Env):
                 potions = p2.get("potions", []) or []
         return state
 
+    # Tried (2026-08-27): re-running this full potion scan on every combat_play
+    # at elite/boss rooms, not just once at combat entry (_advance_to_combat),
+    # since a Block potion judged against turn-1 intents gets carried unused
+    # through a long fight. Measured on 100 fixed seeds/arm (ppo_defect_2248k,
+    # paired by seed): -0.03 HP/elite fight (se 0.07, p=0.75) over the intent-
+    # defense override, +0.35 HP (se 0.33, p=0.51) at elite route bias 20 —
+    # effectively zero. Can't work: this function already sets use=True for
+    # almost every potion once is_tough is true, so potions are all spent
+    # turn 1 and a later pass has nothing left to reconsider. Mid-combat
+    # heals are handled separately by _combat_check_heal.
     def _greedy_use_potions(self, state: dict) -> dict:
         """Auto-use potions before RL policy acts (RL action space has no potion actions).
 
@@ -2496,9 +2828,31 @@ class CombatEnv(gym.Env):
             # Damage that bypasses current block (what we'll actually take)
             unblocked_dmg = max(0, incoming_dmg - blk_cur)
 
-            # Late-game (floor 10+): survivability matters more than saving potions
+            # Late-game (floor 10+): survivability matters more than saving potions.
+            # NOTE both read the ACT-LOCAL floor. is_late_game is fine that way
+            # (it means "late within this act"), but is_act2 was not: act-local
+            # >= 16 is the last two floors of every act, not Act 2. Derived from
+            # the act now — same root cause as the act-local floor bonus.
+            # This floor gate was made configurable and measured 2026-09-03 on the
+            # theory that potions are hoarded for a late game most runs never
+            # reach (54% of Ironclad deaths are at floors 1-9). It is a DEAD knob:
+            # floor 1 and floor 17 arms returned bit-identical potions-at-death
+            # distributions, seed for seed, so the paired result (+0.117, p=0.31)
+            # is void rather than null. Knob removed; do not rebuild it.
+            #
+            # The reason it cannot bind is the real defect, and it is not here:
+            # _greedy_use_potions is called ONLY from _advance_to_combat at the
+            # moment the decision first becomes combat_play, i.e. once at combat
+            # ENTRY, never again during the fight. So every hp_ratio < 0.50/0.60
+            # condition below is evaluated at entry HP, when the player is
+            # typically healthy — an emergency heal at 45% HP mid-fight is
+            # unreachable by construction. Fixing potions means calling this per
+            # turn, not moving this threshold. Headroom is modest though:
+            # Ironclad carries a measured 0.75 potions at death (6 of 12 runs die
+            # empty), not the ~2.0 a sloppier sample suggested.
             is_late_game = self._current_floor >= 10
-            is_act2 = self._current_floor >= 16
+            _act = (state.get("context") or {}).get("act")
+            is_act2 = isinstance(_act, int) and _act >= 2
 
             if ("heal" in text or "restore" in text) and "curse" not in text:
                 # Heal thresholds 2026-05-19: raised Act 1 monster from 0.30→0.50.
@@ -2516,6 +2870,16 @@ class CombatEnv(gym.Env):
                 # at elite/threatening: use when damaged or incoming is severe
                 threatening = incoming_dmg > 0 and unblocked_dmg >= hp_cur * 0.45
                 use = is_boss or threatening or (is_elite and hp_ratio < 0.60)
+                # `is_boss` ignores intent, so a block potion is spent on turn 1
+                # even when the boss is buffing — and real Act 3 boss entries do
+                # arrive with ZERO potions, all burned earlier. Gating this on
+                # `incoming_dmg > 0` (the rule intent_defense_override already
+                # uses) was built and measured 2026-09-01 and is NULL: 90 paired
+                # seeds came back bit-identical on every metric (floor,
+                # combat_wins, elite and boss HP all exactly 0.000), and a
+                # 240-seed run scored −0.046 (p=0.16). The gate never changes a
+                # decision, so the turn-1 dump is not what empties the belt.
+                # Knob removed rather than left as dead config. Do not rebuild.
             elif not is_tough and not is_late_game:
                 continue  # other potions: save for elite/boss (but use freely in late game)
             elif not is_tough:
@@ -2597,7 +2961,91 @@ class CombatEnv(gym.Env):
 
         return state
 
+    # Two strikes, not one. A single no-op already implies a loop for a purely
+    # deterministic policy, but the decision advisor may sample, so one identical
+    # reply is not by itself proof the option is inert.
+    _INERT_OPTION_STRIKES = 2
+
+    @staticmethod
+    def _decision_signature(state: dict | None) -> str | None:
+        """Stable identity of a decision point, or None when not comparable."""
+        if not isinstance(state, dict) or state.get("decision") != "event_choice":
+            return None
+        try:
+            return json.dumps(state, sort_keys=True, default=str)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _chosen_option_index(cmd: dict | None) -> int | None:
+        if not isinstance(cmd, dict) or cmd.get("action") != "choose_option":
+            return None
+        index = (cmd.get("args") or {}).get("option_index")
+        return index if isinstance(index, int) and not isinstance(index, bool) else None
+
+    def _note_inert_option(
+        self,
+        inert: dict,
+        previous: dict | None,
+        previous_sig: str | None,
+        cmd: dict | None,
+        new_state: dict | None,
+    ) -> None:
+        """Record a choose_option that left the decision byte-identical."""
+        if previous_sig is None:
+            return
+        index = self._chosen_option_index(cmd)
+        if index is None:
+            return
+        if self._decision_signature(new_state) != previous_sig:
+            return
+        strikes = inert.setdefault(previous_sig, {})
+        strikes[index] = strikes.get(index, 0) + 1
+        if strikes[index] == self._INERT_OPTION_STRIKES:
+            event = (previous or {}).get("event_name")
+            self._dump_stuck("inert_event_option", previous)
+            warnings.warn(
+                f"event option {index} on {event!r} is inert "
+                f"(state unchanged after {self._INERT_OPTION_STRIKES} attempts); "
+                "retiring it and choosing another",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _without_inert_options(self, state: dict, inert: dict) -> dict:
+        """Mask options already proven inert so the policy picks something else."""
+        sig = self._decision_signature(state)
+        if sig is None:
+            return state
+        retired = {
+            index
+            for index, strikes in inert.get(sig, {}).items()
+            if strikes >= self._INERT_OPTION_STRIKES
+        }
+        if not retired:
+            return state
+        options = state.get("options")
+        if not isinstance(options, list):
+            return state
+        masked = dict(state)
+        masked["options"] = [
+            dict(option, is_locked=True)
+            if isinstance(option, dict) and option.get("index") in retired
+            else option
+            for option in options
+        ]
+        return masked
+
     def _advance_to_combat(self, state: dict) -> dict | None:
+        # Some event options are silently inert: the engine accepts the choice,
+        # applies nothing, and hands back a byte-identical decision. Jungle Maze
+        # Adventure's "Join Forces" is one — 197 identical replies with gold and
+        # HP untouched, then the run dies as advance_loop_exhausted. Because the
+        # policy is a function of the state, an unchanged state re-picks the same
+        # option forever, so a repeat offender is retired from the menu and the
+        # next-best option is taken instead. Once every option is retired,
+        # greedy_action falls through to leave_room on its own.
+        inert_options: dict[str, dict[int, int]] = {}
         for _ in range(200):
             if state is None:
                 return None
@@ -2630,16 +3078,20 @@ class CombatEnv(gym.Env):
                 except Exception:
                     cmd = None
             if cmd is None:
-                cmd = greedy_action(state)
+                cmd = greedy_action(self._without_inert_options(state, inert_options))
             # Log every card_reward decision (deck_before + offered options + picked)
             # for the deck predictor's training set. Old milestone/outcome events
             # remain unchanged — this is a strictly-additive event stream.
             if state.get("decision") == "card_reward":
                 self._buffer_card_pick(state, cmd)
+            previous, previous_sig = state, self._decision_signature(state)
             state = self._send_with_run_decision(state, cmd)
             self._update_buffered_node_inventory(state)
             if state is None:
                 return None
+            self._note_inert_option(
+                inert_options, previous, previous_sig, cmd, state
+            )
         self._dump_stuck("advance_loop_exhausted", state)
         return {
             "decision": "stuck",
