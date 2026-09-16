@@ -39,6 +39,12 @@ def _find_dotnet():
     return "dotnet"
 
 DOTNET = _find_dotnet()
+# Don't clobber an explicit STS2_GAME_DIR — a caller may point at a
+# different install (or a different platform's data dir) and the
+# hardcoded path below is only a macOS/Steam default.
+os.environ.setdefault("STS2_GAME_DIR", os.path.expanduser(
+    "~/Library/Application Support/Steam/steamapps/common/"
+    "Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64"))
 PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "src", "Sts2Headless", "Sts2Headless.csproj")
 

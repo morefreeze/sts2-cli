@@ -982,8 +982,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fixed_seeds=True)
     p.add_argument("--seed-offset", type=int, default=0,
                    help="Offset for fixed seed index")
-    p.add_argument("--invalid-retries", type=int, default=1,
-                   help="Retry crash/timeout/stuck attempts on the same seed (default: 1)")
+    p.add_argument("--invalid-retries", type=int, default=3,
+                   help="Retry crash/timeout/stuck attempts on the same seed (default: 3)")
     p.add_argument("--results-log", default="data/eval_results.jsonl",
                    help="JSONL file for every evaluation attempt. Pass 'none' to disable.")
     p.add_argument(
@@ -1077,6 +1077,15 @@ def main():
         # Result is deterministic post-load; default to 1 game unless user passed --n-games.
         if "--n-games" not in sys.argv and "-n" not in sys.argv:
             n_games = 1
+
+    if args.verbose and n_games > 1:
+        print(
+            "WARNING: --verbose perturbs run outcomes (mutates card_scoring context, "
+            "eats decision budget) — do not trust status/floor numbers from a --verbose "
+            "run with n_games > 1. Use --verbose only to inspect a single game "
+            "(--n-games 1), then re-measure without the flag.",
+            file=sys.stderr,
+        )
 
     checkpoint = args.checkpoint
     device = "mps" if torch.backends.mps.is_available() else "cpu"
