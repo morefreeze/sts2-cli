@@ -28,6 +28,7 @@ using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Multiplayer.Serialization;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Unlocks;
+using CombatSolver;
 
 namespace Sts2Headless;
 
@@ -908,6 +909,8 @@ public class RunSimulator
                     return DoMapSelect(player, args);
                 case "play_card":
                     return DoPlayCard(player, args);
+                case "plan_combat_turn":
+                    return DoPlanCombatTurn(player, args);
                 case "end_turn":
                     return DoEndTurn(player);
                 case "choose_option":
@@ -1060,6 +1063,161 @@ public class RunSimulator
         }
 
         return DetectDecisionPoint();
+    }
+
+    /// <summary>
+    /// Runs the ported Combat Solver (CombatSolverEngine/{Engine,Search,Prediction,Strategy,Runtime})
+    /// against the real live combat state and returns its best multi-turn action sequence, instead of
+    /// only ever recommending one card at a time like DoPlayCard.
+    /// </summary>
+    private Dictionary<string, object?> DoPlanCombatTurn(Player player, Dictionary<string, object?>? args)
+    {
+        var pcs = player.PlayerCombatState;
+        if (pcs == null)
+            return Error("Not in combat");
+
+        // Same source RunSimulator.cs already uses elsewhere (DoPlayCard, DoUsePotion) to reach the
+        // real MegaCrit.Sts2.Core.Combat.CombatState instance for this room.
+        var combatState = CombatManager.Instance.DebugOnlyGetState();
+        if (combatState == null)
+            return Error("Not in combat");
+
+        CombatRootSnapshot snapshot;
+        try
+        {
+            snapshot = CombatRootSnapshot.Capture(combatState);
+        }
+        catch (Exception ex)
+        {
+            return ErrorWithTrace("CombatRootSnapshot.Capture failed", ex);
+        }
+
+        SolverDisplayNames displayNames;
+        try
+        {
+            displayNames = SolverDisplayNames.Capture(combatState);
+        }
+        catch (Exception ex)
+        {
+            return ErrorWithTrace("SolverDisplayNames.Capture failed", ex);
+        }
+
+        // BattleDamageTracker is a static, request-scoped tracker keyed by combat state identity;
+        // Observe() lazily calls Begin() the first time it sees a given CombatState, so calling it
+        // here (with no prior Begin()) is the correct minimal usage for a one-shot plan query.
+        BattleDamageSnapshot battleDamage = BattleDamageTracker.Observe(combatState);
+
+        // No mod-settings UI was vendored (Task 3 scope note: SolverSettings.cs stays out because it
+        // pulls in real Godot for JSON persistence), so this policy is assembled by hand from the
+        // engine's own documented defaults rather than a UI-bound settings object:
+        //   - Profile: SolverSearchProfile.Default (Search/SolverSearchProfile.cs).
+        //   - MaxDegreeOfParallelism: SolverWeights.DefaultSearchMaxDegreeOfParallelism, the same
+        //     processor-count-scaled default the mod itself falls back to.
+        //   - PotionPolicy/PotionStrategy: Smart with no per-slot overrides (let the solver decide).
+        //   - AcceptableBattleHpLoss: int.MaxValue, so the early-stop-on-"good enough" shortcut in
+        //     HasReachedAcceptableBattleHpLoss never fires and the search always spends its full
+        //     node/time budget looking for the true best route.
+        //   - Boss HP strategy: ProgressionFirst (the enum's default member) for both act-transition
+        //     and final bosses.
+        //   - Diagnostics/FramePressureSignal/MemoryPressureSignal: freshly constructed, disabled/
+        //     no-op instances -- there is no frame budget or GC pressure to react to outside a real
+        //     game render loop.
+        var policy = new SearchPolicySnapshot(
+            Profile: SolverSearchProfile.Default,
+            PotionPolicy: SolverPotionPolicy.Smart,
+            PotionStrategy: new PotionStrategySnapshot(SolverPotionPolicy.Smart, Array.Empty<PotionSlotDirective>()),
+            DetailedDiagnostics: false,
+            VerifyIncrementalSearch: false,
+            FixedBudget: false,
+            MeasurePhasePerformance: false,
+            MaxDegreeOfParallelism: SolverWeights.DefaultSearchMaxDegreeOfParallelism,
+            BudgetOverrideMilliseconds: null,
+            IncludeTurnSetup: false,
+            TheftPolicy: null,
+            ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
+            FinalBossHpStrategy: BossHpStrategy.ProgressionFirst,
+            AcceptableBattleHpLoss: int.MaxValue,
+            Diagnostics: new SearchDiagnosticsSink(
+                info: message => Log($"[CombatSolver] {message}"),
+                debug: _ => { }),
+            FramePressureSignal: new SearchFramePressureSignal(),
+            MemoryPressureSignal: new SearchMemoryPressureSignal());
+
+        SolverResult result;
+        try
+        {
+            result = CombatSearchCoordinator.Solve(
+                snapshot, displayNames, battleDamage, policy,
+                CancellationToken.None, progressCallback: null);
+        }
+        catch (Exception ex)
+        {
+            return ErrorWithTrace("CombatSearchCoordinator.Solve failed", ex);
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["type"] = "combat_plan",
+            ["only_death_routes_found"] = result.OnlyDeathRoutesFound,
+            ["action_count"] = result.BestNode.ActionCount,
+            ["score"] = result.BestNode.Score,
+            ["projected_player_hp"] = result.Snapshot.ProjectedPlayerHp,
+            ["all_enemies_dead"] = result.Snapshot.AllEnemiesDead,
+            ["actions"] = ConvertPlanActionsToJson(result.BestNode.Actions),
+        };
+    }
+
+    /// <summary>
+    /// Converts the solver's PlanAction sequence (Search/CombatPlan.cs) into JSON-friendly action
+    /// dictionaries. PlanAction identifies cards by CardId/CardOccurrence (a card identity plus how
+    /// many times that identity has been seen), not by a live hand-position index: the sequence spans
+    /// multiple future turns whose hand contents/order this action never actually simulates in
+    /// RunSimulator.cs, so a "card_index" (as DoPlayCard takes it) cannot be produced here -- a
+    /// consumer must resolve CardId to a live hand index itself at execution time, turn by turn.
+    /// </summary>
+    private static List<Dictionary<string, object?>> ConvertPlanActionsToJson(IReadOnlyList<PlanAction> actions)
+    {
+        var result = new List<Dictionary<string, object?>>(actions.Count);
+        foreach (var action in actions)
+        {
+            var entry = new Dictionary<string, object?> { ["turn"] = action.Turn };
+            switch (action.Kind)
+            {
+                case PlanActionKind.PlayCard:
+                    entry["action"] = "play_card";
+                    entry["card_id"] = action.CardId;
+                    entry["card_title"] = action.CardTitle;
+                    entry["card_upgrade_level"] = action.CardUpgradeLevel;
+                    entry["card_occurrence"] = action.CardOccurrence;
+                    if (action.TargetIndex >= 0)
+                        entry["target_index"] = action.TargetIndex;
+                    if (action.TargetCombatId is uint cardTargetCombatId)
+                        entry["target_combat_id"] = cardTargetCombatId;
+                    if (!string.IsNullOrEmpty(action.TargetName))
+                        entry["target_name"] = action.TargetName;
+                    break;
+                case PlanActionKind.UsePotion:
+                    entry["action"] = "use_potion";
+                    entry["potion_slot"] = action.PotionSlot;
+                    entry["potion_id"] = action.PotionId;
+                    entry["potion_title"] = action.PotionTitle;
+                    if (action.TargetIndex >= 0)
+                        entry["target_index"] = action.TargetIndex;
+                    if (action.TargetCombatId is uint potionTargetCombatId)
+                        entry["target_combat_id"] = potionTargetCombatId;
+                    if (!string.IsNullOrEmpty(action.TargetName))
+                        entry["target_name"] = action.TargetName;
+                    break;
+                case PlanActionKind.EndTurn:
+                    entry["action"] = "end_turn";
+                    break;
+                default:
+                    entry["action"] = action.Kind.ToString();
+                    break;
+            }
+            result.Add(entry);
+        }
+        return result;
     }
 
     // STS2 build 23372702 removed CombatManager.IsPlayPhase (global) in favor of a
