@@ -312,7 +312,7 @@ grep -rn "class NGame\b" /Users/bytedance/mygit/sts2-cli/src/Sts2Headless/Combat
 `[{"action": "play_card", "card_index": 2, "target_index": 0}, {"action": "end_turn"}]`
 的列表，塞进上面返回值的 `["actions"]` 键。这一步的具体字段名必须来自实际读到的源码，不能照抄本计划的骨架。
 
-> 实际返回的是 `card_id`/`card_occurrence`（稳定身份），不是 `card_index`（手牌位置）——因为计划跨越未来若干回合，那些回合的手牌内容在 JSON 协议这一层根本没模拟，手牌位置索引过了第 0 回合就没有意义。同理 `target_index`/`target_combat_id` 对第 2 回合及之后的动作也没有办法对上普通 `combat_play` 决策返回的敌人列表（那边只暴露位置 `index`）。**约定**：只执行到计划里第一个 `end_turn` 为止，然后重新调用一次 `plan_combat_turn` 拿下一回合的新计划，不要试图盲目执行整份多回合计划——已经记录进 [CLAUDE.md](../../../CLAUDE.md) 的 Protocol notes。另外 `PlanAction.Choice`/`NestedChoices`（弃牌/消耗/换形态这类卡牌自带的子选择）目前的处理见后续 commit。
+> 实际返回的是 `card_id`/`card_occurrence`（稳定身份），不是 `card_index`（手牌位置）——因为计划跨越未来若干回合，那些回合的手牌内容在 JSON 协议这一层根本没模拟，手牌位置索引过了第 0 回合就没有意义。同理 `target_index`/`target_combat_id` 对第 2 回合及之后的动作也没有办法对上普通 `combat_play` 决策返回的敌人列表（那边只暴露位置 `index`）。**约定**：只执行到计划里第一个 `end_turn` 为止，然后重新调用一次 `plan_combat_turn` 拿下一回合的新计划，不要试图盲目执行整份多回合计划——已经记录进 [CLAUDE.md](../../../CLAUDE.md) 的 Protocol notes。`PlanAction.Choice`/`NestedChoices`（弃牌/消耗/换形态这类卡牌自带的子选择）已在 4bd49d5 补上序列化，走引擎自带的 `GetActionChoicesInExecutionOrder()`。
 
 - [x] **Step 6: build 确认新代码编译通过**
 
