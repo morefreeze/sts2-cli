@@ -1114,9 +1114,27 @@ public class RunSimulator
         //   - MaxDegreeOfParallelism: SolverWeights.DefaultSearchMaxDegreeOfParallelism, the same
         //     processor-count-scaled default the mod itself falls back to.
         //   - PotionPolicy/PotionStrategy: Smart with no per-slot overrides (let the solver decide).
-        //   - AcceptableBattleHpLoss: int.MaxValue, so the early-stop-on-"good enough" shortcut in
-        //     HasReachedAcceptableBattleHpLoss never fires and the search always spends its full
-        //     node/time budget looking for the true best route.
+        //   - AcceptableBattleHpLoss: -1. This value feeds HasReachedAcceptableBattleHpLoss
+        //     (CombatSearchCoordinator.cs:1841: `completeVictory && projectedBattleHpLost <=
+        //     acceptableBattleHpLoss`) and the beam solver's own in-search MeetsHpTarget gate
+        //     (CombatBeamSolver.Phases.cs:310: `battleDamage.HpLostSoFar +
+        //     node.Snapshot.CumulativePlayerHpLost <= _acceptableBattleHpLoss`). ProjectedBattleHpLost/
+        //     CumulativePlayerHpLost are pure accumulators of unblocked damage that only ever add
+        //     (see the doc comment on CumulativePlayerHpLost in ActEndingBossPolicy.cs:131 and
+        //     BattleDamageTracker's Math.Max(0, ...) accumulation), so they can never be negative.
+        //     -1 therefore makes both `<=` comparisons permanently false, so the search can never
+        //     decide "this route is already good enough" and always keeps searching/auditing to its
+        //     full node/time budget for the true best route -- unlike int.MaxValue, which made
+        //     `projectedBattleHpLost <= acceptableBattleHpLoss` trivially true for ANY complete
+        //     victory, causing the search to settle for the FIRST winning route it found and skip
+        //     the potion/opening-power supplemental audits entirely.
+        //   - UseBeamWidthPortfolio: true. SearchPolicySnapshot.cs's own doc comment on this property
+        //     says "默认开启" (on by default: several beam widths share one node budget and the best
+        //     is kept), but the property has no field initializer so C# defaults it to false when
+        //     left unset, which routes CombatSearchCoordinator.cs's RunBeamWidthPortfolioPass through
+        //     SingleMemberOutcome (one beam width only) instead of BeamWidthPortfolio.Run (multiple
+        //     widths compared) at CombatSearchCoordinator.cs:470-478. Set explicitly to match the
+        //     vendored engine's own documented intent.
         //   - Boss HP strategy: ProgressionFirst (the enum's default member) for both act-transition
         //     and final bosses.
         //   - Diagnostics/FramePressureSignal/MemoryPressureSignal: freshly constructed, disabled/
@@ -1136,12 +1154,26 @@ public class RunSimulator
             TheftPolicy: null,
             ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
             FinalBossHpStrategy: BossHpStrategy.ProgressionFirst,
-            AcceptableBattleHpLoss: int.MaxValue,
+            AcceptableBattleHpLoss: -1,
+            // Both delegates are no-ops, not just Log()-wired for visibility: a full-budget search
+            // with UseBeamWidthPortfolio (multiple members) and no early settle can emit many
+            // "[CombatSolver/Test] ..." Info lines per call (see CombatSearchCoordinator.cs's many
+            // Diagnostics.Info sites). Routing that through Log() (Console.Error.WriteLine, i.e.
+            // stderr) deadlocked a live smoke test here: the JSON stdin/stdout protocol's documented
+            // consumers don't all drain stderr concurrently while blocked reading the stdout
+            // response -- agent/sts2_bridge.py does (a dedicated _forward_stderr thread), but
+            // tests/conftest.py's Game fixture and python/play_full_run.py's non-verbose mode do
+            // not, so enough stderr volume in one call fills the OS pipe buffer and blocks the
+            // engine's Console.Error.WriteLine forever, wedging the whole call. No consumer of this
+            // action depends on this diagnostic stream, so it is dropped entirely instead.
             Diagnostics: new SearchDiagnosticsSink(
-                info: message => Log($"[CombatSolver] {message}"),
+                info: _ => { },
                 debug: _ => { }),
             FramePressureSignal: new SearchFramePressureSignal(),
-            MemoryPressureSignal: new SearchMemoryPressureSignal());
+            MemoryPressureSignal: new SearchMemoryPressureSignal())
+        {
+            UseBeamWidthPortfolio = true,
+        };
 
         SolverResult result;
         try
