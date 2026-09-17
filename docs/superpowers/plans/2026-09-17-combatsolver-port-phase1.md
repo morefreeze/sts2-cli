@@ -47,7 +47,7 @@
 **Files:**
 - Modify: `src/Sts2Headless/Sts2Headless.csproj`
 
-- [ ] **Step 1: 在 `<ItemGroup>` 里加入 Krafs.Publicizer，设置与 CombatSolver 完全一致的选项**
+- [x] **Step 1: 在 `<ItemGroup>` 里加入 Krafs.Publicizer，设置与 CombatSolver 完全一致的选项**
 
 在 `Sts2Headless.csproj` 现有的 `<Reference Include="sts2">...</Reference>` 所在 `<ItemGroup>` 之前，新增一个 `<ItemGroup>`：
 
@@ -58,7 +58,7 @@
   </ItemGroup>
 ```
 
-- [ ] **Step 2: 确认包能正常还原并且现有代码仍然编译**
+- [x] **Step 2: 确认包能正常还原并且现有代码仍然编译**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
@@ -67,7 +67,7 @@ dotnet build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -40
 
 Expected: `Build succeeded.`（这一步只加了 Publicizer，没有加任何新源码，理论上不应该产生新的编译错误——如果报错，先在这一步止损，不要带着坏的基线进入 Task 2）。
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit** (943cd9d)
 
 ```bash
 git add src/Sts2Headless/Sts2Headless.csproj
