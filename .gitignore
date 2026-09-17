@@ -21,24 +21,24 @@ checkpoints/
 saves/*
 
 # runtime artifacts
-training_run*.log
-training_boss*.log
+training_*.log
+training_advisor.pid
 crash_stderr.log
+crash_*.log
+eval_global_progress*.log
+train_pids/
 data/
 # Exceptions: advisor card ratings are derived from an EXTERNAL site
 # (ing-gom/sts2-card-advisor) that can change/disappear, so we commit a
 # snapshot. Regenerate with: agent/build_advisor_ratings.py
 !data/advisor_card_ratings.json
 !data/advisor_card_tags.json
-checkpoints_boss/
-checkpoints_boss2/
-checkpoints_boss3/
-checkpoints_midact_elite/
-checkpoints_act1_boss/
-checkpoints_hpw/
-checkpoints_fix/
-checkpoints_256x256/
+checkpoints_*/
 decks.html
+boss_decks.html
+decks_boss.html
+workbench.png
+.superpowers/
 
 # local Claude / MCP state (not tracked)
 .claude/scheduled_tasks.json

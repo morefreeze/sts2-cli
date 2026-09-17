@@ -912,6 +912,59 @@ select {
   color: var(--red);
 }
 
+.top-runs-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.top-run-card {
+  display: flex;
+  min-height: 110px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface-strong);
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(23, 32, 38, 0.04);
+}
+
+.top-run-card:hover {
+  background: var(--teal-soft);
+}
+
+.top-run-card:focus-visible {
+  outline: 3px solid rgba(20, 118, 111, 0.3);
+  outline-offset: -2px;
+}
+
+.top-run-card[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.top-run-rank {
+  color: var(--slate-650);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.top-run-floor {
+  margin: 2px 0;
+  font-size: clamp(24px, 2.6vw, 34px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.top-run-meta {
+  color: var(--slate-500);
+  font-size: 11px;
+}
+
 .chart-grid,
 .inspection-grid {
   display: grid;
@@ -1392,6 +1445,10 @@ pre {
   .metric-card {
     grid-column: span 6;
     min-height: 128px;
+  }
+
+  .top-runs-grid {
+    grid-template-columns: 1fr;
   }
 
   .inspection-grid > .panel {

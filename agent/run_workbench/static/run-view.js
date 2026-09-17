@@ -51,7 +51,9 @@ window.RunView = (() => {
     if (actSummary) clear(actSummary);
     const selectedNode = byId('selectedNodeSummary');
     if (selectedNode) clear(selectedNode);
-    if (typeof showMapPage === 'function') showMapPage({ focusPage: true });
+    if (window.STS2Map && typeof window.STS2Map.showMapPage === 'function') {
+      window.STS2Map.showMapPage({ focusPage: true });
+    }
   }
 
   async function render(cohortId, ref) {

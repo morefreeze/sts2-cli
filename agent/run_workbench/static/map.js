@@ -1306,5 +1306,9 @@
     // workbenchBody wholesale, so without the matching close the batch view
     // stays buried under the map page and the tree never comes back.
     showDashboardPage,
+    // Exposed so callers outside this IIFE (run-view.js's showNoMap) can
+    // reveal #runMapPage for runs that lack map capability -- they still
+    // need the page shown even though there is no map to load.
+    showMapPage,
   });
 })();

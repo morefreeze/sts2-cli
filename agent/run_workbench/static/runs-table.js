@@ -11,8 +11,64 @@ window.RunsTable = (() => {
   let sortKey = null; // null | 'global_floor' | 'status'
   let sortDir = 'desc';
 
+  // How many of the most-recently-started runs count as "recent" before
+  // ranking by floor -- keeps the highlight reel from surfacing an old
+  // high-floor outlier just because a cohort has hundreds of runs.
+  const TOP_RUNS_RECENT_WINDOW = 20;
+  const TOP_RUNS_COUNT = 3;
+
   function missingCell(value) {
     return value === null || value === undefined || value === '' ? '—' : String(value);
+  }
+
+  // Recent-first, then best-of-recent -- a run with no started_at can't be
+  // placed in the recency window, and one with no global_floor carries no
+  // ranking information, so both are excluded rather than faked into place.
+  function selectTopRuns(rows) {
+    const timed = rows.filter((row) => Number.isFinite(row.started_at));
+    timed.sort((a, b) => b.started_at - a.started_at);
+    const recentPool = timed.slice(0, TOP_RUNS_RECENT_WINDOW);
+    const ranked = recentPool.filter((row) => Number.isFinite(row.global_floor));
+    ranked.sort((a, b) => b.global_floor - a.global_floor);
+    return ranked.slice(0, TOP_RUNS_COUNT);
+  }
+
+  function topRunCard(row, rank) {
+    const ref = row.ref && typeof row.ref === 'object' && typeof row.ref.id === 'string' && row.ref.id
+      ? row.ref
+      : null;
+    const card = element('div', {
+      className: 'top-run-card',
+      attrs: ref
+        ? { tabindex: '0', role: 'button', 'aria-label': `查看第 ${rank} 名对局详情` }
+        : { 'aria-disabled': 'true' },
+    });
+    card.append(element('span', { className: 'top-run-rank', text: `第 ${rank} 名` }));
+    card.append(element('strong', { className: 'top-run-floor', text: missingCell(row.global_floor) }));
+    card.append(element('span', { className: 'top-run-meta', text: `种子 ${missingCell(row.seed)} · ${STATUS_LABELS[row.status] || missingCell(row.status)}` }));
+    card.append(element('span', { className: 'top-run-meta', text: Number.isFinite(row.started_at) ? formatTime(row.started_at) : '—' }));
+    if (ref) {
+      const activate = () => navigate(runRoute(state.selectedCohortId, ref));
+      card.addEventListener('click', activate);
+      card.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate();
+        }
+      });
+    }
+    return card;
+  }
+
+  function renderTopRuns(rows) {
+    const container = byId('topRunsList');
+    clear(container);
+    const top = selectTopRuns(rows);
+    if (!top.length) {
+      renderEmpty(container, '没有足够的时间与推进层数记录来计算最近最好的对局。');
+      return;
+    }
+    top.forEach((row, index) => container.append(topRunCard(row, index + 1)));
   }
 
   function sortedRows(rows) {
@@ -132,6 +188,7 @@ window.RunsTable = (() => {
     const notice = byId('runsTableNotice');
     notice.hidden = true;
     renderEmpty(byId('runsTable'), '正在读取对局列表…', 'loading-state');
+    renderEmpty(byId('topRunsList'), '正在读取对局列表…', 'loading-state');
     try {
       const payload = await getJSON(`/api/cohort/runs?id=${encodeURIComponent(cohortId)}`);
       if (state.selectedCohortId !== cohortId) return;
@@ -141,10 +198,12 @@ window.RunsTable = (() => {
         notice.textContent = `仅展示前 ${currentRows.length} 条记录，未加载全部对局。`;
       }
       renderTable(currentRows);
+      renderTopRuns(currentRows);
     } catch (error) {
       if (state.selectedCohortId !== cohortId) return;
       currentRows = [];
       renderEmpty(byId('runsTable'), `对局列表读取失败：${error.message}`, 'error-state');
+      renderEmpty(byId('topRunsList'), `对局列表读取失败：${error.message}`, 'error-state');
     }
   }
 
@@ -152,6 +211,7 @@ window.RunsTable = (() => {
     currentRows = [];
     byId('runsTableNotice').hidden = true;
     renderEmpty(byId('runsTable'), '选择左侧批次后查看对局列表。');
+    renderEmpty(byId('topRunsList'), '选择左侧批次后查看对局列表。');
   }
 
   return { render, renderEmpty: renderEmptyTable };

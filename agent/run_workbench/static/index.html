@@ -51,6 +51,17 @@
           </label>
         </div>
 
+        <section id="topRunsPanel" class="panel top-runs-panel" aria-labelledby="topRunsTitle">
+          <div class="section-heading compact-heading">
+            <div>
+              <p class="section-kicker">高光时刻</p>
+              <h2 id="topRunsTitle">最近最好的对局</h2>
+            </div>
+            <p class="section-note">先取最近的对局，再从中挑推进层数最高的 3 局；点击可查看详情。</p>
+          </div>
+          <div id="topRunsList" class="top-runs-grid" aria-live="polite"></div>
+        </section>
+
         <section class="metrics-section" aria-labelledby="metricsTitle">
           <div class="section-heading compact-heading">
             <div>

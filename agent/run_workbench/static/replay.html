@@ -1,0 +1,320 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>对局回放</title>
+<style>
+  :root {
+    --bg: #14161c; --fg: #dfe3ec; --dim: #8b93a7; --line: #2c3140;
+    --card: #1b1e26; --accent: #7aa2f7; --bad: #f7768e; --good: #9ece6a;
+    --gold: #e0af68;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f7f9; --fg: #1e2230; --dim: #6b7280; --line: #d8dbe3;
+            --card: #fff; --accent: #2f6feb; --bad: #c2334d; --good: #2f7d32;
+            --gold: #9a6b12; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 22px; background: var(--bg); color: var(--fg);
+         font: 14px/1.55 -apple-system, "PingFang SC", system-ui, sans-serif; }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  .sub { color: var(--dim); font-size: 12.5px; margin-bottom: 14px;
+         word-break: break-all; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .chip { background: var(--card); border: 1px solid var(--line);
+          border-radius: 999px; padding: 3px 11px; font-size: 12.5px; }
+  .chip b { font-variant-numeric: tabular-nums; }
+  .rooms { display: flex; flex-direction: column; gap: 7px; }
+  details.room { background: var(--card); border: 1px solid var(--line);
+                 border-radius: 9px; padding: 9px 12px; }
+  details.room[data-act2] { border-left: 3px solid var(--gold); }
+  summary { cursor: pointer; display: flex; gap: 12px; align-items: baseline;
+            flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+  summary::-webkit-details-marker { display: none; }
+  .fl { min-width: 58px; font-weight: 600; }
+  .rt { min-width: 84px; color: var(--accent); }
+  .hp { min-width: 132px; color: var(--dim); }
+  .delta-bad { color: var(--bad); } .delta-good { color: var(--good); }
+  .boss { color: var(--gold); }
+  .body { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
+  .k { color: var(--dim); }
+  .row { padding: 2px 0; }
+  .round { margin: 9px 0 0; padding: 8px 10px; background: var(--bg);
+           border: 1px solid var(--line); border-radius: 7px; }
+  .rhead { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12.5px;
+           margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+  .enemy { color: var(--bad); }
+  .plays { margin: 0; padding-left: 17px; }
+  .plays li { padding: 1px 0; }
+  .tgt { color: var(--dim); }
+  .cardname { font-weight: 600; }
+  .hand { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  .fx { color: var(--dim); font-size: 12.5px; margin-left: 6px; }
+  .fx .good { color: var(--good); }
+  .fx .bad { color: var(--bad); }
+  li.enemyturn { color: var(--dim); font-style: italic; list-style: none; margin-left: -17px; }
+  .err { color: var(--bad); }
+  table.opts { border-collapse: collapse; font-size: 12.5px; margin-top: 3px; }
+  table.opts td { padding: 1px 12px 1px 0; }
+  .sel { color: var(--good); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  .acthead { margin: 16px 0 4px; padding-bottom: 4px; font-weight: 600;
+             border-bottom: 1px solid var(--line); display: flex; gap: 12px;
+             align-items: baseline; flex-wrap: wrap; }
+  .acthead:first-child { margin-top: 0; }
+</style>
+<h1 id="title">对局回放</h1>
+<div class="sub" id="sub"></div>
+<div class="bar" id="bar"></div>
+<div class="rooms" id="rooms"></div>
+<script>
+const qs = new URLSearchParams(location.search);
+const name = qs.get('log') || qs.get('name');
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const chip = (k, v) => `<span class="chip"><span class="k">${esc(k)}</span> <b>${esc(v)}</b></span>`;
+
+function intentText(e) {
+  const parts = (e.intents || []).map(i => {
+    const dmg = i.damage != null ? ` ${i.damage}` : '';
+    const hits = i.hits && i.hits > 1 ? `×${i.hits}` : '';
+    return `${i.type || '?'}${dmg}${hits}`;
+  });
+  return parts.join(' + ') || '?';
+}
+
+function enemyText(list) {
+  return (list || []).map(e =>
+    `${esc(e.name)} ${e.hp}/${e.max_hp}${e.block ? ` +${e.block}格` : ''} → ${esc(intentText(e))}`
+  ).join(' ｜ ');
+}
+
+// A delta object is {before, after, delta}; render it as "before→after (±delta)".
+function deltaText(label, d) {
+  if (!d) return '';
+  const sign = d.delta > 0 ? '+' : '';
+  return `${label ? `<span class="k">${esc(label)}</span> ` : ''}${esc(d.before)}→${esc(d.after)} (${sign}${d.delta})`;
+}
+
+// Orbs are a fixed-size queue: diff the type sequence as a multiset so we can
+// call out "channeled X, evicted Y" instead of just dumping both arrays.
+function orbChangeText(before, after) {
+  const b = (before || []).map(o => o.type || '?');
+  const a = (after || []).map(o => o.type || '?');
+  const bCount = {}; b.forEach(t => { bCount[t] = (bCount[t] || 0) + 1; });
+  const aCount = {}; a.forEach(t => { aCount[t] = (aCount[t] || 0) + 1; });
+  const added = [];
+  const removed = [];
+  new Set([...Object.keys(bCount), ...Object.keys(aCount)]).forEach(t => {
+    const diff = (aCount[t] || 0) - (bCount[t] || 0);
+    for (let i = 0; i < diff; i += 1) added.push(t);
+    for (let i = 0; i < -diff; i += 1) removed.push(t);
+  });
+  if (added.length === 1 && removed.length === 1) {
+    return `<span class="k">充能</span> ${esc(added[0])}（替换 ${esc(removed[0])}）`;
+  }
+  if (added.length && !removed.length) {
+    return `<span class="k">充能</span> ${added.map(esc).join('、')}`;
+  }
+  if (removed.length && !added.length) {
+    return `<span class="k">失去轨道</span> ${removed.map(esc).join('、')}`;
+  }
+  return `<span class="k">轨道</span> ${b.map(esc).join(',')} → ${a.map(esc).join(',')}`;
+}
+
+// Render the sparse `effects` delta attached to a played action. Only present
+// sub-keys are rendered; a card/potion with no visible effect renders nothing.
+// `spans_enemy_turn` effects are rendered separately by enemyTurnText, never here.
+function effectsFragment(a) {
+  const e = a.effects;
+  if (!e) return '';
+  const parts = [];
+  const targetIndex = a.target ? a.target.index : undefined;
+  if (e.enemy_hp && e.enemy_hp.length) {
+    // The primary target's HP change is already shown inline by targetText;
+    // only surface *other* enemies here (AOE splash).
+    const others = e.enemy_hp.filter(h => h.index !== targetIndex);
+    if (others.length) {
+      parts.push(others.map(h => `${esc(h.name)} ${deltaText('', h)}`).join('，'));
+    }
+  }
+  if (e.block) parts.push(deltaText('格挡', e.block));
+  if (e.hp) parts.push(deltaText('HP', e.hp));
+  if (e.orbs) parts.push(orbChangeText(e.orbs.before, e.orbs.after));
+
+  const playedName = a.card && a.card.name;
+  const removed = (e.cards_removed || []).slice();
+  if (playedName) {
+    // The played card always leaves the hand — that's implied by the line
+    // itself, so drop one matching instance before reporting "removed" cards.
+    const idx = removed.indexOf(playedName);
+    if (idx !== -1) removed.splice(idx, 1);
+  }
+  if (e.cards_added && e.cards_added.length) {
+    parts.push(e.cards_added.map(n => `+${esc(n)}`).join(', '));
+  }
+  if (removed.length) {
+    parts.push(removed.map(n => `-${esc(n)}`).join(', '));
+  }
+  return parts.length ? ` <span class="fx">${parts.join('　')}</span>` : '';
+}
+
+function targetText(a) {
+  if (!a.target) return '';
+  const match = (a.effects && a.effects.enemy_hp || []).find(h => h.index === a.target.index);
+  if (match) {
+    return ` <span class="tgt">→ ${esc(a.target.name)} ${deltaText('', match)}</span>`;
+  }
+  return ` <span class="tgt">→ ${esc(a.target.name)} (${a.target.hp}血)</span>`;
+}
+
+// An action carries a ready-made `label` plus resolved card/target/potion objects.
+// Prefer the resolved names; fall back to the label, never to the raw object.
+function actionText(a) {
+  const act = (a.action && a.action.action) || '';
+  if (act === 'play_card' && a.card) {
+    const cost = a.card.cost != null ? `<span class="k">[${a.card.cost}]</span> ` : '';
+    return `${cost}<span class="cardname">${esc(a.card.name)}</span>${targetText(a)}${effectsFragment(a)}`;
+  }
+  if (act === 'use_potion' && a.potion) {
+    return `<span class="k">药水</span> <span class="cardname">${esc(a.potion.name)}</span>${effectsFragment(a)}`;
+  }
+  if (act === 'select_cards' && a.cards) {
+    return `<span class="k">选牌</span> ${a.cards.map(c => esc(c.name)).join(', ')}${effectsFragment(a)}`;
+  }
+  // end_turn's effects (the enemy's reply) are rendered as their own line by
+  // enemyTurnText, never attributed to "结束回合" itself as if it were a card.
+  if (act === 'end_turn') return '<span class="k">结束回合</span>';
+  return `${esc(a.label || act || '?')}${effectsFragment(a)}`;
+}
+
+// The delta attached to an end_turn action actually spans the enemy's turn
+// (their attack, end-of-turn triggers, etc). Surface it as its own grey line
+// instead of pretending "结束回合" itself dealt damage or took block.
+function enemyTurnText(a) {
+  const e = a.effects;
+  if (!e || !e.spans_enemy_turn) return '';
+  const parts = [];
+  if (e.hp) parts.push(deltaText('HP', e.hp));
+  if (e.block) parts.push(deltaText('格挡', e.block));
+  if (e.enemy_hp && e.enemy_hp.length) {
+    parts.push(e.enemy_hp.map(h => `${esc(h.name)} ${deltaText('', h)}`).join('，'));
+  }
+  if (!parts.length) return '';
+  return `<li class="enemyturn"><span class="k">敌方回合</span>：${parts.join('，')}</li>`;
+}
+
+function renderRound(r) {
+  const s = r.start_state || {};
+  const plays = (r.actions || []).map(a => {
+    const act = (a.action && a.action.action) || '';
+    const line = `<li>${actionText(a)}</li>`;
+    return act === 'end_turn' ? line + enemyTurnText(a) : line;
+  }).join('');
+  const hand = (s.hand || []).map(c => esc(c.name)).join(', ');
+  const loss = r.hp_loss ?? 0;
+  return `<div class="round">
+    <div class="rhead">
+      <b>第 ${esc(r.round)} 回合</b>
+      <span class="k">HP</span> ${esc(s.hp)}/${esc(s.max_hp)}
+      <span class="k">能量</span> ${esc(s.energy)}
+      <span class="${loss > 0 ? 'delta-bad' : 'delta-good'}">本回合 ${loss > 0 ? '-' : '+'}${Math.abs(loss)}</span>
+    </div>
+    <div class="row enemy">${enemyText(s.enemies)}</div>
+    <ol class="plays">${plays || '<li class="k">无出牌</li>'}</ol>
+    ${hand ? `<div class="hand">手牌：${hand}</div>` : ''}
+  </div>`;
+}
+
+function renderRoom(r) {
+  const past = (r.global_floor || 0) > 17;
+  const loss = r.hp_loss ?? 0;
+  const bits = [];
+
+  if (r.room_type === 'Boss' && r.boss) {
+    bits.push(`<div class="row"><span class="k">boss</span> <span class="boss">${esc(r.boss)}</span></div>`);
+  }
+  if (r.event_name) bits.push(`<div class="row"><span class="k">事件</span> ${esc(r.event_name)}</div>`);
+
+  // decisions is a list of decision-point kinds (strings), not objects.
+  const decs = (r.decisions || []).map(d => typeof d === 'string' ? d : (d.kind || d.type || ''));
+  if (decs.length) bits.push(`<div class="row"><span class="k">决策点</span> ${esc(decs.join(' → '))}</div>`);
+
+  // Some rooms only ever got a partial action stream (combat ended while the
+  // log was mid-write). Say so rather than rendering a suspiciously empty room.
+  if (r.combat && r.combat_action_stream_complete === false) {
+    bits.push('<div class="row k">⚠ 本场战斗记录不完整（动作流未写完）</div>');
+  }
+
+  const rounds = (r.combat && r.combat.rounds) || [];
+  if (rounds.length) {
+    bits.push(rounds.map(renderRound).join(''));
+  } else {
+    // Non-combat rooms carry a flat action list instead of rounds.
+    const acts = (r.actions || []).map(a => `<li>${actionText(a)}</li>`).join('');
+    if (acts) bits.push(`<div class="row"><span class="k">动作</span></div><ol class="plays">${acts}</ol>`);
+  }
+
+  // Options (card rewards, map choices) are decided only after combat plays
+  // out — a room goes combat_play → card_reward → map_select — so render
+  // them last, chronologically after the turns above.
+  const opts = r.options || [];
+  if (opts.length) {
+    const rows = opts.map(o => `<tr>
+      <td class="${o.selected ? 'sel' : 'k'}">${o.selected ? '✓ 选中' : '　未选'}</td>
+      <td class="${o.selected ? 'sel' : ''}">${esc(o.label ?? o.item_id ?? '')}</td>
+      <td class="k">${esc(o.detail ?? '')}</td></tr>`).join('');
+    bits.push(`<div class="row"><span class="k">选项</span></div><div class="scroll"><table class="opts">${rows}</table></div>`);
+  }
+
+  return `<details class="room"${past ? ' data-act2' : ''}>
+    <summary>
+      <span class="fl">${esc(r.label || '')}</span>
+      <span class="rt">${esc(r.room_type || '')}</span>
+      <span class="hp">HP ${esc(r.start_hp)} → ${esc(r.end_hp)}
+        <span class="${loss > 0 ? 'delta-bad' : 'delta-good'}">(${loss > 0 ? '-' : '+'}${Math.abs(loss)})</span></span>
+      ${r.room_type === 'Boss' && r.boss ? `<span class="boss">${esc(r.boss)}</span>` : ''}
+    </summary>
+    <div class="body">${bits.join('') || '<span class="k">无记录</span>'}</div>
+  </details>`;
+}
+
+async function main() {
+  const sub = document.getElementById('sub');
+  if (!name) { sub.innerHTML = '<span class="err">URL 缺少 ?log=&lt;文件名&gt;</span>'; return; }
+  sub.textContent = name;
+  let data;
+  try {
+    data = await (await fetch('/api/log?name=' + encodeURIComponent(name))).json();
+  } catch (e) {
+    sub.innerHTML = `<span class="err">读取失败：${esc(e.message)}</span>`; return;
+  }
+  if (data.error) { sub.innerHTML = `<span class="err">${esc(data.error)}</span>`; return; }
+
+  const p = data.progress || {}, s = p.summary || {}, rooms = p.rooms || [];
+  document.getElementById('title').textContent =
+    `${s.character || '?'} · ${s.seed || ''} · 最深 ${s.max_floor_label || '?'}`;
+  const deepest = s.max_global_floor || 0;
+  document.getElementById('bar').innerHTML = [
+    chip('版本', s.game_version || '?'),
+    chip('房间', rooms.length),
+    chip('HP', `${s.start_hp ?? '?'} → ${s.end_hp ?? '?'}`),
+    chip('总失血', s.total_hp_loss ?? '?'),
+    chip('过第一幕', deepest > 17 ? '是' : '否'),
+    chip('过第二幕', deepest > 34 ? '是' : '否'),
+  ].join('');
+  const acts = [];
+  for (const r of rooms) {
+    const a = r.act || 0;
+    if (!acts.length || acts[acts.length - 1].act !== a) {
+      acts.push({ act: a, name: r.act_name, boss: r.boss, rooms: [] });
+    }
+    acts[acts.length - 1].rooms.push(r);
+  }
+  document.getElementById('rooms').innerHTML = acts.map(g => `
+    <div class="acthead">第 ${esc(g.act)} 幕${g.name ? ` · ${esc(g.name)}` : ''}
+      ${g.boss ? `<span class="boss">boss: ${esc(g.boss)}</span>` : ''}
+      <span class="k">${g.rooms.length} 个房间</span></div>
+    ${g.rooms.map(renderRoom).join('')}`).join('');
+}
+main();
+</script>
