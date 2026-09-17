@@ -86,7 +86,7 @@ way the original mod's own .csproj does."
 **Files:**
 - Create: `src/Sts2Headless/CombatSolverEngine/` （新目录，容纳全部移植文件）
 
-- [ ] **Step 1: 克隆上游仓库到临时目录（如果 `/tmp/sts2-cli/CombatSolver` 已存在就跳过这一步）**
+- [x] **Step 1: 克隆上游仓库到临时目录（如果 `/tmp/sts2-cli/CombatSolver` 已存在就跳过这一步）**
 
 ```bash
 mkdir -p /tmp/sts2-cli
@@ -94,7 +94,7 @@ rm -rf /tmp/sts2-cli/CombatSolver
 git clone --depth 1 https://github.com/Torch1230/CombatSolver.git /tmp/sts2-cli/CombatSolver
 ```
 
-- [ ] **Step 2: 按移植范围表复制文件**
+- [x] **Step 2: 按移植范围表复制文件**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
@@ -110,7 +110,7 @@ find src/Sts2Headless/CombatSolverEngine -name "*.cs" | wc -l
 
 Expected: 最后一行输出 `324`（如果不是，对照上面的移植范围表检查漏了哪个目录）。
 
-- [ ] **Step 3: 在 `Sts2Headless.csproj` 里确认新文件被编译器捡到**
+- [x] **Step 3: 在 `Sts2Headless.csproj` 里确认新文件被编译器捡到**
 
 `Microsoft.NET.Sdk` 项目默认按 glob `**/*.cs` 包含所有子目录源码，不需要手动加 `<Compile Include>`。用下面命令确认没有被意外排除：
 
@@ -121,7 +121,7 @@ dotnet build src/Sts2Headless/Sts2Headless.csproj -v:normal 2>&1 | grep -c "Comb
 
 Expected: 输出一个 > 0 的数字（说明编译器确实在处理这些文件；具体报错留到 Task 3 处理）。
 
-- [ ] **Step 4: 记录来源，方便以后同步上游更新**
+- [x] **Step 4: (b664dcb, README.md cleanup in 429befb) 记录来源，方便以后同步上游更新**
 
 ```bash
 cat > src/Sts2Headless/CombatSolverEngine/VENDORED.md << 'EOF'
