@@ -38,6 +38,141 @@ def _find_dotnet():
             continue
     return "dotnet"
 
+def _norm_card_id(cid):
+    """Normalize a card id for comparison between two different formats seen
+    in this protocol: the ordinary combat_play/card_select JSON's "id" field
+    is "CARD.<ENTRY>" (c.Id.ToString() in RunSimulator.cs), while
+    plan_combat_turn's card_id is the bare uppercase entry (card.Preview.Id.Entry
+    in the vendored solver) -- same discrepancy agent/card_scoring.py's
+    _card_id_norm already strips for card-override lookups."""
+    if isinstance(cid, dict):
+        cid = cid.get("en", str(cid))
+    cid = str(cid).upper().strip()
+    if cid.startswith("CARD."):
+        cid = cid[5:]
+    return cid
+
+
+def _resolve_card_index(hand, card_id, occurrence):
+    """Resolve plan_combat_turn's (card_id, card_occurrence) -- a stable card
+    identity -- to a live hand card_index (hand position), by walking the
+    hand in order and counting matches the same way the vendored solver's
+    own FindCardOccurrence (Search/CombatBeamSolver.Expansion.cs) counts
+    occurrences when it originally assigned card_occurrence."""
+    target = _norm_card_id(card_id)
+    seen = 0
+    for c in hand:
+        if _norm_card_id(c.get("id", "")) == target:
+            if seen == occurrence:
+                return c["index"]
+            seen += 1
+    return None
+
+
+def _resolve_choice_indices(pending_cards, choice):
+    """Resolve a plan action's bundled card_select sub-choice (Discard/Exhaust/
+    Transform/... -- PlanCardChoice in Search/CombatPlan.cs) to indices into
+    the live card_select decision's offered "cards" list, matching each
+    PlanCardToken's card_id + option_occurrence the same way _resolve_card_index
+    matches card_id + card_occurrence. Returns None if any token can't be
+    resolved (a real mismatch to surface, not something to paper over)."""
+    indices = []
+    for token in choice.get("cards", []):
+        target = _norm_card_id(token.get("card_id", ""))
+        occ = token.get("option_occurrence", 0)
+        seen = 0
+        found = None
+        for c in pending_cards:
+            if _norm_card_id(c.get("id", "")) == target:
+                if seen == occ:
+                    found = c["index"]
+                    break
+                seen += 1
+        if found is None:
+            return None
+        indices.append(found)
+    return indices
+
+
+def _apply_action_choices(send, cur, action):
+    """Resolve and answer any card_select sub-decisions bundled into a plan
+    action (RunSimulator.cs's ConvertPlanActionsToJson attaches "choices" to
+    ANY action kind that has one -- e.g. a potion like Ambrosia can trigger a
+    card_select just as much as a Discard/Exhaust/Transform card can -- so
+    this runs after play_card AND use_potion, not just play_card). Returns
+    (state, ok)."""
+    for choice in action.get("choices", []):
+        if cur.get("decision") != "card_select":
+            print(f"  !! plan_combat_turn: expected card_select for choice "
+                  f"{choice.get('effect')}, got decision={cur.get('decision')!r}")
+            return cur, False
+        idxs = _resolve_choice_indices(cur.get("cards", []), choice)
+        if idxs is None:
+            print(f"  !! plan_combat_turn: could not resolve choice tokens "
+                  f"{choice.get('cards')} against pending cards "
+                  f"{[c.get('id') for c in cur.get('cards', [])]}")
+            return cur, False
+        cur = send({"cmd": "action", "action": "select_cards",
+                    "args": {"indices": ",".join(map(str, idxs))}})
+        if cur.get("type") == "error":
+            print(f"  !! plan_combat_turn: select_cards failed: {cur.get('message')}")
+            return cur, False
+    return cur, True
+
+
+def _execute_combat_plan_actions(send, state, actions):
+    """Execute a plan_combat_turn action list up through (and including) the
+    first end_turn -- never the whole multi-turn plan blindly, per CLAUDE.md's
+    "Protocol notes" on plan_combat_turn (turn>=2 actions' target_index/
+    target_combat_id have no counterpart in an ordinary combat_play decision's
+    enemy list, so the caller must re-call plan_combat_turn fresh for the next
+    turn instead). Returns (state, ok); ok=False means the LIVE engine
+    disagreed with the plan (unresolved card/choice, or an action itself
+    errored) -- a real bug to surface, not "the solver predicts a loss".
+    """
+    cur = state
+    for action in actions:
+        kind = action.get("action")
+        if kind == "play_card":
+            hand = cur.get("hand", [])
+            idx = _resolve_card_index(hand, action.get("card_id", ""), action.get("card_occurrence", 0))
+            if idx is None:
+                print(f"  !! plan_combat_turn: could not resolve card_id={action.get('card_id')} "
+                      f"occurrence={action.get('card_occurrence')} in live hand "
+                      f"{[c.get('id') for c in hand]}")
+                return cur, False
+            args = {"card_index": idx}
+            if "target_index" in action:
+                args["target_index"] = action["target_index"]
+            cur = send({"cmd": "action", "action": "play_card", "args": args})
+            if cur.get("type") == "error":
+                print(f"  !! plan_combat_turn: play_card failed: {cur.get('message')}")
+                return cur, False
+            cur, ok = _apply_action_choices(send, cur, action)
+            if not ok:
+                return cur, False
+        elif kind == "use_potion":
+            args = {"potion_index": action.get("potion_slot")}
+            if "target_index" in action:
+                args["target_index"] = action["target_index"]
+            cur = send({"cmd": "action", "action": "use_potion", "args": args})
+            if cur.get("type") == "error":
+                print(f"  !! plan_combat_turn: use_potion failed: {cur.get('message')}")
+                return cur, False
+            cur, ok = _apply_action_choices(send, cur, action)
+            if not ok:
+                return cur, False
+        elif kind == "end_turn":
+            cur = send({"cmd": "action", "action": "end_turn"})
+            if cur.get("type") == "error":
+                print(f"  !! plan_combat_turn: end_turn failed: {cur.get('message')}")
+                return cur, False
+            return cur, True
+        else:
+            print(f"  !! plan_combat_turn: unknown action kind {kind!r}, skipping")
+    return cur, True
+
+
 DOTNET = _find_dotnet()
 # Don't clobber an explicit STS2_GAME_DIR — a caller may point at a
 # different install (or a different platform's data dir) and the
@@ -173,39 +308,65 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                 })
 
             elif decision == "combat_play":
-                hand = state.get("hand", [])
-                energy = state.get("energy", 0)
-                enemies = state.get("enemies", [])
-
-                # Simple strategy: play playable cards until out of energy
-                playable = [c for c in hand if c.get("can_play", False)
-                           and (c.get("cost", 0) <= energy)]
-
-                if playable:
-                    card = playable[0]
-                    args = {"card_index": card["index"]}
-                    # If card needs a target, pick first enemy
-                    if card.get("target_type") == "AnyEnemy" and enemies:
-                        args["target_index"] = 0
-                    state = send({
-                        "cmd": "action",
-                        "action": "play_card",
-                        "args": args
-                    })
+                # Try the ported Combat Solver first (plan_combat_turn): resolve
+                # its card_id/card_occurrence-addressed actions to live
+                # card_index and execute through the first end_turn, then let
+                # the outer loop re-call plan_combat_turn fresh for the next
+                # turn (see CLAUDE.md's "Protocol notes" on plan_combat_turn).
+                # Only fall back to the old one-card-at-a-time heuristic below
+                # if plan_combat_turn itself errors out -- a losing-but-valid
+                # plan is still followed, since judging play quality is a
+                # separate concern from this regression run.
+                plan = send({"cmd": "action", "action": "plan_combat_turn"})
+                if plan.get("type") != "error":
+                    plan_actions = plan.get("actions", [])
+                    if not plan_actions:
+                        # A valid plan with nothing to do this turn still needs
+                        # to progress; the solver's own list is expected to
+                        # include a terminal end_turn, but don't spin forever
+                        # if it somehow doesn't.
+                        state = send({"cmd": "action", "action": "end_turn"})
+                    else:
+                        state, plan_ok = _execute_combat_plan_actions(send, state, plan_actions)
+                        if not plan_ok:
+                            print("  ERROR: plan_combat_turn's plan did not execute "
+                                  "cleanly against the live engine")
+                            return {"victory": False, "seed": seed, "steps": step,
+                                     "error": "plan_combat_turn_execution_failed"}
                 else:
-                    # End turn - retry a few times if we get "Not in play phase"
-                    for retry in range(5):
+                    hand = state.get("hand", [])
+                    energy = state.get("energy", 0)
+                    enemies = state.get("enemies", [])
+
+                    # Simple strategy: play playable cards until out of energy
+                    playable = [c for c in hand if c.get("can_play", False)
+                               and (c.get("cost", 0) <= energy)]
+
+                    if playable:
+                        card = playable[0]
+                        args = {"card_index": card["index"]}
+                        # If card needs a target, pick first enemy
+                        if card.get("target_type") == "AnyEnemy" and enemies:
+                            args["target_index"] = 0
                         state = send({
                             "cmd": "action",
-                            "action": "end_turn"
+                            "action": "play_card",
+                            "args": args
                         })
-                        if state.get("type") != "error":
-                            break
-                        import time
-                        time.sleep(0.5)
-                    if state.get("type") == "error":
-                        # Try proceeding instead
-                        state = send({"cmd": "action", "action": "proceed"})
+                    else:
+                        # End turn - retry a few times if we get "Not in play phase"
+                        for retry in range(5):
+                            state = send({
+                                "cmd": "action",
+                                "action": "end_turn"
+                            })
+                            if state.get("type") != "error":
+                                break
+                            import time
+                            time.sleep(0.5)
+                        if state.get("type") == "error":
+                            # Try proceeding instead
+                            state = send({"cmd": "action", "action": "proceed"})
 
             elif decision == "event_choice":
                 options = state.get("options", [])
