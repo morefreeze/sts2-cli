@@ -155,7 +155,7 @@ private-member access are resolved in the next tasks."
 
 这一步的产出是可验证的（`dotnet build` 干净通过），但具体报什么错在实际跑之前无法穷举，因此用下面这套**判定规则**逐类处理，而不是逐行猜测：
 
-- [ ] **Step 1: 先跑一次完整 build，把所有报错存下来**
+- [x] **Step 1: 先跑一次完整 build，把所有报错存下来**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
@@ -163,7 +163,9 @@ dotnet build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tee /tmp/sts2-cli/build
 cat /tmp/sts2-cli/build_errors_1_summary.txt
 ```
 
-- [ ] **Step 2: 按错误类型分类处理，按下表的优先级顺序修**
+- [x] **Step 2: 按错误类型分类处理，按下表的优先级顺序修**
+
+> 实测发现第 5 个 RitsuLib 触点（`PowerDynamicVarMaterializationGuardPatch.cs`，处理方式同表格第一行），以及 Runtime 下另外 13 个文件的连锁依赖（见上面"范围修正"）。
 
 | 错误特征 | 处理方式 |
 |---|---|
@@ -179,18 +181,18 @@ cd /Users/bytedance/mygit/sts2-cli
 dotnet build src/Sts2Headless/Sts2Headless.csproj 2>&1 | grep -c "error CS"
 ```
 
-重复 Step 1-3，直到这个数字是 0。
+重复 Step 1-3，直到这个数字是 0。**已达成**：`dotnet build` 从 85 个唯一错误收敛到 0（过程：85 → 81 → 80 → 1 → 0，中间两次收敛分别是修完 4 个已知触点、以及把 Runtime 缺口补全后又炸出的两波连锁依赖）。
 
-- [ ] **Step 4: 确认现有测试套件（未涉及新代码的部分）没有被破坏**
+- [x] **Step 4: 确认现有测试套件（未涉及新代码的部分）没有被破坏**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
 dotnet build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -5
 ```
 
-Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`（Warning 数量不必是 0，但不能新增编译 Error）。
+Expected: `Build succeeded. 0 Warning(s) 0 Error(s)`（Warning 数量不必是 0，但不能新增编译 Error）。**已确认**：从清空 `obj`/`bin` 的干净状态重新 build，`0 Error(s)`（有若干 pre-existing 风格的 warning，如 `CS0649` 未赋值字段，均为 vendored 代码本身特性，非本任务引入的新问题）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** (09311aa，文档措辞修正在 254afd8)
 
 ```bash
 git add src/Sts2Headless/CombatSolverEngine
@@ -208,6 +210,8 @@ git commit -m "fix: resolve RitsuLib touchpoints and compile errors in vendored 
 Build is clean: dotnet build src/Sts2Headless/Sts2Headless.csproj
 succeeds with 0 errors."
 ```
+
+> **Task 4/5 需要知道的一个隐患**（Task 3 代码质量审核发现）：`PowerDynamicVarMaterializationGuardPatch.cs` 在真实 mod 里是一个"检测到后台模拟违规提前物化 Power 动态数值就立刻 throw"的 fail-fast 保护，靠 RitsuLib 把它装成真实 Harmony 补丁才生效。本仓库从不安装任何 Harmony 补丁（`Entry.Initialize()` 从不运行），所以这个保护现在是**彻底不生效的**——不是"改成了安全的保守路径"，而是"该 throw 的地方现在完全沉默"。如果 Task 4/5 验证时看到 solver 对某些跟 Power 相关的局面给出奇怪的方案，这是一个排查线索：某处后台模拟可能违反了这个不变量，但因为保护没装，不会有异常告诉你。
 
 ---
 

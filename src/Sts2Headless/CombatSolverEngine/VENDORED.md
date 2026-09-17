@@ -31,7 +31,7 @@ CardDynamicVarWarmup call sites below). The 13 files above (beyond the
 original CombatRootSnapshot.cs) were vendored unmodified to supply them, each
 confirmed clean of Godot/RitsuLib coupling before vendoring.
 
-Three deliberate exceptions to "verbatim file copy" in this directory:
+Four deliberate exceptions to "verbatim file copy" in this directory:
 
 - `SolverSettingsEnums.cs` hand-extracts only the `SolverPotionPolicy` and
   `BossHpStrategy` enum declarations out of upstream `Runtime/SolverSettings.cs`.
