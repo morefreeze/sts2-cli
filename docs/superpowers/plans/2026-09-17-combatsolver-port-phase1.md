@@ -36,6 +36,8 @@
 | `src/Strategy/` | 1 | 是 | 核心：纯值函数（`CardMechanismFacts.cs`），无依赖 |
 | `src/Runtime/CombatRootSnapshot.cs` | 1 | 是 | Search.Solve 的入参类型，0 RitsuLib 依赖 |
 | `src/Runtime/`（其余 55 个） | 55 | 否 | mod 生命周期钩子、RitsuLib 注册，无头环境不需要 |
+
+> **范围修正（Task 3 实测发现，2026-09-17）**：上面这行"其余 55 个否"判断错了。Engine/Search/Prediction 还依赖 `Runtime/` 下另外 8 个文件定义的数据/策略类型（`SolverProgress.cs`、`SolverSettings.cs`、`BattleDamageTracker.cs`、`ContinuationStamp.cs`、`LiveCombatStamp.cs`、`SearchGcLifecycleMetrics.cs`、`SearchMemoryPressureSignal.cs`、`SolverDisplayNames.cs`），编译期缺失表现为 12 个 `CS0246`。其中 7 个文件只依赖已引入的 `MegaCrit.Sts2.*`/`CombatSolver.Engine.*`，可以直接照搬 vendor；`SolverSettings.cs`（716 行）整份引了真实 `Godot` 命名空间做 mod 设置的 JSON 持久化，不能整体 vendor——但我们只需要它里面的 2 个纯枚举 `SolverPotionPolicy`/`BossHpStrategy`，改为单独摘出到一个新文件 `Runtime/SolverSettingsEnums.cs`，只放这两个枚举定义，注明"节选自 SolverSettings.cs，只取枚举，不引入 Godot 依赖"。
 | `src/UI/` `src/Api/` `src/Diagnostics/` `src/Replay/` `src/Testing/` | 259 | 否 | UI 覆盖层、mod 对外 API、诊断工具、mod 自己的测试框架——本阶段不需要 |
 
 合计移植 324 个文件，保留原始 `namespace CombatSolver` 前缀不改名（减少 diff，Phase 2 如有真实命名冲突再处理）。
