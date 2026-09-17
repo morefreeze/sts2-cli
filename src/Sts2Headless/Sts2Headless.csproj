@@ -12,6 +12,11 @@
     <ProjectReference Include="..\GodotStubs\GodotStubs.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="all" />
+    <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
+  </ItemGroup>
+
   <!-- Reference game DLL and its non-Godot dependencies -->
   <ItemGroup>
     <Reference Include="sts2">
