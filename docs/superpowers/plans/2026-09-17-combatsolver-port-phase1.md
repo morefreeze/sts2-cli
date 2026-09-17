@@ -448,13 +448,53 @@ Expected: `Completed: 5/5`，且日志里没有 `plan_combat_turn`/`CombatRootSn
 - `_resolve_choice_indices`（card_select 子选择用的 `option_occurrence`）**确认是真实 bug，已修复**：vendor 侧 `OptionOccurrence` 走的是另一条计数逻辑（`Search/CardChoiceSupport.cs` 的 `CountTokenOccurrence`/`HasStableTokenIdentity`），要求 Entry **和** `CurrentUpgradeLevel` 同时相同才计入同一次出现，而 Python 侧原实现只比较 Entry——于是手牌里同时有未升级 Strike 和 Strike+ 时，`option_occurrence` 会把 Strike+ 也算进未升级 Strike 的计数，解析到错误的物理卡。JSON 协议其实已经带了区分所需字段（`ConvertPlanCardChoiceToJson` 序列化的 `upgrade_level`，card_select 决策里每张候选卡自带的 `upgraded`），只是没被用上。修复：`_resolve_choice_indices` 改为同时比较 `_norm_entity_id` 和 `bool(upgrade_level) == upgraded`（`python/play_full_run.py`）。注意 `RunSimulator.cs` 里 `ConvertPlanCardChoiceToJson` 上方的注释（"OptionOccurrence disambiguate duplicate cards the same way CardOccurrence does"）与此结论相悖，是过时/错误的注释，C# 侧代码本身不用改，但那条注释以后顺手更新一下。
 - 仍未验证的部分：手牌在同一回合内被 Discard/Exhaust/Rearrange 重排、导致 `_resolve_card_index` 的计数基准和执行时顺序对不上——这需要真实引擎多步执行才能触发，纯单测覆盖不到，依然是理论风险。
 
+### 20 局 Ironclad 回归发现的新问题（2026-09-17 晚，Task 5 之后）
+
+Task 5 的"至少 5 局，0 crash/stuck"验证是假阳性范围太小——5 局跑到 `Wins: 0/5, Completed: 5/5` 干净通过后，把同样的代码扩到 20 局（`scripts/run_caffeinated.sh .venv/bin/python python/play_full_run.py 20 Ironclad`，种子 `run_1`..`run_20`），一次性暴露了 4 局失败：`Wins: 0/20, Completed: 16/20, avg_floor=11.6`（`Run 7: TIMEOUT steps=37`、`Run 8: ERROR plan_combat_turn_execution_failed`、`Run 10: TIMEOUT steps=130`、`Run 15: ERROR plan_combat_turn_execution_failed`）。逐个复现如下：
+
+**问题 7（Run 8，已修复，根因确实在我们自己的协议胶水层）：`target_index` 是"计划制定时刻"的位置索引，同一回合内被更早的动作杀死一个敌人就会失效。**
+
+现场：`logs/20260917_192246_Ironclad_run_8.jsonl` 步骤 31-32，一个 `target_index: 2` 的 `play_card` 被引擎拒绝——`"Card STRIKE_IRONCLAD targets a single enemy (AnyEnemy); 'target_index' is required when multiple enemies are alive (2)."`——此时只有 2 个敌人存活，`target_index=2` 指向一个已经不存在的第 3 个槽位。根因：同一份 `plan_combat_turn` 计划里，更早的一个动作杀死了一个敌人，`RunSimulator.cs` 的 `combat_play` 敌人列表只包含 `IsAlive` 的敌人，所以列表会随着击杀重新编号/收缩，后面动作里"计划制定时刻"算出来的 `target_index` 就可能指向错误的敌人甚至越界。这是 Task 4 代码质量评审就标记过的已知缺口（"`target_combat_id` 在 JSON 协议的其它地方没有对应物"）第一次真正咬人——而且是同一回合内的风险，不只是跨回合。
+
+修复（`9465d19`）：vendor 引擎的 `PlanAction` 早就带了稳定 id `target_combat_id`（反编译 `lib/sts2.dll` 确认是 `MegaCrit.Sts2.Core.Entities.Creatures.Creature.CombatId`，`uint?`，由 `CombatState.AttachCreature` 用单调递增计数器分配一次、整场战斗不变，`CombatState.GetCreature(combatId)` 可以按它反查），但普通 `combat_play` 决策的敌人列表从没把它暴露出来。`RunSimulator.cs` 的敌人序列化里加一个 `combat_id` 字段；`play_full_run.py` 新增 `_resolve_enemy_target_index`，每次执行 `play_card`/`use_potion` 时按 `target_combat_id` 在**当前**敌人列表里重新查出真实 `target_index`，不再直接信任计划里的旧值；如果目标已经不在存活列表里（被同一计划里更早的动作杀死），跳过这个动作而不是瞎猜一个替代目标。现场复现确认：重放种子 `run_8` 命中同一处（`combat_id=3` 的 `TWIG_SLIME_S` 已死），新代码打印跳过信息而不是把无效 `target_index` 发给引擎，该局正常打到 `game_over`（`DEFEAT` at floor 15）。
+
+**问题 8（Run 15，已诊断，vendor 引擎里的真实 bug，但修复范围超出本任务边界——采用胶水层规避）：solver 预测"击杀敌人时顺带触发 Vulnerable-on-kill 的抽卡效果"，但真实引擎在目标死亡时不会触发。**
+
+现场：`logs/20260917_194053_Ironclad_run_15.jsonl` 步骤 148-150，回合 8 的 `plan_combat_turn` 返回 `[Bash 打 Phrog Parasite（血量 6）, True Grit, end_turn]`（`only_death_routes_found: true`，已经是必死路线里"最不坏"的一条）。Bash 的伤害是致命一击，杀死了 Phrog Parasite（同时正确触发了它"死亡时分裂成 4 只 Wriggler"的机制——`all_enemies_dead` 仍然是 `false`，说明 solver 确实模拟了这个分裂）。但 solver 还预测 Bash 附加的 Vulnerable 会触发 Ironclad 的 Vicious 能力（"每次施加 Vulnerable 时抽 1 张牌"），并据此安排下一步打出被抽到的 True Grit——用原始 JSONL 日志重放同一段真实动作序列到一个全新引擎实例（byte-for-byte 复现同一份 `combat_plan` JSON），确认真实引擎里这次抽卡**没有发生**：手牌只减少了 Bash 本身，抽牌堆原封不动，`True Grit` 一直躺在抽牌堆顶。反编译 `lib/sts2.dll` 确认 `Bash.OnPlay` 在伤害结算完之后无条件对 `cardPlay.Target` 施加 Vulnerable，但目标此时已死——真实游戏这一步显然静默失效（不然抽卡会发生）。
+
+根因定位到 vendor 引擎：`CombatSolverEngine/Prediction/CardEffectSpecRegistry.cs` 里 `CardEffectTarget.Target` 这条通用分支（约 148-166 行）对目标施加 power 效果时没有 `IsAlive` 检查（同一个文件里 `BoneShards`/`MoltenFist` 等特判分支反而有），`CombatSolverEngine/Search/SimulatedCombatState.DeathLifecycle.cs` 的 `CanReceivePredictedPowers`（144 行）只在 `_deathPhases` 被显式标记时才拒绝——而这套机制是为"复活/重新连接"类怪物（如 Decimillipede 分节）设计的窄范围追踪，普通击杀根本不会写入 `_deathPhases`。于是 `PowerLifecycleSupport.ResolvePowerAmountChanges`（167 行）照样对着一个刚刚死亡、只是还没被标记的目标触发了 Vicious 的抽卡联动。这是一个真实的、影响面很广的模拟保真度缺口（任何"伤害+debuff"卡牌打出致命一击时都可能复现），要修对需要审计整条通用卡牌效果流水线里"伤害结算"和"后续 power 施加"之间的时序保证——超出本任务"只碰协议胶水层"的边界，未改动 vendor 代码。
+
+胶水层规避（`493cb33`）：`_execute_combat_plan_actions` 把"计划里某个动作的 `card_id`/`potion_id` 在当前手牌/药水里根本找不到"（不是目标问题，是这张牌压根没被抽到）识别为"solver 的预测和真实状态出现分歧"信号，而不是"引擎拒绝了动作"那类硬 bug：停止执行这份已经过时的计划剩余部分，返回 `ok=True` 且决策仍是 `combat_play`，让 `play_run()` 现成的外层循环自然重新进入 `combat_play` 分支、对着**真实**手牌重新调用一次 `plan_combat_turn`。用同一份重放脚本验证：修复后返回 `ok=True`，手牌/敌人正确反映真实的 Bash 击杀后状态，而不是再报一次 `plan_combat_turn_execution_failed`。
+
+**Run 7 / Run 10（TIMEOUT，已确认与 solver 集成无关，不在本任务范围内）：卡在 `event_choice` 决策的预置 bug，`play_full_run.py` 的朴素事件策略没有"重复选择无进展就换一个选项/离开"的退出路径。**
+
+两局都卡在**事件**决策，完全没进入战斗/`plan_combat_turn` 代码路径：
+
+- Run 7（`logs/20260917_192226_Ironclad_run_7.jsonl` 末尾）：卡在"Whispering Hollow"事件的 `event_choice`，反复对同一页选 `option_index: 0`（"Exchange Gold"）却始终停在同一个决策上。
+- Run 10（`logs/20260917_192417_Ironclad_run_10.jsonl` 末尾，且用同一个种子现场重跑**精确复现**：`STUCK after 130 steps`，`hp=28/80 gold=334`，与原始日志的数字完全一致）：卡在"Crystal Sphere"事件，`Uncover Future` 选项第一次选中时金币从 427 掉到 334（说明确实生效了一次），但之后连续 20+ 次重选同一个未锁定选项，金币和血量都纹丝不动——事件既没有把这个选项标记为 `is_locked`，也没有推进到别的决策。`play_run()` 的 STUCK 检测用的 `state_key` 本来就不含 `gold`（`f"{decision}:{round}:{hp}:{hand_len}:{enemy_hp}:{energy}"`），但即使把 `gold` 也编码进去，这里同样会判定"无进展"，因为金币也确实不再变化了——真正的缺口是 `play_full_run.py` 里 `event_choice` 分支的策略太朴素（`next(unlocked option, else first)`，永远选第一个未锁定选项，从不尝试另一个选项或 `leave_room`），从一开始就没有"同一页面反复出现就换策略"的退出路径。
+
+确认这与本次 solver 集成无关：`git log --follow -p -- python/play_full_run.py` 显示 `event_choice` 这个分支从最早的 `f3981b2 feat: 无头全流程模拟器` 开始就是这个朴素实现，`plan_combat_turn` 相关的全部提交（`c12cd3d` 起）只碰过 `combat_play` 分支，从未touch 过 `event_choice`。这是一个预先存在、和 Combat Solver 无关的独立缺陷，按本任务的范围约定单独跟踪，不在这次修复范围内。
+
+**20 局回归重跑（问题 7/8 修复后，`scripts/run_caffeinated.sh .venv/bin/python python/play_full_run.py 20 Ironclad`，种子 `run_1`..`run_20`）：**
+
+```
+Wins: 0/20, Completed: 17/20, avg_floor=10.9
+Run 7:  TIMEOUT steps=37  （event_choice 卡死，pre-existing，见上）
+Run 14: TIMEOUT steps=40  （event_choice 卡死，pre-existing，同一类，这次换了个种子命中）
+Run 18: TIMEOUT steps=37  （event_choice 卡死，pre-existing，同一类，这次又换了个种子命中）
+```
+
+原始 4 个失败（Run 7/8/10/15）里，**Run 8 和 Run 15 这次都干净完成**（分别是 `LOSS steps=70 floor=12` 和 `LOSS steps=83 floor=14`，没有任何 `ERROR`/`plan_combat_turn_execution_failed`）——问题 7/8 的修复确认在完整 20 局回归里生效，不是只在单独复现脚本里生效。Run 10 这次种子路线不同，正常完成，没有触发 `event_choice` 卡死。**但 `event_choice` 卡死这个类别本身还在**，这次命中的是 Run 7/14/18 三个不同的种子（Run 7 命中的还是原来那次的同一个种子，说明这条路径下的卡死是稳定可复现的；Run 14/18 是新的种子命中同一类 bug，印证了它和地图路线相关、和 solver 集成无关的判断）——`Completed: 17/20` 而不是 `20/20`，诚实反映这一点，不是假阳性也不是已经修好。
+
+**结论：`plan_combat_turn` 集成本身引入的两个真实 bug（问题 7、问题 8）已确认修复；20 局里剩下的 3 个 TIMEOUT 全部是同一个预先存在、与本次工作无关的 `event_choice` 卡死类缺陷，按范围约定不在本次修复范围内，已作为独立 follow-up 记录。**
+
 ---
 
 ## Phase 1 完成的判定标准（对照 spec）
 
 - [x] `dotnet build src/Sts2Headless/Sts2Headless.csproj` 干净通过，包含全部 324 个移植文件。
 - [x] `plan_combat_turn` 在真实 Ironclad 对局的至少一个 `combat_play` 决策点上返回可执行的多步计划。
-- [x] 至少 5 局 Ironclad 全程由 solver 接管出牌，跑到 `game_over`，0 crash / stuck / reset_failure。**范围明确限定 Ironclad**：`python/play_full_run.py` 的 `combat_play` 分支把 `plan_combat_turn` 显式 gate 在 `character == "Ironclad"` 后面（code-quality review 发现之前是无条件对全部 5 个角色都会调用，但 `_resolve_card_index`/`_resolve_potion_index`/`_apply_action_choices` 从未在 Silent/Defect/Regent/Necrobinder 的机制——法力珠、姿态、荼毒/苦无等——上跑过一局）；其余 4 个角色继续走 Task 5 之前就有的简单启发式，不受影响。全角色回归验证是 Phase 2 的范围，本任务不做。
-- [x] 已知缺口（`CardOnPlayInferrer.cs` 的 RitsuLib 触点、`NGame.IsMainThread()` 实测结果、`SolverDisplayNames`/`BattleDamageSnapshot`/`SearchPolicySnapshot` 的真实构造方式、上面 Task 5 postmortem 的三个协议层 bug、`CardStateKey`/`card_occurrence` 未测风险）都已经在对应 commit message 或本文件里写清楚，不留没记录的隐藏假设。
+- [x] ~~至少 5 局 Ironclad 全程由 solver 接管出牌，跑到 `game_over`，0 crash / stuck / reset_failure。~~ **（2026-09-17 晚更正）这条判定标准原文是假阳性**：5 局样本量太小，没有触发问题 7/8。把同一份代码扩到 20 局后暴露了 4 个失败（2 个 solver 集成自身的协议层 bug——问题 7/8，已修复并在 20 局回归里确认；2 个不是"crash"而是 `event_choice` 卡死超时——已确认是预先存在、和 solver 无关的 bug，见上面的 postmortem）。20 局回归重跑（问题 7/8 修复后）：`Wins: 0/20, Completed: 17/20, avg_floor=10.9`，**0 个 `ERROR`（crash）**，3 个 `TIMEOUT`（同一类 `event_choice` 卡死，pre-existing，不计入本次判定标准，已作为独立 follow-up 记录）。**范围明确限定 Ironclad**：`python/play_full_run.py` 的 `combat_play` 分支把 `plan_combat_turn` 显式 gate 在 `character == "Ironclad"` 后面（code-quality review 发现之前是无条件对全部 5 个角色都会调用，但 `_resolve_card_index`/`_resolve_potion_index`/`_apply_action_choices` 从未在 Silent/Defect/Regent/Necrobinder 的机制——法力珠、姿态、荼毒/苦无等——上跑过一局）；其余 4 个角色继续走 Task 5 之前就有的简单启发式，不受影响。全角色回归验证是 Phase 2 的范围，本任务不做。
+- [x] 已知缺口（`CardOnPlayInferrer.cs` 的 RitsuLib 触点、`NGame.IsMainThread()` 实测结果、`SolverDisplayNames`/`BattleDamageSnapshot`/`SearchPolicySnapshot` 的真实构造方式、上面 Task 5 postmortem 的三个协议层 bug、`CardStateKey`/`card_occurrence` 未测风险、20 局回归的问题 7/8 及 `event_choice` 卡死 follow-up）都已经在对应 commit message 或本文件里写清楚，不留没记录的隐藏假设。
 
 达标后回到 [docs/superpowers/specs/2026-09-17-combatsolver-port-design.md](../specs/2026-09-17-combatsolver-port-design.md) 开 Phase 2 的计划（全角色接入——即验证并去掉上面的 `character == "Ironclad"` gate——+ 退休 `agent/sim`/`turn_planner.py`）。
