@@ -14,10 +14,17 @@ namespace CombatSolver;
 // (Runtime/CombatSolverLog.cs, not vendored) writes to a Godot user-data-dir file via
 // Runtime/CombatDiagnosticJournal.cs (not vendored) and to src/Diagnostics/PerformanceRecording.cs
 // (an entire top-level directory this port excludes). Vendoring that chain would pull in real
-// Godot file I/O and the excluded Diagnostics/ tree for what is, in every call site actually
-// reachable from this vendored engine, a fire-and-forget diagnostic log line -- never a value
-// that influences search/prediction control flow (grep the tree for `Entry\.` to confirm: every
-// use is `Entry.Logger.Info/Warn(...)` or the `Entry.ModId` constant).
+// Godot file I/O and the excluded Diagnostics/ tree for what is, at every `Entry.Logger` call
+// site in this vendored tree, a fire-and-forget diagnostic log line -- never a value that
+// influences search/prediction control flow.
+//
+// `Entry.ModId` is a different story: PredictionModPatchAudit.cs and
+// PredictionModHookSubscriberCapture.cs both compare it against a patch's owning mod id to gate
+// an exception/foreign-patch path. That comparison is currently unreachable in this headless
+// build (no Harmony patches are ever installed, since Entry.Initialize() never runs -- those
+// code paths only see an empty patch list), but it is NOT diagnostics-only, and this shim keeps
+// the constant's real value ("CombatSolver") so that if this build ever starts installing
+// patches, the comparison still behaves correctly rather than silently.
 //
 // This shim reproduces only that surface. Logging is a no-op: the headless build speaks JSON over
 // stdin/stdout (see agent/sts2_bridge.py), so writing arbitrary log lines to Console would corrupt

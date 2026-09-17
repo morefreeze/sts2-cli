@@ -70,12 +70,17 @@ Three deliberate exceptions to "verbatim file copy" in this directory:
   which this headless build runs. Its `Logger` further chains into
   `Runtime/CombatSolverLog.cs` → `Runtime/CombatDiagnosticJournal.cs` (both
   unvendored) and `src/Diagnostics/PerformanceRecording.cs` (a whole
-  top-level directory this port excludes). Every actual call site in this
-  vendored tree uses `Entry.Logger`/`Entry.ModId` for diagnostics only (never
-  for control flow); the shim's logger methods are no-ops, since writing to
-  Console would corrupt this build's JSON stdin/stdout protocol and there is
-  no vendored file-logging destination to write to instead. See the comment
-  at the top of the file for the full reasoning.
+  top-level directory this port excludes). Every `Entry.Logger` call site in
+  this vendored tree is diagnostics-only (never control flow); the shim's
+  logger methods are no-ops, since writing to Console would corrupt this
+  build's JSON stdin/stdout protocol and there is no vendored file-logging
+  destination to write to instead. `Entry.ModId` is different -- it's
+  compared against a patch's owning mod id in two files to gate an
+  exception/foreign-patch path, which is currently unreachable here (no
+  Harmony patches are ever installed) but is control flow, not diagnostics;
+  the shim keeps the real constant value ("CombatSolver") so that stays
+  correct if this ever changes. See the comment at the top of the file for
+  the full reasoning.
 
 NOT vendored: Runtime/ (remainder, including SolverSettings.cs and
 SolverController.cs as wholes, and Entry.cs), UI/, Api/, Diagnostics/,
