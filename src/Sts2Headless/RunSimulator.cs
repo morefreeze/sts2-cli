@@ -3800,6 +3800,20 @@ public class RunSimulator
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
+                    // Stable identity, matching the "id" field already exposed for hand cards
+                    // (c.Id.ToString() there too) -- needed so a plan_combat_turn use_potion
+                    // action's PotionId (a bare entry like "FIRE_POTION"; see
+                    // Search/CombatBeamSolver.Expansion.cs's `PotionId: potion.Id.Entry`) can be
+                    // resolved to this live "index" by identity instead of assuming any numeric
+                    // relationship to the solver's PotionSlot. PotionSlot addresses the physical
+                    // belt (player.PotionSlots, fixed-size, holes for empty slots); this "index"
+                    // is a position in player.Potions, the real game's OWN compacted enumerable
+                    // (Where(p => p != null) over PotionSlots) that DoUsePotion's potion_index
+                    // argument already indexes into -- the two numberings diverge the moment any
+                    // earlier belt slot is consumed, which is exactly the bug this "id" field
+                    // exists to let callers route around (see docs/superpowers/plans/
+                    // 2026-09-17-combatsolver-port-phase1.md's Task 5 postmortem).
+                    ["id"] = p.Id.ToString(),
                     ["name"] = _loc.Potion(p.Id.Entry),
                     ["description"] = _loc.Bilingual("potions", p.Id.Entry + ".description"),
                     ["vars"] = pvars.Count > 0 ? pvars : null,

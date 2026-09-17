@@ -342,7 +342,9 @@ one card at a time."
 **Files:**
 - Test: 用现有的 `python/play_full_run.py` 或 `agent/sts2_bridge.py` 手动跑
 
-- [ ] **Step 1: 用 HTTP bridge 起一局 Ironclad，在第一个 `combat_play` 决策点调用新 action**
+> **执行时发现的协议契约（写完本计划文字之后才确认，执行时以 [CLAUDE.md](../../../CLAUDE.md) 的 Protocol notes 为准）**：`plan_combat_turn` 的出牌动作用 `card_id`/`card_occurrence`（稳定身份）寻址，不是 `card_index`（手牌位置）；第 2 回合及之后动作的 `target_index`/`target_combat_id` 在普通 `combat_play` 决策的敌人列表里没有对应物。约定：**只执行到计划里第一个 `end_turn` 为止，然后重新调用一次 `plan_combat_turn` 拿下一回合的新计划**，不要试图盲目执行整份多回合计划。下面 Step 1-5 均按这个约定执行（而不是按写计划时设想的"直接执行 actions 列表"）。
+
+- [x] **Step 1: 用 HTTP bridge 起一局 Ironclad，在第一个 `combat_play` 决策点调用新 action**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
@@ -357,13 +359,13 @@ curl -s -X POST localhost:9877 -d '{"cmd":"action","action":"plan_combat_turn"}'
 kill $BRIDGE_PID
 ```
 
-Expected: 返回一个 `"type": "combat_plan"` 的 JSON，`actions` 列表里全是本回合合法的 `play_card`/`end_turn`（不是 error，`only_death_routes_found` 为 `false`）。
+Expected: 返回一个 `"type": "combat_plan"` 的 JSON，`actions` 列表里全是本回合合法的 `play_card`/`end_turn`（不是 error，`only_death_routes_found` 为 `false`）。**已确认**：在一场自然到达（非 `enter_room` 强制）的 Nibbit 战斗上验证，返回合法 `combat_plan`。
 
-- [ ] **Step 2: 把返回的 `actions` 依次真的执行，确认无头引擎能正常吃下每一步**
+- [x] **Step 2: 把返回的 `actions` 依次真的执行，确认无头引擎能正常吃下每一步**
 
-写一个一次性脚本（放 `/tmp/sts2-cli/`，不进仓库）驱动 bridge：调用 `plan_combat_turn` 拿到 actions 后，依次 POST 每个 action，确认没有任何一步返回 `"type": "error"`，直到 `decision` 变成非 `combat_play`（战斗结束）。
+写一个一次性脚本（放 `/tmp/sts2-cli/`，不进仓库）驱动 bridge：调用 `plan_combat_turn` 拿到 actions 后，依次 POST 每个 action，确认没有任何一步返回 `"type": "error"`，直到 `decision` 变成非 `combat_play`（战斗结束）。**已确认**（`/tmp/sts2-cli/verify_task5.py`，未提交）：按上面的"只执行到第一个 end_turn，然后重新 plan"约定跑完整场 4 回合战斗，`card_id`/`card_occurrence` → 手牌 `card_index` 的解析在全部 4 个回合边界上都正确（手牌内容/位置每回合都在变化），全程 0 damage（77→77 HP，与 solver 自己的 `projected_player_hp` 完全一致），`all_enemies_dead=true`。
 
-- [ ] **Step 3: 对比同一个种子下 `agent/sim` + `turn_planner.py` 现有基线的表现**
+- [x] **Step 3: 对比同一个种子下 `agent/sim` + `turn_planner.py` 现有基线的表现**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
@@ -377,7 +379,9 @@ from agent.turn_planner import plan_turn
 "
 ```
 
-- [ ] **Step 4: 跑满一整局 Ironclad，确认 solver 全程接管 combat_play 不会导致 crash/stuck/reset_failure**
+**已确认**：在同一场 Nibbit 战斗的第 1 回合真实状态上分别跑了 `turn_planner.plan_action()`（旧 1 回合 DFS）和 `plan_combat_turn`（新 solver）。旧的选择打 Strike（手牌槽 0，打敌人 0）；新 solver 选择先打 Defend。两者不要求一致——新 solver 的完整计划全程 0 掉血清场，不比旧规划器差，不是一次质量倒退。
+
+- [x] **Step 4: 跑满一整局 Ironclad，确认 solver 全程接管 combat_play 不会导致 crash/stuck/reset_failure**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
@@ -387,15 +391,42 @@ scripts/run_caffeinated.sh .venv/bin/python python/play_full_run.py 5 Ironclad 2
 
 Expected: `Completed: 5/5`，且日志里没有 `plan_combat_turn`/`CombatRootSnapshot`/`CombatSearchCoordinator` 相关的未捕获异常。注意：`play_full_run.py` 目前的简单 AI 不会主动调用 `plan_combat_turn`——这一步需要先给它加一个"combat_play 时优先尝试 plan_combat_turn，失败则退回原逻辑"的最小分支，改动限定在 `python/play_full_run.py` 的 `combat_play` 分支内，不动其它决策类型的处理。
 
-- [ ] **Step 5: Commit（如果 Step 4 改了 play_full_run.py）**
+**已确认（跑了 4 次 5 局回归，如实记录，不是只挑一次干净的）**：
+- 第 1 次（问题 1/2 修复前）：`Completed: 5/5`，但这是假阳性——问题 1（见下面 postmortem）会把真实的执行失败悄悄算成 `Completed`。
+- 第 2 次（问题 1/2 修复后）：`Wins: 0/5, Completed: 5/5, avg_floor=11.4`，无任何 `!!`/异常。
+- 第 3 次（同样的代码，换一批地图路线）：**`Wins: 0/5, Completed: 4/5, avg_floor=10.8`**——run 3 第一次被正确标成 `ERROR`（问题 1 的修复生效，抓到了问题 3：`expected card_select for choice MoveToDrawTop, got decision='combat_play'`）。
+- 第 4 次（问题 3 修复后）：`Wins: 0/5, Completed: 5/5, avg_floor=11.8`，无任何 `!!`/异常，包括 run 3 用的种子。
 
-```bash
-git add python/play_full_run.py
-git commit -m "test: drive Ironclad combat via the ported Combat Solver in play_full_run
+全程 5 局都在 Act 1 落败（未见 Win），但这是 `play_full_run.py` 自己"random agent"式的地图路线/卡牌奖励/商店策略造成的混杂因素，不是本任务要评估的对象——solver 本身的出牌质量评估见 Step 3。
 
-Validates Phase 1 of the engine port end-to-end: 5/5 runs complete
-with the solver making every in-combat decision."
-```
+- [x] **Step 5: Commit（如果 Step 4 改了 play_full_run.py）**
+
+初版落地于 d6585bb。Spec review 发现两个真实问题（问题 1/2），修复后重跑回归又自己暴露出第三个（问题 3——正是问题 1 修复之后才不再被静默吞掉）。三个问题的修复和对应 commit 见下面的 postmortem。
+
+### Task 5 postmortem：三个真实问题（前两个来自 spec review，第三个是修复问题 1 之后自己暴露的）
+
+**问题 1（已修复）：`summarize()` 把 `plan_combat_turn` 执行失败静默算作 "completed"。**
+
+`play_run()` 里 `_execute_combat_plan_actions` 失败时返回的字典只有 `error` 键，没有 `timeout` 键；而 `summarize()` 原来的 `completed = sum(1 for r in results if r and not r.get("timeout"))` 只排除 `timeout`，不排除 `error`——于是这一局在 SUMMARY 里显示成一行普通的 `LOSS`（`act=None floor=None` 是唯一的线索），却被计入 `Completed: N/5`。这正好会让 CLAUDE.md 的回归门槛（"`Completed: 5/5` = 0 crash/stuck"）在真出问题的时候看起来像通过了。修复：`completed` 同时排除 `timeout` 和 `error`；每行状态新增 `ERROR`（区别于 `WIN`/`TIMEOUT`/`LOSS`），并在行尾附上 `error=...` 消息。
+
+**问题 2（已修复，根因在我们自己的协议胶水层，不在 vendor 引擎里）：solver 提议使用一个已经用过的药水槽位。**
+
+现象：turn 10 一次全新调用 `plan_combat_turn` 提议 `use_potion` slot=1，但真实引擎回绝 `"Invalid potion index 1"`——那个槽位在 turn 8（两次重新规划之前）已经被真实消耗过。
+
+排查过程：
+1. 确认 `CombatRootSnapshot.Capture` 本身没有跨调用缓存——`DoPlanCombatTurn` 每次都用 `CombatManager.Instance.DebugOnlyGetState()` 现取 `CombatState`，`Capture` 内部又用 `LocalContext.GetMe(state)` 现取 `Player`，`SimulatedCombatState` 的构造函数（`Search/SimulatedCombatState.cs:336-350`）每次都用 `player.GetPotionAtSlotIndex(slot)` 现读真实药水槽——vendor 引擎这条链路是干净的，每次调用都是新鲜状态，不是 `BattleDamageTracker` 那种静态缓存模式。
+2. 反编译 `lib/sts2.dll`（`ilspycmd -t MegaCrit.Sts2.Core.Entities.Players.Player`）找到真正根因：`Player.PotionSlots` 是带空位的固定长度物理槽位数组，而 `Player.Potions => PotionSlots.Where(p => p != null)`——是一个**跳过空位、会因为消耗而收缩重排**的枚举。Combat Solver 的 `PlanAction.PotionSlot`（来自 `Search/CombatBeamSolver.Expansion.cs` 等处的 `potion.Id.Entry`/物理槽位）寻址的是 `PotionSlots`（物理槽位，我们没有引入任何 bug）；但 `RunSimulator.cs` 的 `DoUsePotion` 和 `PlayerSummary` 里的 `potions` 字段一直用的是 `player.Potions`（压缩列表）。这两套编号只要还没有槽位被消耗时碰巧一致，一旦任意更早的槽位被消耗，`PotionSlot` 和 `player.Potions` 里的位置就会永久错位——这正是我们自己（Task 4）在 `ConvertPlanActionsToJson` 里直接把 `action.PotionSlot` 透传成 `potion_index` 时踩中的协议层 bug，不是 vendor 引擎缺陷，因此不需要在 `VENDORED.md` 里记已知缺口，直接在这一层修。
+3. 修复：给 `PlayerSummary` 里 `potions` 每一项加一个稳定身份字段 `["id"] = p.Id.ToString()`（和手牌卡片的 `["id"] = c.Id.ToString()` 同一套约定），`python/play_full_run.py` 新增 `_resolve_potion_index`，按 `potion_id`（`_norm_entity_id` 归一化后）在当前活的 `player.potions` 列表里找同身份的条目，取它的 `index`，而不是直接把 solver 的 `potion_slot` 当 `potion_index` 用。药水没有升级/附魔那类状态，同名药水互相等价，所以不需要像卡牌那样再引入一个 occurrence 字段。
+
+**问题 3（已修复，同样是我们自己胶水层的假设错误，不是引擎 bug）：`_apply_action_choices` 把"引擎已经自动完成的选择"误判成失败。**
+
+现象：第二次重跑回归（`step4_regression_v3.log`）里，run 3 在 `Completed: 5/5` 表格里第一次显示成了 `ERROR`（问题 1 的修复生效了——这正是它被设计要抓的那类情况）。具体报错：`!! plan_combat_turn: expected card_select for choice MoveToDrawTop, got decision='combat_play'`。
+
+排查：从 `logs/20260917_154119_Ironclad_run_3.jsonl` 里还原出真实序列——turn 4 先打 Thrash（进 discard pile），再打 Headbutt（`choices: [{"effect": "MoveToDrawTop", "source_pile": "Discard", "cards": [{"card_id": "THRASH", ...}]}]`）。打 Headbutt 那一步的**前一个状态**显示 `discard_pile_count: 1`，`discard_pile: ["CARD.THRASH"]`——弃牌堆里只有唯一一张牌，没有真正的"选择"可做。打完 Headbutt 之后，`decision` 全程停留在 `combat_play`（从未变成 `card_select`），但下一次的 `draw_pile[0]` 确认是 `CARD.THRASH`——solver 想要的效果**已经真实生效**，只是引擎在候选唯一时直接自动结算，不走一次显式的 `card_select` 往返。这和本仓库 CLAUDE.md 已经记录的引擎不变式吻合："任何可能打开 card_select 的路径必须在 `_cardSelector.HasPending` 出现时才 yield"——反过来说，decision 没有变成 `card_select`，就说明真的没有任何选择在等待答复，不是 bug，是我们自己的校验太严格。
+
+修复：`_apply_action_choices` 里，`decision == "combat_play"`（选择已经在同一次 play_card/use_potion 调用里自动结算，跳过继续）和`decision` 变成除 `card_select` 之外的别的合法状态（比如这张牌的伤害刚好斩杀最后一个敌人，直接跳到 `card_reward`/`game_over`）都不再算失败——只有真正意外的情形才失败。同时给 `_execute_combat_plan_actions` 加了一个配套检查：只要某个动作执行完之后 `decision` 已经不是 `combat_play`（无论是因为战斗提前结束还是别的原因），就立刻停止这一批的执行并返回成功，不再尝试拿一个已经不存在的手牌去解析下一个计划动作的 `card_id`（那样会把"仗提前打完了"误报成"卡牌解析失败"）。
+
+**已知未测风险（未确认是 bug，只是没验证过）：`CardStateKey`/`card_occurrence` 在手牌被重排后的正确性。** `_resolve_card_index`/`_resolve_choice_indices` 按"沿手牌顺序数第 N 个同 `card_id` 的匹配"解析——如果同一 `card_id` 但状态不同的两张卡同时在手（例如未升级的 Strike 和 Strike+），且一次 Discard/Exhaust/Rearrange 选择在同一回合内改变了手牌顺序，`card_occurrence` 的计数基准可能和执行时的真实顺序对不上，从而解析到错误的物理卡。本次验证的战斗（Nibbit 4 回合、以及 5 局回归里遇到的所有战斗）都没有触发"同 id 不同状态 + 重排"的组合，所以这是一个理论上的未测风险，不是已确认的 bug；`PlanAction` 其实还有一个 `CardStateKey`/`CardStateOccurrence` 字段（vendor 引擎自己在 `FindCardForReplay`/`Search/CombatBeamSolver.Expansion.cs` 里优先用它而不是 `CardId`/`CardOccurrence`），但 `ConvertPlanActionsToJson` 目前没有把它序列化出来给 JSON 协议用——如果以后遇到疑似此类错误解析，先补上这个字段的序列化，而不是继续猜 occurrence。
 
 ---
 
