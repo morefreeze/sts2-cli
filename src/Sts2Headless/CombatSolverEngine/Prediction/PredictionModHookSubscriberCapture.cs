@@ -5,7 +5,6 @@ using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
 using CombatSolver.Engine.Common;
-using STS2RitsuLib;
 
 namespace CombatSolver;
 
@@ -60,14 +59,13 @@ internal sealed class PredictionModHookSubscriberCapture
             ValidateSubscriber(subscriber, "combat");
         AdaptedOnPlaySnapshot? onPlay = PredictionModPatchAudit.CaptureCardOnPlay(EnumerateAuditableCards(runState, combat));
 
+        // Upstream asks RitsuLib for a per-player max hand size, since RitsuLib-loaded mods
+        // (e.g. Loadout's LoadoutMaxHandSizeModifier, guarded against above) can vary it per
+        // player. This headless build never loads RitsuLib or any such mod, so every player
+        // uses the base game's fixed hand-size cap, CardPile.MaxCardsInHand.
         Dictionary<Player, int> maxHandSizes = [];
         foreach (Player player in combat.Players)
-        {
-            int maxHandSize = RitsuLibFramework.GetMaxHandSize(player);
-            if (maxHandSize < 0)
-                throw new InvalidOperationException($"RitsuLib returned max hand size {maxHandSize}.");
-            maxHandSizes.Add(player, maxHandSize);
-        }
+            maxHandSizes.Add(player, CardPile.MaxCardsInHand);
 
         IReadOnlySet<Player> everyCardFreePlayers = CaptureEveryCardFreePlayers(
             combatSubscribers,

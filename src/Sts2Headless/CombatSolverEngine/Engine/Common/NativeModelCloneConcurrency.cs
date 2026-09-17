@@ -2,7 +2,6 @@ using System.Reflection;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
-using STS2RitsuLib.Cards.DynamicVars;
 
 namespace CombatSolver.Engine.Common;
 
@@ -62,21 +61,12 @@ internal static class NativeModelCloneConcurrency
             && HasExactPatches(AccessTools.PropertyGetter(typeof(PowerModel), nameof(PowerModel.DynamicVars)),
                 [AccessTools.Method(typeof(PowerDynamicVarMaterializationGuardPatch), "Prefix")], []);
 
-    private static bool HasConcurrentVariableMetadata()
-    {
-        Type? baseLibCopy = AccessTools.TypeByName("BaseLib.Extensions.DynamicVarExtensions+CloneTooltips");
-        Type? ritsuCopy = AccessTools.TypeByName("STS2RitsuLib.Cards.Patches.DynamicVarTooltipClonePatch");
-        if (baseLibCopy == null || ritsuCopy == null)
-            return false;
-        MethodInfo copy = AccessTools.Method(baseLibCopy, "Copy");
-        MethodInfo ritsuPostfix = AccessTools.Method(ritsuCopy, "Postfix");
-        return HasExactPatches(AccessTools.Method(typeof(DynamicVarSet), "Clone"), [], [])
-            && HasExactPatches(AccessTools.Method(typeof(DynamicVar), "Clone"), [], [copy, ritsuPostfix])
-            && HasExactPatches(copy,
-                [AccessTools.Method(typeof(BaseLibDynamicVarCloneMetadataPatch), "Prefix")], [])
-            && HasExactPatches(AccessTools.Method(typeof(DynamicVarTooltipRegistry), "CopyTo"),
-                [AccessTools.Method(typeof(RitsuDynamicVarCloneMetadataPatch), "Prefix")], []);
-    }
+    // Original logic detected whether BaseLib/RitsuLib's dynamic-var tooltip clone patches
+    // were installed (via reflection over STS2RitsuLib.* / BaseLib.* mod types) to decide
+    // whether cloning could skip re-copying tooltip metadata. This headless build never
+    // loads those mods, so the check is unconditionally false -- callers already fall back
+    // to the conservative (non-independent) clone path when this returns false.
+    private static bool HasConcurrentVariableMetadata() => false;
 
     private static bool HasExactPatches(MethodInfo? method, MethodInfo[] prefixes, MethodInfo[] postfixes)
     {
