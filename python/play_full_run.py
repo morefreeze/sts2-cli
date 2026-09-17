@@ -103,6 +103,39 @@ def _resolve_potion_index(potions, potion_id):
     return None
 
 
+def _resolve_enemy_target_index(enemies, target_combat_id):
+    """Resolve a plan_combat_turn action's target_combat_id -- the solver's
+    stable per-enemy identity (the real game's Creature.CombatId, exposed on
+    the ordinary combat_play decision's "enemies" list as "combat_id" since
+    the Run 8 fix below) -- to a live target_index (position in the CURRENT
+    combat_play decision's enemies list).
+
+    Mirrors _resolve_card_index/_resolve_potion_index: trusting the plan's
+    own target_index directly is unsafe not just cross-turn (which CLAUDE.md's
+    Protocol notes already documented) but also SAME-turn -- an EARLIER action
+    in the very same turn-plan can kill an enemy, and RunSimulator.cs's
+    combat_play "enemies" list only ever contains IsAlive creatures, so it
+    reindexes/shrinks the moment that happens. A LATER action's plan-time
+    target_index (computed against the pre-kill enemy count) can then point
+    past the live list's end, or silently hit the wrong creature. Confirmed
+    live: 20-game Ironclad eval Run 8 (logs/20260917_192246_Ironclad_run_8.jsonl
+    step 31-32) -- a play_card with target_index=2 was rejected with
+    "'target_index' is required when multiple enemies are alive (2)", i.e.
+    only 2 enemies were alive when the plan's target_index assumed a 3rd
+    slot still existed.
+
+    Returns None if no live enemy has this combat_id -- the target died
+    (killed by an earlier action in this same plan), and the caller must
+    skip the action rather than guess a substitute target.
+    """
+    if target_combat_id is None:
+        return None
+    for e in enemies:
+        if e.get("combat_id") == target_combat_id:
+            return e["index"]
+    return None
+
+
 def _resolve_choice_indices(pending_cards, choice):
     """Resolve a plan action's bundled card_select sub-choice (Discard/Exhaust/
     Transform/... -- PlanCardChoice in Search/CombatPlan.cs) to indices into
@@ -217,6 +250,22 @@ def _execute_combat_plan_actions(send, state, actions):
     "fight ended early" as a false unresolved-card failure; the caller's
     outer decision loop is what should react to whatever decision this now
     is, not this function.
+
+    Same-turn target resolution (Run 8 fix): an action's target_index is only
+    valid against the enemy list AS OF PLAN TIME. If an EARLIER action in this
+    same plan killed an enemy, the live combat_play decision's enemies list
+    (RunSimulator.cs only ever includes IsAlive creatures) reindexes/shrinks,
+    so a later action's raw target_index can point past the live list's end
+    or hit the wrong creature. Every play_card/use_potion action that targets
+    an enemy also carries target_combat_id (the stable Creature.CombatId,
+    now also exposed on the live enemies list as "combat_id" -- see
+    RunSimulator.cs's enemy serialization). _resolve_enemy_target_index
+    re-derives the CURRENT target_index from that stable id each time,
+    instead of trusting the plan's stale one. If the intended target is no
+    longer alive at all (killed earlier this turn), resolution fails and the
+    action is skipped rather than guessing a substitute target -- the next
+    action still gets a chance (nothing else about state resolution depends
+    on this one action having run).
     """
     cur = state
     for action in actions:
@@ -230,7 +279,19 @@ def _execute_combat_plan_actions(send, state, actions):
                       f"{[c.get('id') for c in hand]}")
                 return cur, False
             args = {"card_index": idx}
-            if "target_index" in action:
+            if "target_combat_id" in action:
+                t_idx = _resolve_enemy_target_index(cur.get("enemies", []), action["target_combat_id"])
+                if t_idx is None:
+                    print(f"  .. plan_combat_turn: target {action.get('target_name')} "
+                          f"(combat_id={action.get('target_combat_id')}) for "
+                          f"card_id={action.get('card_id')} is no longer alive -- "
+                          f"an earlier action in this same plan must have killed it; "
+                          f"skipping this action")
+                    continue
+                args["target_index"] = t_idx
+            elif "target_index" in action:
+                # No stable id available -- shouldn't happen for AnyEnemy cards per
+                # ConvertPlanActionsToJson, but keep the raw index as a fallback.
                 args["target_index"] = action["target_index"]
             cur = send({"cmd": "action", "action": "play_card", "args": args})
             if cur.get("type") == "error":
@@ -250,7 +311,17 @@ def _execute_combat_plan_actions(send, state, actions):
                       f"{[p.get('id') for p in potions]}")
                 return cur, False
             args = {"potion_index": idx}
-            if "target_index" in action:
+            if "target_combat_id" in action:
+                t_idx = _resolve_enemy_target_index(cur.get("enemies", []), action["target_combat_id"])
+                if t_idx is None:
+                    print(f"  .. plan_combat_turn: target {action.get('target_name')} "
+                          f"(combat_id={action.get('target_combat_id')}) for "
+                          f"potion_id={action.get('potion_id')} is no longer alive -- "
+                          f"an earlier action in this same plan must have killed it; "
+                          f"skipping this action")
+                    continue
+                args["target_index"] = t_idx
+            elif "target_index" in action:
                 args["target_index"] = action["target_index"]
             cur = send({"cmd": "action", "action": "use_potion", "args": args})
             if cur.get("type") == "error":

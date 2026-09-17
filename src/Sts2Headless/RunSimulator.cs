@@ -2590,6 +2590,23 @@ public class RunSimulator
                 return new Dictionary<string, object?>
                 {
                     ["index"] = i,
+                    // Stable per-creature identity for this combat (real game's
+                    // Creature.CombatId -- MegaCrit.Sts2.Core.Entities.Creatures.Creature,
+                    // decompile-verified: assigned once via CombatState.AttachCreature's
+                    // monotonically-increasing _nextCreatureId, looked up back via
+                    // CombatState.GetCreature(uint? combatId)). "index" above is only a
+                    // POSITION in this list -- it is recomputed every call from
+                    // `Enemies.Where(IsAlive)`, so it silently shifts/shrinks the moment
+                    // any enemy dies. plan_combat_turn's own PlanAction already carries
+                    // this same id as "target_combat_id" (Search/CombatPlan.cs's
+                    // TargetCombatId, itself just `target?.CombatId`), so exposing it
+                    // here lets a consumer resolve a plan-time target across an
+                    // intra-turn kill instead of trusting the plan's positional
+                    // target_index once the live list has reindexed underneath it (see
+                    // python/play_full_run.py's _resolve_enemy_target_index and the Run 8
+                    // regression in docs/superpowers/plans/
+                    // 2026-09-17-combatsolver-port-phase1.md).
+                    ["combat_id"] = e.CombatId,
                     ["name"] = _loc.Monster(e.Monster?.Id.Entry ?? "UNKNOWN"),
                     ["hp"] = e.CurrentHp,
                     ["max_hp"] = e.MaxHp,
