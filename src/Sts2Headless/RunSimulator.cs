@@ -1070,6 +1070,11 @@ public class RunSimulator
     /// against the real live combat state and returns its best multi-turn action sequence, instead of
     /// only ever recommending one card at a time like DoPlayCard.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="args"/> is currently unused; the parameter is kept (matching the
+    /// DoPlayCard/DoMapSelect signature pattern in this file) as a reserved slot for a future
+    /// per-call override, e.g. SearchPolicySnapshot's BudgetOverrideMilliseconds/IncludeTurnSetup.
+    /// </remarks>
     private Dictionary<string, object?> DoPlanCombatTurn(Player player, Dictionary<string, object?>? args)
     {
         var pcs = player.PlayerCombatState;
@@ -1247,10 +1252,53 @@ public class RunSimulator
                     entry["action"] = action.Kind.ToString();
                     break;
             }
+            // Choice/NestedChoices/NestedChoicesBeforePrimary (Search/CombatPlan.cs:140,141,149) are
+            // sub-choices bundled into this action (e.g. Discard/Exhaust/Transform/Duplicate/
+            // MoveToHand -- see the PlanChoiceEffect enum, CombatPlan.cs:16-42) that a live card_select
+            // decision point would otherwise ask about with zero indication of what the solver
+            // intended. PlanAction.GetActionChoicesInExecutionOrder() (CombatPlan.cs:1067) is the
+            // engine's own accessor for the correctly-ordered combination of Choice and
+            // NestedChoices (interleaved per NestedChoicesBeforePrimary), so the array order below
+            // already encodes execution order without needing to also expose that split index.
+            IReadOnlyList<PlanCardChoice> choices = action.GetActionChoicesInExecutionOrder();
+            if (choices.Count > 0)
+                entry["choices"] = choices.Select(ConvertPlanCardChoiceToJson).ToList();
             result.Add(entry);
         }
         return result;
     }
+
+    /// <summary>
+    /// Converts a PlanCardChoice (Search/CombatPlan.cs:109-115) to JSON. Cards is the solver's
+    /// already-resolved selection for this choice (e.g. which specific card(s) to discard/exhaust),
+    /// not a menu of candidates -- confirmed by reading its construction sites in
+    /// Search/CardChoiceSupport.cs (BuildAutomaticPolicyChoice/BuildVakuuChoice/BuildChoices all
+    /// Take(count) from the offered options before building tokens from that taken subset). Each
+    /// PlanCardToken (CombatPlan.cs:101-107) is plain value data (string/int), not an object
+    /// reference, so this serializes cleanly: CardId/UpgradeLevel identify the card the same way
+    /// PlanAction.CardId/CardUpgradeLevel do elsewhere in this file, and SourceOccurrence/
+    /// OptionOccurrence disambiguate duplicate cards the same way CardOccurrence does -- SourceOccurrence
+    /// counts occurrences within the choice's full source pile, OptionOccurrence within just the
+    /// offered options (see CardChoiceSupport.cs's ToTokens helper).
+    /// </summary>
+    private static Dictionary<string, object?> ConvertPlanCardChoiceToJson(PlanCardChoice choice)
+        => new()
+        {
+            ["effect"] = choice.Effect.ToString(),
+            ["source_pile"] = choice.SourcePile.ToString(),
+            ["timing"] = choice.Timing.ToString(),
+            ["source_id"] = choice.SourceId,
+            ["context_id"] = choice.ContextId,
+            ["cards"] = choice.Cards.Select(token => new Dictionary<string, object?>
+            {
+                ["card_id"] = token.CardId,
+                ["card_title"] = token.Title,
+                ["upgrade_level"] = token.UpgradeLevel,
+                ["state_key"] = token.StateKey,
+                ["source_occurrence"] = token.SourceOccurrence,
+                ["option_occurrence"] = token.OptionOccurrence,
+            }).ToList(),
+        };
 
     // STS2 build 23372702 removed CombatManager.IsPlayPhase (global) in favor of a
     // per-player PlayerCombatState.Phase. Headless is single-player, so the local
