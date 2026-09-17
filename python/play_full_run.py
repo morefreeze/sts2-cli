@@ -106,18 +106,36 @@ def _resolve_potion_index(potions, potion_id):
 def _resolve_choice_indices(pending_cards, choice):
     """Resolve a plan action's bundled card_select sub-choice (Discard/Exhaust/
     Transform/... -- PlanCardChoice in Search/CombatPlan.cs) to indices into
-    the live card_select decision's offered "cards" list, matching each
-    PlanCardToken's card_id + option_occurrence the same way _resolve_card_index
-    matches card_id + card_occurrence. Returns None if any token can't be
+    the live card_select decision's offered "cards" list.
+
+    Unlike _resolve_card_index (which matches card_id + card_occurrence the
+    same way the vendored solver's CardOccurrence does -- Entry only, ignoring
+    upgrade state, per CombatBeamSolver.Expansion.cs), this matches each
+    PlanCardToken's card_id + upgrade_level + option_occurrence, mirroring the
+    vendor's OptionOccurrence/HasStableTokenIdentity (Search/CardChoiceSupport.cs),
+    which requires BOTH Entry AND CurrentUpgradeLevel to agree before two
+    candidates count as "the same card" for occurrence-counting purposes.
+    Confirmed as a real (not just theoretical) bug: with entry-only matching,
+    a choice token identifying "the 2nd unupgraded Strike" in a candidate list
+    that also contains an upgraded Strike+ would miscount the Strike+ as an
+    occurrence of plain Strike and resolve to the wrong physical card. The
+    live JSON only carries a bool ("upgraded" on each pending candidate,
+    "upgrade_level" as an int on each token) rather than the vendor's richer
+    state, so the comparison here is boolean upgraded-or-not -- as close to
+    HasStableTokenIdentity as the wire format allows, not full parity with a
+    CurrentUpgradeLevel int (e.g. it can't distinguish two different upgrade
+    tracks/levels beyond upgraded-vs-not). Returns None if any token can't be
     resolved (a real mismatch to surface, not something to paper over)."""
     indices = []
     for token in choice.get("cards", []):
         target = _norm_entity_id(token.get("card_id", ""))
+        target_upgraded = bool(token.get("upgrade_level", 0))
         occ = token.get("option_occurrence", 0)
         seen = 0
         found = None
         for c in pending_cards:
-            if _norm_entity_id(c.get("id", "")) == target:
+            if (_norm_entity_id(c.get("id", "")) == target
+                    and bool(c.get("upgraded", False)) == target_upgraded):
                 if seen == occ:
                     found = c["index"]
                     break
@@ -250,7 +268,14 @@ def _execute_combat_plan_actions(send, state, actions):
                 return cur, False
             return cur, True
         else:
-            print(f"  !! plan_combat_turn: unknown action kind {kind!r}, skipping")
+            # Unreachable today (PlanActionKind only has PlayCard/UsePotion/
+            # EndTurn), but every other unexpected condition in this function
+            # is a hard failure (unresolved card_id/potion_id/choice, any
+            # send() error) -- silently skipping an action kind we don't
+            # recognize would half-execute a plan without saying so if this
+            # enum ever grows. Fail loudly instead, matching that convention.
+            print(f"  !! plan_combat_turn: unknown action kind {kind!r}")
+            return cur, False
     return cur, True
 
 
@@ -399,7 +424,23 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                 # if plan_combat_turn itself errors out -- a losing-but-valid
                 # plan is still followed, since judging play quality is a
                 # separate concern from this regression run.
-                plan = send({"cmd": "action", "action": "plan_combat_turn"})
+                #
+                # Gated to Ironclad only: this whole validation pass (Task 5,
+                # docs/superpowers/plans/2026-09-17-combatsolver-port-phase1.md)
+                # scoped itself to "在 Ironclad 上验证" -- all-character
+                # rollout is explicitly deferred to Phase 2. _resolve_card_index/
+                # _resolve_potion_index/_apply_action_choices have never been
+                # exercised against Silent/Defect/Regent/Necrobinder's different
+                # mechanics (orbs, stances, poison/shivs, etc.), and this
+                # project's own memory records a prior planner that was "only
+                # SAFE on Ironclad" and cost Defect real floors when used
+                # cross-character without validation -- don't repeat that.
+                # Phase 2 lifts this gate once the other 4 characters are
+                # actually regression-tested against this path.
+                if character == "Ironclad":
+                    plan = send({"cmd": "action", "action": "plan_combat_turn"})
+                else:
+                    plan = {"type": "error"}
                 if plan.get("type") != "error":
                     plan_actions = plan.get("actions", [])
                     if not plan_actions:
@@ -413,7 +454,11 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                         if not plan_ok:
                             print("  ERROR: plan_combat_turn's plan did not execute "
                                   "cleanly against the live engine")
+                            player = state.get("player", {}) or {}
+                            context = state.get("context", {}) or {}
                             return {"victory": False, "seed": seed, "steps": step,
+                                     "act": context.get("act"), "floor": context.get("floor"),
+                                     "hp": player.get("hp"), "max_hp": player.get("max_hp"),
                                      "error": "plan_combat_turn_execution_failed"}
                 else:
                     hand = state.get("hand", [])

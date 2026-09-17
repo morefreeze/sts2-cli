@@ -396,14 +396,16 @@ Expected: `Completed: 5/5`，且日志里没有 `plan_combat_turn`/`CombatRootSn
 - 第 2 次（问题 1/2 修复后）：`Wins: 0/5, Completed: 5/5, avg_floor=11.4`，无任何 `!!`/异常。
 - 第 3 次（同样的代码，换一批地图路线）：**`Wins: 0/5, Completed: 4/5, avg_floor=10.8`**——run 3 第一次被正确标成 `ERROR`（问题 1 的修复生效，抓到了问题 3：`expected card_select for choice MoveToDrawTop, got decision='combat_play'`）。
 - 第 4 次（问题 3 修复后）：`Wins: 0/5, Completed: 5/5, avg_floor=11.8`，无任何 `!!`/异常，包括 run 3 用的种子。
+- 第 5 次（code-quality review 之后：加了 `character == "Ironclad"` gate、unknown action kind 改成硬失败、`plan_combat_turn_execution_failed` 补上 `act`/`floor`/`hp`/`max_hp`）：`Wins: 0/5, Completed: 5/5, avg_floor=13.6`，无任何 `!!`/异常——确认 gate 本身不改变 Ironclad 走 `plan_combat_turn` 这条路径。
+- 第 6 次（并行 review 又给 `_resolve_choice_indices` 修了一个真实 bug——同 entry 不同升级等级的卡在 card_select 子选择里会算错 occurrence，见下面新增的"后续验证"小节——合并后最终状态）：`Wins: 0/5, Completed: 5/5, avg_floor=12.8`，无任何 `!!`/异常。
 
 全程 5 局都在 Act 1 落败（未见 Win），但这是 `play_full_run.py` 自己"random agent"式的地图路线/卡牌奖励/商店策略造成的混杂因素，不是本任务要评估的对象——solver 本身的出牌质量评估见 Step 3。
 
 - [x] **Step 5: Commit（如果 Step 4 改了 play_full_run.py）**
 
-初版落地于 d6585bb。Spec review 发现两个真实问题（问题 1/2），修复后重跑回归又自己暴露出第三个（问题 3——正是问题 1 修复之后才不再被静默吞掉）。三个问题的修复和对应 commit 见下面的 postmortem。
+初版落地于 d6585bb，随后经过多轮 spec review + code-quality review，修了六个真实问题（外加一个单独 commit 修的 STUCK 未计入 timeout 的问题，见 50fcbaa）：问题 1/2 来自第一轮 spec review（f518e02），问题 3 是修问题 1 之后重跑回归自己暴露出来的（同一个 commit），问题 4/5/6 来自 code-quality review（覆盖 38328c2..50fcbaa 全范围）。所有问题的修复和对应 commit 见下面的 postmortem。
 
-### Task 5 postmortem：三个真实问题（前两个来自 spec review，第三个是修复问题 1 之后自己暴露的）
+### Task 5 postmortem：六个真实问题
 
 **问题 1（已修复）：`summarize()` 把 `plan_combat_turn` 执行失败静默算作 "completed"。**
 
@@ -426,15 +428,33 @@ Expected: `Completed: 5/5`，且日志里没有 `plan_combat_turn`/`CombatRootSn
 
 修复：`_apply_action_choices` 里，`decision == "combat_play"`（选择已经在同一次 play_card/use_potion 调用里自动结算，跳过继续）和`decision` 变成除 `card_select` 之外的别的合法状态（比如这张牌的伤害刚好斩杀最后一个敌人，直接跳到 `card_reward`/`game_over`）都不再算失败——只有真正意外的情形才失败。同时给 `_execute_combat_plan_actions` 加了一个配套检查：只要某个动作执行完之后 `decision` 已经不是 `combat_play`（无论是因为战斗提前结束还是别的原因），就立刻停止这一批的执行并返回成功，不再尝试拿一个已经不存在的手牌去解析下一个计划动作的 `card_id`（那样会把"仗提前打完了"误报成"卡牌解析失败"）。
 
+**问题 4（Critical，code-quality review 发现，已修复）：`plan_combat_turn` 之前对全部 5 个角色无条件生效，但本任务只在 Ironclad 上验证过。**
+
+`combat_play` 分支原来不看 `character` 就调用 `plan_combat_turn`——但本文件开头"Goal"和本 Task 5 的标题都明确写着"在 Ironclad **一个角色**上跑通"，全角色接入是 Phase 2 的范围。`_resolve_card_index`/`_resolve_potion_index`/`_apply_action_choices` 全部只在 Ironclad 的战斗（法力珠、姿态、荼毒/苦无等机制都没有）上跑过；本仓库 memory 里已经有前车之鉴（一个更早的规划器"只在 Ironclad 上是安全的"，跨角色不经验证直接用在 Defect 上时实测倒扣 3.96 层）。修复：`combat_play` 分支里 `plan_combat_turn` 调用现在 gate 在 `if character == "Ironclad":` 后面，其余 4 个角色显式走 Task 5 之前就有的简单启发式（`plan = {"type": "error"}` 直接复用已有的 fallback 分支，不需要另外写一条路径）。**不在本次改动里跑全角色回归**——按 review 要求，验证并解除这个 gate 是 Phase 2 的工作。
+
+**问题 5（Important，code-quality review 发现，已修复）：未识别的 `PlanActionKind` 只打印一行然后静默跳过，没有像其它异常分支一样硬失败。**
+
+`_execute_combat_plan_actions` 对"无法解析 card_id/potion_id"、"无法解析 choice token"、任何 `send()` 返回 error，全部是 `return cur, False`（硬失败，交给上层处理），唯独 `else` 分支（未知 action kind）只打印警告就继续循环，不推进也不报错——和自己定的"真 bug 就报出来，不要悄悄放过"的原则矛盾。目前这条分支不可达（`PlanActionKind` 只有 `PlayCard`/`UsePotion`/`EndTurn` 三种），但万一以后引擎加了新的 kind，这里会悄悄半执行一份计划。修复：改成 `return cur, False`，和其它分支保持一致。
+
+**问题 6（Important，code-quality review 发现，已修复）：`plan_combat_turn_execution_failed` 的返回结果缺 `act`/`floor`/`hp`/`max_hp`，且天真的补法会取错字段。**
+
+`play_run()` 里其它每一个终止分支（`game_over`、STUCK、max-steps）都带 `act`/`floor`/`hp`/`max_hp`，方便 `summarize()` 的 SUMMARY 表格显示定位信息；问题 1 新增的这条 `error` 分支却只有 `seed`/`steps`/`error`，实际渲染出来是 `act=None floor=None`——直接削弱了问题 1 修复本身的意义（ERROR 行看得见，但看不出出在哪）。陷阱：`combat_play` 决策的顶层 JSON **没有** `act`/`floor` 字段（只有 `map_select`/`game_over` 这两种决策类型才在顶层重复写了一份，读 `RunSimulator.cs` 的 `RunContext()`/`GameOverState()`/`MapSelectState()` 确认的）——这条 `error` 分支触发时 `state` 一定是 `combat_play` 决策，所以必须从 `state["context"]["act"]`/`state["context"]["floor"]`（`RunContext()` 写入的嵌套字段）读，而不是 `state.get("act")`（会一直是 `None`）。`hp`/`max_hp` 则和其它分支一样从 `state["player"]`（`PlayerSummary()` 写入）里取，本来就是对的。修复：改成 `state.get("context", {}).get("act")` / `.get("floor")`，`hp`/`max_hp` 保持从 `state.get("player", {})` 取。
+
 **已知未测风险（未确认是 bug，只是没验证过）：`CardStateKey`/`card_occurrence` 在手牌被重排后的正确性。** `_resolve_card_index`/`_resolve_choice_indices` 按"沿手牌顺序数第 N 个同 `card_id` 的匹配"解析——如果同一 `card_id` 但状态不同的两张卡同时在手（例如未升级的 Strike 和 Strike+），且一次 Discard/Exhaust/Rearrange 选择在同一回合内改变了手牌顺序，`card_occurrence` 的计数基准可能和执行时的真实顺序对不上，从而解析到错误的物理卡。本次验证的战斗（Nibbit 4 回合、以及 5 局回归里遇到的所有战斗）都没有触发"同 id 不同状态 + 重排"的组合，所以这是一个理论上的未测风险，不是已确认的 bug；`PlanAction` 其实还有一个 `CardStateKey`/`CardStateOccurrence` 字段（vendor 引擎自己在 `FindCardForReplay`/`Search/CombatBeamSolver.Expansion.cs` 里优先用它而不是 `CardId`/`CardOccurrence`），但 `ConvertPlanActionsToJson` 目前没有把它序列化出来给 JSON 协议用——如果以后遇到疑似此类错误解析，先补上这个字段的序列化，而不是继续猜 occurrence。
+
+**后续验证（`tests/test_plan_combat_turn_resolution.py`，纯 Python 单测，不需要 Game fixture / DLL）：给这四个纯函数补了单测后，上面这条"同 id 不同状态"的风险被拆成了两半，一半证伪一半证实**：
+
+- `_resolve_card_index`（`play_card` 动作用的 `card_id`/`card_occurrence`）**验证为按设计正确，不是 bug**：读 vendor 源码 `Search/CombatBeamSolver.Expansion.cs` 确认 `CardOccurrence` 本身就是纯 Entry-only 计数（`hand.Take(handIndex).Count(candidate => candidate.Preview.Id.Entry == card.Preview.Id.Entry)`，不看升级等级），和 Python 侧的计数算法完全一致——两边计数基准本来就没有分歧，升级状态从一开始就不参与这个字段的编号。
+- `_resolve_choice_indices`（card_select 子选择用的 `option_occurrence`）**确认是真实 bug，已修复**：vendor 侧 `OptionOccurrence` 走的是另一条计数逻辑（`Search/CardChoiceSupport.cs` 的 `CountTokenOccurrence`/`HasStableTokenIdentity`），要求 Entry **和** `CurrentUpgradeLevel` 同时相同才计入同一次出现，而 Python 侧原实现只比较 Entry——于是手牌里同时有未升级 Strike 和 Strike+ 时，`option_occurrence` 会把 Strike+ 也算进未升级 Strike 的计数，解析到错误的物理卡。JSON 协议其实已经带了区分所需字段（`ConvertPlanCardChoiceToJson` 序列化的 `upgrade_level`，card_select 决策里每张候选卡自带的 `upgraded`），只是没被用上。修复：`_resolve_choice_indices` 改为同时比较 `_norm_entity_id` 和 `bool(upgrade_level) == upgraded`（`python/play_full_run.py`）。注意 `RunSimulator.cs` 里 `ConvertPlanCardChoiceToJson` 上方的注释（"OptionOccurrence disambiguate duplicate cards the same way CardOccurrence does"）与此结论相悖，是过时/错误的注释，C# 侧代码本身不用改，但那条注释以后顺手更新一下。
+- 仍未验证的部分：手牌在同一回合内被 Discard/Exhaust/Rearrange 重排、导致 `_resolve_card_index` 的计数基准和执行时顺序对不上——这需要真实引擎多步执行才能触发，纯单测覆盖不到，依然是理论风险。
 
 ---
 
 ## Phase 1 完成的判定标准（对照 spec）
 
-- [ ] `dotnet build src/Sts2Headless/Sts2Headless.csproj` 干净通过，包含全部 324 个移植文件。
-- [ ] `plan_combat_turn` 在真实 Ironclad 对局的至少一个 `combat_play` 决策点上返回可执行的多步计划。
-- [ ] 至少 5 局 Ironclad 全程由 solver 接管出牌，跑到 `game_over`，0 crash / stuck / reset_failure。
-- [ ] 已知缺口（`CardOnPlayInferrer.cs` 的 RitsuLib 触点、`NGame.IsMainThread()` 实测结果、`SolverDisplayNames`/`BattleDamageSnapshot`/`SearchPolicySnapshot` 的真实构造方式）都已经在对应 commit message 或本文件里写清楚，不留没记录的隐藏假设。
+- [x] `dotnet build src/Sts2Headless/Sts2Headless.csproj` 干净通过，包含全部 324 个移植文件。
+- [x] `plan_combat_turn` 在真实 Ironclad 对局的至少一个 `combat_play` 决策点上返回可执行的多步计划。
+- [x] 至少 5 局 Ironclad 全程由 solver 接管出牌，跑到 `game_over`，0 crash / stuck / reset_failure。**范围明确限定 Ironclad**：`python/play_full_run.py` 的 `combat_play` 分支把 `plan_combat_turn` 显式 gate 在 `character == "Ironclad"` 后面（code-quality review 发现之前是无条件对全部 5 个角色都会调用，但 `_resolve_card_index`/`_resolve_potion_index`/`_apply_action_choices` 从未在 Silent/Defect/Regent/Necrobinder 的机制——法力珠、姿态、荼毒/苦无等——上跑过一局）；其余 4 个角色继续走 Task 5 之前就有的简单启发式，不受影响。全角色回归验证是 Phase 2 的范围，本任务不做。
+- [x] 已知缺口（`CardOnPlayInferrer.cs` 的 RitsuLib 触点、`NGame.IsMainThread()` 实测结果、`SolverDisplayNames`/`BattleDamageSnapshot`/`SearchPolicySnapshot` 的真实构造方式、上面 Task 5 postmortem 的三个协议层 bug、`CardStateKey`/`card_occurrence` 未测风险）都已经在对应 commit message 或本文件里写清楚，不留没记录的隐藏假设。
 
-达标后回到 [docs/superpowers/specs/2026-09-17-combatsolver-port-design.md](../specs/2026-09-17-combatsolver-port-design.md) 开 Phase 2 的计划（全角色接入 + 退休 `agent/sim`/`turn_planner.py`）。
+达标后回到 [docs/superpowers/specs/2026-09-17-combatsolver-port-design.md](../specs/2026-09-17-combatsolver-port-design.md) 开 Phase 2 的计划（全角色接入——即验证并去掉上面的 `character == "Ironclad"` gate——+ 退休 `agent/sim`/`turn_planner.py`）。
