@@ -220,7 +220,7 @@ succeeds with 0 errors."
 **Files:**
 - Modify: `src/Sts2Headless/RunSimulator.cs`（在 `ExecuteAction` 的 `switch` 里加一个 case，紧挨 `case "play_card":` 之后；新增一个 `DoPlanCombatTurn` 方法，放在 `DoPlayCard` 方法之后）
 
-- [ ] **Step 1: 读一遍 `CombatRootSnapshot.Capture` 的完整实现和它三个搭档类型的构造方式**
+- [x] **Step 1: 读一遍 `CombatRootSnapshot.Capture` 的完整实现和它三个搭档类型的构造方式**
 
 ```bash
 cat /Users/bytedance/mygit/sts2-cli/src/Sts2Headless/CombatSolverEngine/Runtime/CombatRootSnapshot.cs
@@ -229,15 +229,15 @@ grep -rn "class SolverDisplayNames\|class BattleDamageSnapshot\|class SearchPoli
 
 记录这三个类型各自最小可用的构造方式（可能是无参默认值，也可能需要从 `player`/`state` 派生几个字段）——这决定了下面 `DoPlanCombatTurn` 里怎么构造它们，写代码前必须先看到真实定义，不能猜。
 
-- [ ] **Step 2: 验证 `NGame.IsMainThread()` 在无头进程里的返回值**
+- [x] **Step 2: 验证 `NGame.IsMainThread()` 在无头进程里的返回值**
 
 ```bash
 grep -rn "class NGame\b" /Users/bytedance/mygit/sts2-cli/src/Sts2Headless/CombatSolverEngine/ /Users/bytedance/mygit/sts2-cli/src/GodotStubs/ 2>/dev/null
 ```
 
-如果 `NGame` 来自 `sts2.dll`（不在 GodotStubs 里），大概率是判断 `Thread.CurrentThread == 某个记录下来的主线程 ID`；由于 `RunSimulator.cs` 本身就是单线程同步跑（`InlineSynchronizationContext`），这个判断多半天然成立，但必须实测确认，不能假设。
+如果 `NGame` 来自 `sts2.dll`（不在 GodotStubs 里），大概率是判断 `Thread.CurrentThread == 某个记录下来的主线程 ID`；由于 `RunSimulator.cs` 本身就是单线程同步跑（`InlineSynchronizationContext`），这个判断多半天然成立，但必须实测确认，不能假设。**已实测确认**：`NGame.IsMainThread()` 返回 `true`，`CombatRootSnapshot.Capture` 在无头进程里不会因为这个检查抛异常（用一次性脚本驱动真实对局验证的，不是读代码猜的）。
 
-- [ ] **Step 3: 在 `ExecuteAction` 里加新 case**
+- [x] **Step 3: 在 `ExecuteAction` 里加新 case**
 
 在 `src/Sts2Headless/RunSimulator.cs` 里找到：
 
@@ -255,7 +255,9 @@ grep -rn "class NGame\b" /Users/bytedance/mygit/sts2-cli/src/Sts2Headless/Combat
                     return DoPlanCombatTurn(player, args);
 ```
 
-- [ ] **Step 4: 实现 `DoPlanCombatTurn`**
+- [x] **Step 4: 实现 `DoPlanCombatTurn`**
+
+> 实际实现里 `SearchPolicySnapshot` 在整个 vendor 的代码树里都找不到任何构造点（mod 自己的设置 UI 没移植），是手工按字段拼的。过程中踩了两个真实的行为坑，被 spec 审核抓到并修复：`AcceptableBattleHpLoss` 一开始设成 `int.MaxValue`，本意是"关掉找到就收手的提前退出"，实际效果正好相反（让 solver 找到第一个能赢的方案就不再继续搜），修成 `-1`（`ProjectedBattleHpLost` 系列字段全是非负累加量，`-1` 让比较永远不成立）；`UseBeamWidthPortfolio` 漏设，默认 `false`，跟 vendored 源码自己"默认开启"的文档注释矛盾，改成 `true`。细节见 commit c12cd3d/4a4ca8a。
 
 在 `DoPlayCard` 方法定义结束之后加入（具体字段名以 Step 1 读到的真实定义为准，下面是骨架，`???` 处必须替换成真实类型/字段，不能保留占位符）：
 
@@ -304,22 +306,24 @@ grep -rn "class NGame\b" /Users/bytedance/mygit/sts2-cli/src/Sts2Headless/Combat
     }
 ```
 
-- [ ] **Step 5: 把 `SolverResult` 里的最优出牌序列转换成 `play_card`/`end_turn` 动作列表**
+- [x] **Step 5: 把 `SolverResult` 里的最优出牌序列转换成 `play_card`/`end_turn` 动作列表**
 
 读 `src/Sts2Headless/CombatSolverEngine/Search/CombatPlan.cs` 和 `SolverResult` 的定义，找到"最佳节点的动作序列"字段，写一个私有辅助方法把它转换成形如
 `[{"action": "play_card", "card_index": 2, "target_index": 0}, {"action": "end_turn"}]`
 的列表，塞进上面返回值的 `["actions"]` 键。这一步的具体字段名必须来自实际读到的源码，不能照抄本计划的骨架。
 
-- [ ] **Step 6: build 确认新代码编译通过**
+> 实际返回的是 `card_id`/`card_occurrence`（稳定身份），不是 `card_index`（手牌位置）——因为计划跨越未来若干回合，那些回合的手牌内容在 JSON 协议这一层根本没模拟，手牌位置索引过了第 0 回合就没有意义。同理 `target_index`/`target_combat_id` 对第 2 回合及之后的动作也没有办法对上普通 `combat_play` 决策返回的敌人列表（那边只暴露位置 `index`）。**约定**：只执行到计划里第一个 `end_turn` 为止，然后重新调用一次 `plan_combat_turn` 拿下一回合的新计划，不要试图盲目执行整份多回合计划——已经记录进 [CLAUDE.md](../../../CLAUDE.md) 的 Protocol notes。另外 `PlanAction.Choice`/`NestedChoices`（弃牌/消耗/换形态这类卡牌自带的子选择）目前的处理见后续 commit。
+
+- [x] **Step 6: build 确认新代码编译通过**
 
 ```bash
 cd /Users/bytedance/mygit/sts2-cli
 dotnet build src/Sts2Headless/Sts2Headless.csproj 2>&1 | tail -10
 ```
 
-Expected: `Build succeeded.`
+Expected: `Build succeeded.` **已确认**，0 error。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit** (c12cd3d 初版，4a4ca8a 修复上面两个策略字段的 bug，后续 commit 补 Choice 序列化)
 
 ```bash
 git add src/Sts2Headless/RunSimulator.cs
