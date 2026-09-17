@@ -239,8 +239,12 @@ def _execute_combat_plan_actions(send, state, actions):
     target_combat_id have no counterpart in an ordinary combat_play decision's
     enemy list, so the caller must re-call plan_combat_turn fresh for the next
     turn instead). Returns (state, ok); ok=False means the LIVE engine
-    disagreed with the plan (unresolved card/choice, or an action itself
-    errored) -- a real bug to surface, not "the solver predicts a loss".
+    itself rejected an action, or a bundled card_select choice couldn't be
+    resolved -- a real bug to surface, not "the solver predicts a loss". An
+    unresolved card_id/potion_id is deliberately NOT one of those cases (see
+    "Stale-plan recovery" below) -- it reports ok=True instead, since it
+    reflects the solver's own prediction going stale, not a live-engine
+    disagreement.
 
     Also stops (successfully) the moment any action leaves the "combat_play"
     decision for a reason OTHER than the plan's own end_turn -- e.g. a card's
@@ -266,6 +270,40 @@ def _execute_combat_plan_actions(send, state, actions):
     action is skipped rather than guessing a substitute target -- the next
     action still gets a chance (nothing else about state resolution depends
     on this one action having run).
+
+    Stale-plan recovery (Run 15 fix): if a LATER action's card_id/potion_id
+    itself can't be found in the live hand/potions at all (not a target
+    problem -- the card the plan wants to play was simply never there),
+    that is different from an engine rejection: it means the solver's
+    PREDICTION of this turn's state diverged from what the live engine
+    actually did, so the rest of this precomputed plan is unsafe to keep
+    executing blindly. Confirmed root cause for one concrete case (20-game
+    Ironclad eval Run 15, logs/20260917_194053_Ironclad_run_15.jsonl step
+    148-150): the solver predicted Bash (damage + Vulnerable) would trigger
+    Ironclad's Vicious power ("whenever you apply Vulnerable, draw 1 card")
+    and planned a follow-up play_card for the drawn card (True Grit) --
+    but Bash's hit was lethal, and the real game's Vulnerable application
+    (decompiled MegaCrit.Sts2.Core.Models.Cards.Bash.OnPlay in lib/sts2.dll)
+    silently no-ops against an already-dead target, so Vicious never fired
+    and no card was drawn. The vendored solver's generic post-damage power
+    effect application (CombatSolverEngine/Prediction/CardEffectSpecRegistry.cs's
+    CardEffectTarget.Target case) has no such IsAlive guard before applying
+    the power and recording the triggering PowerAmountChange that
+    PowerLifecycleSupport.ResolvePowerAmountChanges later fires Vicious's
+    draw from -- a genuine vendored-engine simulation gap, but one with wide
+    blast radius (any lethal "damage + debuff" card), so fixing the engine
+    itself is out of scope here (see docs/superpowers/plans/
+    2026-09-17-combatsolver-port-phase1.md's postmortem). The safe, narrow
+    mitigation available at this layer: stop executing the rest of THIS
+    stale plan and report ok=True with the decision still "combat_play" --
+    the caller's outer loop (play_full_run.py's play_run()) then naturally
+    re-enters the combat_play branch and calls plan_combat_turn again fresh,
+    which plans off the ACTUAL live hand instead of the solver's stale
+    prediction. This trades a slightly weaker turn (the remaining planned
+    actions don't execute) for correctness, matching this project's
+    established "re-plan when stale" philosophy (CLAUDE.md's Protocol notes)
+    and the sanctioned Run 8 fallback ("skip the action, or trigger a fresh
+    re-plan, don't just guess a random target").
     """
     cur = state
     for action in actions:
@@ -274,10 +312,14 @@ def _execute_combat_plan_actions(send, state, actions):
             hand = cur.get("hand", [])
             idx = _resolve_card_index(hand, action.get("card_id", ""), action.get("card_occurrence", 0))
             if idx is None:
-                print(f"  !! plan_combat_turn: could not resolve card_id={action.get('card_id')} "
-                      f"occurrence={action.get('card_occurrence')} in live hand "
-                      f"{[c.get('id') for c in hand]}")
-                return cur, False
+                print(f"  ~~ plan_combat_turn: card_id={action.get('card_id')} "
+                      f"occurrence={action.get('card_occurrence')} not found in live hand "
+                      f"{[c.get('id') for c in hand]} -- the plan has gone stale (a "
+                      f"predicted mid-turn side effect, e.g. a power-triggered draw, "
+                      f"didn't actually happen live; see Run 15 fix note above). "
+                      f"Stopping this plan early and letting the caller re-plan from "
+                      f"the current live state.")
+                return cur, True
             args = {"card_index": idx}
             if "target_combat_id" in action:
                 t_idx = _resolve_enemy_target_index(cur.get("enemies", []), action["target_combat_id"])
@@ -306,10 +348,12 @@ def _execute_combat_plan_actions(send, state, actions):
             potions = cur.get("player", {}).get("potions", [])
             idx = _resolve_potion_index(potions, action.get("potion_id", ""))
             if idx is None:
-                print(f"  !! plan_combat_turn: could not resolve potion_id={action.get('potion_id')} "
-                      f"(solver's physical slot={action.get('potion_slot')}) in live potions "
-                      f"{[p.get('id') for p in potions]}")
-                return cur, False
+                print(f"  ~~ plan_combat_turn: potion_id={action.get('potion_id')} "
+                      f"(solver's physical slot={action.get('potion_slot')}) not found in "
+                      f"live potions {[p.get('id') for p in potions]} -- the plan has gone "
+                      f"stale (see Run 15 fix note above). Stopping this plan early and "
+                      f"letting the caller re-plan from the current live state.")
+                return cur, True
             args = {"potion_index": idx}
             if "target_combat_id" in action:
                 t_idx = _resolve_enemy_target_index(cur.get("enemies", []), action["target_combat_id"])
