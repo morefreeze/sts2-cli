@@ -352,7 +352,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                     return {"victory": False, "seed": seed, "steps": step,
                             "act": state.get("act"), "floor": state.get("floor"),
                             "hp": state.get("player", {}).get("hp"),
-                            "max_hp": state.get("player", {}).get("max_hp")}
+                            "max_hp": state.get("player", {}).get("max_hp"),
+                            "timeout": True}
             else:
                 stuck_count = 0
                 last_state_key = state_key
@@ -542,16 +543,18 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
 def summarize(results, num_runs, character="Ironclad"):
     """Build the SUMMARY text block, including avg_floor over numeric floors.
 
-    "Completed" means the run reached a genuine game_over (win or loss) or a
-    STUCK detection -- NOT a run that was cut short by an internal failure
-    (max-steps timeout, bad_init, an uncaught exception, or a
-    plan_combat_turn plan that the live engine rejected mid-execution).
-    Any result dict carrying an "error" key is exactly that kind of cut-short
-    run, so it must be excluded from "Completed" the same way "timeout" is --
-    otherwise the CLAUDE.md regression gate ("Completed: 5/5" = "0
-    crashes/stuck") can silently pass while a real crash/stuck hid behind an
-    ordinary-looking LOSS line (see git history for the plan_combat_turn
-    execution-failure case this was written to catch).
+    "Completed" means the run reached a genuine game_over (win or loss) --
+    NOT a run cut short by an internal failure: max-steps safety limit,
+    STUCK-loop detection, bad_init, an uncaught exception, or a
+    plan_combat_turn plan that the live engine rejected mid-execution.
+    CLAUDE.md's own regression gate is explicit that STUCK must NOT count as
+    completed ("Completed: 5/5" = "0 crashes/stuck") -- both the STUCK path
+    and the max-steps path set "timeout": True for exactly this reason, and
+    any result dict carrying an "error" key (a plan_combat_turn execution
+    failure) is excluded the same way, so none of these can silently hide
+    behind an ordinary-looking LOSS line (see git history: this docstring
+    previously claimed STUCK counted as completed, which contradicted
+    CLAUDE.md and let a real stuck run pass the gate undetected).
     """
     lines = ["\n" + "=" * 60, f"SUMMARY ({character})", "=" * 60]
     wins = sum(1 for r in results if r and r.get("victory"))
