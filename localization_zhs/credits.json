@@ -18,6 +18,8 @@
   "LOC_ESP.team": "Translators’ Tale Team",
   "LOC_FRA.header": "法语",
   "LOC_FRA.names": "首席翻译||Timothy Tamim\n翻译||Vincent Larcin",
+  "LOC_IND.header": "印度尼西亚语",
+  "LOC_IND.names": "Peter Christian Erastus (Peterce3)",
   "LOC_ITA.header": "意大利语",
   "LOC_ITA.names": "翻译||Daniele Iannilli\n校对||Francesco Caligiuri",
   "LOC_ITA.team": "To Transcreation and Beyond",
@@ -39,6 +41,8 @@
   "LOC_TUR.names": "翻译||Berke Oğuz Yılmaz (Secundus)\n校对||Ömer Can Aytekin",
   "LOC_ZHS.header": "简体中文",
   "LOC_ZHS.names": "翻译/校对||谜之声\n翻译/校对||爱丽丝拉斐尔",
+  "LOC_ZHT.header": "繁体中文",
+  "LOC_ZHT.names": "DK Liao (HexaLoc Lab)",
   "MARKETING_SUPPORT.header": "市场支持",
   "MARKETING_SUPPORT.names": "Dana Trebella",
   "MEGA_CRIT.header": "Mega Crit",
@@ -58,5 +62,5 @@
   "TWITCH.header": "Twitch集成",
   "TWITCH.names": "直播工具匠人||Thomas Tuts",
   "VOICES.header": "语音（不完整）",
-  "VOICES.names": "涅奥，商人（真/假）、坦克斯、钙化邪教徒（男）、雾菇、小啃兽、灵魂异鱼、高塔炮手、青蛙骑士||Will Lewis\n储君||Mark Ota\n努诺佩普||Demi Montes\n达弗||Phillip Corrado\n同族小队||Chris Gortz\n钙化邪教徒（女）||Marlowe Dobbe\n组装师||Genevieve Green\n墨宝||Lil Chan\n魔法骑士||Ed Lu\n机甲骑士||Jose Pacio\n红宝石劫掠者（暴徒）||CJ Rhone\n红宝石劫掠者（弩手）||Carter “Diency” Staley\n红宝石劫掠者（追踪手）||Peter “Raven” Havran\n海洋混混||Galen Drew\n史莱姆狂战士||Ben Brode\n偷窃草蜢||Jaiden Gerig\n双尾鼠||Mars Orach"
+  "VOICES.names": "涅奥, 商人（真/假）, 坦克斯, 钙化邪教徒（男）, 雾菇, 小啃兽, 灵魂异鱼, 高塔炮手, 青蛙骑士||Will Lewis\n储君||Mark Ota\n努诺佩普||Demi Montes\n达弗||Phillip Corrado\n同族小队||Chris Gortz\n钙化邪教徒（女）||Marlowe Dobbe\n组装师||Genevieve Green\n墨宝||Lil Chan\n魔法骑士||Ed Lu\n机甲骑士||Jose Pacio\n红宝石劫掠者（暴徒）||CJ Rhone\n红宝石劫掠者（弩手）||Carter “Diency” Staley\n红宝石劫掠者（追踪手）||Peter “Raven” Havran\n海洋混混||Galen Drew\n史莱姆狂战士||Ben Brode\n偷窃草蜢||Jaiden Gerig\n双尾鼠||Mars Orach"
 }
