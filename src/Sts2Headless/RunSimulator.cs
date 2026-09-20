@@ -3938,10 +3938,6 @@ public class RunSimulator
         try { SaveManager.Instance.InitPrefsDataForTest(); }
         catch (Exception ex) { Console.Error.WriteLine($"[WARN] SaveManager.InitPrefsDataForTest: {ex.Message}"); }
 
-        // Initialize progress data for epoch/timeline tracking
-        try { SaveManager.Instance.InitProgressData(); }
-        catch (Exception ex) { Console.Error.WriteLine($"[WARN] InitProgressData: {ex.Message}"); }
-
         // Install the Task.Yield patch but keep SuppressYield=false by default.
         // SuppressYield is toggled to true only during EndTurn to prevent boss fight deadlocks.
         PatchTaskYield();
@@ -3985,6 +3981,14 @@ public class RunSimulator
             }
         }
         Console.Error.WriteLine($"[INFO] ModelDb: {registered} registered, {failed} failed out of {subtypes.Count}");
+
+        // Initialize progress data for epoch/timeline tracking. Must run AFTER ModelDb
+        // registration: progress resolves character models by id (CHARACTER.IRONCLAD etc.),
+        // so calling it earlier throws "key not present in the dictionary" -- a failure
+        // that used to be masked by InitProfileId itself failing first (see
+        // GodotStubs/StringExtensions.cs).
+        try { SaveManager.Instance.InitProgressData(); }
+        catch (Exception ex) { Console.Error.WriteLine($"[WARN] InitProgressData: {ex.Message}"); }
 
         // v0.111 added a mod system, and StartRun reaches ReflectionHelper.ModTypes,
         // which throws while ModManager.State is None. The real Initialize() wants Steam
