@@ -94,7 +94,7 @@ def _copy_dlls(game_dir):
     os.makedirs(LIB_DIR, exist_ok=True)
     dlls = [
         "sts2.dll", "SmartFormat.dll", "SmartFormat.ZString.dll",
-        "Sentry.dll", "Steamworks.NET.dll", "MonoMod.Backports.dll",
+        "Sentry.dll", "Sentry.Godot.dll", "Steamworks.NET.dll", "MonoMod.Backports.dll",
         "MonoMod.ILHelpers.dll", "0Harmony.dll", "System.IO.Hashing.dll",
     ]
     import shutil
