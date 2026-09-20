@@ -3432,6 +3432,7 @@ public class RunSimulator
                     ["description"] = optDesc,
                     ["text_key"] = opt.TextKey,
                     ["is_locked"] = opt.IsLocked,
+                    ["was_chosen"] = opt.WasChosen,
                     ["vars"] = optVars?.Count > 0 ? optVars : null,
                 };
             }).ToList();
@@ -3958,6 +3959,11 @@ public class RunSimulator
         PatchSandpitPower();
         PatchTurnEndCardsDiagnostic();
 
+        // Patch RewardsSet.Offer for card-less reward sets (e.g. event-triggered custom
+        // rewards like Whispering Hollow's "Exchange Gold"). Outside combat, Offer() drives
+        // a Godot NRewardsScreen UI loop that never completes headless, hanging forever.
+        PatchRewardsSetOffer();
+
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
 
@@ -4094,6 +4100,34 @@ public class RunSimulator
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[WARN] Failed to patch Cmd.Wait: {ex.Message}");
+        }
+    }
+
+    private static void PatchRewardsSetOffer()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.rewardsoffer");
+            var offerMethod = typeof(RewardsSet).GetMethod("Offer",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (offerMethod != null)
+            {
+                var prefix = typeof(YieldPatches).GetMethod(nameof(YieldPatches.RewardsSetOfferPrefix),
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                if (prefix != null)
+                {
+                    harmony.Patch(offerMethod, new HarmonyMethod(prefix));
+                    Console.Error.WriteLine("[INFO] Patched RewardsSet.Offer() to bypass NRewardsScreen for card-less reward sets (prevents event-triggered reward hangs, e.g. Whispering Hollow)");
+                }
+            }
+            else
+            {
+                Console.Error.WriteLine("[WARN] Could not find RewardsSet.Offer to patch");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] Failed to patch RewardsSet.Offer: {ex.Message}");
         }
     }
 
@@ -4410,6 +4444,42 @@ public class RunSimulator
         {
             __result = null;
             return false; // Skip original method
+        }
+
+        /// <summary>
+        /// Harmony prefix: bypass RewardsSet.Offer()'s NRewardsScreen-driven flow for reward
+        /// sets with no CardReward. Outside combat, Offer() shows a Godot UI screen whose
+        /// button-click signals drive completion of a TaskCompletionSource that never resolves
+        /// headless (no Godot UI loop) -- confirmed live via Whispering Hollow's "Exchange Gold"
+        /// event option (RewardsCmd.OfferCustom with 2 PotionRewards, no CardReward): gold
+        /// deducts once then the option becomes a silent permanent no-op forever. Combat
+        /// rewards already avoid this entirely via a separate bypass (DetectPostCombatState:
+        /// GenerateWithoutOffering() + SelectUnsynchronized() per reward, never calling
+        /// Offer()) -- this generalizes that same proven-safe pattern to any other caller of
+        /// Offer() (currently: event-triggered custom rewards; combat is unaffected since it
+        /// never calls Offer() at all). Reward sets containing a CardReward fall through to the
+        /// original method unchanged (return true) -- event-triggered card rewards go through a
+        /// different, already-headless-working path (see DoChooseOption's "event-triggered card
+        /// reward" handling via ICardSelector.GetSelectedCardReward / _cardSelector.HasPendingReward),
+        /// and this patch hasn't been verified against that combination, so don't touch it.
+        /// </summary>
+        public static bool RewardsSetOfferPrefix(RewardsSet __instance, ref Task __result)
+        {
+            if (__instance.Rewards.Any(r => r is MegaCrit.Sts2.Core.Rewards.CardReward))
+                return true; // let the original NRewardsScreen-driven flow run, unchanged
+            __result = HeadlessOfferAsync(__instance);
+            return false;
+        }
+
+        private static async Task HeadlessOfferAsync(RewardsSet set)
+        {
+            if (set.Player.Creature.IsDead) return;
+            await set.GenerateWithoutOffering();
+            foreach (var reward in set.Rewards)
+            {
+                try { await reward.SelectUnsynchronized(); }
+                catch (Exception ex) { Console.Error.WriteLine($"[WARN] HeadlessOfferAsync: reward select failed: {ex.Message}"); }
+            }
         }
 
         /// <summary>
