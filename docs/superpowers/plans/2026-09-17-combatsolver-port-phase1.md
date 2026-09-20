@@ -488,13 +488,43 @@ Run 18: TIMEOUT steps=37  （event_choice 卡死，pre-existing，同一类，�
 
 **结论：`plan_combat_turn` 集成本身引入的两个真实 bug（问题 7、问题 8）已确认修复；20 局里剩下的 3 个 TIMEOUT 全部是同一个预先存在、与本次工作无关的 `event_choice` 卡死类缺陷，按范围约定不在本次修复范围内，已作为独立 follow-up 记录。**
 
+### `event_choice` 卡死 follow-up 的修复与验证（2026-09-17 深夜）
+
+上面记录的 3 个 TIMEOUT（Run 7/14/18）都卡在同一类根因上，反编译 `lib/sts2.dll`（`ilspycmd`）确认到具体方法级别：
+
+**根因链**：`MegaCrit.Sts2.Core.Events.EventOption.Chosen()` 里 `WasChosen` 在第一次调用时无条件置 `true`；因为 `DisableOnChosen` 默认是 `true`，同一个 option 的后续 `Chosen()` 调用会静默变成 no-op（`OnChosen()` 不会再执行）。但 `EventOption.IsLocked`——`RunSimulator.cs` 序列化给 JSON 协议的唯一字段——只在构造函数里赋值一次，从不随 `WasChosen` 更新。于是一个"已经死掉"的 option 会永远上报 `is_locked: false`，而 `play_full_run.py` 原来的策略（"选第一个未锁定的"）会永远重选它。这条根因链在两个具体事件上分叉成两种不同性质的问题：
+
+- **Whispering Hollow（Run 7 原始现场，`WhisperingHollow.Gold()`）——可在引擎层根治**：该 option 调用 `RewardsCmd.OfferCustom(...)` → `RewardsSet.Offer()`；战斗外，`Offer()` 会走 `NRewardsScreen.ShowScreen(...)`，用 Godot 按钮点击信号驱动一个 `RewardsSetSynchronizer.BeginRewardsSet(this)` 的 `TaskCompletionSource` 完成——headless 没有 Godot UI 循环，这个 `await` 永远挂起。金币在挂起前已经真实扣除一次（"Exchange Gold" 現場：130 → 103），之后 option 变成永久静默 no-op。证据：战斗奖励早就用另一条路径绕开了同一个坑——`DetectPostCombatState`（约 3158-3202 行）从不调用 `.Offer()`，而是 `GenerateWithoutOffering()` + 逐个 `SelectUnsynchronized()`，完全不经过 `NRewardsScreen`。
+- **Crystal Sphere（Run 10 原始现场，`CrystalSphere.UncoverFuture()`/`PaymentPlan()`）——不可用同一招修，是真实的 headless 能力缺口**：两者都调用 `new CrystalSphereMinigame(...).PlayMinigame()`，这是一个由独立的 `NCrystalSphereScreen` Godot 场景驱动的真实交互式翻牌小游戏（点格子、Small/Big Divination 按钮），headless 完全没有对应实现。这不是"再包一层 bypass"能解决的——需要一整套新的"翻牌"JSON 协议，超出本次任务范围，是一个已知的、暂时性的永久缺口。
+
+**修复（`src/Sts2Headless/RunSimulator.cs`）**：
+
+1. 新增 Harmony patch `PatchRewardsSetOffer()`（紧跟 `PatchCmdWait()` 之后，调用点在 `PatchTurnEndCardsDiagnostic()` 之后）：对 `RewardsSet.Offer()` 打 prefix `YieldPatches.RewardsSetOfferPrefix`——如果这个 reward set 里含 `CardReward`（战斗内/事件触发的卡牌奖励走另一条已经在 headless 下工作的路径，未验证过和本 patch 的组合，故不碰），放行原方法；否则用 `HeadlessOfferAsync`（`GenerateWithoutOffering()` + 逐个 `SelectUnsynchronized()`，和 `DetectPostCombatState` 同一套已验证安全的模式）直接跳过 `NRewardsScreen`。这是**引擎层的根治**，对 Whispering Hollow 这一类"事件触发、无卡牌成分的自定义奖励"永久有效。
+2. `EventChoiceState()` 序列化的每个 option 新增 `was_chosen` 字段（`opt.WasChosen`，公开 getter），让调用方能看见 `is_locked` 看不见的"已经死过一次"状态。
+3. `python/play_full_run.py` 的 stuck-detection `state_key` 扩展进 `gold` 和（仅 `event_choice` 时）每个 option 的 `is_locked:was_chosen` 指纹，让"同一页面、同一组 option 状态"的重复能被现有 `stuck_count` 机制真正识别（原来 hp/hand/enemy/energy 对纯事件页面完全不敏感）；`event_choice` 分支新增：`stuck_count >= 3` 时不再重选，改为 `leave_room` 逃生。这是**harness 层的安全网**，明确只覆盖"没有办法在引擎层修的死局"（当前已知即 Crystal Sphere 一类），**不是** Crystal Sphere 小游戏本身的修复——真实小游戏能力依然缺失，只是不再让整局卡死到全局 STUCK 上限。
+
+**验证**：
+
+- **直接 replay 复现**（因为 solver 决策改变了后续 RNG 消耗路径，新跑的 10 局里 run_7/run_10 这两个种子这次都没有自然撞到 Whispering Hollow / Crystal Sphere——这本身印证了"事件出现与否和地图路线相关"的判断，但意味着不能只看新跑的种子号，必须直接复现原始现场才能验证修复）：用原始卡死日志 `logs/20260917_192226_Ironclad_run_7.jsonl`（Whispering Hollow）和 `logs/20260917_192417_Ironclad_run_10.jsonl`（Crystal Sphere），把日志里的动作序列原样重放到卡死点前一步，再喂一次同样的 `choose_option`：
+  - Whispering Hollow：重放后金币=130，选项与原始现场完全一致（`Exchange Gold`/`Hug the Tree`，`was_chosen: false`）；选一次 "Exchange Gold" 后金币变成 103（和原始现场扣款金额一致），决策**直接跳到 `map_select`**——不再卡在 `event_choice`，patch 生效。
+  - Crystal Sphere：重放后金币=427，选一次 "Uncover Future" 后金币变成 334（和原始现场一致），但决策**仍然停在** `event_choice`/Crystal Sphere，且此时 `is_locked: false, was_chosen: true`——精确复现了根因链的描述（is_locked 从不反映死亡状态）；再重复选 4 次，金币和决策都纹丝不动，确认这条路径依然是真实的、未修复的引擎缺口。此时手动发送 `leave_room`，决策成功跳转到 `map_select`——确认 harness 层的逃生动作在引擎层面本身是可行的。
+- **完整 20 局回归里的真实命中**：Run 10（`logs/20260917_234614_Ironclad_run_10.jsonl`）这次真的在 floor 4 撞上了 Crystal Sphere（金币 378 → 285，和 "Uncover Future" 的花费一致），日志打印 `event_choice stuck on same page, leaving room`，`leave_room` 后正常回到 `map_select` 继续跑，最终打到真实的 `DEFEAT`（act 2, floor 7）而不是 STUCK——不是脚本层面的孤立验证，是在整条回归流水线里被真实触发并生效的。
+
+**20 局 Ironclad 完整回归（修复后，`scripts/run_caffeinated.sh .venv/bin/python python/play_full_run.py 20 Ironclad`，种子 `run_1`..`run_20`）：**
+
+```
+Wins: 0/20, Completed: 20/20, avg_floor=10.9
+```
+
+20 局全部 `LOSS`（无一 `WIN`，无一 `ERROR`，无一 `TIMEOUT`/`STUCK`）——此前 pre-existing 的 3 个 `event_choice` TIMEOUT（Run 7/14/18 那一跑）在这次回归里全部消失：其中一局（本跑的 Run 10）确实又撞上了 Crystal Sphere，但经由新加的 `leave_room` 逃生正常收尾，不再计入失败。**结论：`event_choice` 卡死 follow-up 已解决**——Whispering Hollow 一类在引擎层根治，Crystal Sphere 一类（真实小游戏能力缺口，仍然存在）由 harness 层的安全网兜底，不再产生 STUCK/TIMEOUT。日志里仍能看到大量 `[ERROR] ... InitProfileId must be called on SaveManager!`（`SaveManager.SaveProgressFile`/`RunManager.WriteReplay` 相关）——这是本次改动之前就存在、和 `event_choice`/`RewardsSet.Offer` 无关的既有噪音（不影响任何一局的正常完成，20/20 全部收尾到 `game_over`），本次任务不处理。
+
 ---
 
 ## Phase 1 完成的判定标准（对照 spec）
 
 - [x] `dotnet build src/Sts2Headless/Sts2Headless.csproj` 干净通过，包含全部 324 个移植文件。
 - [x] `plan_combat_turn` 在真实 Ironclad 对局的至少一个 `combat_play` 决策点上返回可执行的多步计划。
-- [x] ~~至少 5 局 Ironclad 全程由 solver 接管出牌，跑到 `game_over`，0 crash / stuck / reset_failure。~~ **（2026-09-17 晚更正）这条判定标准原文是假阳性**：5 局样本量太小，没有触发问题 7/8。把同一份代码扩到 20 局后暴露了 4 个失败（2 个 solver 集成自身的协议层 bug——问题 7/8，已修复并在 20 局回归里确认；2 个不是"crash"而是 `event_choice` 卡死超时——已确认是预先存在、和 solver 无关的 bug，见上面的 postmortem）。20 局回归重跑（问题 7/8 修复后）：`Wins: 0/20, Completed: 17/20, avg_floor=10.9`，**0 个 `ERROR`（crash）**，3 个 `TIMEOUT`（同一类 `event_choice` 卡死，pre-existing，不计入本次判定标准，已作为独立 follow-up 记录）。**范围明确限定 Ironclad**：`python/play_full_run.py` 的 `combat_play` 分支把 `plan_combat_turn` 显式 gate 在 `character == "Ironclad"` 后面（code-quality review 发现之前是无条件对全部 5 个角色都会调用，但 `_resolve_card_index`/`_resolve_potion_index`/`_apply_action_choices` 从未在 Silent/Defect/Regent/Necrobinder 的机制——法力珠、姿态、荼毒/苦无等——上跑过一局）；其余 4 个角色继续走 Task 5 之前就有的简单启发式，不受影响。全角色回归验证是 Phase 2 的范围，本任务不做。
+- [x] ~~至少 5 局 Ironclad 全程由 solver 接管出牌，跑到 `game_over`，0 crash / stuck / reset_failure。~~ **（2026-09-17 晚更正）这条判定标准原文是假阳性**：5 局样本量太小，没有触发问题 7/8。把同一份代码扩到 20 局后暴露了 4 个失败（2 个 solver 集成自身的协议层 bug——问题 7/8，已修复并在 20 局回归里确认；2 个不是"crash"而是 `event_choice` 卡死超时——已确认是预先存在、和 solver 无关的 bug，见上面的 postmortem）。**（2026-09-17 深夜更新，见上面"`event_choice` 卡死 follow-up 的修复与验证"一节）3 个 TIMEOUT 已解决**：Whispering Hollow 一类在引擎层用 `RewardsSet.Offer` Harmony patch 根治，Crystal Sphere 一类（真实小游戏、headless 无对应实现，仍是已知缺口）由 harness 层的 `was_chosen` 感知 + `leave_room` 逃生兜底。20 局完整回归重跑：`Wins: 0/20, Completed: 20/20, avg_floor=10.9`，**0 个 `ERROR`，0 个 `TIMEOUT`/`STUCK`**（其中一局仍真实撞上 Crystal Sphere，经 `leave_room` 逃生后正常收尾，不再计入失败）。**范围明确限定 Ironclad**：`python/play_full_run.py` 的 `combat_play` 分支把 `plan_combat_turn` 显式 gate 在 `character == "Ironclad"` 后面（code-quality review 发现之前是无条件对全部 5 个角色都会调用，但 `_resolve_card_index`/`_resolve_potion_index`/`_apply_action_choices` 从未在 Silent/Defect/Regent/Necrobinder 的机制——法力珠、姿态、荼毒/苦无等——上跑过一局）；其余 4 个角色继续走 Task 5 之前就有的简单启发式，不受影响。全角色回归验证是 Phase 2 的范围，本任务不做。
 - [x] 已知缺口（`CardOnPlayInferrer.cs` 的 RitsuLib 触点、`NGame.IsMainThread()` 实测结果、`SolverDisplayNames`/`BattleDamageSnapshot`/`SearchPolicySnapshot` 的真实构造方式、上面 Task 5 postmortem 的三个协议层 bug、`CardStateKey`/`card_occurrence` 未测风险、20 局回归的问题 7/8 及 `event_choice` 卡死 follow-up）都已经在对应 commit message 或本文件里写清楚，不留没记录的隐藏假设。
 
 达标后回到 [docs/superpowers/specs/2026-09-17-combatsolver-port-design.md](../specs/2026-09-17-combatsolver-port-design.md) 开 Phase 2 的计划（全角色接入——即验证并去掉上面的 `character == "Ironclad"` gate——+ 退休 `agent/sim`/`turn_planner.py`）。
