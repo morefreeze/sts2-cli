@@ -61,6 +61,15 @@ PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True):
     """Play a complete run and return the result."""
+    # Dedicated RNG for this harness's own decisions (map routing below), keyed
+    # off the run seed -- NOT random.seed(), which would reseed the shared
+    # global `random` module and silently change behavior for every other
+    # component that uses it. Without this, the same `seed` string passed to
+    # start_run does not pin the route: the C# engine's own state is
+    # deterministic per seed, but the *harness's* map_select choice was drawn
+    # from the unseeded global random module, so two runs of the same seed
+    # could diverge onto different routes and reach different floors.
+    rng = random.Random(seed)
     logger = GameLogger(character, seed, enabled=log)
     proc = subprocess.Popen(
         [DOTNET, "run", "--no-build", "--project", PROJECT],
@@ -124,13 +133,40 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         max_steps = 500  # Safety limit
         stuck_count = 0
         last_state_key = None
+        # Per-turn set of refused card `id`s for the combat_play fallback
+        # heuristic (see the combat_play/else branch below) plus the turn
+        # key it was collected under.
+        refused_ids = set()
+        refused_turn_key = None
+        # Most recent state with type=="decision", tracked so an error
+        # response (which carries no context/player, see RunSimulator.cs's
+        # Error()/ErrorWithTrace()) can still be reported with real
+        # act/floor/hp instead of None/None/None.
+        last_decision = {}
 
         while step < max_steps:
             step += 1
 
+            if state.get("type") == "decision":
+                last_decision = state
+
             if state.get("type") == "error":
-                print(f"  ERROR: {state.get('message', 'unknown')}")
-                break
+                # An engine error is a genuine failure, not a timeout -- return
+                # here (instead of `break`-ing into the max-steps timeout path
+                # below) so summarize() reports ERROR, not the dishonestly
+                # less-alarming TIMEOUT (same class of bug already fixed once
+                # for plan_combat_turn, see the return a few lines above this
+                # branch's sibling). The error dict itself has no context/player
+                # (RunSimulator.cs Error()/ErrorWithTrace()), so fall back to
+                # the last genuine decision seen for act/floor/hp.
+                context = state.get("context") or last_decision.get("context", {})
+                player = state.get("player") or last_decision.get("player", {})
+                msg = state.get("message", "unknown")
+                print(f"  ERROR: {msg}")
+                return {"victory": False, "seed": seed, "steps": step,
+                        "act": context.get("act"), "floor": context.get("floor"),
+                        "hp": player.get("hp"), "max_hp": player.get("max_hp"),
+                        "error": f"engine_error: {msg[:160]}"}
 
             decision = state.get("decision", "")
 
@@ -188,7 +224,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                     print("  No map choices available!")
                     break
                 # Random selection
-                choice = random.choice(choices)
+                choice = rng.choice(choices)
                 state = send({
                     "cmd": "action",
                     "action": "select_map_node",
@@ -245,23 +281,62 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                     hand = state.get("hand", [])
                     energy = state.get("energy", 0)
                     enemies = state.get("enemies", [])
+                    context = state.get("context", {}) or {}
 
-                    # Simple strategy: play playable cards until out of energy
-                    playable = [c for c in hand if c.get("can_play", False)
-                               and (c.get("cost", 0) <= energy)]
+                    # Refused-card ids are scoped to one turn (act, floor,
+                    # round) -- a new turn/room deals a fresh hand, so a
+                    # previous turn's refusals no longer apply.
+                    turn_key = (context.get("act"), context.get("floor"), state.get("round"))
+                    if turn_key != refused_turn_key:
+                        refused_turn_key = turn_key
+                        refused_ids = set()
 
-                    if playable:
+                    # Resolve the whole refusal cascade (if any) inside this
+                    # one outer-loop step -- otherwise the outer STUCK
+                    # detector sees an unchanged state_key and misreports a
+                    # refusal storm as a hang.
+                    played = False
+                    while True:
+                        playable = [c for c in hand if c.get("can_play", False)
+                                   and (c.get("cost", 0) <= energy)
+                                   and c.get("id") not in refused_ids]
+                        if not playable:
+                            break
                         card = playable[0]
                         args = {"card_index": card["index"]}
                         # If card needs a target, pick first enemy
                         if card.get("target_type") == "AnyEnemy" and enemies:
                             args["target_index"] = 0
-                        state = send({
+                        resp = send({
                             "cmd": "action",
                             "action": "play_card",
                             "args": args
                         })
-                    else:
+                        if resp.get("type") != "error":
+                            state = resp
+                            played = True
+                            break
+                        # Engine refused the play (DoPlayCard's "still in hand
+                        # after action" check, RunSimulator.cs:988) even though
+                        # can_play was true -- CanPlay() and the post-play
+                        # verification aren't the same check (BUG-004/BUG-006).
+                        # Key the block by card `id`, not hand index: a
+                        # successful play of a DIFFERENT card re-indexes the
+                        # hand, so a stored index would go stale and silently
+                        # block the wrong card, while `id` stays stable and a
+                        # refusal is a property of the card's own behaviour
+                        # (every copy is equally suspect). A refusal leaves the
+                        # engine untouched (same hand/energy/indices), so the
+                        # pre-refusal `state` is still exactly accurate and is
+                        # deliberately left alone -- only the candidate set
+                        # shrinks. Each refusal permanently removes >=1 id, so
+                        # this terminates.
+                        print(f"  REFUSED: card {card.get('id')} "
+                              f"({card.get('name')}) rejected by engine: "
+                              f"{resp.get('message', 'unknown')}")
+                        refused_ids.add(card.get("id"))
+
+                    if not played:
                         # End turn - retry a few times if we get "Not in play phase"
                         for retry in range(5):
                             state = send({
@@ -381,16 +456,25 @@ def summarize(results, num_runs, character="Ironclad"):
 
     "Completed" means the run reached a genuine game_over (win or loss) --
     NOT a run cut short by an internal failure: max-steps safety limit,
-    STUCK-loop detection, bad_init, an uncaught exception, or a
-    plan_combat_turn plan that the live engine rejected mid-execution.
+    STUCK-loop detection, bad_init, an uncaught exception, a
+    plan_combat_turn plan that the live engine rejected mid-execution, or
+    any other engine error response ("engine_error: ...").
     CLAUDE.md's own regression gate is explicit that STUCK must NOT count as
     completed ("Completed: 5/5" = "0 crashes/stuck") -- both the STUCK path
     and the max-steps path set "timeout": True for exactly this reason, and
-    any result dict carrying an "error" key (a plan_combat_turn execution
-    failure) is excluded the same way, so none of these can silently hide
-    behind an ordinary-looking LOSS line (see git history: this docstring
-    previously claimed STUCK counted as completed, which contradicted
-    CLAUDE.md and let a real stuck run pass the gate undetected).
+    any result dict carrying an "error" key is excluded the same way, so
+    none of these can silently hide behind an ordinary-looking LOSS line
+    (see git history: this docstring previously claimed STUCK counted as
+    completed, which contradicted CLAUDE.md and let a real stuck run pass
+    the gate undetected).
+
+    The inverse matters just as much: a failure must not masquerade as a
+    DIFFERENT failure either. The engine-error path deliberately returns
+    "error" (never "timeout") so it renders as ERROR here rather than as the
+    less alarming TIMEOUT -- it used to `break` into the max-steps return and
+    print "TIMEOUT | act=None floor=None" for what was really a refused
+    action. Same class as the plan_combat_turn "问题 1" postmortem in
+    docs/superpowers/plans/2026-09-17-combatsolver-port-phase1.md.
     """
     lines = ["\n" + "=" * 60, f"SUMMARY ({character})", "=" * 60]
     wins = sum(1 for r in results if r and r.get("victory"))
