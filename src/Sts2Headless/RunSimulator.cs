@@ -19,7 +19,6 @@ using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
-using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
@@ -4679,6 +4678,21 @@ public class RunSimulator
 
             Console.Error.WriteLine("[INFO] LocManager initialized with stub tables");
 
+            // WARNING for future patches added to this "sts2headless.locpatch" Harmony
+            // instance (or any other): NEVER target a card's OnPlay. PredictionModPatchAudit.
+            // CaptureCardOnPlay (src/Sts2Headless/CombatSolverEngine/Prediction/
+            // PredictionModPatchAudit.cs:38-114) walks every card reachable at combat start and
+            // throws PredictionUnsupportedException the moment it finds a Harmony patch on a
+            // card's mirrored OnPlay it can't attribute to the base game or a registered mod
+            // manifest -- which silently disables plan_combat_turn (falls back to the one-card
+            // heuristic, see play_full_run.py) for every combat containing that card, i.e. every
+            // character whose deck can draw it. Precedent: commit 5e9a1c9 deleted a
+            // Neutralize.OnPlay patch (Silent's starter card) that had exactly this effect --
+            // all 502 plan_combat_turn calls in a 3-game Silent smoke test errored and the
+            // solver produced zero plans, invisibly. Patches on Commands, Powers, Monsters, and
+            // any non-card method are NOT affected (the audit's scope is card OnPlay only, by
+            // the class's own doc comment).
+            //
             // Use Harmony to patch methods that need fallback behavior
             var harmony = new Harmony("sts2headless.locpatch");
 

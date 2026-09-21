@@ -106,6 +106,17 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     # could diverge onto different routes and reach different floors.
     rng = random.Random(seed)
     solver_chars = solver_characters()
+    # Engagement counters for this one run: how many plan_combat_turn calls
+    # returned a usable plan vs. an error (which silently falls back to the
+    # one-card-at-a-time heuristic below). A 3-game Silent smoke test once
+    # printed "Completed: 3/3" while all 502 plan_combat_turn calls in it
+    # errored with PredictionUnsupportedException and the solver produced
+    # zero plans -- the harness had no way to notice it was measuring the
+    # fallback heuristic instead. These counters (surfaced by summarize())
+    # are what makes that impossible to miss again.
+    solver_plans = 0
+    solver_errors = 0
+    solver_error_printed = False
     logger = GameLogger(character, seed, enabled=log)
     proc = subprocess.Popen(
         [DOTNET, "run", "--no-build", "--project", PROJECT],
@@ -158,7 +169,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         ready = read_json_line()
         if ready.get("type") != "ready":
             print(f"  Unexpected initial response: {ready}")
-            return {"victory": False, "seed": seed, "error": "bad_init"}
+            return {"victory": False, "seed": seed, "error": "bad_init",
+                    "solver_plans": solver_plans, "solver_errors": solver_errors}
         if verbose:
             print(f"Connected: {ready}")
 
@@ -202,7 +214,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                 return {"victory": False, "seed": seed, "steps": step,
                         "act": context.get("act"), "floor": context.get("floor"),
                         "hp": player.get("hp"), "max_hp": player.get("max_hp"),
-                        "error": f"engine_error: {msg[:160]}"}
+                        "error": f"engine_error: {msg[:160]}",
+                        "solver_plans": solver_plans, "solver_errors": solver_errors}
 
             decision = state.get("decision", "")
 
@@ -231,7 +244,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                             "act": state.get("act"), "floor": state.get("floor"),
                             "hp": state.get("player", {}).get("hp"),
                             "max_hp": state.get("player", {}).get("max_hp"),
-                            "timeout": True}
+                            "timeout": True,
+                            "solver_plans": solver_plans, "solver_errors": solver_errors}
             else:
                 stuck_count = 0
                 last_state_key = state_key
@@ -252,6 +266,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                     "floor": state.get("floor"),
                     "hp": player.get("hp"),
                     "max_hp": player.get("max_hp"),
+                    "solver_plans": solver_plans,
+                    "solver_errors": solver_errors,
                 }
 
             elif decision == "map_select":
@@ -293,6 +309,20 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                 # docs/superpowers/plans/2026-09-21-combatsolver-port-phase2.md.
                 if character in solver_chars:
                     plan = send({"cmd": "action", "action": "plan_combat_turn"})
+                    if plan.get("type") == "error":
+                        solver_errors += 1
+                        # Print the engine's message only the FIRST time this
+                        # run hits it -- a run where the solver is disabled
+                        # for the whole combat (e.g. the PredictionUnsupportedException
+                        # regression fixed in 5e9a1c9) would otherwise print
+                        # the identical line hundreds of times. Style matches
+                        # combat_plan_driver.py's own "!!" hard-failure prefix.
+                        if not solver_error_printed:
+                            solver_error_printed = True
+                            print(f"  !! plan_combat_turn error (falling back to heuristic): "
+                                  f"{plan.get('message', 'unknown')}")
+                    else:
+                        solver_plans += 1
                 else:
                     plan = {"type": "error"}
                 if plan.get("type") != "error":
@@ -313,7 +343,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                             return {"victory": False, "seed": seed, "steps": step,
                                      "act": context.get("act"), "floor": context.get("floor"),
                                      "hp": player.get("hp"), "max_hp": player.get("max_hp"),
-                                     "error": "plan_combat_turn_execution_failed"}
+                                     "error": "plan_combat_turn_execution_failed",
+                                     "solver_plans": solver_plans, "solver_errors": solver_errors}
                 else:
                     hand = state.get("hand", [])
                     energy = state.get("energy", 0)
@@ -466,11 +497,13 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                 state = send({"cmd": "action", "action": "proceed"})
 
         print(f"  Reached max steps ({max_steps})")
-        return {"victory": False, "seed": seed, "steps": step, "timeout": True}
+        return {"victory": False, "seed": seed, "steps": step, "timeout": True,
+                "solver_plans": solver_plans, "solver_errors": solver_errors}
 
     except Exception as e:
         print(f"  EXCEPTION: {e}")
-        return {"victory": False, "seed": seed, "steps": step, "error": str(e)}
+        return {"victory": False, "seed": seed, "steps": step, "error": str(e),
+                "solver_plans": solver_plans, "solver_errors": solver_errors}
 
     finally:
         logger.close()
@@ -488,7 +521,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
             proc.kill()
 
 
-def summarize(results, num_runs, character="Ironclad"):
+def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     """Build the SUMMARY text block, including avg_floor over numeric floors.
 
     "Completed" means the run reached a genuine game_over (win or loss) --
@@ -512,11 +545,25 @@ def summarize(results, num_runs, character="Ironclad"):
     print "TIMEOUT | act=None floor=None" for what was really a refused
     action. Same class as the plan_combat_turn "问题 1" postmortem in
     docs/superpowers/plans/2026-09-17-combatsolver-port-phase1.md.
+
+    Solver engagement ("solver=<plans>/<attempts>" per run, plus an aggregate
+    line) is reported alongside -- but deliberately NOT folded into
+    Completed/WIN/LOSS/TIMEOUT/ERROR above: a run that fell back to the
+    one-card-at-a-time heuristic for its entire combat is still a completed,
+    valid run of *something*; conflating "solver didn't engage" with "run
+    crashed" would make the regression gate mean two different things at
+    once. `solver_chars` defaults to solver_characters() (STS2_SOLVER_CHARS)
+    but takes an explicit override so callers (and tests) don't have to
+    monkeypatch the environment to control it.
     """
+    if solver_chars is None:
+        solver_chars = solver_characters()
     lines = ["\n" + "=" * 60, f"SUMMARY ({character})", "=" * 60]
     wins = sum(1 for r in results if r and r.get("victory"))
     completed = sum(1 for r in results if r and not r.get("timeout") and not r.get("error"))
     floors = []
+    total_solver_plans = 0
+    total_solver_errors = 0
     for i, r in enumerate(results):
         if r:
             if r.get("victory"):
@@ -527,8 +574,13 @@ def summarize(results, num_runs, character="Ironclad"):
                 status = "ERROR"
             else:
                 status = "LOSS"
+            solver_plans = r.get("solver_plans", 0)
+            solver_errors = r.get("solver_errors", 0)
+            total_solver_plans += solver_plans
+            total_solver_errors += solver_errors
+            attempts = solver_plans + solver_errors
             line = (f"  Run {i+1}: {status} | seed={r.get('seed')} steps={r.get('steps')} "
-                    f"act={r.get('act')} floor={r.get('floor')}")
+                    f"act={r.get('act')} floor={r.get('floor')} solver={solver_plans}/{attempts}")
             if r.get("error"):
                 line += f" error={r.get('error')}"
             lines.append(line)
@@ -538,6 +590,22 @@ def summarize(results, num_runs, character="Ironclad"):
     avg_floor = round(sum(floors) / len(floors), 1) if floors else 0.0
     lines.append(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}, "
                  f"avg_floor={avg_floor}")
+    total_solver_attempts = total_solver_plans + total_solver_errors
+    lines.append(f"Solver engagement: {total_solver_plans}/{total_solver_attempts} "
+                 f"plan_combat_turn calls returned a usable plan")
+    # Zero engagement is only alarming for a character the solver is SUPPOSED
+    # to drive -- for the A/B's control arm (character not in solver_chars),
+    # zero plans is the whole point and must stay silent. This is the check
+    # that would have caught the Silent 502/0 smoke result: it "passed"
+    # (Completed: 3/3) while every single plan_combat_turn call errored with
+    # PredictionUnsupportedException and the run was secretly measuring the
+    # fallback heuristic (fixed in 5e9a1c9, but the blindness itself wasn't).
+    if character in solver_chars and total_solver_plans == 0:
+        lines.append(
+            f"!! SOLVER NEVER ENGAGED for {character} -- every plan_combat_turn "
+            f"call failed; these results measure the FALLBACK heuristic, not "
+            f"the solver."
+        )
     return "\n".join(lines)
 
 
