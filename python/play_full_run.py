@@ -33,6 +33,41 @@ from combat_plan_driver import (
 
 VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
 
+# Which characters route their combat_play decisions through the ported
+# Combat Solver (plan_combat_turn) instead of the simple one-card-at-a-time
+# heuristic. Phase 1 hard-coded this to Ironclad because the resolution glue
+# (_resolve_card_index / _resolve_potion_index / _apply_action_choices) had
+# only ever been exercised against Ironclad's mechanics; Phase 2 validates the
+# other four one at a time via STS2_SOLVER_CHARS before changing this default.
+_SOLVER_CHARS_DEFAULT = frozenset({"Ironclad"})
+
+
+def solver_characters(env=None) -> set:
+    """Resolve the set of characters allowed to call plan_combat_turn.
+
+    STS2_SOLVER_CHARS accepts a comma-separated character list, "all", or
+    "none". Unset/blank means the default. An unrecognized name raises rather
+    than being dropped: a typo that silently disabled the solver would make a
+    whole regression or A/B run measure the opposite of what it claims to.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("STS2_SOLVER_CHARS") or "").strip()
+    if not raw:
+        return set(_SOLVER_CHARS_DEFAULT)
+    if raw.lower() == "all":
+        return set(VALID_CHARACTERS)
+    if raw.lower() == "none":
+        return set()
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    unknown = [n for n in names if n not in VALID_CHARACTERS]
+    if unknown:
+        raise ValueError(
+            f"STS2_SOLVER_CHARS names unknown character(s): {', '.join(unknown)}. "
+            f"Valid: {', '.join(VALID_CHARACTERS)}"
+        )
+    return set(names)
+
+
 def _find_dotnet():
     for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
               os.path.expanduser("~/.dotnet/dotnet"),
@@ -70,6 +105,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     # from the unseeded global random module, so two runs of the same seed
     # could diverge onto different routes and reach different floors.
     rng = random.Random(seed)
+    solver_chars = solver_characters()
     logger = GameLogger(character, seed, enabled=log)
     proc = subprocess.Popen(
         [DOTNET, "run", "--no-build", "--project", PROJECT],
@@ -252,9 +288,10 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                 # project's own memory records a prior planner that was "only
                 # SAFE on Ironclad" and cost Defect real floors when used
                 # cross-character without validation -- don't repeat that.
-                # Phase 2 lifts this gate once the other 4 characters are
-                # actually regression-tested against this path.
-                if character == "Ironclad":
+                # Which characters take this path is resolved by
+                # solver_characters() (STS2_SOLVER_CHARS); see
+                # docs/superpowers/plans/2026-09-21-combatsolver-port-phase2.md.
+                if character in solver_chars:
                     plan = send({"cmd": "action", "action": "plan_combat_turn"})
                 else:
                     plan = {"type": "error"}
