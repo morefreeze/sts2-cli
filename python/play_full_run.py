@@ -526,6 +526,42 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
             proc.kill()
 
 
+def result_to_eval_row(result: dict, character: str) -> dict:
+    """Convert one play_run() result into an agent/paired_eval.py input row.
+
+    paired_eval pairs only rows whose status is "win" or "dead"
+    (agent/paired_eval.py:54) and reads `floor` for the run-level metric
+    (agent/paired_eval.py:287). Harness-internal failures therefore have to map
+    onto names outside that set -- "timeout" for the STUCK/max-steps path and
+    "crash" for an engine error -- so a run that never finished cannot be
+    averaged in as if it were an ordinary death.
+
+    `solver_plans`/`solver_errors` are carried through too so the paired A/B
+    can prove the ON arm actually engaged the solver and the OFF arm did not,
+    rather than trusting STS2_SOLVER_CHARS alone.
+    """
+    if result.get("victory"):
+        status = "win"
+    elif result.get("timeout"):
+        status = "timeout"
+    elif result.get("error"):
+        status = "crash"
+    else:
+        status = "dead"
+    floor = result.get("floor")
+    return {
+        "seed": result.get("seed"),
+        "status": status,
+        "floor": floor if isinstance(floor, (int, float)) else None,
+        "act": result.get("act"),
+        "steps": result.get("steps"),
+        "character": character,
+        "solver_plans": result.get("solver_plans"),
+        "solver_errors": result.get("solver_errors"),
+        "solver": sorted(solver_characters()),
+    }
+
+
 def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     """Build the SUMMARY text block, including avg_floor over numeric floors.
 
@@ -632,6 +668,9 @@ def main():
     parser.add_argument("character", nargs="?", default="Ironclad",
                         choices=VALID_CHARACTERS, metavar="character",
                         help=f"Character to play as (default: Ironclad). Choices: {', '.join(VALID_CHARACTERS)}")
+    parser.add_argument("--results-log", default=None,
+                        help="Append one JSONL row per run, in agent/paired_eval.py's "
+                             "input format (seed/status/floor). Use for A/B arms.")
     args = parser.parse_args()
 
     if args.num_runs <= 0:
@@ -649,6 +688,9 @@ def main():
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
         result = play_run(seed, character, verbose=True)
         results.append(result)
+        if args.results_log:
+            with open(args.results_log, "a") as fh:
+                fh.write(json.dumps(result_to_eval_row(result, character)) + "\n")
         print()
 
     print(summarize(results, num_runs, character))

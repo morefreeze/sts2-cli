@@ -118,3 +118,47 @@ def test_summarize_banner_distinguishes_zero_calls_from_all_calls_failing():
     all_failed = play_full_run.summarize(
         [_result("s1", 0, 251, victory=False)], 1, character="Silent", solver_chars={"Silent"})
     assert "every plan_combat_turn call failed (251 errors)" in all_failed
+
+
+def test_result_row_maps_a_win_to_status_win():
+    row = play_full_run.result_to_eval_row(
+        {"victory": True, "seed": "run_1", "floor": 51, "act": 3, "steps": 200}, "Ironclad")
+    assert row["seed"] == "run_1"
+    assert row["status"] == "win"
+    assert row["floor"] == 51
+    assert row["character"] == "Ironclad"
+
+
+def test_result_row_maps_an_ordinary_loss_to_status_dead():
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "run_2", "floor": 12, "act": 1, "steps": 90}, "Defect")
+    assert row["status"] == "dead"
+
+
+def test_result_row_maps_timeout_and_error_to_technical_statuses():
+    # paired_eval only pairs {"win", "dead"}; everything else must land on a
+    # name its _VALID_STATUSES check will drop, never on "dead" -- a failed run
+    # counted as an ordinary death would silently bias the floor average.
+    assert play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "timeout": True}, "Silent")["status"] == "timeout"
+    assert play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "error": "engine_error: x"}, "Silent")["status"] == "crash"
+
+
+def test_result_row_keeps_floor_none_rather_than_defaulting_to_zero():
+    # A run that never reached a floor must not report floor 0 -- that would
+    # read as "died on floor 0" in an average instead of "no data".
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "timeout": True}, "Regent")
+    assert row["floor"] is None
+
+
+def test_result_row_carries_solver_engagement_counters():
+    # The paired A/B needs to be able to prove the ON arm actually engaged
+    # the solver and the OFF arm did not, without re-deriving it from
+    # STS2_SOLVER_CHARS after the fact.
+    row = play_full_run.result_to_eval_row(
+        {"victory": True, "seed": "s", "floor": 30, "solver_plans": 12, "solver_errors": 1},
+        "Ironclad")
+    assert row["solver_plans"] == 12
+    assert row["solver_errors"] == 1
