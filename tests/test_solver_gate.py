@@ -97,3 +97,17 @@ def test_summarize_shows_per_run_engagement_numbers():
     results = [_result("s1", 178, 0)]
     out = play_full_run.summarize(results, 1, character="Ironclad", solver_chars={"Ironclad"})
     assert "solver=178/178" in out
+
+
+def test_summarize_banner_distinguishes_zero_calls_from_all_calls_failing():
+    # A batch that never reached a combat_play decision made ZERO calls; saying
+    # "every call failed" there would be a false diagnostic, and a banner that
+    # cries wolf inaccurately stops being read.
+    never_called = play_full_run.summarize(
+        [_result("s1", 0, 0, victory=False)], 1, character="Silent", solver_chars={"Silent"})
+    assert "no plan_combat_turn call was ever made" in never_called
+    assert "every plan_combat_turn call failed" not in never_called
+
+    all_failed = play_full_run.summarize(
+        [_result("s1", 0, 251, victory=False)], 1, character="Silent", solver_chars={"Silent"})
+    assert "every plan_combat_turn call failed (251 errors)" in all_failed

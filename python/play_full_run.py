@@ -601,11 +601,19 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     # PredictionUnsupportedException and the run was secretly measuring the
     # fallback heuristic (fixed in 5e9a1c9, but the blindness itself wasn't).
     if character in solver_chars and total_solver_plans == 0:
-        lines.append(
-            f"!! SOLVER NEVER ENGAGED for {character} -- every plan_combat_turn "
-            f"call failed; these results measure the FALLBACK heuristic, not "
-            f"the solver."
-        )
+        # Two different zero-engagement stories, and the banner must not tell
+        # the wrong one: "every call failed" is false when no call was ever
+        # made (a batch that ended before reaching any combat_play decision).
+        # A diagnostic that cries wolf inaccurately stops being trusted, which
+        # would defeat the point of adding it.
+        if total_solver_errors:
+            cause = (f"every plan_combat_turn call failed ({total_solver_errors} "
+                     f"errors); these results measure the FALLBACK heuristic, "
+                     f"not the solver")
+        else:
+            cause = ("no plan_combat_turn call was ever made -- the batch never "
+                     "reached a combat_play decision")
+        lines.append(f"!! SOLVER NEVER ENGAGED for {character} -- {cause}.")
     return "\n".join(lines)
 
 
