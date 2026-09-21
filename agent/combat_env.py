@@ -365,10 +365,45 @@ def _card_threshold_lift() -> float:
 # where random == heuristic is one that barely matters, so no policy (learned or
 # otherwise) can win floors there. Used to decide whether handing out-of-combat
 # decisions to the RL policy is worth a rewrite, and if so, which one first.
-# Deterministic per (seed, decision) so arms stay reproducible.
+# Deterministic per (seed, decision): see _RANDOMIZE_RNG / seed_randomize_rng
+# below, which is what actually makes that true.
 _RANDOMIZE_DECISIONS = frozenset(
     d.strip() for d in os.environ.get("STS2_RANDOMIZE", "").split(",") if d.strip()
 )
+
+# Dedicated RNG for _random_choice_for below, module-level for the same reason
+# _RANDOMIZE_DECISIONS just above already is: this is env-var-driven
+# measurement state, not per-instance state, so a module global is consistent
+# with the existing shape rather than a new pattern. The alternative --
+# threading a seed through greedy_action()/_random_choice_for()'s call
+# signature -- would touch a widely-monkeypatched public surface (both are
+# monkeypatched with single-arg lambdas across tests, e.g.
+# tests/agent/test_combat_env.py:2413, 3069, 3102, 3115), so a setter keeps
+# the blast radius off that. Defaults to entropy (unseeded) so any caller
+# that never goes through CombatEnv.reset() (see seed_randomize_rng) sees
+# unchanged, non-reproducible behavior.
+_RANDOMIZE_RNG = random.Random()
+
+
+def seed_randomize_rng(seed) -> None:
+    """(Re)seed the STS2_RANDOMIZE decision RNG for a new run.
+
+    Called from CombatEnv.reset() right after run_seed is settled, so the
+    STS2_RANDOMIZE arms are actually reproducible per (seed, decision) as
+    the comment on _RANDOMIZE_DECISIONS claims. Pass None to fall back to
+    entropy.
+
+    KNOWN LIMIT -- single-env only. Because the RNG is a module global, two
+    CombatEnv instances live in one process (a vec-env) reset each other's
+    stream, and the reproducibility guarantee above does NOT hold. That is
+    acceptable today only because STS2_RANDOMIZE is an eval-time measurement
+    knob and eval runs one env per process; _random_choice_for is inert
+    whenever the env var is unset, so training vec-envs never reach this.
+    If you ever want randomized decisions under a vec-env, move this onto the
+    instance first -- do not assume the arms are still reproducible.
+    """
+    global _RANDOMIZE_RNG
+    _RANDOMIZE_RNG = random.Random(seed)
 
 
 def _random_choice_for(state: dict) -> dict | None:
@@ -376,7 +411,7 @@ def _random_choice_for(state: dict) -> dict | None:
     decision = state.get("decision", "")
     if decision not in _RANDOMIZE_DECISIONS:
         return None
-    rng = random
+    rng = _RANDOMIZE_RNG
     if decision == "map_select":
         choices = state.get("choices") or []
         if not choices:
@@ -872,6 +907,14 @@ class CombatEnv(gym.Env):
         else:
             self._save_pool = None
             self._native_save_path = native_save_path
+        # Dedicated per-env RNG for the pool pick below (reset(), not here --
+        # this only decides how it's seeded). Never the global `random`
+        # module: when self._seed is set (eval / regression runs) the pick
+        # must be reproducible from the seed, but when self._seed is None
+        # (training via seed_prefix) it must stay entropy-random so a
+        # vec-env keeps spreading across the pool instead of every worker
+        # picking the same save.
+        self._native_save_rng = random.Random(self._seed) if self._seed else random.Random()
         # When set, send {"cmd": "set_player", "hp": N} right after load_save so the
         # subsequent combat starts at N HP. Used by boss_retry.py to sweep "how much
         # HP does the agent need to clear the boss".
@@ -889,7 +932,7 @@ class CombatEnv(gym.Env):
         # below (don't try to continue the previous run — we want fresh boss
         # variety each episode).
         if self._save_pool:
-            self._native_save_path = random.choice(self._save_pool)
+            self._native_save_path = self._native_save_rng.choice(self._save_pool)
             self._game_alive = False
 
         # Try to advance to next combat in the current run
@@ -931,6 +974,7 @@ class CombatEnv(gym.Env):
 
         # Start a fresh game process + run
         run_seed = self._seed or f"{self._seed_prefix}_{self._run_counter}_{random.randint(0,99999)}"
+        seed_randomize_rng(run_seed)
         self._run_counter += 1
         self._milestones_paid.clear()  # new run — re-arm deck-quality milestones
         self._run_max_floor = 1

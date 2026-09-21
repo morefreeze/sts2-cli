@@ -70,7 +70,6 @@ _TECHNICAL_STATUSES = {"crash", "timeout", "stuck", "reset_failure", "invalid"}
 # Do NOT enable STS2_PLANNER for Silent/Defect/Regent/Necrobinder, and do not
 # treat "build a card DB for character X" as sufficient to make it viable.
 # Raising effect coverage toward Ironclad's parity is the prerequisite.
-import random as _random
 # Measurement knob, default off. See the STS2_RANDOMIZE block in combat_env.
 _RANDOM_COMBAT = os.environ.get("STS2_RANDOM_COMBAT", "").strip().lower() in {"1", "true", "on"}
 _PLANNER_ENV = os.environ.get("STS2_PLANNER", "").lower()
@@ -611,6 +610,19 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                 game_seed = f"eval_fixed_{i + seed_offset}"
             else:
                 game_seed = f"eval_r{random.randint(0, 0xFFFFFF):06x}_{i}"
+            # Dedicated per-game RNG for the STS2_RANDOM_COMBAT measurement arm
+            # below (NOT random.seed() -- see play_full_run.py's play_run() for
+            # the same reasoning: reseeding the shared global `random` module
+            # would silently change behavior for every other component that
+            # uses it). Constructed only when game_seed itself changes, so an
+            # invalid-result retry of the same seed does NOT restart the
+            # stream -- it keeps drawing from where the failed attempt left
+            # off, and therefore makes *different* combat choices than that
+            # attempt did. That is deliberate: replaying a technical failure
+            # bit-for-bit would just reproduce it. Whole-eval reproducibility
+            # is unaffected, because re-running the same seed set consumes the
+            # stream in the same order.
+            game_rng = random.Random(game_seed)
 
         run_id = f"{batch_id}-{i:03d}-a{total_attempts:02d}"
         run_context = {
@@ -759,7 +771,7 @@ def run_eval_verbose(model, character: str, n_games: int = 10,
                             # the STS2_RANDOMIZE out-of-combat leverage measurement.
                             import numpy as _np
                             legal = [i for i, m in enumerate(masks) if m]
-                            action = _random.choice(legal) if legal else 0
+                            action = game_rng.choice(legal) if legal else 0
                         else:
                             action, _ = model.predict(obs, deterministic=True, action_masks=masks)
 

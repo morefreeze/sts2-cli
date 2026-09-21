@@ -34,6 +34,7 @@ import json
 import os
 import sys
 import time
+import zlib
 from typing import Optional
 
 import numpy as np
@@ -66,7 +67,7 @@ def _one_rollout(model, save_path: str, deterministic: bool, extra_obs: bool,
                  max_steps: int = 5000, *,
                  game_version: ResolvedGameVersion | None = None,
                  ascension: int = 0, character: str = "Ironclad",
-                 checkpoint: str | None = None) -> dict:
+                 checkpoint: str | None = None, sim_index: int = 0) -> dict:
     """Run a single rollout from `save_path`. Stops at game_over OR when the
     player crosses max_floor (0 = no limit) OR after max_steps env steps.
 
@@ -75,8 +76,22 @@ def _one_rollout(model, save_path: str, deterministic: bool, extra_obs: bool,
     action over the action mask (since combat has no built-in heuristic).
     Use this mode only for end-to-end smoke checks — the random-combat policy
     is much weaker than even the heuristic baseline.
+
+    The random-combat draw uses a local `np.random.default_rng`, seeded from
+    (save_path, sim_index) rather than the global `np.random` singleton --
+    the latter is shared process-wide state that any other numpy consumer
+    (this call's own caller included, across a `rollout()` loop of n_sims)
+    can perturb, which would make "run the same save with the same n_sims"
+    non-reproducible. Keying on `sim_index` (rollout()'s loop counter, distinct
+    per call) rather than only `save_path` is deliberate: a Monte-Carlo
+    rollout is supposed to sample a distribution, so every simulation from the
+    same save must still get its own random draws -- only reruns of the exact
+    same (save_path, sim_index) pair need to reproduce identically.
     """
     ascension = validate_ascension(ascension)
+    rng = np.random.default_rng(
+        [zlib.crc32(str(save_path).encode()), int(sim_index) & 0xFFFFFFFF]
+    )
     run_context = build_run_context(
         game_version,
         character=character,
@@ -116,7 +131,7 @@ def _one_rollout(model, save_path: str, deterministic: bool, extra_obs: bool,
                     valid = np.where(masks)[0]
                     if len(valid) == 0:
                         break
-                    action = int(np.random.choice(valid))
+                    action = int(rng.choice(valid))
                 else:
                     action, _ = model.predict(obs, deterministic=deterministic,
                                               action_masks=masks)
@@ -175,12 +190,12 @@ def rollout(save_path: str, n_sims: int = 30,
     )
     model, extra_obs = _maybe_load_model(ckpt_path)
     out = []
-    for _ in range(n_sims):
+    for sim_index in range(n_sims):
         out.append(_one_rollout(model, save_path, deterministic, extra_obs,
                                 set_hp=set_hp, max_floor=max_floor,
                                 game_version=game_version,
                                 ascension=ascension, character=character,
-                                checkpoint=ckpt_path))
+                                checkpoint=ckpt_path, sim_index=sim_index))
     return out
 
 
