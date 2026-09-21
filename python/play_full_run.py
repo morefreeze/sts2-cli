@@ -37,9 +37,14 @@ VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
 # Combat Solver (plan_combat_turn) instead of the simple one-card-at-a-time
 # heuristic. Phase 1 hard-coded this to Ironclad because the resolution glue
 # (_resolve_card_index / _resolve_potion_index / _apply_action_choices) had
-# only ever been exercised against Ironclad's mechanics; Phase 2 validates the
-# other four one at a time via STS2_SOLVER_CHARS before changing this default.
-_SOLVER_CHARS_DEFAULT = frozenset({"Ironclad"})
+# only ever been exercised against Ironclad's mechanics. Phase 2 smoke-tested
+# the other four one at a time (Silent/Defect/Regent/Necrobinder, 3 games
+# each): Defect/Regent/Necrobinder produced real plans with zero resolution
+# failures and zero engine refusals on the first try, and Silent joined them
+# once 5e9a1c9 removed the Neutralize.OnPlay patch that had been making every
+# Silent capture throw. STS2_SOLVER_CHARS=none turns the solver off, which is
+# what the paired A/B's control arm uses.
+_SOLVER_CHARS_DEFAULT = frozenset(VALID_CHARACTERS)
 
 
 def solver_characters(env=None) -> set:

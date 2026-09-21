@@ -15,8 +15,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 import play_full_run
 
 
-def test_default_is_ironclad_only():
-    assert play_full_run.solver_characters({}) == {"Ironclad"}
+def test_default_is_every_character():
+    # Phase 2 lifted the Ironclad-only gate after smoke-testing the other four
+    # (docs/superpowers/plans/2026-09-21-combatsolver-port-phase2.md Task 2/3).
+    assert play_full_run.solver_characters({}) == set(play_full_run.VALID_CHARACTERS)
 
 
 def test_env_var_overrides_default():
@@ -40,7 +42,12 @@ def test_none_keyword_disables_the_solver_entirely():
 
 
 def test_empty_value_falls_back_to_the_default():
-    assert play_full_run.solver_characters({"STS2_SOLVER_CHARS": "  "}) == {"Ironclad"}
+    # Blank must mean "default", not "none" -- an empty env var is how a shell
+    # exports an unset variable, and silently disabling the solver there would
+    # make a whole batch measure the fallback heuristic.
+    assert play_full_run.solver_characters({"STS2_SOLVER_CHARS": "  "}) == set(
+        play_full_run.VALID_CHARACTERS
+    )
 
 
 def test_unknown_character_raises_rather_than_silently_disabling():
