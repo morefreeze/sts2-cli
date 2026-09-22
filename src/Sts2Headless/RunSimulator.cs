@@ -1065,6 +1065,66 @@ public class RunSimulator
     }
 
     /// <summary>
+    /// Search thread cap for CombatSearchCoordinator's plan_combat_turn queries. This knob exists
+    /// because the search is soft-time-budgeted (CombatSearchCoordinator.cs:405's
+    /// `profile.SoftTimeBudgetMilliseconds - passClock.ElapsedMilliseconds`), not node-budgeted: a
+    /// paired A/B that runs several character processes concurrently to fit a batch into one night
+    /// (each defaulting to SolverWeights.DefaultSearchMaxDegreeOfParallelism threads, SolverWeights.cs:
+    /// 119-132, e.g. 8 on a machine with >=16 logical processors) can oversubscribe the box -- N
+    /// processes x 8 threads onto fewer physical cores than that. A CPU-starved time-budgeted search
+    /// explores fewer nodes in its wall-clock window and returns a worse plan, which would make the
+    /// solver arm measure as worse than the solver actually is -- exactly the wrong-direction bias for
+    /// an experiment deciding whether to keep the solver for a character. STS2_SOLVER_THREADS lets a
+    /// batch script pin threads-per-process (e.g. 5 processes x 3 threads = 15 &lt;= 18 cores, no
+    /// oversubscription) so every concurrent search gets its full budget for the whole run.
+    /// Resolved once into this field (not re-read per call -- it cannot change mid-process and
+    /// plan_combat_turn is a per-decision-point hot path) and logged once at first use so a run's own
+    /// logs record which thread budget produced its results.
+    /// </summary>
+    private static readonly int SolverThreads = ResolveSolverThreadsAndLog();
+
+    /// <summary>
+    /// Reads <c>STS2_SOLVER_THREADS</c>, resolves/clamps it via <see cref="ResolveSolverThreads"/>, and
+    /// emits the one-time startup log line(s). Split out from the pure parsing logic so
+    /// <see cref="ResolveSolverThreads"/> stays a testable static function with no env/console access.
+    /// </summary>
+    private static int ResolveSolverThreadsAndLog()
+    {
+        var raw = Environment.GetEnvironmentVariable("STS2_SOLVER_THREADS");
+        var resolved = ResolveSolverThreads(raw, SolverWeights.DefaultSearchMaxDegreeOfParallelism, out var warning);
+        if (warning != null)
+            Console.Error.WriteLine(warning);
+        Console.Error.WriteLine(
+            $"[Sts2Headless] Solver search threads: {resolved} " +
+            $"(STS2_SOLVER_THREADS={(string.IsNullOrWhiteSpace(raw) ? "<unset>" : raw)})");
+        return resolved;
+    }
+
+    /// <summary>
+    /// Pure parse/clamp for <c>STS2_SOLVER_THREADS</c>. Unset/blank/unparseable/non-positive all keep
+    /// today's behavior (<paramref name="defaultValue"/>, i.e.
+    /// SolverWeights.DefaultSearchMaxDegreeOfParallelism at the real call site) -- but the latter two
+    /// (unparseable, non-positive) are typos/mistakes rather than an intentional "don't set this", so
+    /// they come back with <paramref name="warning"/> set, naming the bad value and the value actually
+    /// used: a typo in a batch script must not silently change what a multi-hour paired A/B measures. A
+    /// valid positive integer is clamped to [1, SolverWeights.MaximumSearchMaxDegreeOfParallelism] --
+    /// the engine's own documented ceiling (SolverWeights.cs:118) -- rather than trusting an arbitrarily
+    /// large request.
+    /// </summary>
+    internal static int ResolveSolverThreads(string? raw, int defaultValue, out string? warning)
+    {
+        warning = null;
+        if (string.IsNullOrWhiteSpace(raw))
+            return defaultValue;
+
+        if (int.TryParse(raw.Trim(), out var parsed) && parsed > 0)
+            return Math.Clamp(parsed, 1, SolverWeights.MaximumSearchMaxDegreeOfParallelism);
+
+        warning = $"[WARN] STS2_SOLVER_THREADS='{raw}' is not a positive integer; using default {defaultValue} instead";
+        return defaultValue;
+    }
+
+    /// <summary>
     /// Runs the ported Combat Solver (CombatSolverEngine/{Engine,Search,Prediction,Strategy,Runtime})
     /// against the real live combat state and returns its best multi-turn action sequence, instead of
     /// only ever recommending one card at a time like DoPlayCard.
@@ -1115,8 +1175,10 @@ public class RunSimulator
         // pulls in real Godot for JSON persistence), so this policy is assembled by hand from the
         // engine's own documented defaults rather than a UI-bound settings object:
         //   - Profile: SolverSearchProfile.Default (Search/SolverSearchProfile.cs).
-        //   - MaxDegreeOfParallelism: SolverWeights.DefaultSearchMaxDegreeOfParallelism, the same
-        //     processor-count-scaled default the mod itself falls back to.
+        //   - MaxDegreeOfParallelism: SolverThreads (this file, defined above), which resolves to
+        //     SolverWeights.DefaultSearchMaxDegreeOfParallelism -- the same processor-count-scaled
+        //     default the mod itself falls back to -- unless STS2_SOLVER_THREADS overrides it. See
+        //     SolverThreads's own doc comment for why a batch-run override is needed.
         //   - PotionPolicy/PotionStrategy: Smart with no per-slot overrides (let the solver decide).
         //   - AcceptableBattleHpLoss: -1. This value feeds HasReachedAcceptableBattleHpLoss
         //     (CombatSearchCoordinator.cs:1841: `completeVictory && projectedBattleHpLost <=
@@ -1152,7 +1214,7 @@ public class RunSimulator
             VerifyIncrementalSearch: false,
             FixedBudget: false,
             MeasurePhasePerformance: false,
-            MaxDegreeOfParallelism: SolverWeights.DefaultSearchMaxDegreeOfParallelism,
+            MaxDegreeOfParallelism: SolverThreads,
             BudgetOverrideMilliseconds: null,
             IncludeTurnSetup: false,
             TheftPolicy: null,
