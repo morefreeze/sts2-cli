@@ -122,10 +122,10 @@ def test_summarize_banner_distinguishes_zero_calls_from_all_calls_failing():
 
 def test_result_row_maps_a_win_to_status_win():
     row = play_full_run.result_to_eval_row(
-        {"victory": True, "seed": "run_1", "floor": 51, "act": 3, "steps": 200}, "Ironclad")
+        {"victory": True, "seed": "run_1", "floor": 17, "act": 3, "steps": 200}, "Ironclad")
     assert row["seed"] == "run_1"
     assert row["status"] == "win"
-    assert row["floor"] == 51
+    assert row["floor"] == 51   # act 3 floor 17 -> global 51
     assert row["character"] == "Ironclad"
 
 
@@ -162,3 +162,36 @@ def test_result_row_carries_solver_engagement_counters():
         "Ironclad")
     assert row["solver_plans"] == 12
     assert row["solver_errors"] == 1
+
+
+def test_result_row_floor_is_global_not_act_local():
+    # The engine's game_over "floor" is ACT-LOCAL (resets to 1 each act), but
+    # agent/paired_eval.py's floor metric is the GLOBAL run floor -- the same
+    # (act - 1) * 17 + floor that agent/eval_rl.py writes (eval_rl.py:109,876).
+    # Emitting the act-local value made a death at act 2 floor 16 score 16,
+    # below an act-1 death at floor 17: the Phase 2 A/B's first verdict read
+    # Defect as -0.24 floors while 24 of its 40 solver runs had reached act 2+.
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 2, "floor": 16, "steps": 150}, "Defect")
+    assert row["floor"] == 33
+    assert row["act_floor"] == 16
+
+
+def test_result_row_global_floor_matches_eval_rl_convention():
+    from agent.eval_rl import global_floor_from_state
+    for act, floor in [(1, 1), (1, 17), (2, 1), (2, 16), (3, 9)]:
+        row = play_full_run.result_to_eval_row(
+            {"victory": False, "seed": "s", "act": act, "floor": floor}, "Ironclad")
+        assert row["floor"] == global_floor_from_state(
+            {"floor": floor, "context": {"act": act}})
+
+
+def test_summarize_avg_floor_uses_global_floor():
+    # avg_floor averaged act-local floors, so a run that died in act 2 pulled
+    # the average DOWN relative to one that died deep in act 1.
+    results = [
+        {"victory": False, "seed": "a", "act": 1, "floor": 10},
+        {"victory": False, "seed": "b", "act": 2, "floor": 4},
+    ]
+    out = play_full_run.summarize(results, 2, character="Defect", solver_chars={"Defect"})
+    assert "avg_floor=15.5" in out   # (10 + 21) / 2, not (10 + 4) / 2

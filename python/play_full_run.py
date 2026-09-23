@@ -526,6 +526,23 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
             proc.kill()
 
 
+def global_floor(act, floor):
+    """Absolute run floor from the engine's ACT-LOCAL floor.
+
+    game_over's top-level `floor` resets to 1 at every act, so on its own it
+    ranks a death at act 2 floor 16 below one at act 1 floor 17. This is the
+    same (act - 1) * 17 + floor convention agent/eval_rl.py uses
+    (global_floor_from_state, eval_rl.py:109) and writes into the results JSONL
+    that agent/paired_eval.py consumes -- so the two harnesses stay comparable.
+    A missing act means act 1, matching eval_rl's `context.get("act") or 1`.
+    """
+    if not isinstance(floor, (int, float)) or floor < 1:
+        return None
+    if not isinstance(act, (int, float)) or act < 1:
+        act = 1
+    return (int(act) - 1) * 17 + int(floor)
+
+
 def result_to_eval_row(result: dict, character: str) -> dict:
     """Convert one play_run() result into an agent/paired_eval.py input row.
 
@@ -548,11 +565,14 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         status = "crash"
     else:
         status = "dead"
-    floor = result.get("floor")
+    act_floor = result.get("floor")
     return {
         "seed": result.get("seed"),
         "status": status,
-        "floor": floor if isinstance(floor, (int, float)) else None,
+        # GLOBAL floor -- paired_eval's floor metric. The act-local value is kept
+        # alongside as act_floor; see global_floor() for why the two differ.
+        "floor": global_floor(result.get("act"), act_floor),
+        "act_floor": act_floor if isinstance(act_floor, (int, float)) else None,
         "act": result.get("act"),
         "steps": result.get("steps"),
         "character": character,
@@ -625,8 +645,10 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
             if r.get("error"):
                 line += f" error={r.get('error')}"
             lines.append(line)
-            f = r.get("floor")
-            if isinstance(f, (int, float)):
+            # Average the GLOBAL floor: the act-local one made an act-2 death
+            # pull avg_floor down relative to a deep act-1 death.
+            f = global_floor(r.get("act"), r.get("floor"))
+            if f is not None:
                 floors.append(f)
     avg_floor = round(sum(floors) / len(floors), 1) if floors else 0.0
     lines.append(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}, "
