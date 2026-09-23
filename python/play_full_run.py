@@ -375,12 +375,18 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                         # ResolveSolverBudget); this harness resolves it independently for
                         # the watchdog and the results row. If their tier tables ever
                         # drift, fail the run loudly rather than label a 30 s run as a
-                        # 120 s one in an A/B.
+                        # 120 s one in an A/B. A MISSING budget fails too: that is an
+                        # engine binary built before the tiers existed, which runs every
+                        # tier at 120 s -- a tier A/B would compare 120 s with 120 s and
+                        # report "no difference". `dotnet run --no-build` runs whatever is
+                        # in bin/, so a stale build is a real hazard, not a hypothetical.
                         reported = (plan.get("search") or {}).get("budget_ms")
-                        if reported is not None and reported != solver_budget_s * 1000:
+                        if reported != solver_budget_s * 1000:
                             raise RuntimeError(
                                 f"engine solver budget {reported} ms != STS2_SOLVER_BUDGET "
-                                f"resolved here as {solver_budget_s} s")
+                                f"resolved here as {solver_budget_s} s"
+                                + (" (engine reported none -- stale build? rebuild "
+                                   "src/Sts2Headless)" if reported is None else ""))
                 else:
                     plan = {"type": "error"}
                 if plan.get("type") != "error":

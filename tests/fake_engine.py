@@ -21,6 +21,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--pidfile", required=True)
 parser.add_argument("--hang-on", default="hang")
 parser.add_argument("--plan-budget-ms", type=int, default=120_000)
+# Omit the `search` dict from combat_plan replies, like an engine binary built
+# before the budget tiers existed.
+parser.add_argument("--no-search", action="store_true")
 args = parser.parse_args()
 
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
@@ -45,10 +48,11 @@ for line in sys.stdin:
     if cmd.get("cmd") == "start_run":
         reply = COMBAT
     elif cmd.get("action") == "plan_combat_turn":
-        reply = {"type": "combat_plan", "actions": [],
-                 "search": {"budget_ms": args.plan_budget_ms, "elapsed_ms": 1,
-                            "boundary": "None", "expanded_nodes": 1,
-                            "total_expanded_nodes": 1}}
+        reply = {"type": "combat_plan", "actions": []}
+        if not args.no_search:
+            reply["search"] = {"budget_ms": args.plan_budget_ms, "elapsed_ms": 1,
+                               "boundary": "None", "expanded_nodes": 1,
+                               "total_expanded_nodes": 1}
     else:
         reply = {"type": "decision", "decision": "echo", "echo": cmd}
     print(json.dumps(reply), flush=True)

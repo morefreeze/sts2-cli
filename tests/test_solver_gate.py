@@ -268,6 +268,16 @@ def test_play_run_fails_loudly_if_engine_and_harness_disagree_on_the_budget(monk
     assert not result.get("hang")
 
 
+def test_play_run_fails_loudly_if_the_engine_reports_no_budget_at_all(monkeypatch, tmp_path):
+    # An engine binary built before the budget tiers existed reports no
+    # `search` dict and silently runs EVERY tier at 120 s -- a tier A/B would
+    # then compare 120 s with 120 s and report "no difference". `dotnet run
+    # --no-build` runs whatever is in bin/, so a stale build is a real hazard.
+    _fake_engine(monkeypatch, tmp_path, "--no-search")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "stale build" in result["error"]
+
+
 def test_summarize_labels_a_hang_as_hang_and_not_completed():
     out = play_full_run.summarize(
         [{"victory": False, "seed": "s", "act": 1, "floor": 8, "steps": 40,
