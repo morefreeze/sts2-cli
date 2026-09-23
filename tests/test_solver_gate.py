@@ -195,3 +195,41 @@ def test_summarize_avg_floor_uses_global_floor():
     ]
     out = play_full_run.summarize(results, 2, character="Defect", solver_chars={"Defect"})
     assert "avg_floor=15.5" in out   # (10 + 21) / 2, not (10 + 4) / 2
+
+
+# --- solver time budget tiers (Phase 2b-1) ------------------------------------
+
+def test_solver_budget_defaults_to_the_validated_120s():
+    assert play_full_run.solver_budget_seconds({}) == 120
+
+
+def test_blank_solver_budget_means_default():
+    assert play_full_run.solver_budget_seconds({"STS2_SOLVER_BUDGET": "  "}) == 120
+
+
+@pytest.mark.parametrize("tier", [30, 60, 120, 180, 300])
+def test_solver_budget_accepts_each_tier(tier):
+    assert play_full_run.solver_budget_seconds({"STS2_SOLVER_BUDGET": str(tier)}) == tier
+
+
+@pytest.mark.parametrize("bad", ["45", "0", "-30", "abc", "30s", "120.0", "+30"])
+def test_solver_budget_rejects_anything_off_the_tier_list(bad):
+    # Raise before any game starts: a typo that silently ran the default would
+    # label a 120 s run as some other tier in a multi-hour A/B.
+    with pytest.raises(ValueError, match="STS2_SOLVER_BUDGET"):
+        play_full_run.solver_budget_seconds({"STS2_SOLVER_BUDGET": bad})
+
+
+def test_solver_call_watchdog_sits_well_above_every_budget():
+    # The budget is soft (checked between node expansions); the worst overrun in
+    # 1,409 measured solves was 0.4 s. The watchdog must never fire on a
+    # legitimately slow search, only on a BUG-040 hang.
+    for tier in play_full_run.SOLVER_BUDGET_TIERS_S:
+        assert play_full_run.solver_call_timeout_s(tier) >= tier + 60
+
+
+def test_result_row_records_the_budget_tier(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_BUDGET", "30")
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 5}, "Silent")
+    assert row["solver_budget_s"] == 30

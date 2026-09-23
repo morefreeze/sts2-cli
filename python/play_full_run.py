@@ -73,6 +73,48 @@ def solver_characters(env=None) -> set:
     return set(names)
 
 
+# Selectable soft time budgets for one plan_combat_turn call, in seconds. 120
+# is the vendored SolverSearchProfile.Default budget that Phase 2's paired A/B
+# validated; the others are the tiers under study in Phase 2b-1. Mirrors
+# RunSimulator.cs SolverBudgetTiersSeconds -- play_run() cross-checks the
+# budget the engine reports on every plan, so a drift fails the run loudly.
+SOLVER_BUDGET_TIERS_S = (30, 60, 120, 180, 300)
+SOLVER_BUDGET_DEFAULT_S = 120
+# How far past its budget a plan_combat_turn reply may run before the watchdog
+# declares the engine hung (agent/bug.md BUG-040). The budget is soft -- only
+# checked between node expansions -- but the worst overrun in 1,409 measured
+# solves was 0.4 s, so 60 s is ~150x headroom while still costing one game
+# instead of a whole day.
+SOLVER_WATCHDOG_MARGIN_S = 60
+# Every other engine reply arrives in well under a second; 120 s only fires on
+# a genuine stall.
+ENGINE_REPLY_TIMEOUT_S = 120
+
+
+def solver_budget_seconds(env=None) -> int:
+    """Resolve STS2_SOLVER_BUDGET to one of SOLVER_BUDGET_TIERS_S.
+
+    Unset/blank means the validated default. Anything else must be a tier
+    written as plain digits; otherwise raise, for the same reason
+    solver_characters() does -- a typo must not silently make a run measure a
+    different budget than the one it is labelled with.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("STS2_SOLVER_BUDGET") or "").strip()
+    if not raw:
+        return SOLVER_BUDGET_DEFAULT_S
+    if raw.isdigit() and int(raw) in SOLVER_BUDGET_TIERS_S:
+        return int(raw)
+    raise ValueError(
+        f"STS2_SOLVER_BUDGET={raw!r} is not a supported tier; use one of "
+        f"{', '.join(str(t) for t in SOLVER_BUDGET_TIERS_S)} (seconds)")
+
+
+def solver_call_timeout_s(budget_s: int) -> float:
+    """Watchdog deadline for one plan_combat_turn reply."""
+    return budget_s + SOLVER_WATCHDOG_MARGIN_S
+
+
 def _find_dotnet():
     for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
               os.path.expanduser("~/.dotnet/dotnet"),
@@ -579,6 +621,7 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "solver_plans": result.get("solver_plans"),
         "solver_errors": result.get("solver_errors"),
         "solver": sorted(solver_characters()),
+        "solver_budget_s": solver_budget_seconds(),
     }
 
 
