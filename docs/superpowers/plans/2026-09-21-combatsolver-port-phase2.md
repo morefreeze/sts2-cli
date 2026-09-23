@@ -619,6 +619,26 @@ git commit -m "fix: keep <角色> on the heuristic -- paired eval says the solve
 
 ---
 
+#### 配对评测结果（实测，2026-09-23）
+
+跑法：每角色 40 个共享种子 × 2 臂，5 条 lane 并行；ON 臂 `STS2_SOLVER_THREADS=3`（5×3=15 ≤ 18 核，避免时间预算下的 CPU 饥饿把 solver 测弱，见 e7c4ed8）。原始数据 `~/.sts2-train/phase2_ab_20260922_102622/`。
+
+**第一次出数是错的，已更正。** `result_to_eval_row`（Task 5）把引擎 game_over 里的**幕内**层数（每幕从 1 重新数）当成了 paired_eval 需要的**全局**层数。偏差只朝一个方向：启发式臂 200 局有 199 局死在 Act 1，幕内 = 全局，不受影响；solver 臂有 54 局死在 Act 2/3，每局被少记约 17 层。第一版结果把 Defect 算成 −0.24 层（p=0.79），而它 40 局里有 24 局打进了 Act 2 以上——这个矛盾暴露了问题。修复见 a6472da（`global_floor()`，与 `agent/eval_rl.py:109` 的 `global_floor_from_state` 同一公式，有测试钉住两者一致）。下表是用修好的换算对**同一批原始数据**重算的，没有重跑对局（`*_global.jsonl`）。
+
+| 角色 | 有效配对 | 启发式 → solver（全局层数） | 配对差值 | t | p | 结论 |
+|---|---|---|---|---|---|---|
+| Ironclad | 38（solver 臂 2 局 crash，均为 BUG-040 挂死被杀） | 9.34 → 17.24 | **+7.90** | 6.88 | <0.0001 | 保持开启 |
+| Silent | 40 | 9.75 → 14.65 | **+4.90** | 4.91 | <0.0001 | 保持开启 |
+| Defect | 38（solver 臂 2 局 `plan_combat_turn_execution_failed`，BUG-042） | 12.08 → 22.58 | **+10.50** | 7.63 | <0.0001 | 保持开启 |
+| Regent | 39（solver 臂 1 局 execution_failed，BUG-042） | 10.13 → 16.95 | **+6.82** | 5.67 | <0.0001 | 保持开启 |
+| Necrobinder | 40 | 9.20 → 13.90 | **+4.70** | 4.88 | <0.0001 | 保持开启 |
+
+五个角色全部正向显著。paired_eval 的 p 值未做多重比较校正；按 5 个角色做 Bonferroni（阈值 0.01）结论不变，最小 t = 4.88。判据里"差值为负就退回 gate"的分支一个都没触发，`_SOLVER_CHARS_DEFAULT` 维持全部 5 个角色。
+
+对照臂的完整性：启发式臂 200/200 局有效、solver 调用 0 次；solver 臂 solver 调用合计 9 000+ 次、solver 报错 4 次（全部是 Regent 的 BUG-041，那几回合回落到启发式，是对 solver 不利的稀释）。
+
+分房间的战损（Act 1、只算战斗内掉血）在跑的过程中另算过一版：普通战斗每场掉血在五个角色上几乎减半（例如 Defect 12.0 → 5.5），精英战也全部下降；过 Act 1 的比例从启发式 200 局只有 1 局，变成 solver 臂的 19%–63%。Boss 战的"每场掉血"反而是 solver 更高，那是幸存者偏差（启发式很少打到 boss，到了也只剩 22–47 HP，没血可掉），不是 solver 打得差——应当看到达率、入场血量和存活率，三项都是 solver 明显更好。
+
 ### Task 7: 文档同步
 
 **Files:**
