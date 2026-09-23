@@ -1081,6 +1081,60 @@ public class RunSimulator
     /// plan_combat_turn is a per-decision-point hot path) and logged once at first use so a run's own
     /// logs record which thread budget produced its results.
     /// </summary>
+    /// <summary>
+    /// The only per-call solver budgets a batch may select, in SECONDS. 120 is the vendored
+    /// SolverSearchProfile.Default budget that Phase 2's paired A/B validated; 30/60/180/300 are the
+    /// tiers under study in Phase 2b-1 (docs/superpowers/plans/2026-09-23-combatsolver-phase2b1-budget-tiers.md).
+    /// Mirrors python/play_full_run.py SOLVER_BUDGET_TIERS_S -- keep the two in sync. play_full_run
+    /// cross-checks the budget this engine reports on every plan (combat_plan.search.budget_ms) and
+    /// fails the run loudly on a mismatch, so drift cannot silently mislabel an A/B arm.
+    /// Must stay ABOVE SolverBudgetMilliseconds: static initializers run in textual order.
+    /// </summary>
+    internal static readonly int[] SolverBudgetTiersSeconds = { 30, 60, 120, 180, 300 };
+
+    /// <summary>
+    /// Per-call soft time budget for plan_combat_turn in milliseconds, or null to keep the profile's
+    /// own default (SolverSearchProfile.Default.SoftTimeBudgetMilliseconds = 120 000). Resolved once
+    /// from STS2_SOLVER_BUDGET. It is passed as SearchPolicySnapshot.BudgetOverrideMilliseconds, which
+    /// CombatSearchCoordinator.cs:237-238 applies as `profile with { SoftTimeBudgetMilliseconds = ... }`
+    /// -- no vendored code changes. The budget is wall-clock and only checked between node expansions
+    /// (CombatBeamSolver.Phases.cs:1496/1811, NoveltySearch.cs:96), so it bounds the search, not a
+    /// single runaway expansion -- that is what the harness watchdog is for (agent/bug.md BUG-040).
+    /// </summary>
+    private static readonly int? SolverBudgetMilliseconds = ResolveSolverBudgetAndLog();
+
+    private static int? ResolveSolverBudgetAndLog()
+    {
+        var raw = Environment.GetEnvironmentVariable("STS2_SOLVER_BUDGET");
+        var resolved = ResolveSolverBudget(raw, out var warning);
+        if (warning != null)
+            Console.Error.WriteLine(warning);
+        var effectiveSeconds = (resolved ?? SolverSearchProfile.Default.SoftTimeBudgetMilliseconds) / 1000;
+        Console.Error.WriteLine(
+            $"[Sts2Headless] Solver time budget: {effectiveSeconds}s " +
+            $"(STS2_SOLVER_BUDGET={(string.IsNullOrWhiteSpace(raw) ? "<unset>" : raw)})");
+        return resolved;
+    }
+
+    /// <summary>
+    /// Pure parse for STS2_SOLVER_BUDGET (seconds). Unset/blank -> null (keep the profile default).
+    /// Anything not on <see cref="SolverBudgetTiersSeconds"/> -> null plus a warning naming the bad
+    /// value, same policy as <see cref="ResolveSolverThreads"/>: a typo must not silently change what a
+    /// multi-hour paired A/B measures. (The Python harness also rejects it before any game starts.)
+    /// </summary>
+    internal static int? ResolveSolverBudget(string? raw, out string? warning)
+    {
+        warning = null;
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+        if (int.TryParse(raw.Trim(), out var seconds) && Array.IndexOf(SolverBudgetTiersSeconds, seconds) >= 0)
+            return seconds * 1000;
+        warning = $"[WARN] STS2_SOLVER_BUDGET='{raw}' is not one of the supported tiers " +
+                  $"({string.Join("/", SolverBudgetTiersSeconds)} s); using the default " +
+                  $"{SolverSearchProfile.Default.SoftTimeBudgetMilliseconds / 1000}s instead";
+        return null;
+    }
+
     private static readonly int SolverThreads = ResolveSolverThreadsAndLog();
 
     /// <summary>
@@ -1215,7 +1269,7 @@ public class RunSimulator
             FixedBudget: false,
             MeasurePhasePerformance: false,
             MaxDegreeOfParallelism: SolverThreads,
-            BudgetOverrideMilliseconds: null,
+            BudgetOverrideMilliseconds: SolverBudgetMilliseconds,
             IncludeTurnSetup: false,
             TheftPolicy: null,
             ActTransitionBossHpStrategy: BossHpStrategy.ProgressionFirst,
@@ -1242,8 +1296,14 @@ public class RunSimulator
         };
 
         SolverResult result;
+        var solveClock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
+            // progressCallback stays null on purpose: when it is non-null the coordinator switches to
+            // an "enriched" path that also maintains UI route previews (CombatSearchCoordinator.cs:79-
+            // 133), extra work that -- under a wall-clock budget -- would come out of search time and
+            // contaminate any budget-tier comparison. Everything reported below is read from the
+            // SolverResult after Solve returns, so it cannot perturb the search.
             result = CombatSearchCoordinator.Solve(
                 snapshot, displayNames, battleDamage, policy,
                 CancellationToken.None, progressCallback: null);
@@ -1252,6 +1312,7 @@ public class RunSimulator
         {
             return ErrorWithTrace("CombatSearchCoordinator.Solve failed", ex);
         }
+        solveClock.Stop();
 
         return new Dictionary<string, object?>
         {
@@ -1262,6 +1323,19 @@ public class RunSimulator
             ["projected_player_hp"] = result.Snapshot.ProjectedPlayerHp,
             ["all_enemies_dead"] = result.Snapshot.AllEnemiesDead,
             ["actions"] = ConvertPlanActionsToJson(result.BestNode.Actions),
+            // Why and how far this search went. `boundary` is the CHOSEN LINE's boundary: it only
+            // becomes TimeLimit/NodeLimit/TurnLimit when that line had no natural stopping point of its
+            // own (CombatBeamSolver.Phases.cs:474-484), so a search that ran out of time but whose best
+            // line stops at a Shuffle reports "Shuffle". Compare elapsed_ms with budget_ms to catch every
+            // time-capped search.
+            ["search"] = new Dictionary<string, object?>
+            {
+                ["budget_ms"] = SolverBudgetMilliseconds ?? SolverSearchProfile.Default.SoftTimeBudgetMilliseconds,
+                ["elapsed_ms"] = solveClock.ElapsedMilliseconds,
+                ["boundary"] = result.BoundaryReason.ToString(),
+                ["expanded_nodes"] = result.ExpandedNodes,
+                ["total_expanded_nodes"] = result.TotalExpandedNodes,
+            },
         };
     }
 
