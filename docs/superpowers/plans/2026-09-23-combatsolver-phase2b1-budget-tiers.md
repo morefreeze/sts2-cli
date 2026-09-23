@@ -1106,6 +1106,24 @@ Expected: 5 个角色都有 plan，`budget_ms` 全部是 `[120000]`。
 
 ---
 
+#### Task 5 实测结果（2026-09-23）
+
+回归目录 `~/.sts2-train/phase2b1_gate_20260923_185946/`。5 个角色全部 `Completed: 5/5`，solver 参与率 100%（Ironclad 260/260、Silent 268/268、Defect 238/238、Regent 164/164、Necrobinder 289/289），没有 TIMEOUT / ERROR / HANG。
+
+**本计划的改动在默认 120 s 下完全不改变 solver 的行为。** 25 局逐局对比 Phase 2 的回归（`~/.sts2-train/phase2_gate_20260921_165327/`），seed、步数、act、floor 全部一致，solver 调用次数也逐角色相同。这是 Task 6 复用 Phase 2 的 120 s 数据作基线的直接依据。（两边都是 8 线程、串行跑；Phase 2 A/B 的 ON 臂是 3 线程并发，这里没有直接覆盖到那个配置。）
+
+**遥测第一次给出了"搜索为什么停"：绝大多数没收敛的搜索是撞了节点上限，而不是时间上限。**
+
+| 角色 | 撞节点上限 `NodeLimit` | 撞时间上限 `TimeLimit` | 最长一次搜索 |
+|---|---|---|---|
+| Necrobinder | 61 / 289 | 2 | 120.2 s |
+| Regent | 14 / 164 | 0 | 85.2 s |
+| Ironclad | 7 / 344（含 Task 1 的两局验证对局，各 42 次） | 0 | 75.4 s |
+| Defect | 2 / 238 | 0 | 73.1 s |
+| Silent | 0 / 316（含 Task 4 的一局冒烟对局） | 0 | 29.4 s |
+
+对档位研究的含义：在 120 s 下，没跑完的搜索主要是被 `MaxExpandedNodes = 120 000` 卡住的，所以**把时间加到 180/300 s 大概率帮不上什么**。唯一可能起作用的路径是 `EscalateSearchWhenNoVictory`：找不到胜利路线时，它会把节点上限翻倍重搜，但前提是剩余时间放得下预计耗时。预算更长就能多做几轮这种升级。阶段 B 的 `total_expanded_nodes` 遥测能直接看出升级有没有发生。这也提示：比起时间，**节点上限可能是更值得研究的杠杆**。这一点留给 Task 6 出结果后再定，不在本计划里临时加测。
+
 ### Task 6: 档位配对评测
 
 **基线复用 Phase 2 的 ON 臂**（`~/.sts2-train/phase2_ab_20260922_102622/<角色>_on_global.jsonl`：120 s、`STS2_SOLVER_THREADS=3`、种子 `run_1..run_40`、全局层数口径）。复用成立的前提是：本计划没有改变 solver 在 120 s 下的行为——Task 1 的遥测只在 `Solve` 返回后读字段，`STS2_SOLVER_BUDGET` 未设置时 `BudgetOverrideMilliseconds` 仍是 `null`，看门狗不参与出牌。**如果执行过程中还改了任何影响 solver 出牌的东西，就必须同样条件重跑一遍 120 s 基线，不能复用。**
