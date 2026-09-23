@@ -21,6 +21,7 @@ import sys
 import random
 import os
 from game_log import GameLogger
+from engine_process import EngineHang, EngineProcess
 from combat_plan_driver import (
     _norm_entity_id,
     _resolve_card_index,
@@ -141,6 +142,12 @@ PROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
                        "src", "Sts2Headless", "Sts2Headless.csproj")
 
 
+def engine_argv() -> list:
+    """Command line that starts the headless engine. A function (not a constant)
+    so tests can point play_run() at tests/fake_engine.py."""
+    return [DOTNET, "run", "--no-build", "--project", PROJECT]
+
+
 def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True):
     """Play a complete run and return the result."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
@@ -153,6 +160,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     # could diverge onto different routes and reach different floors.
     rng = random.Random(seed)
     solver_chars = solver_characters()
+    solver_budget_s = solver_budget_seconds()
     # Engagement counters for this one run: how many plan_combat_turn calls
     # returned a usable plan vs. an error (which silently falls back to the
     # one-card-at-a-time heuristic below). A 3-game Silent smoke test once
@@ -165,35 +173,27 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     solver_errors = 0
     solver_error_printed = False
     logger = GameLogger(character, seed, enabled=log)
-    proc = subprocess.Popen(
-        [DOTNET, "run", "--no-build", "--project", PROJECT],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if not verbose else None,
-        text=True,
-        bufsize=1,
-    )
+    # stderr: inherit when verbose, otherwise DEVNULL -- never an unread PIPE,
+    # which fills up and blocks the engine's Console.Error.WriteLine (the stderr
+    # deadlock described in RunSimulator.cs DoPlanCombatTurn's diagnostics note).
+    engine = EngineProcess(engine_argv(), stderr=None if verbose else subprocess.DEVNULL)
+    solver_call_timeout = solver_call_timeout_s(solver_budget_s)
 
-    def read_json_line() -> dict:
-        """Read a line from stdout, skipping non-JSON lines (build warnings etc.)"""
-        while True:
-            resp_line = proc.stdout.readline().strip()
-            if not resp_line:
-                raise RuntimeError("No response from simulator (EOF)")
-            if resp_line.startswith("{"):
-                return json.loads(resp_line)
-            # Skip non-JSON lines (build warnings, etc.)
-            if verbose:
-                print(f"  [skip] {resp_line[:120]}")
+    def read_json_line(timeout: float = ENGINE_REPLY_TIMEOUT_S) -> dict:
+        """Next JSON reply, skipping non-JSON lines (build warnings etc.).
+        Raises EngineHang if nothing arrives in time (agent/bug.md BUG-040)."""
+        on_skip = (lambda text: print(f"  [skip] {text[:120]}")) if verbose else None
+        return engine.read_json(timeout, on_skip=on_skip)
 
     def send(cmd: dict) -> dict:
         line = json.dumps(cmd)
         if verbose:
             print(f"  > {line[:200]}")
         logger.log_action(cmd)
-        proc.stdin.write(line + "\n")
-        proc.stdin.flush()
-        resp = read_json_line()
+        engine.write(cmd)
+        timeout = (solver_call_timeout if cmd.get("action") == "plan_combat_turn"
+                   else ENGINE_REPLY_TIMEOUT_S)
+        resp = read_json_line(timeout)
         logger.log_state(resp)
         if verbose:
             rtype = resp.get("type", "?")
@@ -211,6 +211,12 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         return resp
 
     step = 0
+    # Most recent state with type=="decision", tracked so an error response
+    # (which carries no context/player, see RunSimulator.cs's
+    # Error()/ErrorWithTrace()) -- or an engine hang -- can still be reported
+    # with real act/floor/hp instead of None/None/None. Bound before `try:` so
+    # the EngineHang handler below can read it even if the hang comes first.
+    last_decision = {}
     try:
         # Read ready message (may need to skip build warnings)
         ready = read_json_line()
@@ -233,11 +239,6 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         # key it was collected under.
         refused_ids = set()
         refused_turn_key = None
-        # Most recent state with type=="decision", tracked so an error
-        # response (which carries no context/player, see RunSimulator.cs's
-        # Error()/ErrorWithTrace()) can still be reported with real
-        # act/floor/hp instead of None/None/None.
-        last_decision = {}
 
         while step < max_steps:
             step += 1
@@ -370,6 +371,16 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
                                   f"{plan.get('message', 'unknown')}")
                     else:
                         solver_plans += 1
+                        # The engine resolves STS2_SOLVER_BUDGET itself (RunSimulator.cs
+                        # ResolveSolverBudget); this harness resolves it independently for
+                        # the watchdog and the results row. If their tier tables ever
+                        # drift, fail the run loudly rather than label a 30 s run as a
+                        # 120 s one in an A/B.
+                        reported = (plan.get("search") or {}).get("budget_ms")
+                        if reported is not None and reported != solver_budget_s * 1000:
+                            raise RuntimeError(
+                                f"engine solver budget {reported} ms != STS2_SOLVER_BUDGET "
+                                f"resolved here as {solver_budget_s} s")
                 else:
                     plan = {"type": "error"}
                 if plan.get("type") != "error":
@@ -547,6 +558,17 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         return {"victory": False, "seed": seed, "steps": step, "timeout": True,
                 "solver_plans": solver_plans, "solver_errors": solver_errors}
 
+    except EngineHang as e:
+        context = last_decision.get("context") or {}
+        player = last_decision.get("player") or {}
+        print(f"  !! ENGINE HANG: {e} -- killing the engine process group (agent/bug.md BUG-040)")
+        engine.kill()
+        return {"victory": False, "seed": seed, "steps": step,
+                "act": context.get("act"), "floor": context.get("floor"),
+                "hp": player.get("hp"), "max_hp": player.get("max_hp"),
+                "error": f"engine_hang: {e}", "hang": True,
+                "solver_plans": solver_plans, "solver_errors": solver_errors}
+
     except Exception as e:
         print(f"  EXCEPTION: {e}")
         return {"victory": False, "seed": seed, "steps": step, "error": str(e),
@@ -556,16 +578,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         logger.close()
         if logger.path:
             print(f"  [log] Saved to {logger.path}")
-        try:
-            proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
-            proc.stdin.flush()
-        except:
-            pass
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except:
-            proc.kill()
+        engine.close()
 
 
 def global_floor(act, floor):
@@ -601,6 +614,10 @@ def result_to_eval_row(result: dict, character: str) -> dict:
     """
     if result.get("victory"):
         status = "win"
+    elif result.get("hang"):
+        # "stuck" is in eval_rl's technical-status set, so paired_eval drops the
+        # seed from pairing instead of averaging a killed run in as a death.
+        status = "stuck"
     elif result.get("timeout"):
         status = "timeout"
     elif result.get("error"):
@@ -672,6 +689,8 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
         if r:
             if r.get("victory"):
                 status = "WIN"
+            elif r.get("hang"):
+                status = "HANG"
             elif r.get("timeout"):
                 status = "TIMEOUT"
             elif r.get("error"):

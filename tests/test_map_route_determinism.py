@@ -19,8 +19,9 @@ the same seed and asserting the chosen map route is unchanged -- if play_run
 ever regresses to reading global `random` state again, this test will start
 failing without needing the real game engine.
 
-No game DLLs / subprocess involved: subprocess.Popen is monkeypatched to a
-scripted fake so this stays fast and hermetic.
+No game DLLs / subprocess involved: play_full_run.EngineProcess (the seam
+play_run() drives the engine through) is monkeypatched to a scripted fake so
+this stays fast and hermetic.
 """
 import json
 import os
@@ -31,42 +32,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 import play_full_run
 
 
-class _FakeProc:
-    """Stands in for the subprocess.Popen(...) handle play_run() drives.
+class _FakeEngine:
+    """Stands in for engine_process.EngineProcess, the seam play_run() drives.
 
     Feeds back a pre-scripted sequence of engine responses (one per
-    readline()) and records every line written to "stdin" so the test can
-    inspect exactly which select_map_node actions the harness chose.
+    read_json()) and records every command written so the test can inspect
+    exactly which select_map_node actions the harness chose. (This used to
+    fake subprocess.Popen; play_run() now talks to the engine only through
+    EngineProcess, whose reader thread iterates stdout -- a readline()-only
+    Popen fake would silently starve it and wait out the reply timeout.)
     """
 
     def __init__(self, script):
         self._script = list(script)
         self._idx = 0
         self.sent = []
-        self.stdin = self
-        self.stdout = self
-        self.stderr = None
 
-    # stdin-like
-    def write(self, s):
-        self.sent.append(s)
+    def write(self, obj):
+        self.sent.append(json.dumps(obj))
 
-    def flush(self):
-        pass
-
-    # stdout-like
-    def readline(self):
-        line = json.dumps(self._script[self._idx])
+    def read_json(self, timeout, on_skip=None):
+        reply = self._script[self._idx]
         self._idx += 1
-        return line + "\n"
-
-    def terminate(self):
-        pass
-
-    def wait(self, timeout=None):
-        pass
+        return reply
 
     def kill(self):
+        pass
+
+    def close(self):
         pass
 
 
@@ -93,17 +86,17 @@ def _map_select_script(n_steps=5):
 def _run_and_capture_map_choices(monkeypatch, seed):
     created = []
 
-    def _fake_popen(*args, **kwargs):
-        proc = _FakeProc(_map_select_script())
-        created.append(proc)
-        return proc
+    def _fake_engine(argv, **kwargs):
+        engine = _FakeEngine(_map_select_script())
+        created.append(engine)
+        return engine
 
-    monkeypatch.setattr(play_full_run.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(play_full_run, "EngineProcess", _fake_engine)
     play_full_run.play_run(seed, character="Ironclad", verbose=False, log=False)
 
-    proc = created[0]
+    engine = created[0]
     picks = []
-    for line in proc.sent:
+    for line in engine.sent:
         cmd = json.loads(line)
         if cmd.get("action") == "select_map_node":
             picks.append((cmd["args"]["col"], cmd["args"]["row"]))

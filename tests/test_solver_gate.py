@@ -233,3 +233,46 @@ def test_result_row_records_the_budget_tier(monkeypatch):
     row = play_full_run.result_to_eval_row(
         {"victory": False, "seed": "s", "act": 1, "floor": 5}, "Silent")
     assert row["solver_budget_s"] == 30
+
+
+# --- play_run watchdog integration (Phase 2b-1) --------------------------------
+
+FAKE_ENGINE = os.path.join(os.path.dirname(__file__), "fake_engine.py")
+
+
+def _fake_engine(monkeypatch, tmp_path, *extra):
+    pidfile = tmp_path / "engine.pid"
+    monkeypatch.setattr(play_full_run, "engine_argv",
+                        lambda: [sys.executable, FAKE_ENGINE, "--pidfile", str(pidfile), *extra])
+    monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
+    monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
+
+
+def test_play_run_turns_a_solver_hang_into_a_hang_result(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path, "--hang-on", "plan_combat_turn")
+    monkeypatch.setattr(play_full_run, "solver_call_timeout_s", lambda budget_s: 0.5)
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert result["hang"] is True
+    assert result["error"].startswith("engine_hang")
+    # act/floor/hp come from the last decision seen before the hang -- the
+    # error path must not report None/None like BUG-042's rows do.
+    assert (result["act"], result["floor"], result["hp"]) == (1, 8, 28)
+    assert play_full_run.result_to_eval_row(result, "Ironclad")["status"] == "stuck"
+
+
+def test_play_run_fails_loudly_if_engine_and_harness_disagree_on_the_budget(monkeypatch, tmp_path):
+    # Harness resolves 120 s (unset); the fake engine claims 30 s.
+    _fake_engine(monkeypatch, tmp_path, "--plan-budget-ms", "30000")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver budget" in result["error"]
+    assert not result.get("hang")
+
+
+def test_summarize_labels_a_hang_as_hang_and_not_completed():
+    out = play_full_run.summarize(
+        [{"victory": False, "seed": "s", "act": 1, "floor": 8, "steps": 40,
+          "error": "engine_hang: no reply within 180s", "hang": True,
+          "solver_plans": 3, "solver_errors": 0}],
+        1, character="Ironclad", solver_chars={"Ironclad"})
+    assert "Run 1: HANG" in out
+    assert "Completed: 0/1" in out
