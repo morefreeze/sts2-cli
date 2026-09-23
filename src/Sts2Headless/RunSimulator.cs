@@ -1337,10 +1337,15 @@ public class RunSimulator
     /// Take(count) from the offered options before building tokens from that taken subset). Each
     /// PlanCardToken (CombatPlan.cs:101-107) is plain value data (string/int), not an object
     /// reference, so this serializes cleanly: CardId/UpgradeLevel identify the card the same way
-    /// PlanAction.CardId/CardUpgradeLevel do elsewhere in this file, and SourceOccurrence/
-    /// OptionOccurrence disambiguate duplicate cards the same way CardOccurrence does -- SourceOccurrence
-    /// counts occurrences within the choice's full source pile, OptionOccurrence within just the
-    /// offered options (see CardChoiceSupport.cs's ToTokens helper).
+    /// PlanAction.CardId/CardUpgradeLevel do elsewhere in this file. SourceOccurrence/OptionOccurrence
+    /// disambiguate duplicate cards, but NOT the way CardOccurrence does: they count through
+    /// CardChoiceSupport.cs's CountTokenOccurrence (:941) -> HasStableTokenIdentity (:1159), which
+    /// requires the same Entry AND the same CurrentUpgradeLevel, whereas CardOccurrence counts by
+    /// Entry alone (CombatBeamSolver.Expansion.cs:68 assigns it, FindCardOccurrence at :3177 reads
+    /// it). So with Strike and Strike+ both offered, the Strike+ is option occurrence 0 of its own
+    /// identity, not occurrence 1 of "STRIKE". SourceOccurrence counts within the choice's full source
+    /// pile, OptionOccurrence within just the offered options. The Python resolver
+    /// (python/combat_plan_driver.py _resolve_choice_indices) matches on both fields for this reason.
     /// </summary>
     private static Dictionary<string, object?> ConvertPlanCardChoiceToJson(PlanCardChoice choice)
         => new()
@@ -2664,7 +2669,7 @@ public class RunSimulator
                     // here lets a consumer resolve a plan-time target across an
                     // intra-turn kill instead of trusting the plan's positional
                     // target_index once the live list has reindexed underneath it (see
-                    // python/play_full_run.py's _resolve_enemy_target_index and the Run 8
+                    // python/combat_plan_driver.py's _resolve_enemy_target_index and the Run 8
                     // regression in docs/superpowers/plans/
                     // 2026-09-17-combatsolver-port-phase1.md).
                     ["combat_id"] = e.CombatId,

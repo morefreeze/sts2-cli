@@ -683,11 +683,11 @@ decision_advisor / rl_agent / eval_rl / combat_env / boss_retry."
 
 ## Phase 2 完成的判定标准
 
-- [ ] `STS2_SOLVER_CHARS` 开关存在、默认值反映 Task 6 的真实结论，且单测覆盖（未知角色名报错、`all`/`none`、逗号列表）。
-- [ ] 完整回归门槛（5 角色 × 5 局）全部 `Completed: 5/5`，0 `TIMEOUT`/`ERROR`。
-- [ ] 5 个角色**每一个**都有配对评测数字（有效种子数、floor 配对差值、p 值）写进本文件，没有一个角色是"没测但开着"。
-- [ ] 冒烟/修复过程中发现的每个问题都在 `agent/bug.md` 有条目，注明修在胶水层还是引擎层。
-- [ ] 文档（`CLAUDE.md`、设计文档）与代码实际行为一致。
+- [x] `STS2_SOLVER_CHARS` 开关存在、默认值反映 Task 6 的真实结论，且单测覆盖（未知角色名报错、`all`/`none`、逗号列表）。
+- [x] 完整回归门槛（5 角色 × 5 局）全部 `Completed: 5/5`，0 `TIMEOUT`/`ERROR`。
+- [x] 5 个角色**每一个**都有配对评测数字（有效种子数、floor 配对差值、p 值）写进本文件，没有一个角色是"没测但开着"。
+- [x] 冒烟/修复过程中发现的每个问题都在 `agent/bug.md` 有条目，注明修在胶水层还是引擎层。
+- [x] 文档（`CLAUDE.md`、设计文档）与代码实际行为一致（逐条对照代码和原始数据核实过）。
 
 达标后开 Phase 2b：把 solver 接进 `agent/combat_env.py` 的 `combat_play` 决策（现在完全没接），再谈退休 `agent/sim`/`turn_planner.py`。
 

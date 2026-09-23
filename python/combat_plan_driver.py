@@ -250,10 +250,12 @@ def _send_and_apply_choices(send, cur, action, action_name, index_key, idx):
 def _execute_combat_plan_actions(send, state, actions):
     """Execute a plan_combat_turn action list up through (and including) the
     first end_turn -- never the whole multi-turn plan blindly, per CLAUDE.md's
-    "Protocol notes" on plan_combat_turn (turn>=2 actions' target_index/
-    target_combat_id have no counterpart in an ordinary combat_play decision's
-    enemy list, so the caller must re-call plan_combat_turn fresh for the next
-    turn instead). Returns (state, ok); ok=False means the LIVE engine
+    "Protocol notes" on plan_combat_turn: later turns assume draws and enemy
+    intents the protocol never exposes, so the caller must re-call
+    plan_combat_turn fresh for the next turn instead. (Targets themselves are
+    resolvable on any turn -- each enemy in a combat_play decision carries the
+    same combat_id the plan's target_combat_id refers to; see
+    _resolve_enemy_target_index.) Returns (state, ok); ok=False means the LIVE engine
     itself rejected an action, or a bundled card_select choice couldn't be
     resolved -- a real bug to surface, not "the solver predicts a loss". An
     unresolved card_id/potion_id is deliberately NOT one of those cases (see

@@ -48,8 +48,17 @@ CombatSolver.Engine / Search / Prediction / Strategy
 **Phase 1 — 单角色跑通并验证正确性**
 把 Engine+Search+Prediction+Strategy 四个目录拉进仓库、解决 4 处 RitsuLib 触点、接一个新的 JSON 决策动作，让 `CombatBeamSolver` 在**一个角色**（建议 Ironclad，因为 `agent/sim` 现有基线也是 Ironclad，方便对比）的真实 `combat_play` 决策点上跑起来、返回可执行的出牌序列。用现有 replay 日志或新跑的对局验证：solver 给出的每一步都能被 `DoPlayCard`/`DoEndTurn` 正常执行，且不崩溃、不卡死。
 
-**Phase 2 — 全角色接入，退休旧规划器**
-确认 Phase 1 在其余 4 个角色上同样可用（这四个角色目前正是 `agent/sim` 已知不安全的对象），全量替换 `combat_play` 决策的来源；删除 `agent/sim`、`agent/turn_planner.py`、以及 `eval_rl.py`/`train.py` 里调用它们的分支。
+> **状态（2026-09-23）**：Phase 1 已完成（[实施计划](../plans/2026-09-17-combatsolver-port-phase1.md)）。Phase 2 按下面拆开后的范围完成，见 [Phase 2 实施计划](../plans/2026-09-21-combatsolver-port-phase2.md)。
+
+**Phase 2 — 全角色接入 + 质量门槛（已完成）**
+确认 Phase 1 在其余 4 个角色上同样可用（这四个角色目前正是 `agent/sim` 已知不安全的对象），并且证明它不只是"不崩"，而是确实比现有启发式打得好。结果：解除 Ironclad gate 后 5 角色 × 5 局回归全部 `Completed: 5/5`、solver 参与率 100%；每角色 40 个共享种子的配对评测（solver 开 vs 关），全局层数提升 **+4.7 ~ +10.5**（Defect +10.5、Ironclad +7.9、Regent +6.8、Silent +4.9、Necrobinder +4.7），五个角色 p 均 < 0.0001。
+
+**Phase 2b — 接进 RL 路径，再退休旧规划器（未开始）**
+原计划写的"全量替换 `combat_play` 决策的来源；删除 `agent/sim`、`agent/turn_planner.py`、以及 `eval_rl.py`/`train.py` 里调用它们的分支"，在写 Phase 2 计划时核对代码后发现不能一步做完：
+
+- 上面的质量结论只来自 `python/play_full_run.py`（回归 harness）。`agent/combat_env.py` / `agent/eval_rl.py` 从来没有调用过 `plan_combat_turn`，所以 PPO/eval 的任何数字都还没有体现 solver。要先把它接进 `combat_env` 的 `combat_play` 决策，并在那条管线上重新做配对评测。
+- `agent/turn_planner.py` 不只是旧的 1 回合 DFS，它还承载着已上线、实测有收益的走廊/精英格挡阈值（`defense_override_enabled`/`intent_defense_override`/`hallway_danger_threshold`/`elite_danger_threshold`）和 `apply_vantom_slippery_mask`，调用方有 `decision_advisor`/`rl_agent`/`eval_rl`/`combat_env`/`boss_retry`。退休它之前要先把这些搬到独立模块，不能随文件一起删。
+- 前置条件：`plan_combat_turn` 会偶发永久挂死（`agent/bug.md` BUG-040，A/B 中 Ironclad 40 局里挂死 2 局，其余 4 个角色 160 局为 0）。进训练/评测管线前必须先有单次调用看门狗，否则一个挂死就会让一个训练 worker 永远停住。
 
 **Phase 3 — PPO 缩到只学地图路线**
 战斗决策完全由 solver 接管后，精简 PPO 的观测空间和动作空间到只覆盖 `map_select`；`combat_play`/`card_reward`/`rest_site` 等决策点视情况仍可能需要人工启发式或 solver 建议（Combat Solver 的 `Strategy`/`Prediction` 是否覆盖map外决策还需在 Phase 1 期间进一步确认），本阶段范围以地图路线学习为主。
@@ -58,6 +67,7 @@ CombatSolver.Engine / Search / Prediction / Strategy
 
 - **IL 工具触点**（`CardOnPlayInferrer.cs`）的裁剪成本目前只是估计，Phase 1 期间需要实际读代码确认。
 - **搜索预算**：Combat Solver 默认给 16GB 内存做 Medium 档搜索（面向单机大内存场景）；训练/评测要跑大量并发对局，需要在 Phase 1 期间测出适合批量无头运行的预算档位，避免搜索本身成为新的资源瓶颈（类比当前 5 角色并行训练已经把机器打到 idle 0.56% 的教训）。
+  - **实测结论（Phase 2）**：移植版本里**没有档位**——原 mod 的档位选择住在没移植的 `SolverSettings.cs` 里，我们只有唯一的 `SolverSearchProfile.Default`（`BeamWidth` 60、`MaxExpandedNodes` 120 000、软时间预算 **120 s**）。单次 `plan_combat_turn` 中位数 3.4 s、均值 9.2 s（8 线程、无争用），约为启发式的 300 倍，一局要好几分钟。预算按墙钟计时，所以多个 solver 进程并发时 CPU 饥饿会让搜索变弱——批量跑必须用 `STS2_SOLVER_THREADS` 把每进程线程数压到核数以内（Phase 2 A/B 用 5 进程 × 3 线程）。
 - **Phase 3 范围**：Combat Solver 本身不做地图路线规划，`map_planner.py` 保留；具体哪些非战斗决策点（`card_reward`/`rest_site`/`event_choice`）继续用现有启发式、哪些改用 solver 建议，留到 Phase 1 验证完主链路后再定。
 
 ## 测试
