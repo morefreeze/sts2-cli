@@ -670,3 +670,12 @@ decision_advisor / rl_agent / eval_rl / combat_env / boss_retry."
 - [ ] 文档（`CLAUDE.md`、设计文档）与代码实际行为一致。
 
 达标后开 Phase 2b：把 solver 接进 `agent/combat_env.py` 的 `combat_play` 决策（现在完全没接），再谈退休 `agent/sim`/`turn_planner.py`。
+
+---
+
+## 待办（执行中发现，Task 6 跑完之后再动——现在改任何 solver 路径都会作废正在跑的 A/B）
+
+- [ ] **接上 solver 的进度遥测。** `DoPlanCombatTurn` 目前传的是 `progressCallback: null`（`src/Sts2Headless/RunSimulator.cs:1249`），诊断 sink 的 `info`/`debug` 也是两个空函数（Phase 1 为避开"stderr 写满管道 → 引擎阻塞"的死锁特意关掉的）。所以 `SolverProgress` 里的 `ExpandedNodes`/`MaxNodes`/`FrontierNodes`/`EndedNodes`/`ReviewedWorldlines`/`ElapsedMilliseconds`/`Phase` 一条都没采。做法：只在 callback 里记最后一份 progress，随 `combat_plan` 结果一起放进 JSON 返回，**不走 stderr**，从而绕开原来那个死锁。收益：能直接回答每次搜索是自己收敛（`passSettled`）、撞节点上限（`MaxExpandedNodes = 120_000`）、还是撞时间上限（120 s）——目前只能从耗时分布间接推测（8 线程无争用时 23.5% 秒内收手、1.4% 顶到 120 s）。注意：它只能估到"预算耗尽"的时间，估不到"遍历穷尽"的时间——这是 beam search（宽度 60），从不穷举。
+- [ ] **BUG-040：`plan_combat_turn` 可以永久挂死。** 见 `agent/bug.md`。先做 harness 层的单次调用看门狗（远高于 120 s，比如 300 s，超时就重启引擎并记一个独立状态），让一次挂死只损失一局而不是一整条 lane；再用保存下来的 core dump 查根因。
+- [ ] **BUG-041：`Cannot fork with pending Power amount changes`**（Regent，力量）。见 `agent/bug.md`。
+- [ ] **BUG-042：3 局 `plan_combat_turn_execution_failed`，且 ERROR 行丢了 act/floor。** 见 `agent/bug.md`。
