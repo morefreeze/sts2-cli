@@ -1406,9 +1406,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Phase 2b-1 完成的判定标准
 
-- [ ] `STS2_SOLVER_BUDGET` 在 C# 和 Python 两侧都只接受 30/60/120/180/300；不设就是 120；两侧不一致时对局会大声失败。
-- [ ] 每个 `combat_plan` 回复都带 `search` 遥测，而且没有碰 `progressCallback`。
-- [ ] 看门狗有单测覆盖（挂死 → `EngineHang`，按进程组杀，引擎退出 → EOF 而不是挂死，正常关闭不留孤儿），也有 `play_run` 集成测试覆盖。
-- [ ] 完整回归门槛（默认档位）5 角色全部 `Completed: 5/5`、solver 参与率 100%。
-- [ ] 阶段 A 5 个角色、阶段 B Necrobinder **每一个**都有配对数字、遥测和结论写进本文件，并给出 2b-2 该用的档位。
-- [ ] `CLAUDE.md`、`agent/bug.md`、设计文档与代码实际行为一致。
+- [x] `STS2_SOLVER_BUDGET` 在 C# 和 Python 两侧都只接受 30/60/120/180/300；不设就是 120；两侧不一致时对局会大声失败。
+- [x] 每个 `combat_plan` 回复都带 `search` 遥测，而且没有碰 `progressCallback`。
+- [x] 看门狗有单测覆盖（挂死 → `EngineHang`，按进程组杀，引擎退出 → EOF 而不是挂死，正常关闭不留孤儿），也有 `play_run` 集成测试覆盖。
+- [x] 完整回归门槛（默认档位）5 角色全部 `Completed: 5/5`、solver 参与率 100%。
+- [x] 阶段 A 5 个角色、阶段 B Necrobinder **每一个**都有配对数字、遥测和结论写进本文件，并给出 2b-2 该用的档位。**例外**：Regent 按判据是"判不了"，两臂各扩到 120 个种子的重判**没有做**；2b-2 里 Regent 暂用 120 s。
+- [x] `CLAUDE.md`、`agent/bug.md`、设计文档与代码实际行为一致。

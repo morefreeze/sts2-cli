@@ -53,12 +53,19 @@ CombatSolver.Engine / Search / Prediction / Strategy
 **Phase 2 — 全角色接入 + 质量门槛（已完成）**
 确认 Phase 1 在其余 4 个角色上同样可用（这四个角色目前正是 `agent/sim` 已知不安全的对象），并且证明它不只是"不崩"，而是确实比现有启发式打得好。结果：解除 Ironclad gate 后 5 角色 × 5 局回归全部 `Completed: 5/5`、solver 参与率 100%；每角色 40 个共享种子的配对评测（solver 开 vs 关），全局层数提升 **+4.7 ~ +10.5**（Defect +10.5、Ironclad +7.9、Regent +6.8、Silent +4.9、Necrobinder +4.7），五个角色 p 均 < 0.0001。
 
-**Phase 2b — 接进 RL 路径，再退休旧规划器（未开始）**
+**Phase 2b-1 — 搜索时间档位 + 挂死看门狗（已完成）**
+`STS2_SOLVER_BUDGET` 可选 30/60/120/180/300 秒；每次搜索都有遥测；`python/play_full_run.py` 通过 `python/engine_process.py` 给每次引擎回复设超时，超时就杀掉整个进程组。档位配对评测（[实施计划与结果](../plans/2026-09-23-combatsolver-phase2b1-budget-tiers.md)）的结论：
+- 30 s 对 Ironclad/Silent/Defect/Necrobinder 不劣于 120 s，批量条件下能省 13–55% 的搜索时间。Regent 方差太大，还判不了。
+- 300 s 没有测得出来的收益：更长的搜索会先撞 12 万节点上限（`MaxExpandedNodes`），多给的时间用不上。
+- 所以接下来值得研究的是节点上限，而不是时间。
+
+**Phase 2b-2 — 接进 RL 路径，再退休旧规划器（未开始）**
 原计划写的"全量替换 `combat_play` 决策的来源；删除 `agent/sim`、`agent/turn_planner.py`、以及 `eval_rl.py`/`train.py` 里调用它们的分支"，在写 Phase 2 计划时核对代码后发现不能一步做完：
 
 - 上面的质量结论只来自 `python/play_full_run.py`（回归 harness）。`agent/combat_env.py` / `agent/eval_rl.py` 从来没有调用过 `plan_combat_turn`，所以 PPO/eval 的任何数字都还没有体现 solver。要先把它接进 `combat_env` 的 `combat_play` 决策，并在那条管线上重新做配对评测。
 - `agent/turn_planner.py` 不只是旧的 1 回合 DFS，它还承载着已上线、实测有收益的走廊/精英格挡阈值（`defense_override_enabled`/`intent_defense_override`/`hallway_danger_threshold`/`elite_danger_threshold`）和 `apply_vantom_slippery_mask`，调用方有 `decision_advisor`/`rl_agent`/`eval_rl`/`combat_env`/`boss_retry`。退休它之前要先把这些搬到独立模块，不能随文件一起删。
-- 前置条件：`plan_combat_turn` 会偶发永久挂死（`agent/bug.md` BUG-040，A/B 中 Ironclad 40 局里挂死 2 局，其余 4 个角色 160 局为 0）。进训练/评测管线前必须先有单次调用看门狗，否则一个挂死就会让一个训练 worker 永远停住。
+- 挂死防护：`plan_combat_turn` 会永久挂死（`agent/bug.md` BUG-040，Ironclad 种子 `run_32` 可以稳定复现）。harness 侧已经有看门狗（Phase 2b-1）。`combat_env` 自己管理引擎子进程（`agent/combat_env.py:3206`，已经是 `start_new_session=True`），接进去时要加同等的单次回复超时，否则一次挂死就会让一个训练 worker 永远停住。
+- 训练档位用 Phase 2b-1 的结论：Ironclad/Silent/Defect/Necrobinder 用 30 s，Regent 在扩样本判定之前用 120 s；评测维持 120 s。
 
 **Phase 3 — PPO 缩到只学地图路线**
 战斗决策完全由 solver 接管后，精简 PPO 的观测空间和动作空间到只覆盖 `map_select`；`combat_play`/`card_reward`/`rest_site` 等决策点视情况仍可能需要人工启发式或 solver 建议（Combat Solver 的 `Strategy`/`Prediction` 是否覆盖map外决策还需在 Phase 1 期间进一步确认），本阶段范围以地图路线学习为主。
