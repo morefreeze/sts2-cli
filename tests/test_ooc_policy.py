@@ -262,3 +262,38 @@ def test_event_page_stuck_guard_applies_under_greedy(monkeypatch):
     result, sent = _run(monkeypatch, script)
     assert len(calls) == 3
     assert sent[-1] == {"cmd": "action", "action": "leave_room"}
+
+
+def _r(policy, greedy, fallbacks, **extra):
+    r = {"victory": False, "seed": "s", "steps": 10, "act": 1, "floor": 5,
+         "solver_plans": 1, "solver_errors": 0,
+         "ooc_policy": policy, "ooc_greedy": greedy, "ooc_fallbacks": fallbacks}
+    r.update(extra)
+    return r
+
+
+def test_summary_reports_ooc_policy_and_counts():
+    text = play_full_run.summarize([_r("greedy", 10, 1), _r("greedy", 7, 0)], 2,
+                                   "Ironclad", solver_chars={"Ironclad"})
+    assert "OOC policy: greedy -- 17 greedy decisions, 1 fallbacks" in text
+    assert "OOC POLICY NEVER ENGAGED" not in text
+
+
+def test_summary_banner_when_greedy_never_engaged():
+    text = play_full_run.summarize([_r("greedy", 0, 3)], 1, "Ironclad",
+                                   solver_chars={"Ironclad"})
+    assert "!! OOC POLICY NEVER ENGAGED" in text
+
+
+def test_summary_naive_prints_policy_without_banner():
+    text = play_full_run.summarize([_r("naive", 0, 0)], 1, "Ironclad",
+                                   solver_chars={"Ironclad"})
+    assert "OOC policy: naive" in text
+    assert "NEVER ENGAGED" not in text
+
+
+def test_summary_tolerates_results_without_ooc_fields():
+    text = play_full_run.summarize([{"victory": False, "seed": "s", "act": 1, "floor": 5,
+                                     "solver_plans": 1, "solver_errors": 0}], 1,
+                                   "Ironclad", solver_chars={"Ironclad"})
+    assert "OOC policy" not in text

@@ -868,6 +868,18 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     total_solver_attempts = total_solver_plans + total_solver_errors
     lines.append(f"Solver engagement: {total_solver_plans}/{total_solver_attempts} "
                  f"plan_combat_turn calls returned a usable plan")
+    policies = sorted({r.get("ooc_policy") for r in results if r and r.get("ooc_policy")})
+    if policies:
+        total_greedy = sum(r.get("ooc_greedy") or 0 for r in results if r)
+        total_fallbacks = sum(r.get("ooc_fallbacks") or 0 for r in results if r)
+        lines.append(f"OOC policy: {'/'.join(policies)} -- {total_greedy} greedy decisions, "
+                     f"{total_fallbacks} fallbacks")
+        # Same blindness the solver banner guards against: a greedy arm whose
+        # policy never answered anything is secretly the naive arm.
+        if policies == ["greedy"] and total_greedy == 0:
+            lines.append("!! OOC POLICY NEVER ENGAGED -- STS2_OOC_POLICY=greedy but "
+                         "greedy_action answered no decision; these results measure "
+                         "the fallback commands")
     # Zero engagement is only alarming for a character the solver is SUPPOSED
     # to drive -- for the A/B's control arm (character not in solver_chars),
     # zero plans is the whole point and must stay silent. This is the check
