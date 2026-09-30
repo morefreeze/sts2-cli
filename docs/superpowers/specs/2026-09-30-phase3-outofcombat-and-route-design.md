@@ -42,8 +42,9 @@ Changes to `python/play_full_run.py`:
 1. `--ascension N` (default 0, so existing invocations and the regression command are
    unchanged). Sent as `start_run.ascension`; recorded in every results row as
    `ascension`. Phase 3 runs use `--ascension 1`.
-2. `STS2_OOC_POLICY` = `greedy` | `naive` (default `greedy` once 3a ships; `naive` is
-   the control arm and reproduces today's behaviour bit-for-bit on a seed). Unknown
+2. `STS2_OOC_POLICY` = `greedy` | `naive` (default `naive` until the A/B passes, then
+   flipped to `greedy`; `naive` is the control arm and reproduces today's behaviour
+   bit-for-bit on a seed). Unknown
    values raise, like `STS2_SOLVER_CHARS`. Under `greedy`, the decisions `card_reward`,
    `rest_site`, `event_choice`, `bundle_select`, `shop`, and out-of-combat
    `card_select` are answered by `agent.combat_env.greedy_action(state)`. `map_select`
@@ -53,12 +54,16 @@ Changes to `python/play_full_run.py`:
    back to the naive command for that decision; a shop visit is capped at 20 actions,
    then `leave_room`. Both events are counted and printed in the SUMMARY
    (`ooc_fallbacks=`), so a policy that silently degrades to naive is visible.
-4. `--trace-log <file>`: one JSONL row per `map_select` decision (the state before
-   choosing) — seed, character, ascension, act, act-local floor, global floor,
-   hp, max_hp, gold, deck (card id + upgraded flag), relic ids, potion ids, chosen
-   node (col, row, type), boss id — plus one terminal row per game with the outcome
-   and final global floor. Consecutive rows give per-room transitions. This is the
-   calibration data for 3b and the death-cause data for later phases.
+4. Route data. `GameLogger` already writes every state (deck with upgrades, relics,
+   potions, gold, hp, `context.boss`) to `logs/<ts>_<char>_<seed>.jsonl` — but
+   `cleanup_old_logs()` deletes anything older than 7 days, which has already erased
+   the Phase 2 games. So: `--keep-game-logs DIR` copies each finished game's log to
+   `DIR/<character>_<seed>.jsonl`, and the results row records that path as
+   `game_log` (plus `ascension`, `ooc_policy`). The logger's run_meta header carries
+   seed, character, ascension and the policy. 3b extracts per-room transitions from
+   these copies offline; they are also the death-cause data for later phases.
+5. `--seed-prefix P` (default `run_`, i.e. unchanged) so each phase's verdict runs
+   on seeds no earlier phase tuned on.
 
 Acceptance: 67 existing tests plus new unit tests pass; full 5×5 regression
 Completed 5/5 every character; paired A/B at a1, 40 fresh seeds × 5 characters,
@@ -78,14 +83,14 @@ size, count of non-starter relics, potion count, act, rows remaining to the boss
 character.
 
 **Value model V(state)** = predicted remaining global floors from this state. Ridge
-regression on the features above, fitted from 3a traces (the `greedy` arm, whose
+regression on the features above, fitted from the 3a kept game logs (the `greedy` arm, whose
 routes are random — so node-type outcomes are not biased by route selection).
 Validation: split by seed, 5 folds; V must beat an HP-only model (hp, max_hp, act,
 rows remaining) on held-out MAE. If it does not, the planner ships with the HP-only
 model and the report says the richer features added nothing.
 
 **Transition model** per (act, room type): empirical distributions from consecutive
-trace rows of Δhp, Δmax_hp, Δgold, Δrelics, Δpotions, Δdeck power, with Monster and
+kept-game-log states of Δhp, Δmax_hp, Δgold, Δrelics, Δpotions, Δdeck power, with Monster and
 Elite split into two deck-power buckets. Death risk per room = empirical
 P(hp loss ≥ current hp) from that room type's loss distribution. Cells with fewer
 than 20 samples fall back to the act-pooled cell, then to all acts.
@@ -95,7 +100,7 @@ to the boss; propagate the expected state room by room and accumulate survival
 probability; score a path as
 `P(survive) × (gf_boss_entry + V(state_at_boss_entry)) + Σ_k P(die at room k) × gf_k`.
 Pick the child with the best-scoring path. Ties → lower column (deterministic).
-The fixed rows are checkpoints, not decomposition: the trace records predicted vs
+The fixed rows are checkpoints, not decomposition: the game logs give predicted vs
 actual state at the Treasure and RestSite rows so model drift is measurable.
 
 Acceptance: unit tests for enumeration, fixed-row detection, transition fallback, and
@@ -116,7 +121,7 @@ positive and no character is significantly worse.
 
 ## After Phase 3
 
-Use the 3a/3b traces to rank where runs die (which boss, at what HP and deck power),
+Use the 3a/3b kept game logs to rank where runs die (which boss, at what HP and deck power),
 and pick the next lever from that ranking — likely candidates are card-pick quality
 re-tuned on solver-era data, boss-aware deck building, and Phase 2b-2. Each lever gets
 its own spec and paired A/B.
