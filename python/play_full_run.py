@@ -241,6 +241,67 @@ def ooc_escape_command(state: dict) -> dict:
     return {"cmd": "action", "action": "leave_room"}
 
 
+# Map route policy (Phase 3b,
+# docs/superpowers/plans/2026-09-30-phase3b-route-value-planner.md). "random" is
+# the seeded random route every phase before 3b measured; "value" asks
+# agent.route_planner to pick the child whose best path to the boss has the
+# highest expected final floor under the model fitted by agent.fit_route_model.
+# Under "random" the map_select branch is exactly the old one: no get_map is
+# sent and no route module is imported.
+ROUTE_POLICIES = ("random", "value")
+ROUTE_POLICY_DEFAULT = "random"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROUTE_MODEL_DEFAULT = os.path.join(REPO_ROOT, "agent", "data", "route_model_a1.json")
+_ROUTE_MODEL_CACHE: dict = {}
+
+
+def route_policy(env=None) -> str:
+    """Resolve STS2_ROUTE_POLICY ("random" | "value"; blank/unset = default).
+
+    An unknown value raises instead of silently running the default, for the
+    same reason ooc_policy() does: an A/B arm that quietly measured the wrong
+    policy still prints "Completed: N/N".
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("STS2_ROUTE_POLICY") or "").strip().lower()
+    if not raw:
+        return ROUTE_POLICY_DEFAULT
+    if raw not in ROUTE_POLICIES:
+        raise ValueError(f"STS2_ROUTE_POLICY={raw!r} is not one of {ROUTE_POLICIES}")
+    return raw
+
+
+def route_model_path(env=None) -> str:
+    """STS2_ROUTE_MODEL (a route model JSON) or the committed default."""
+    env = os.environ if env is None else env
+    return (env.get("STS2_ROUTE_MODEL") or "").strip() or ROUTE_MODEL_DEFAULT
+
+
+def _repo_root_on_path() -> None:
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
+
+
+def _load_route_model(path: str):
+    """The agent.route_model.RouteModel stored at `path`, loaded once per path.
+    Imported lazily (the random policy never needs it) and the seam tests
+    replace to hand the harness a stub model."""
+    if path not in _ROUTE_MODEL_CACHE:
+        _repo_root_on_path()
+        from agent.route_model import RouteModel
+        _ROUTE_MODEL_CACHE[path] = RouteModel.load(path)
+    return _ROUTE_MODEL_CACHE[path]
+
+
+def _route_choose(map_reply: dict, state: dict, character: str, model):
+    """agent.route_planner.choose_node -- the seam tests replace to script the
+    planner's answers. The attribute is read at call time, so patching
+    agent.route_planner.choose_node works too."""
+    _repo_root_on_path()
+    from agent import route_planner
+    return route_planner.choose_node(map_reply, state, character, model)
+
+
 def _find_dotnet():
     for p in [os.path.expanduser("~/.dotnet-arm64/dotnet"),
               os.path.expanduser("~/.dotnet/dotnet"),
@@ -295,6 +356,11 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              # exits the same way, so these are NOT fallbacks
              "ooc_event_stuck": 0,
              "ooc_knobs": greedy_knobs() if policy == "greedy" else {},
+             "route_policy": route_policy(),
+             # map_selects routed by the planner / that fell back to the seeded
+             # random pick (planner raised, offered no usable node, or get_map failed)
+             "route_plans": 0,
+             "route_fallbacks": 0,
              "game_log": None}
     result = _play_run(seed, character, verbose, log, ascension, stats)
     stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
@@ -320,8 +386,9 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
 def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: int,
               stats: dict):
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
-    stats["ooc_greedy"], stats["ooc_fallback_causes"][...] and
-    stats["ooc_event_stuck"], and sets stats["game_log"]."""
+    stats["ooc_greedy"], stats["ooc_fallback_causes"][...],
+    stats["ooc_event_stuck"], stats["route_plans"] and stats["route_fallbacks"],
+    and sets stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
     # global `random` module and silently change behavior for every other
@@ -418,6 +485,10 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         # Phase 3a: out-of-combat decisions go to agent.combat_env.greedy_action
         # when STS2_OOC_POLICY=greedy (see OOC_GREEDY_DECISIONS). None = naive.
         greedy = _load_greedy_action() if stats["ooc_policy"] == "greedy" else None
+        # Phase 3b: the route model under STS2_ROUTE_POLICY=value; None = seeded random.
+        route_model = (_load_route_model(route_model_path())
+                       if stats["route_policy"] == "value" else None)
+        route_raise_printed = False
         shop_visit = None
         shop_actions = 0
         raised_decisions = set()  # decision types whose first raise printed a traceback
@@ -518,8 +589,43 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if not choices:
                     print("  No map choices available!")
                     break
-                # Random selection
-                choice = rng.choice(choices)
+                if route_model is None:
+                    # Random selection
+                    choice = rng.choice(choices)
+                else:
+                    # get_map is a read-only query: its reply must NOT replace
+                    # `state`, which is still the pending map_select decision.
+                    map_reply = send({"cmd": "get_map"})
+                    pick = None
+                    why = "get_map did not return a map"
+                    if map_reply.get("type") == "map":
+                        try:
+                            pick = _route_choose(map_reply, state, character, route_model)
+                            offered = {(c["col"], c["row"]) for c in choices}
+                            if pick is None:
+                                why = "planner returned no node"
+                            elif (pick["col"], pick["row"]) not in offered:
+                                why = f"planner picked a node not offered: {pick}"
+                                pick = None
+                        except Exception as exc:
+                            pick = None
+                            why = f"planner raised {exc!r}"
+                            if not route_raise_printed:
+                                route_raise_printed = True
+                                print(traceback.format_exc())
+                    if pick is None:
+                        print(f"  !! route planner fallback ({why}) -- random pick")
+                        stats["route_fallbacks"] += 1
+                        choice = rng.choice(choices)
+                    else:
+                        stats["route_plans"] += 1
+                        choice = pick
+                        context = state.get("context") or {}
+                        print("  [route] " + json.dumps({
+                            "act": context.get("act"), "floor": context.get("floor"),
+                            "choice": {"col": pick["col"], "row": pick["row"]},
+                            "score": pick.get("score"), "p_alive": pick.get("p_alive"),
+                            "checkpoints": pick.get("checkpoints")}, default=str))
                 state = send({
                     "cmd": "action",
                     "action": "select_map_node",
@@ -893,6 +999,9 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "ooc_fallback_causes": result.get("ooc_fallback_causes"),
         "ooc_event_stuck": result.get("ooc_event_stuck"),
         "ooc_knobs": result.get("ooc_knobs"),
+        "route_policy": result.get("route_policy"),
+        "route_plans": result.get("route_plans"),
+        "route_fallbacks": result.get("route_fallbacks"),
         "game_log": result.get("game_log"),
         "game_log_error": result.get("game_log_error"),
     }
@@ -1011,6 +1120,20 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
             if capped:
                 lines.append(f"!! {capped} shop visit(s) hit SHOP_ACTION_CAP -- a greedy "
                              f"shop command made no progress")
+    route_policies = sorted({r.get("route_policy") for r in results if r and r.get("route_policy")})
+    if route_policies:
+        planned = sum(r.get("route_plans") or 0 for r in results if r)
+        route_fallbacks = sum(r.get("route_fallbacks") or 0 for r in results if r)
+        lines.append(f"Route policy: {'/'.join(route_policies)} -- {planned} planned, "
+                     f"{route_fallbacks} fallbacks")
+        # Same blindness the OOC banner guards against: a value arm whose planner
+        # never had a pick accepted is secretly the seeded-random arm.
+        if route_policies == ["value"] and planned == 0:
+            lines.append("!! ROUTE PLANNER NEVER ENGAGED -- STS2_ROUTE_POLICY=value but the "
+                         "planner made no pick; these results measure the random route")
+        if "value" in route_policies and route_fallbacks:
+            lines.append(f"!! route planner fell back {route_fallbacks} times -- those map "
+                         f"choices were random; see the '!! route planner' lines in this log")
     unkept = sum(1 for r in results if r and r.get("game_log_error"))
     if unkept:
         lines.append(f"!! {unkept} game log(s) could not be kept -- their game_log points "
@@ -1075,11 +1198,20 @@ def main():
         for knob, value in greedy_knobs().items():
             print(f"!! greedy_action knob set: {knob}={value}")
 
+    route = route_policy()  # likewise: a bad STS2_ROUTE_POLICY aborts before any game
+    if route == "value":
+        model_path = route_model_path()
+        model = _load_route_model(model_path)  # a missing/corrupt model aborts now
+        model_data = getattr(model, "data", None) or {}
+        print(f"Route policy: value (model {model_path}, "
+              f"n_games {(model_data.get('meta') or {}).get('n_games')}, "
+              f"value {(model_data.get('validation') or {}).get('chosen')})")
+
     num_runs = args.num_runs
     character = args.character
 
     print(f"Playing {num_runs} runs as {character} "
-          f"(ascension {args.ascension}, ooc policy {policy})")
+          f"(ascension {args.ascension}, ooc policy {policy}, route policy {route})")
     print("=" * 60)
 
     results = []
