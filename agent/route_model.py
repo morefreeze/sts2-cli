@@ -22,17 +22,18 @@ import statistics
 
 CHARACTERS = ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder")
 
-FULL_FEATURES = ["hp", "max_hp", "hp_frac", "gold", "deck_strength", "deck_size", "n_upgraded",
-                 "n_relics", "n_potions", "floor", "act2", "act3",
+FULL_FEATURES = ["hp", "max_hp", "hp_frac", "gold", "deck_burst", "deck_top8", "deck_size",
+                 "n_upgraded", "n_relics", "n_potions", "floor", "act2", "act3",
                  "char_Ironclad", "char_Silent", "char_Defect", "char_Regent", "char_Necrobinder"]
 HP_ONLY_FEATURES = ["hp", "max_hp", "hp_frac", "floor", "act2", "act3",
                     "char_Ironclad", "char_Silent", "char_Defect", "char_Regent", "char_Necrobinder"]
 
 # Per-room feature changes the transition model tracks (same names as
 # route_data.FEATURE_KEYS).
-DELTA_KEYS = ("hp", "max_hp", "gold", "deck_strength", "deck_size", "n_upgraded",
+DELTA_KEYS = ("hp", "max_hp", "gold", "deck_burst", "deck_top8", "deck_size", "n_upgraded",
               "n_relics", "n_potions")
 MAX_POTIONS = 3
+MAX_CARD_SCORE = 10.0  # card_scoring.score_card is a 0-10 scale, so is its top-8 mean
 REST_HP_FRAC_SPLIT = 0.5
 
 
@@ -149,7 +150,7 @@ def fit_value_model(games: list[dict], alpha: float = 1.0, folds: int = 5, seed:
 
 def _bucket(room_type: str, pre: dict, split: float) -> str:
     if room_type in ("Monster", "Elite"):
-        return "lo" if pre.get("deck_strength", 0.0) < split else "hi"
+        return "lo" if pre.get("deck_burst", 0.0) < split else "hi"
     if room_type == "RestSite":
         return "lo" if _hp_frac(pre) < REST_HP_FRAC_SPLIT else "hi"
     return "all"
@@ -170,19 +171,19 @@ def _cell_from(samples: list[dict]) -> dict:
 def fit_transition_model(games: list[dict], min_n: int = 20) -> dict:
     """Empirical per-room transition cells from every non-Boss transition.
 
-    Cell key ``"{act}|{room_type}|{bucket}"``; bucket is lo/hi by deck_strength
-    against ``split`` (the median deck_strength over all Monster pre states) for
-    Monster and Elite, lo/hi by hp_frac < 0.5 for RestSite, else "all". The
+    Cell key ``"{act}|{room_type}|{bucket}"``; for Monster and Elite the bucket is
+    lo/hi by ``deck_burst < split`` (``split`` = the median deck_burst over all
+    Monster pre states), for RestSite lo/hi by hp_frac < 0.5, else "all". The
     pooled fallbacks ``"*|{room_type}|{bucket}"`` (all acts) and
     ``"*|{room_type}|all"`` (all buckets) are built here too. Returns
     {"split", "min_n", "cells"}; RouteModel.cell walks the fallback chain.
     """
     transitions = [t for g in games for t in g.get("transitions", [])
                    if t["room_type"] != "Boss"]
-    monster_strengths = [t["pre"].get("deck_strength", 0.0) for t in transitions
-                         if t["room_type"] == "Monster"]
-    # No Monster fights at all -> no basis for a split; the middle of [0, 1].
-    split = float(statistics.median(monster_strengths)) if monster_strengths else 0.5
+    monster_bursts = [t["pre"].get("deck_burst", 0.0) for t in transitions
+                      if t["room_type"] == "Monster"]
+    # No Monster fights at all -> no basis for a split; a typical Act 1 deck_burst.
+    split = float(statistics.median(monster_bursts)) if monster_bursts else 0.5
 
     grouped: dict[str, list[dict]] = {}
     for t in transitions:
@@ -256,8 +257,8 @@ class RouteModel:
     def step(self, act: int, room_type: str, features: dict) -> dict:
         """Expected features after SURVIVING the room: the cell's mean deltas
         added, then hp clamped to [1, max_hp], max_hp >= 1, gold >= 0,
-        deck_strength to [0, 1], counts >= 0 and n_potions <= 3; floor and gf
-        advance by one, act is unchanged."""
+        deck_burst >= 0, deck_top8 to [0, 10], counts >= 0 and n_potions <= 3;
+        floor and gf advance by one, act is unchanged."""
         delta = self.cell(act, room_type, features)["mean_delta"]
         s = dict(features)
         for key in DELTA_KEYS:
@@ -265,7 +266,8 @@ class RouteModel:
         s["max_hp"] = max(1.0, s["max_hp"])
         s["hp"] = min(max(s["hp"], 1.0), s["max_hp"])
         s["gold"] = max(0.0, s["gold"])
-        s["deck_strength"] = min(max(s["deck_strength"], 0.0), 1.0)
+        s["deck_burst"] = max(0.0, s["deck_burst"])
+        s["deck_top8"] = min(max(s["deck_top8"], 0.0), MAX_CARD_SCORE)
         for key in ("deck_size", "n_upgraded", "n_relics"):
             s[key] = max(0.0, s[key])
         s["n_potions"] = min(max(s["n_potions"], 0.0), float(MAX_POTIONS))

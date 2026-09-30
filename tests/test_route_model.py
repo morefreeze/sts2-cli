@@ -13,8 +13,9 @@ from agent.route_model import (
     feature_vector, fit_transition_model, fit_value_model)
 
 
-def _feat(floor=1, act=1, hp=80, max_hp=80, gold=0, ds=0.5, deck_size=15, n_up=0, n_rel=1, n_pot=0):
-    return {"hp": hp, "max_hp": max_hp, "gold": gold, "deck_strength": ds,
+def _feat(floor=1, act=1, hp=80, max_hp=80, gold=0, burst=0.5, top8=6.0, deck_size=15, n_up=0,
+          n_rel=1, n_pot=0):
+    return {"hp": hp, "max_hp": max_hp, "gold": gold, "deck_burst": burst, "deck_top8": top8,
             "deck_size": deck_size, "n_upgraded": n_up, "n_relics": n_rel, "n_potions": n_pot,
             "act": act, "floor": floor, "gf": (act - 1) * 17 + floor}
 
@@ -78,9 +79,10 @@ def test_fit_value_model_chooses_full_when_the_deck_matters():
     rng = np.random.default_rng(0)
     games = _deck_games(
         40, rng,
-        # y = final_gf - floor = 30 - floor + 0.3 * deck_strength * 100, small noise
-        final_of=lambda b, r: round(30 + 0.3 * b["deck_strength"] * 100 + r.normal(0, 0.3), 3),
-        per_game=lambda r: _feat(ds=float(r.uniform(0, 1)), gold=int(r.integers(0, 300)),
+        # y = final_gf - floor = 30 - floor + 0.3 * deck_burst * 100, small noise
+        final_of=lambda b, r: round(30 + 0.3 * b["deck_burst"] * 100 + r.normal(0, 0.3), 3),
+        per_game=lambda r: _feat(burst=float(r.uniform(0.2, 0.9)), top8=float(r.uniform(4, 9)),
+                                 gold=int(r.integers(0, 300)),
                                  n_rel=int(r.integers(0, 6))))
     fit = fit_value_model(games)
     assert fit["chosen"] == "full"
@@ -95,10 +97,10 @@ def test_fit_value_model_falls_back_to_hp_only_when_extra_features_are_noise():
     games = _deck_games(
         25, rng,
         final_of=lambda b, r: round(30 + 0.1 * b["hp"] + r.normal(0, 3.0), 3),
-        per_game=lambda r: _feat(hp=int(r.integers(20, 81)), ds=float(r.uniform(0, 1)),
-                                 gold=int(r.integers(0, 300)), n_rel=int(r.integers(0, 6)),
-                                 n_pot=int(r.integers(0, 4)), deck_size=int(r.integers(10, 30)),
-                                 n_up=int(r.integers(0, 8))))
+        per_game=lambda r: _feat(hp=int(r.integers(20, 81)), burst=float(r.uniform(0.2, 0.9)),
+                                 top8=float(r.uniform(4, 9)), gold=int(r.integers(0, 300)),
+                                 n_rel=int(r.integers(0, 6)), n_pot=int(r.integers(0, 4)),
+                                 deck_size=int(r.integers(10, 30)), n_up=int(r.integers(0, 8))))
     fit = fit_value_model(games)
     assert fit["chosen"] == "hp_only"
     assert fit["model"]["features"] == HP_ONLY_FEATURES
@@ -138,11 +140,11 @@ def test_save_load_round_trip_preserves_value_exactly(tmp_path):
     games = _deck_games(
         10, rng,
         final_of=lambda b, r: round(25 + b["hp"] * 0.1 + r.normal(0, 1), 3),
-        per_game=lambda r: _feat(hp=int(r.integers(20, 81)), ds=float(r.uniform(0, 1))))
+        per_game=lambda r: _feat(hp=int(r.integers(20, 81)), burst=float(r.uniform(0.2, 0.9)), top8=float(r.uniform(4, 9))))
     data = {"version": 1, "value": fit_value_model(games)["model"],
             "transitions": fit_transition_model(games), "meta": {"n_games": 10}, "validation": {}}
     model = RouteModel(data)
-    f = _feat(floor=7, hp=51, ds=0.37, gold=123)
+    f = _feat(floor=7, hp=51, burst=0.37, gold=123)
     before = model.value(f, "Defect")
     path = str(tmp_path / "sub" / "m.json")
     model.save(path)
@@ -162,24 +164,24 @@ def test_cell_uses_the_exact_act_cell_when_it_has_enough_samples():
     exact = _cell(n=25, hp=-7.0)
     pooled = _cell(n=90, hp=-3.0)
     m = _model({"2|Monster|hi": exact, "*|Monster|hi": pooled, "*|Monster|all": _cell(n=200)})
-    assert m.cell(2, "Monster", _feat(ds=0.9)) is exact
-    assert m.cell(3, "Monster", _feat(ds=0.9)) is pooled  # no act-3 cell -> pooled over acts
+    assert m.cell(2, "Monster", _feat(burst=0.9)) is exact
+    assert m.cell(3, "Monster", _feat(burst=0.9)) is pooled  # no act-3 cell -> pooled over acts
 
 
 def test_cell_falls_back_when_a_cell_is_below_min_n():
     thin = _cell(n=19, hp=-30.0)
     pooled = _cell(n=90, hp=-3.0)
     m = _model({"2|Elite|hi": thin, "*|Elite|hi": pooled})
-    assert m.cell(2, "Elite", _feat(ds=0.9)) is pooled
+    assert m.cell(2, "Elite", _feat(burst=0.9)) is pooled
 
 
 def test_cell_fallback_chain_ends_in_the_all_bucket_then_a_zero_cell():
     only_pooled_hi = _cell(n=50, hp=-15.0)
     m = _model({"*|Elite|hi": only_pooled_hi})
-    assert m.cell(2, "Elite", _feat(ds=0.9)) is only_pooled_hi
+    assert m.cell(2, "Elite", _feat(burst=0.9)) is only_pooled_hi
     all_bucket = _cell(n=50, hp=-9.0)
     m2 = _model({"*|Elite|all": all_bucket})
-    assert m2.cell(2, "Elite", _feat(ds=0.1)) is all_bucket  # lo bucket missing -> all
+    assert m2.cell(2, "Elite", _feat(burst=0.1)) is all_bucket  # lo bucket missing -> all
     unknown = m.cell(2, "Mystery", _feat())
     assert unknown["n"] == 0 and unknown["losses"] == [] and unknown["death_hp"] == []
     assert all(v == 0.0 for v in unknown["mean_delta"].values())
@@ -189,12 +191,12 @@ def test_cell_fallback_chain_ends_in_the_all_bucket_then_a_zero_cell():
     assert all(stepped[k] == _feat(floor=4, hp=33, gold=10)[k] for k in DELTA_KEYS)
 
 
-def test_cell_bucketing_uses_deck_strength_for_fights_and_hp_frac_for_rest():
+def test_cell_bucketing_uses_deck_burst_for_fights_and_hp_frac_for_rest():
     m = _model({"1|Monster|lo": _cell(n=30, hp=-9.0), "1|Monster|hi": _cell(n=30, hp=-3.0),
                 "1|RestSite|lo": _cell(n=30, hp=25.0), "1|RestSite|hi": _cell(n=30, hp=8.0),
                 "1|Shop|all": _cell(n=30, gold=-60.0)}, split=0.4)
-    assert m.cell(1, "Monster", _feat(ds=0.39))["mean_delta"]["hp"] == -9.0
-    assert m.cell(1, "Monster", _feat(ds=0.4))["mean_delta"]["hp"] == -3.0
+    assert m.cell(1, "Monster", _feat(burst=0.39))["mean_delta"]["hp"] == -9.0
+    assert m.cell(1, "Monster", _feat(burst=0.4))["mean_delta"]["hp"] == -3.0
     assert m.cell(1, "RestSite", _feat(hp=39, max_hp=80))["mean_delta"]["hp"] == 25.0
     assert m.cell(1, "RestSite", _feat(hp=40, max_hp=80))["mean_delta"]["hp"] == 8.0
     assert m.cell(1, "Shop", _feat())["mean_delta"]["gold"] == -60.0
@@ -207,35 +209,38 @@ def test_death_prob_reads_the_cell_samples_at_the_current_hp():
 
 
 def test_step_clamps_and_advances_the_floor():
-    delta = _cell(n=30, hp=100.0, max_hp=-500.0, gold=-999.0, deck_strength=5.0,
+    delta = _cell(n=30, hp=100.0, max_hp=-500.0, gold=-999.0, deck_burst=-5.0, deck_top8=50.0,
                   deck_size=-50.0, n_upgraded=-9.0, n_relics=-9.0, n_potions=10.0)
     m = _model({"*|Treasure|all": delta})
     s = m.step(2, "Treasure", _feat(floor=8, act=2, hp=30, max_hp=80, gold=40, n_pot=1))
     assert s["max_hp"] == 1.0 and s["hp"] == 1.0            # max_hp floored at 1, hp within [1, max_hp]
-    assert s["gold"] == 0.0 and s["deck_strength"] == 1.0
+    assert s["gold"] == 0.0 and s["deck_burst"] == 0.0 and s["deck_top8"] == 10.0
     assert s["deck_size"] == 0.0 and s["n_upgraded"] == 0.0 and s["n_relics"] == 0.0
     assert s["n_potions"] == 3.0
     assert (s["act"], s["floor"], s["gf"]) == (2, 9, 26)
 
 
 def test_step_caps_hp_at_max_hp_and_does_not_mutate_its_input():
-    m = _model({"*|RestSite|all": _cell(n=30, hp=40.0, n_potions=-2.0, deck_strength=-0.9)})
-    f = _feat(hp=70, max_hp=80, ds=0.5, n_pot=1)
+    m = _model({"*|RestSite|all": _cell(n=30, hp=40.0, n_potions=-2.0, deck_top8=-9.0,
+                                        deck_burst=2.5)})
+    f = _feat(hp=70, max_hp=80, burst=0.5, top8=6.0, n_pot=1)
     frozen = dict(f)
     s = m.step(1, "RestSite", f)
-    assert s["hp"] == 80.0 and s["deck_strength"] == 0.0 and s["n_potions"] == 0.0
+    assert s["hp"] == 80.0 and s["deck_top8"] == 0.0 and s["n_potions"] == 0.0
+    assert s["deck_burst"] == pytest.approx(3.0)  # burst is unbounded above: 0.5 + 2.5
     assert f == frozen
 
 
 # ------------------------------------------------------------ transition model
 
 def test_fit_transition_model_buckets_rest_by_hp_frac_and_monsters_by_the_monster_median():
-    ds_values = [0.1, 0.2, 0.3, 0.4, 0.9]  # median 0.3
-    monsters = [_trans("Monster", _feat(ds=d, hp=70), {"hp": 65}) for d in ds_values]
+    burst_values = [0.1, 0.2, 0.3, 0.4, 0.9]  # median 0.3
+    monsters = [_trans("Monster", _feat(burst=d, hp=70), {"hp": 65}) for d in burst_values]
     rests = ([_trans("RestSite", _feat(hp=24, max_hp=80), {"hp": 60}) for _ in range(2)]
              + [_trans("RestSite", _feat(hp=64, max_hp=80), {"hp": 80}) for _ in range(3)])
     # An Elite bucket uses the MONSTER median too: 0.35 is hi against 0.3.
-    elites = [_trans("Elite", _feat(ds=0.35), {"hp": 50}), _trans("Elite", _feat(ds=0.25), {"hp": 40})]
+    elites = [_trans("Elite", _feat(burst=0.35), {"hp": 50}),
+              _trans("Elite", _feat(burst=0.25), {"hp": 40})]
     tm = fit_transition_model([_game(9, [_feat()], monsters + rests + elites)], min_n=1)
     cells = tm["cells"]
     assert tm["split"] == pytest.approx(0.3) and tm["min_n"] == 1
@@ -247,20 +252,34 @@ def test_fit_transition_model_buckets_rest_by_hp_frac_and_monsters_by_the_monste
     assert cells["*|RestSite|all"]["n"] == 5 and cells["*|Monster|all"]["n"] == 5
 
 
+def test_monster_split_is_the_median_deck_burst_and_gives_both_buckets_samples():
+    bursts = [0.3, 0.3, 0.5, 0.5]  # median 0.4: strict < puts the two 0.3 fights in "lo"
+    monsters = [_trans("Monster", _feat(burst=b), {"hp": 75}) for b in bursts]
+    tm = fit_transition_model([_game(9, [_feat()], monsters)], min_n=1)
+    assert tm["split"] == pytest.approx(0.4)
+    assert tm["cells"]["1|Monster|lo"]["n"] == 2
+    assert tm["cells"]["1|Monster|hi"]["n"] == 2
+    assert tm["cells"]["*|Monster|all"]["n"] == 4
+
+
 def test_fit_transition_model_cell_contents_use_survivors_and_censored_deaths():
     pre = _feat(hp=60, gold=100, n_rel=1)
-    survived_a = _trans("Elite", pre, {"hp": 45, "n_relics": 2, "gold": 130})
-    survived_b = _trans("Elite", pre, {"hp": 70, "n_relics": 2, "gold": 130})  # healed: loss clamps at 0
+    survived_a = _trans("Elite", pre, {"hp": 45, "n_relics": 2, "gold": 130, "deck_burst": 0.7,
+                                       "deck_top8": 6.5})
+    survived_b = _trans("Elite", pre, {"hp": 70, "n_relics": 2, "gold": 130, "deck_burst": 0.9,
+                                       "deck_top8": 7.5})  # healed: loss clamps at 0
     died_a = _trans("Elite", _feat(hp=22), died=True)
     died_b = _trans("Elite", _feat(hp=9), died=True)
     tm = fit_transition_model([_game(9, [pre], [survived_a, survived_b, died_a, died_b])], min_n=1)
-    cell = tm["cells"]["1|Elite|hi"]  # no Monsters -> split 0.5; deck_strength 0.5 is not < 0.5
+    cell = tm["cells"]["1|Elite|hi"]  # no Monsters -> split 0.5; deck_burst 0.5 is not < 0.5
     assert cell["n"] == 4 and cell["n_died"] == 2
     assert cell["losses"] == [0, 15]
     assert cell["death_hp"] == [9, 22]
     md = cell["mean_delta"]
     assert md["hp"] == pytest.approx((-15 + 10) / 2)        # survivors only
     assert md["n_relics"] == pytest.approx(1.0) and md["gold"] == pytest.approx(30.0)
+    assert md["deck_burst"] == pytest.approx(0.3)   # (0.7 - 0.5, 0.9 - 0.5) -> 0.3
+    assert md["deck_top8"] == pytest.approx(1.0)    # (6.5 - 6.0, 7.5 - 6.0) -> 1.0
 
 
 def test_fit_transition_model_ignores_boss_transitions_and_pools_across_acts():
@@ -290,6 +309,13 @@ def test_fit_value_model_caps_folds_at_the_number_of_games():
 
 # --------------------------------------------------------------------- CLI
 
+@pytest.fixture
+def _fake_card_data(monkeypatch):
+    from agent import route_data
+    monkeypatch.setattr(route_data, "score_card", lambda card: 5.0)
+    monkeypatch.setattr(route_data, "deck_5turn_burst", lambda deck: 40.0)
+
+
 def _write_log(path, character, ascension, seed, hp_curve, final_floor):
     """A JSONL game log: one map_select per floor 1..len(hp_curve), then game_over."""
     def ms(floor, hp):
@@ -311,7 +337,7 @@ def _write_log(path, character, ascension, seed, hp_curve, final_floor):
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
 
-def test_cli_end_to_end(tmp_path, capsys):
+def test_cli_end_to_end(tmp_path, capsys, _fake_card_data):
     from agent import fit_route_model
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -335,9 +361,11 @@ def test_cli_end_to_end(tmp_path, capsys):
     report = capsys.readouterr().out
     assert "dropped 1" in report.lower() or "dropped: 1" in report.lower()
     assert "Defect" in report and "hp_only" in report
+    assert "d_burst" in report and "d_top8" in report
+    assert "deck_strength" not in report
 
 
-def test_cli_exits_with_an_error_when_no_games_match(tmp_path):
+def test_cli_exits_with_an_error_when_no_games_match(tmp_path, _fake_card_data):
     from agent import fit_route_model
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -348,7 +376,8 @@ def test_cli_exits_with_an_error_when_no_games_match(tmp_path):
     assert not (tmp_path / "m.json").exists()
 
 
-def test_cli_accepts_globs_and_repeated_logs_without_double_counting(tmp_path, capsys):
+def test_cli_accepts_globs_and_repeated_logs_without_double_counting(tmp_path, capsys,
+                                                                     _fake_card_data):
     from agent import fit_route_model
     logs = tmp_path / "logs"
     logs.mkdir()

@@ -12,7 +12,7 @@ from __future__ import annotations
 from agent.route_data import state_features
 
 MAX_PATHS = 20000
-CHECKPOINT_KEYS = ("hp", "max_hp", "deck_strength", "n_relics", "n_potions", "gold")
+CHECKPOINT_KEYS = ("hp", "max_hp", "deck_burst", "deck_top8", "n_relics", "n_potions", "gold")
 _TIE_EPS = 1e-9
 
 
@@ -91,7 +91,7 @@ def choose_node(map_json: dict, state: dict, character: str, model) -> dict | No
     plus a Boss choice, which has no rooms left to plan and is scored as the
     empty path (gf + V). Returns {"col", "row", "score", "p_alive", "paths" (paths
     scored over all choices), "checkpoints": {str(row): {hp, max_hp,
-    deck_strength, n_relics, n_potions, gold} after that row of the chosen path,
+    deck_burst, deck_top8, n_relics, n_potions, gold} after that row of the chosen path,
     for the rows every path crosses as the same room type}}; None when no choice
     can be scored."""
     features = state_features(state)

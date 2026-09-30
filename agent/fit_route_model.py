@@ -56,14 +56,15 @@ def print_report(games: list[dict], fit: dict, transitions: dict) -> None:
     print(f"Coefficients (floors per 1 SD), intercept {fit['model']['intercept']:.3f}:")
     for feature, coef in zip(fit["model"]["features"], fit["model"]["coef"]):
         print(f"  {feature:16s} {coef:+8.3f}")
-    print(f"Transition cells (Act 1-2; Monster/Elite split at deck_strength "
+    print(f"Transition cells (Act 1-2; Monster/Elite split at deck_burst "
           f"{transitions['split']:.3f}, min_n {transitions['min_n']}):")
-    print(f"  {'cell':22s} {'n':>5s} {'died':>5s} {'d_hp':>7s} {'d_relics':>9s} {'d_deck':>7s}")
+    print(f"  {'cell':22s} {'n':>5s} {'died':>5s} {'d_hp':>7s} {'d_relics':>9s} "
+          f"{'d_burst':>8s} {'d_top8':>7s}")
     for key, cell in transitions["cells"].items():
         if key.split("|")[0] in ("1", "2"):
             md = cell["mean_delta"]
             print(f"  {key:22s} {cell['n']:5d} {cell['n_died']:5d} {md['hp']:+7.1f} "
-                  f"{md['n_relics']:+9.2f} {md['deck_strength']:+7.3f}")
+                  f"{md['n_relics']:+9.2f} {md['deck_burst']:+8.3f} {md['deck_top8']:+7.3f}")
 
 
 def main(argv=None) -> int:

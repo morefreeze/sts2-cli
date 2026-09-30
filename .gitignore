@@ -33,6 +33,12 @@ data/
 # snapshot. Regenerate with: agent/build_advisor_ratings.py
 !data/advisor_card_ratings.json
 !data/advisor_card_tags.json
+# Fitted route models (Phase 3b) are small and committed. A file cannot be
+# re-included while its parent directory is excluded, so re-include agent/data/
+# first and ignore everything in it except the models.
+!agent/data/
+agent/data/*
+!agent/data/route_model_*.json
 checkpoints_*/
 decks.html
 boss_decks.html

@@ -121,11 +121,10 @@ def test_death_risk_dominates_a_higher_end_value():
     state = _state([(0, 1, "Elite"), (1, 1, "Monster")], hp=50)
     assert model.death_prob(1, "Elite", {"hp": 50, "max_hp": 80}) == pytest.approx(0.9)
     # survive-only value of the risky path is higher (25 vs 4.5) ...
-    features_after = model.step(1, "Elite", {"hp": 50, "max_hp": 80, "n_relics": 0, "act": 1,
-                                             "floor": 1, "gf": 1, "deck_strength": 0.5})
-    assert model.value(features_after, "Defect") > model.value(
-        model.step(1, "Monster", {"hp": 50, "max_hp": 80, "n_relics": 0, "act": 1,
-                                  "floor": 1, "gf": 1, "deck_strength": 0.5}), "Defect")
+    now = {"hp": 50, "max_hp": 80, "n_relics": 0, "act": 1, "floor": 1, "gf": 1,
+           "deck_burst": 0.5, "deck_top8": 6.0}
+    assert model.value(model.step(1, "Elite", now), "Defect") > model.value(
+        model.step(1, "Monster", now), "Defect")
     # ... but the planner routes around the death risk
     pick = choose_node(m, state, "Defect", model)
     assert (pick["col"], pick["row"]) == (1, 1) and pick["p_alive"] == 1.0
@@ -167,13 +166,15 @@ def test_choose_node_returns_checkpoints_for_the_fixed_rows_the_chosen_path_cros
               (0, 2): ("Treasure", [(0, 3)]), (1, 2): ("Treasure", [(0, 3)]),
               (0, 3): ("RestSite", [(3, 99)])})
     model = _model({"*|Monster|all": _cell(hp=-10, gold=5), "*|RestSite|all": _cell(hp=20),
-                    "*|Treasure|all": _cell(n_relics=1)})
+                    "*|Treasure|all": _cell(n_relics=1, deck_burst=0.1, deck_top8=0.5)})
     pick = choose_node(m, _state([(0, 1, "Monster"), (1, 1, "RestSite")]), "Defect", model)
     assert (pick["col"], pick["row"]) == (1, 1)  # rest first, both paths end resting
     assert set(pick["checkpoints"]) == {"2", "3"}  # row 1 mixes types: not a checkpoint row
     cp2, cp3 = pick["checkpoints"]["2"], pick["checkpoints"]["3"]
-    assert set(cp2) == {"hp", "max_hp", "deck_strength", "n_relics", "n_potions", "gold"}
+    assert set(cp2) == {"hp", "max_hp", "deck_burst", "deck_top8", "n_relics", "n_potions",
+                      "gold"}
     assert cp2["hp"] == pytest.approx(70.0) and cp2["n_relics"] == pytest.approx(1.0)
+    assert cp2["deck_burst"] == pytest.approx(0.1) and cp2["deck_top8"] == pytest.approx(0.5)
     assert cp3["hp"] == pytest.approx(80.0)  # 70 + 20, clamped to max_hp 80
     assert isinstance(pick["score"], float) and pick["p_alive"] == 1.0
 

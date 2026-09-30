@@ -1,16 +1,27 @@
 """Phase 3b Task 1: per-room transitions and state features from game logs.
 
 Hermetic: the logs are tiny synthetic JSONL rows in the shape python/game_log.py
-writes (run_meta line, then {"type": "action"|"state", "data": ...}).
+writes (run_meta line, then {"type": "action"|"state", "data": ...}), and the
+card-data functions state_features leans on are replaced by simple stand-ins
+(one test at the end runs the real ones).
 """
 import json
 
 import pytest
 
+from agent import route_data
 from agent.route_data import FEATURE_KEYS, extract_transitions, load_games, state_features
 
-CARD_A = {"id": "A", "type": "Attack", "upgraded": True}
-CARD_B = {"id": "B", "type": "Skill", "upgraded": False}
+CARD_A = {"id": "A", "type": "Attack", "upgraded": True, "score": 7.0}
+CARD_B = {"id": "B", "type": "Skill", "upgraded": False, "score": 3.0}
+
+
+@pytest.fixture(autouse=True)
+def _fake_card_data(monkeypatch):
+    """score_card = the card's own "score" (0 if none); deck_5turn_burst = 40 per attack."""
+    monkeypatch.setattr(route_data, "score_card", lambda card: card.get("score", 0.0))
+    monkeypatch.setattr(route_data, "deck_5turn_burst",
+                        lambda deck: 40.0 * sum(1 for c in deck if c.get("type") == "Attack"))
 
 
 def _player(hp, deck=None, relics=None, potions=None, max_hp=80, gold=99):
@@ -57,21 +68,47 @@ def test_state_features_counts_and_global_floor():
     assert f["n_potions"] == 1
     assert (f["act"], f["floor"], f["gf"]) == (2, 3, 20)
     assert f["hp"] == 55 and f["max_hp"] == 80 and f["gold"] == 99
-    assert 0.0 <= f["deck_strength"] <= 1.0
+    assert "deck_strength" not in f
     for key in FEATURE_KEYS:
         assert key in f
+
+
+def test_deck_burst_is_the_raw_burst_over_100_and_is_not_clipped():
+    attacks = lambda n: [{"id": f"K{i}", "type": "Attack"} for i in range(n)]
+    for n_attacks, expected in ((0, 0.0), (1, 0.4), (7, 2.8)):
+        f = state_features(_ms(1, 1, 50, [(0, 1, "Monster")], deck=attacks(n_attacks)))
+        assert f["deck_burst"] == pytest.approx(expected)
+    assert f["deck_burst"] > 1.0  # the old 0..1 strength would have clipped this
+
+
+def test_deck_top8_averages_the_eight_best_card_scores_of_a_ten_card_deck():
+    scores = [5, 1, 9, 3, 7, 10, 2, 8, 4, 6]
+    deck = [{"id": f"C{i}", "type": "Skill", "score": float(v)} for i, v in enumerate(scores)]
+    f = state_features(_ms(1, 1, 50, [(0, 1, "Monster")], deck=deck))
+    assert f["deck_top8"] == pytest.approx((10 + 9 + 8 + 7 + 6 + 5 + 4 + 3) / 8)
+    assert f["deck_size"] == 10
+
+
+def test_deck_top8_of_a_small_or_empty_deck_uses_every_card_or_zero():
+    three = [{"id": f"C{i}", "type": "Skill", "score": v} for i, v in enumerate((2.0, 4.0, 9.0))]
+    assert state_features(_ms(1, 1, 50, [(0, 1, "Monster")], deck=three))["deck_top8"] == \
+        pytest.approx(5.0)
+    empty = state_features(_ms(1, 1, 50, [(0, 1, "Monster")], deck=[]))
+    assert empty["deck_top8"] == 0.0 and empty["deck_burst"] == 0.0 and empty["deck_size"] == 0
 
 
 def test_state_features_defaults_for_a_bare_state():
     f = state_features({})
     assert (f["act"], f["floor"], f["gf"]) == (1, 0, 0)
     assert f["hp"] == 0 and f["deck_size"] == 0 and f["n_relics"] == 0 and f["n_potions"] == 0
+    assert f["deck_burst"] == 0.0 and f["deck_top8"] == 0.0
 
 
 def test_state_features_game_over_uses_deck_size_and_top_level_act_floor():
     f = state_features({"decision": "game_over", "act": 2, "floor": 4,
                         "player": {"hp": 0, "max_hp": 70, "deck_size": 13}})
     assert f["deck_size"] == 13 and f["hp"] == 0 and f["gf"] == 21
+    assert f["deck_burst"] == 0.0 and f["deck_top8"] == 0.0 and f["n_upgraded"] == 0
 
 
 def test_two_moves_then_death():
@@ -191,3 +228,24 @@ def test_load_games_skips_a_bad_file_and_keeps_good_ones(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "bad.jsonl" in out and "missing.jsonl" in out
 
+
+def test_state_features_with_the_real_card_scoring_on_a_starter_like_deck(monkeypatch):
+    card_scoring = pytest.importorskip("agent.card_scoring")
+    strike = {"id": "CARD.STRIKE_IRONCLAD", "name": "Strike", "cost": 1, "type": "Attack",
+              "upgraded": False, "stats": {"damage": 6}}
+    defend = {"id": "CARD.DEFEND_IRONCLAD", "name": "Defend", "cost": 1, "type": "Skill",
+              "upgraded": False, "stats": {"block": 5}}
+    bash = {"id": "CARD.BASH", "name": "Bash", "cost": 2, "type": "Attack",
+            "upgraded": False, "stats": {"damage": 8}}
+    deck = [strike] * 5 + [defend] * 4 + [bash]
+    try:
+        burst = card_scoring.deck_5turn_burst(deck)
+        top8 = sorted((card_scoring.score_card(c) for c in deck), reverse=True)[:8]
+    except (OSError, ValueError, KeyError) as exc:  # card data missing in this checkout
+        pytest.skip(f"card data unavailable: {exc!r}")
+    monkeypatch.setattr(route_data, "score_card", card_scoring.score_card)
+    monkeypatch.setattr(route_data, "deck_5turn_burst", card_scoring.deck_5turn_burst)
+    f = state_features(_ms(1, 1, 80, [(0, 1, "Monster")], deck=deck))
+    assert f["deck_burst"] == pytest.approx(burst / 100.0)
+    assert f["deck_top8"] == pytest.approx(sum(top8) / 8)
+    assert f["deck_burst"] > 0.0 and 0.0 < f["deck_top8"] <= 10.0 and f["deck_size"] == 10

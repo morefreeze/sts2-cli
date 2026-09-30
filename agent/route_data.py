@@ -18,10 +18,16 @@ from __future__ import annotations
 
 import json
 
-FEATURE_KEYS = ("hp", "max_hp", "gold", "deck_strength", "deck_size", "n_upgraded",
+# Imported directly (not through map_planner._deck_strength, which swallows an
+# import error and silently returns a constant): an environment without the
+# card data must fail loudly here, not fit a model on a constant feature.
+from agent.card_scoring import deck_5turn_burst, score_card
+
+FEATURE_KEYS = ("hp", "max_hp", "gold", "deck_burst", "deck_top8", "deck_size", "n_upgraded",
                 "n_relics", "n_potions")
 
 ACT_FLOORS = 17
+TOP_CARDS = 8
 
 
 def _num(value, default=0):
@@ -42,27 +48,39 @@ def state_features(state: dict) -> dict:
     """Numeric features of one decision state (map_select or game_over).
 
     FEATURE_KEYS plus ``act`` (default 1), ``floor`` (act-local, default 0) and
-    ``gf`` (global floor). deck_strength comes from map_planner._deck_strength.
-    A game_over reply has no ``deck`` / ``relics`` -- only ``deck_size`` -- so
-    its deck-derived features are deck_size and zeros: it only ever serves as
-    the ``post`` of a death, whose deltas the model never uses.
+    ``gf`` (global floor). Deck quality is two UNCLIPPED numbers -- the clipped
+    0..1 strength of map_planner is exactly 0 for most Act 1-2 states and carries
+    no signal:
+
+    * ``deck_burst`` = card_scoring.deck_5turn_burst(deck) / 100;
+    * ``deck_top8`` = mean of the top min(8, len(deck)) card_scoring.score_card
+      values (0.0 for an empty deck).
+
+    A game_over reply has no ``deck`` / ``relics`` -- only ``deck_size`` -- so its
+    deck-derived features are deck_size and zeros: it only ever serves as the
+    ``post`` of a death, whose deltas the model never uses.
     """
     player = state.get("player") if isinstance(state.get("player"), dict) else {}
     act, floor = _act_floor(state)
     deck = player.get("deck")
     if isinstance(deck, list):
-        from agent.map_planner import _deck_strength
-        strength, deck_size = _deck_strength(deck)
-        n_upgraded = sum(1 for c in deck if isinstance(c, dict) and c.get("upgraded"))
+        cards = [c for c in deck if isinstance(c, dict)]
+        burst = deck_5turn_burst(cards) / 100.0
+        top = sorted((score_card(c) for c in cards), reverse=True)[:TOP_CARDS]
+        top8 = sum(top) / len(top) if top else 0.0
+        deck_size = len(cards)
+        n_upgraded = sum(1 for c in cards if c.get("upgraded"))
     else:
-        strength, deck_size, n_upgraded = 0.0, int(_num(player.get("deck_size"), 0)), 0
+        burst, top8, n_upgraded = 0.0, 0.0, 0
+        deck_size = int(_num(player.get("deck_size"), 0))
     relics = player.get("relics")
     potions = player.get("potions")
     return {
         "hp": _num(player.get("hp")),
         "max_hp": _num(player.get("max_hp")),
         "gold": _num(player.get("gold")),
-        "deck_strength": float(strength),
+        "deck_burst": float(burst),
+        "deck_top8": float(top8),
         "deck_size": int(deck_size),
         "n_upgraded": int(n_upgraded),
         "n_relics": len(relics) if isinstance(relics, list) else 0,

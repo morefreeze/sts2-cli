@@ -23,7 +23,7 @@
 - Global floor everywhere = `(act - 1) * 17 + floor` (`python/play_full_run.py` `global_floor`).
 - `get_map` (`{"cmd": "get_map"}`) is a read-only query: reply `{"type": "map", "rows": [[node]], "boss": {"col", "row", "type": "Boss", "id", "name"}, "current_coord": ..., "context": ...}`, node = `{"col", "row", "type", "children": [{"col","row"} or [col,row]], "visited", "current"}`. Calling it at a `map_select` decision does not change the pending decision (`agent/combat_env.py` does the same).
 - Measured map facts: Act 1 rows 1..15 then boss row 16; Act 2 rows 0..14 then boss 15 (row 0 = act-opening event). Fixed rows (every node one type): A1 row 1 Monster, 9 Treasure, 15 RestSite; A2 row 1 Monster, 8 Treasure, 14 RestSite. An Act 1 map has 32–374 start→boss paths — enumerate them all.
-- Deck strength: `agent/map_planner.py::_deck_strength(deck) -> (strength 0..1, size)` (wraps `card_scoring.deck_5turn_burst`). Reuse it; do not reimplement.
+- Deck quality: two UNCLIPPED features from `agent.card_scoring`, imported directly (not via `map_planner._deck_strength`, which clips to 0..1 -- exactly 0 for 61-78% of Act 1/2 states, so it carries no signal -- and swallows import errors, silently returning a constant): `deck_burst = deck_5turn_burst(deck) / 100` (Act 1 early p10/p50/p90 = 0.24/0.37/0.63) and `deck_top8` = mean of the top `min(8, len(deck))` `score_card(card)` values (Act 1 early 5.50/6.75/7.75, Act 2 late 8.12/9.00/9.94; 0.0 for an empty deck).
 - Rules: `.venv/bin/python` always; scratch in `/tmp/sts2-cli/`; long runs under `~/.sts2-train/` wrapped in `scripts/run_caffeinated.sh`; commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; `git add` only the task's files (never `-A`).
 
 ## File structure
@@ -43,14 +43,18 @@
 **Interfaces:**
 
 ```python
-FEATURE_KEYS = ("hp", "max_hp", "gold", "deck_strength", "deck_size", "n_upgraded",
+FEATURE_KEYS = ("hp", "max_hp", "gold", "deck_burst", "deck_top8", "deck_size", "n_upgraded",
                 "n_relics", "n_potions")
 
 def state_features(state: dict) -> dict:
     """Numeric features of one decision state (map_select or game_over).
     Returns FEATURE_KEYS plus "act" (int, default 1), "floor" (act-local int, default 0),
-    "gf" (global floor = (act-1)*17 + floor). deck_strength via map_planner._deck_strength;
-    n_upgraded = cards with upgraded true; n_potions counts non-null potion entries."""
+    "gf" (global floor = (act-1)*17 + floor). deck_burst / deck_top8 as in Background, imported
+    at module level (`from agent.card_scoring import deck_5turn_burst, score_card`) so a
+    missing-data environment fails loudly and tests can monkeypatch them on `agent.route_data`;
+    n_upgraded = cards with upgraded true; n_potions counts non-null potion entries.
+    A game_over reply has no deck/relics (only deck_size): its deck_burst/deck_top8/n_upgraded/
+    n_relics are 0."""
 
 def extract_transitions(rows: list[dict]) -> dict | None:
     """One game log (already json-parsed lines) -> {
@@ -76,7 +80,8 @@ def load_games(paths: list[str]) -> list[dict]:
 - `final_gf` = global floor of the `game_over` state; `won` = its `victory`.
 
 **Tests (`tests/test_route_data.py`)** — build tiny synthetic logs in the test (helper `_ms(act, floor, hp, choices, deck=..., relics=..., potions=...)`, `_act(col,row)`, `_over(act, floor, victory)`):
-1. `state_features` on a state with deck `[{"id":"A","type":"Attack","upgraded":True}, {"id":"B","type":"Skill","upgraded":False}]`, 2 relics, potions `[{"id":"P"}, None]` → deck_size 2, n_upgraded 1, n_relics 2, n_potions 1, gf for act 2 floor 3 == 20.
+1. `state_features` on a state with deck `[{"id":"A","type":"Attack","upgraded":True}, {"id":"B","type":"Skill","upgraded":False}]`, 2 relics, potions `[{"id":"P"}, None]` → deck_size 2, n_upgraded 1, n_relics 2, n_potions 1, gf for act 2 floor 3 == 20. (`score_card` / `deck_5turn_burst` are monkeypatched on `agent.route_data` with simple lambdas so the tests do not depend on card data.)
+1b. `deck_burst` is the raw burst / 100 and is NOT clipped (a burst of 280 gives 2.8); `deck_top8` of a 10-card deck averages its 8 highest `score_card` values; of a 3-card deck, all three; of an empty deck 0.0. One test runs the real `card_scoring` functions on a starter-like Ironclad deck and skips if the card data is unavailable.
 2. Two moves then death: ms(A1F1, hp 80) → select (1,1) Monster → ms(A1F2, hp 70) → select (1,2) Elite → game_over(A1F2, victory false). Transitions: [Monster pre.hp 80 post.hp 70 died False], [Elite pre.hp 70 died True post.hp 0]; final_gf 2; won False; 2 snapshots with choice types Monster, Elite.
 3. Act crossing: ms(A1F16) select Boss → event_choice decision (A2) → ms(A2F1) → transition room_type "Boss", post act 2.
 4. Log without game_over → `extract_transitions` returns None; `load_games` skips it.
@@ -92,8 +97,8 @@ Commit: `feat(route): extract per-room transitions and state features from game 
 **Value model.** Samples = every snapshot of every game in `load_games` output (only games with final_gf). Target `y = final_gf - features["gf"]`. Two feature sets (constants in the module):
 
 ```python
-FULL_FEATURES = ["hp", "max_hp", "hp_frac", "gold", "deck_strength", "deck_size", "n_upgraded",
-                 "n_relics", "n_potions", "floor", "act2", "act3",
+FULL_FEATURES = ["hp", "max_hp", "hp_frac", "gold", "deck_burst", "deck_top8", "deck_size",
+                 "n_upgraded", "n_relics", "n_potions", "floor", "act2", "act3",
                  "char_Ironclad", "char_Silent", "char_Defect", "char_Regent", "char_Necrobinder"]
 HP_ONLY_FEATURES = ["hp", "max_hp", "hp_frac", "floor", "act2", "act3",
                     "char_Ironclad", "char_Silent", "char_Defect", "char_Regent", "char_Necrobinder"]
@@ -117,8 +122,8 @@ def fit_value_model(games: list[dict], alpha: float = 1.0, folds: int = 5, seed:
 
 **Transition model.** From all transitions whose `room_type` is not Boss:
 
-- Cell key `f"{act}|{room_type}|{bucket}"`. `bucket`: for Monster and Elite, `"lo"`/`"hi"` by `pre.deck_strength < split` where `split` = median `deck_strength` over all Monster pre states; for RestSite, `"lo"`/`"hi"` by `pre hp_frac < 0.5`; otherwise `"all"`.
-- Per cell store: `n`, `n_died`; `mean_delta` over SURVIVING samples for each of `hp, max_hp, gold, deck_strength, deck_size, n_upgraded, n_relics, n_potions` (0.0 if no survivors); `losses` = sorted list of `max(0, pre.hp - post.hp)` for survivors; `death_hp` = sorted list of `pre.hp` for deaths.
+- Cell key `f"{act}|{room_type}|{bucket}"`. `bucket`: for Monster and Elite, `"lo"`/`"hi"` by `pre.deck_burst < split` (strict `<` for "lo") where `split` = median `deck_burst` over all Monster pre states (0.5 if there are none); for RestSite, `"lo"`/`"hi"` by `pre hp_frac < 0.5`; otherwise `"all"`.
+- Per cell store: `n`, `n_died`; `mean_delta` over SURVIVING samples for each of `hp, max_hp, gold, deck_burst, deck_top8, deck_size, n_upgraded, n_relics, n_potions` (0.0 if no survivors); `losses` = sorted list of `max(0, pre.hp - post.hp)` for survivors; `death_hp` = sorted list of `pre.hp` for deaths.
 - Fallback when a cell has `n < min_n` (default 20): `f"*|{room_type}|{bucket}"` (pooled over acts) → `f"*|{room_type}|all"` → a zero cell (no delta, no death risk). Build the pooled cells at fit time.
 
 ```python
@@ -144,17 +149,18 @@ class RouteModel:
     def death_prob(self, act: int, room_type: str, features: dict) -> float
     def step(self, act: int, room_type: str, features: dict) -> dict:
         """Expected features after SURVIVING the room: add the cell's mean_delta; clamp hp to
-        [1, max_hp], max_hp >= 1, gold >= 0, deck_strength to [0, 1], counts >= 0, n_potions <= 3;
+        [1, max_hp], max_hp >= 1, gold >= 0, deck_burst >= 0, deck_top8 to [0, 10], counts >= 0,
+        n_potions <= 3;
         floor += 1, gf += 1; act unchanged."""
 ```
 
 **Tests (`tests/test_route_model.py`)** — synthetic games built with Task 1's shapes (write a helper that emits `load_games`-style dicts directly):
-1. `death_prob_from_samples([0, 5, 10], [], 6)` == 1/3; `([0, 5], [8], 6)` == 2/3 (the death at 8 counts); `([0, 5], [3], 6)` == 0.0 (death at 3 uninformative for hp 6, denominator 2, numerator 0); `hp=0` → 1.0; all empty → 0.0.
-2. `fit_value_model` on synthetic data where `y = 30 - floor + 0.3*deck_strength*100` (deck matters, noise small, 40 games): chosen == "full" and its mean CV MAE < hp_only's. On data where y depends only on hp and floor: chosen == "hp_only" (full does not win on a majority of folds or ties).
+1. `death_prob_from_samples([0, 5, 10], [], 6)` == 1/3; `([0, 5], [8], 6)` == 1/3 (the death at 8 counts: (0 losses >= 6 + 1 death) / (2 losses + 1 death)); `([0, 5], [3], 6)` == 0.0 (death at 3 uninformative for hp 6, denominator 2, numerator 0); `hp=0` → 1.0; all empty → 0.0.
+2. `fit_value_model` on synthetic data where `y = 30 - floor + 0.3*deck_burst*100` (deck matters, noise small, 40 games): chosen == "full" and its mean CV MAE < hp_only's. On data where y depends only on hp and floor: chosen == "hp_only" (full does not win on a majority of folds or ties).
 3. Round-trip: `RouteModel(data).save(p)`; `RouteModel.load(p).value(f, "Defect")` equals the pre-save value to 1e-9.
 4. Cell fallback: a model with only `*|Elite|hi` present returns that cell for `(2, "Elite", hi-features)`; unknown room type returns the zero cell (death_prob 0, step changes only floor/gf).
-5. `step` clamps: hp + delta above max_hp → max_hp; deck_strength stays in [0,1]; n_potions capped at 3.
-6. `fit_transition_model` puts RestSite samples with pre hp_frac 0.3 in `|lo` and 0.8 in `|hi`; Monster split uses the Monster median.
+5. `step` clamps: hp + delta above max_hp → max_hp; deck_burst never negative (but unbounded above); deck_top8 stays in [0,10]; n_potions capped at 3.
+6. `fit_transition_model` puts RestSite samples with pre hp_frac 0.3 in `|lo` and 0.8 in `|hi`; Monster split uses the Monster median: Monster pre `deck_burst` values `[0.3, 0.3, 0.5, 0.5]` give split 0.4 and 2 samples in each of `|lo` and `|hi`. `mean_delta` covers `deck_burst` and `deck_top8`.
 
 Commit: `feat(route): value model (ridge, grouped CV vs HP-only) and empirical transition model`.
 
@@ -187,9 +193,12 @@ def score_path(path: list[dict], features: dict, character: str, model: "RouteMo
 def choose_node(map_json: dict, state: dict, character: str, model) -> dict:
     """Among state["choices"] (only those present as nodes in map_json["rows"]), return
     {"col", "row", "score", "p_alive", "paths": n_paths_scored,
-     "checkpoints": {str(row): {"hp", "max_hp", "deck_strength", "n_relics", "n_potions", "gold"}}}
+     "checkpoints": {str(row): {"hp", "max_hp", "deck_burst", "deck_top8", "n_relics", "n_potions", "gold"}}}
     for the choice whose best path has the highest score. Ties: lower col, then lower row.
-    A choice with type "Boss" (or no enumerable path) is scored as the empty path (score = gf + V)."""
+    Candidates: the choices that are nodes of map_json["rows"], plus any choice of type "Boss"
+    (the boss is not in rows); a Boss choice is scored as the empty path (score = gf + V, paths = 1).
+    Other choices absent from rows are skipped; returns None when no choice can be scored.
+    "paths" counts the paths scored over all candidates."""
 ```
 
 **Tests (`tests/test_route_planner.py`)** — hand-built maps and a hand-built `RouteModel` (construct its data dict directly: value model with features `["hp"]`, coef chosen so V = hp/10; transition cells chosen per test):
@@ -199,7 +208,8 @@ def choose_node(map_json: dict, state: dict, character: str, model) -> dict:
 4. Holistic trade-off: Elite (Δhp −15, Δn_relics +1) vs Monster (Δhp −5); value model with coef on n_relics = 3.0 and hp = 0.1 → Elite path wins; with coef on n_relics = 0.5 → Monster wins.
 5. Death risk dominates: a path through a cell whose death_prob is 0.9 at the current hp loses to a safe path even if its end value is higher.
 6. Tie → lower col.
-7. `choose_node` returns checkpoints keyed by the fixed rows the chosen path crosses.
+7. `choose_node` returns checkpoints keyed by the fixed rows the chosen path crosses (each with hp, max_hp, deck_burst, deck_top8, n_relics, n_potions, gold).
+8. A Boss choice is scored as the empty path (score = gf + V, `paths` == 1, no checkpoints); choices missing from `rows` are ignored; no scoreable choice → `None`.
 
 Commit: `feat(route): path enumeration and expected-value route choice`.
 
@@ -213,8 +223,8 @@ Commit: `feat(route): path enumeration and expected-value route choice`.
 ```
 
 - Collect `*.jsonl` under each `--logs` (dir → all jsonl inside; else glob). Keep games whose run_meta ascension equals `--ascension` (drop others, print the count dropped).
-- Fit value + transitions; save `RouteModel`; `meta` = {"n_games", "n_transitions", "characters": {name: n}, "ascension", "sources": [...], "fitted_at": iso date}; `validation` = the fit's `cv` + chosen.
-- Print a report: games per character; CV MAE mean ± se for full and hp_only and the chosen set; the chosen coefficients as a table (feature, coef in target units per 1 SD); cell table (key, n, n_died, mean Δhp, mean Δrelics, mean Δdeck_strength) for Act 1 and Act 2 cells.
+- Fit value + transitions; save `RouteModel`; `meta` = {"n_games", "n_transitions" (all transitions of the kept games, Boss included), "characters": {name: n}, "ascension", "sources": [...] (the `--logs` arguments as given), "fitted_at": iso date}; `validation` = the fit's `cv` + chosen.
+- Print a report: games per character; CV MAE mean ± se for full and hp_only and the chosen set; the chosen coefficients as a table (feature, coef in target units per 1 SD); cell table (key, n, n_died, mean Δhp, mean Δrelics, mean Δdeck_burst, mean Δdeck_top8) for Act 1 and Act 2 cells.
 - Test (`tests/test_route_model.py::test_cli_end_to_end`): write 3 synthetic game logs (JSONL with run_meta ascension 1) and 1 with ascension 0 into tmp_path; run `main([...])`; the output JSON loads with `RouteModel.load`, `meta.n_games == 3`.
 
 Commit: `feat(route): fit_route_model CLI with validation report`.
@@ -266,9 +276,9 @@ AB=$(cat ~/.sts2-train/last_phase3a_ab_dir.txt)
     --out agent/data/route_model_a1.json | tee "$AB/route_model_fit_report.txt"
 ```
 
-Record in this file under Task 6: games per character, CV MAE full vs hp_only, the chosen set, the coefficient table, and the Act 1 cell table. **Sanity gates** (stop and report to the controller if any fails): value model predicts non-negative remaining floors on every training snapshot; Elite Act 1 cells have mean Δn_relics > 0.5; RestSite `lo` cells have mean Δhp > 0; Monster cells have mean Δhp < 0.
+Record in this file under Task 6: games per character, CV MAE full vs hp_only, the chosen set, the coefficient table, and the Act 1 cell table. **Sanity gates** (stop and report to the controller if any fails): value model predicts non-negative remaining floors on every training snapshot; Elite Act 1 cells have mean Δn_relics > 0.5; RestSite `lo` cells have mean Δhp > 0; Monster cells have mean Δhp < 0; both Monster `lo` and `hi` cells in Act 1 have n >= 20 (the `deck_burst` split must leave samples on both sides -- the clipped 0..1 strength it replaced put everything in `hi`).
 
-Commit `agent/data/route_model_a1.json` + this file: `feat(route): route model fitted on Phase 3a a1 greedy games`.
+Commit `agent/data/route_model_a1.json` + this file: `feat(route): route model fitted on Phase 3a a1 greedy games`. (`.gitignore` re-includes `agent/data/route_model_*.json`, so no `git add -f` is needed; verify with `git check-ignore agent/data/route_model_a1.json` exiting 1.)
 
 ### Task 7: smoke + regression (value arm)
 
@@ -276,4 +286,4 @@ Smoke: 2 games × 5 characters, `STS2_OOC_POLICY=greedy STS2_ROUTE_POLICY=value 
 
 ### Task 8: paired A/B and verdict
 
-Arms: `random` vs `value`, both `STS2_OOC_POLICY=greedy`, `--ascension 1 --seed-prefix p3b_`, 40 seeds × 5 characters, 5 lanes × `STS2_SOLVER_THREADS=3`, `--keep-game-logs "$AB/games_${arm}"`, results `$AB/${char}_${arm}.jsonl` (same launcher shape as Phase 3a Task 7). Report per character: paired global-floor diff, t, p, A1/A2 boss pass rates, wins, route fallbacks. Also a **checkpoint drift** table from the value arm's `[route]` lines: predicted vs actual hp / relics / deck_strength at the Treasure and RestSite rows (mean error, mean absolute error). Verdict: ship `value` as the default if the mean paired diff across characters is > 0 and no character is significantly worse (p < 0.05); otherwise keep `random` and report. Update `CLAUDE.md` Protocol notes with `STS2_ROUTE_POLICY` / `STS2_ROUTE_MODEL` and the verdict.
+Arms: `random` vs `value`, both `STS2_OOC_POLICY=greedy`, `--ascension 1 --seed-prefix p3b_`, 40 seeds × 5 characters, 5 lanes × `STS2_SOLVER_THREADS=3`, `--keep-game-logs "$AB/games_${arm}"`, results `$AB/${char}_${arm}.jsonl` (same launcher shape as Phase 3a Task 7). Report per character: paired global-floor diff, t, p, A1/A2 boss pass rates, wins, route fallbacks. Also a **checkpoint drift** table from the value arm's `[route]` lines: predicted vs actual hp / relics / deck_burst / deck_top8 at the Treasure and RestSite rows (mean error, mean absolute error). Verdict: ship `value` as the default if the mean paired diff across characters is > 0 and no character is significantly worse (p < 0.05); otherwise keep `random` and report. Update `CLAUDE.md` Protocol notes with `STS2_ROUTE_POLICY` / `STS2_ROUTE_MODEL` and the verdict.
