@@ -31,7 +31,7 @@ CardDynamicVarWarmup call sites below). The 13 files above (beyond the
 original CombatRootSnapshot.cs) were vendored unmodified to supply them, each
 confirmed clean of Godot/RitsuLib coupling before vendoring.
 
-Four deliberate exceptions to "verbatim file copy" in this directory:
+Five deliberate exceptions to "verbatim file copy" in this directory:
 
 - `SolverSettingsEnums.cs` hand-extracts only the `SolverPotionPolicy` and
   `BossHpStrategy` enum declarations out of upstream `Runtime/SolverSettings.cs`.
@@ -82,6 +82,30 @@ Four deliberate exceptions to "verbatim file copy" in this directory:
   correct if this ever changes. See the comment at the top of the file for
   the full reasoning.
 
+- `RitsuLibHarmonyIlShim.cs` is **hand-written, not vendored from any single
+  upstream file** (2026-09-30, agent/bug.md BUG-048). It stands in for the small
+  used surface of RitsuLib's `STS2RitsuLib.Utils.HarmonyIl` -- the extension
+  `MethodInfo.GetOriginalIl()`, `HarmonyIlMethodBody.Instructions`, and
+  `HarmonyIl.{TryGetCalledMethod,TryGetLocalLoadIndex,LoadsInt32}` -- so that
+  `Engine/InCombat/Mirrors/Cards/OnPlay/CardOnPlayInferrer.cs` can be vendored
+  **verbatim** again (its `using STS2RitsuLib.Utils.HarmonyIl;` compiles
+  unchanged because the shim declares exactly that namespace). RitsuLib is a Steam
+  Workshop mod library this headless build does not have. The port (09311aa) had
+  instead stubbed the inferrer's `Infer`/`InferStrict` to `=> null`, which silently
+  removed the generic Attack/Block/Draw simulation of every card without a
+  hand-written mirror (~486 card classes; BUG-048). The shim reads the ORIGINAL
+  (unpatched) IL with `HarmonyLib.PatchProcessor.GetOriginalInstructions` -- our
+  build applies Harmony patches to some game methods -- and, because card `OnPlay`
+  overrides are `async`, reads the compiler-generated state machine's `MoveNext`
+  (found through `[AsyncStateMachine]`), which is the IL the inferrer's heuristics
+  were written against (it ignores `stfld` to the state-machine type, skips branches
+  preceded by `get_IsCompleted`, and reads "local 0 near the start of MoveNext" as
+  the async state switch). `TryGetCalledMethod` reports only `call`/`callvirt` with
+  a `MethodInfo` operand (constructor calls carry a `ConstructorInfo`). The shim
+  contains no algorithm logic: it only decodes `CodeInstruction`s; every decision
+  about what a card does stays in the verbatim inferrer. If upstream's inferrer
+  starts using more of RitsuLib, extend the shim by hand.
+
 NOT vendored: Runtime/ (remainder, including SolverSettings.cs and
 SolverController.cs as wholes, and Entry.cs), UI/, Api/, Diagnostics/,
 Replay/, Testing/ — these are the live-mod / RitsuLib / overlay glue this
@@ -90,11 +114,11 @@ docs/superpowers/specs/2026-09-17-combatsolver-port-design.md.
 
 Do not hand-edit ported files' algorithm logic. If upstream fixes a bug we
 need, re-vendor the affected file(s) from a fresh clone instead of patching
-by hand, so we don't silently diverge from upstream. The four exceptions
+by hand, so we don't silently diverge from upstream. The five exceptions
 above (two hand-extracted enum files, one RitsuLib-touchpoint file with its
-mod-patcher interface stripped, and one hand-written logging shim) are the
-only deliberate departures from "verbatim file copy" in this directory,
-apart from the local patches listed below.
+mod-patcher interface stripped, and two hand-written shims -- logging and the
+HarmonyIl IL reader) are the only deliberate departures from "verbatim file
+copy" in this directory, apart from the local patches listed below.
 
 ## Local patches to vendored algorithm files
 
@@ -135,9 +159,15 @@ and must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
   `case Scourge:` that calls `simulator.Draw(card.Owner, card.DynamicVars.Cards.BaseValue)`.
   Scourge ("Apply {Doom} Doom. Draw {Cards} cards.") was registered only as
   `Target<DoomPower>` in `PowerEffects`, and in this headless build nothing else
-  simulates its draw (the upstream IL-based OnPlay inferrer is stubbed out, see
-  `CardOnPlayInferrer.cs`), so the predicted hand never contained the drawn cards and
+  simulates its draw (at the time the upstream IL-based OnPlay inferrer was stubbed
+  out, see BUG-048), so the predicted hand never contained the drawn cards and
   later planned plays were refused by the live engine (agent/bug.md BUG-042). The real
   `Scourge.OnPlay` is `TriggerAnim; PowerCmd.Apply<DoomPower>(target, Doom.BaseValue);
   CardPileCmd.Draw(Cards.BaseValue)`; the `switch` runs after the `PowerEffects` loop,
   so the simulated order (Doom, then draw) matches. No other card is touched.
+  **NOTE (2026-09-30, BUG-048): that rationale no longer holds.** The inferrer is
+  restored (`CardOnPlayInferrer.cs` verbatim + `RitsuLibHarmonyIlShim.cs`), and it
+  infers Scourge's `CardPileCmd.Draw` from the original `OnPlay` IL, so with both in
+  place Scourge's draw is simulated twice. Drop this patch once a build + probe
+  confirms the inferred draw (the patch stays until then, only because removing it
+  was not requested).
