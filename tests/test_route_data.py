@@ -123,6 +123,9 @@ def test_two_moves_then_death():
     assert game["character"] == "Defect" and game["ascension"] == 1 and game["seed"] == "s1"
     assert game["won"] is False
     assert game["final_gf"] == 3
+    # the death happened in the room entered from the floor-2 map_select: game_over reports
+    # floor 3 = that map_select's floor + 1
+    assert game["final_gf"] == game["transitions"][-1]["pre"]["gf"] + 1
     first, second = game["transitions"]
     assert (first["room_type"], first["pre"]["hp"], first["post"]["hp"], first["died"]) == \
         ("Monster", 80, 70, False)
@@ -131,6 +134,15 @@ def test_two_moves_then_death():
     assert first["act"] == 1
     assert [s["choice_type"] for s in game["snapshots"]] == ["Monster", "Elite"]
     assert [s["features"]["hp"] for s in game["snapshots"]] == [80, 70]
+
+
+def test_experiment_tag_and_map_state_are_reported_for_the_value_route_filter():
+    plain = extract_transitions([dict(META, experiment="ooc=greedy"), _state(_over(1, 1, False))])
+    assert plain["experiment"] == "ooc=greedy" and plain["has_map_state"] is False
+    asked = extract_transitions([META, _state(_ms(1, 1, 80, [(1, 1, "Monster")])),
+                                 {"step": 1, "type": "action", "data": {"cmd": "get_map"}},
+                                 _state({"type": "map", "rows": []}), _state(_over(1, 1, False))])
+    assert asked["experiment"] is None and asked["has_map_state"] is True
 
 
 def test_meta_fields_are_none_without_run_meta():
@@ -249,3 +261,24 @@ def test_state_features_with_the_real_card_scoring_on_a_starter_like_deck(monkey
     assert f["deck_burst"] == pytest.approx(burst / 100.0)
     assert f["deck_top8"] == pytest.approx(sum(top8) / 8)
     assert f["deck_burst"] > 0.0 and 0.0 < f["deck_top8"] <= 10.0 and f["deck_size"] == 10
+
+
+def test_load_games_survives_any_exception_from_a_file(tmp_path, capsys, monkeypatch):
+    def score(card):
+        if card.get("id") == "BOOM":
+            raise AttributeError("'str' object has no attribute 'get'")  # a card of unexpected shape
+        return card.get("score", 0.0)
+
+    monkeypatch.setattr(route_data, "score_card", score)
+    good_rows = [META, _state(_ms(1, 1, 80, [(1, 1, "Monster")])), _act(1, 1),
+                 _state(_over(1, 2, False))]
+    boom_rows = [META, _state(_ms(1, 1, 80, [(1, 1, "Monster")], deck=[{"id": "BOOM"}])),
+                 _act(1, 1), _state(_over(1, 2, False))]
+    good = tmp_path / "good.jsonl"
+    boom = tmp_path / "boom.jsonl"
+    good.write_text("\n".join(json.dumps(r) for r in good_rows) + "\n")
+    boom.write_text("\n".join(json.dumps(r) for r in boom_rows) + "\n")
+    games = load_games([str(boom), str(good)])
+    assert len(games) == 1
+    out = capsys.readouterr().out
+    assert "boom.jsonl" in out and "AttributeError" in out

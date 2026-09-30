@@ -3,9 +3,12 @@
 Hermetic: hand-built maps and a hand-built RouteModel (value V = coef . state,
 transition cells written per test).
 """
+import random
+import time
+
 import pytest
 
-from agent.route_model import DELTA_KEYS, RouteModel
+from agent.route_model import ACT_FLOORS, CELL_LEVELS, DELTA_KEYS, RouteModel
 from agent.route_planner import (
     choose_node, enumerate_paths, fixed_rows, node_key, score_path)
 
@@ -22,10 +25,11 @@ def _map(spec):
     return {"type": "map", "rows": rows, "boss": {"col": 3, "row": n_rows, "type": "Boss"}}
 
 
-def _cell(n=30, losses=(), death_hp=(), **delta):
+def _cell(n=30, survivors=(), death_hp=(), **delta):
+    """survivors = (pre_hp, hp_lost) pairs; death_hp = pre-room hp of the deaths."""
     return {"n": n, "n_died": len(death_hp),
             "mean_delta": {k: float(delta.get(k, 0.0)) for k in DELTA_KEYS},
-            "losses": list(losses), "death_hp": list(death_hp)}
+            "survivors": [list(p) for p in survivors], "death_hp": list(death_hp)}
 
 
 def _model(cells, coef=None):
@@ -114,8 +118,8 @@ def test_elite_relics_are_traded_against_hp_by_the_value_model():
 
 def test_death_risk_dominates_a_higher_end_value():
     m = _map({(0, 1): ("Elite", [(3, 99)]), (1, 1): ("Monster", [(3, 99)])})
-    # at hp 50, 27 of 30 elite samples lost >= 50: a 90% death risk
-    risky = _cell(losses=[10] * 3 + [60] * 27, n_relics=2)
+    # at hp 50, 27 of the 30 elite samples (all entered with 80) lost >= 50: a 90% death risk
+    risky = _cell(survivors=[(80, 10)] * 3 + [(80, 60)] * 27, n_relics=2)
     safe = _cell(hp=-5)
     model = _model({"*|Elite|all": risky, "*|Monster|all": safe}, {"hp": 0.1, "n_relics": 10.0})
     state = _state([(0, 1, "Elite"), (1, 1, "Monster")], hp=50)
@@ -123,8 +127,8 @@ def test_death_risk_dominates_a_higher_end_value():
     # survive-only value of the risky path is higher (25 vs 4.5) ...
     now = {"hp": 50, "max_hp": 80, "n_relics": 0, "act": 1, "floor": 1, "gf": 1,
            "deck_burst": 0.5, "deck_top8": 6.0}
-    assert model.value(model.step(1, "Elite", now), "Defect") > model.value(
-        model.step(1, "Monster", now), "Defect")
+    assert model.value(model.step(1, "Elite", now, 1), "Defect") > model.value(
+        model.step(1, "Monster", now, 1), "Defect")
     # ... but the planner routes around the death risk
     pick = choose_node(m, state, "Defect", model)
     assert (pick["col"], pick["row"]) == (1, 1) and pick["p_alive"] == 1.0
@@ -132,7 +136,7 @@ def test_death_risk_dominates_a_higher_end_value():
 
 def test_death_risk_lowers_p_alive_and_score_on_a_path():
     m = _map({(0, 1): ("Elite", [(3, 99)])})
-    model = _model({"*|Elite|all": _cell(losses=[10] * 3 + [60] * 27)})
+    model = _model({"*|Elite|all": _cell(survivors=[(80, 10)] * 3 + [(80, 60)] * 27)})
     path = enumerate_paths(m, (0, 1))[0]
     features = {"hp": 50, "max_hp": 80, "act": 1, "floor": 1, "gf": 1}
     scored = score_path(path, features, "Defect", model)
@@ -195,3 +199,75 @@ def test_choices_missing_from_the_map_are_ignored_and_none_scoreable_gives_none(
     assert (pick["col"], pick["row"]) == (0, 1)
     assert choose_node(m, _state([(4, 1, "Monster")]), "Defect", model) is None
     assert choose_node(m, _state([]), "Defect", model) is None
+
+
+def test_death_term_uses_the_floor_of_the_room_that_kills():
+    # Act 2 opens at floor 0 (gf 17). The row-0 Ancient is floor 1 of the act: dying in it ends
+    # the run at gf 18, whatever the current state's floor.
+    m = _map({(3, 0): ("Ancient", [(3, 99)])})
+    model = _model({"*|Ancient|all": _cell(death_hp=[70] * 30)})   # every Ancient entered at <= 70 died
+    features = {"hp": 50, "max_hp": 80, "act": 2, "floor": 0, "gf": 17}
+    scored = score_path(enumerate_paths(m, (3, 0))[0], features, "Defect", model)
+    assert scored["p_alive"] == 0.0 and scored["score"] == pytest.approx(ACT_FLOORS + 1)
+
+
+def test_an_act_2_ancient_room_neither_helps_nor_hurts_a_route_through_it():
+    # Act 2 map with the real shape: row 0 is the Ancient, rows 1.. the map proper. The Ancient
+    # links to both row-1 Monsters, and those Monsters are selectable straight from the start.
+    spec = {(3, 0): ("Ancient", [(1, 1), (4, 1)]),
+            (1, 1): ("Monster", [(1, 2)]), (4, 1): ("Monster", [(4, 2)]),
+            (1, 2): ("RestSite", [(3, 99)]), (4, 2): ("RestSite", [(3, 99)])}
+    m = _map(spec)
+    assert len(m["rows"][0]) == 1 and m["rows"][0][0]["type"] == "Ancient"
+    model = _model({"*|Ancient|all": _cell(), "*|Monster|all": _cell(), "*|RestSite|all": _cell()})
+    state = _state([(3, 0, "Ancient"), (1, 1, "Monster"), (4, 1, "Monster")], hp=50, floor=0, act=2)
+    features = {"hp": 50, "max_hp": 80, "act": 2, "floor": 0, "gf": ACT_FLOORS}
+    via_ancient = score_path(enumerate_paths(m, (3, 0))[0], features, "Defect", model)
+    direct = score_path(enumerate_paths(m, (1, 1))[0], features, "Defect", model)
+    # zero-delta cells: both paths reach row 2 and end on the same floor with the same state.
+    # (Counting rooms instead of reading the row put the longer Ancient path one floor ahead.)
+    assert via_ancient["end"]["gf"] == direct["end"]["gf"] == ACT_FLOORS + 3
+    assert via_ancient["score"] == pytest.approx(direct["score"])
+    pick = choose_node(m, state, "Defect", model)
+    assert (pick["col"], pick["row"]) == (1, 1)   # equal scores: lower col wins, not the Ancient
+
+
+def test_score_path_and_choose_node_report_which_cell_levels_the_path_used():
+    m = _map({(0, 1): ("Monster", [(0, 2)]), (0, 2): ("Shop", [(0, 3)]),
+              (0, 3): ("Ancient", [(3, 99)])})
+    model = _model({"1|Monster|hi": _cell(n=25), "*|Shop|all": _cell(n=60)})
+    features = {"hp": 50, "max_hp": 80, "act": 1, "floor": 1, "gf": 1, "deck_burst": 0.9}
+    scored = score_path(enumerate_paths(m, (0, 1))[0], features, "Defect", model)
+    # Monster: exact act cell; Shop: only the all-acts cell exists; Ancient: nothing -> zero
+    assert scored["cell_levels"] == {"act": 1, "pooled": 1, "type": 0, "zero": 1}
+    pick = choose_node(m, _state([(0, 1, "Monster")], floor=1), "Defect", model)
+    # the state's empty deck has deck_burst 0 -> the "lo" Monster bucket, which has no cell:
+    # Monster and Ancient resolve to zero, only the Shop finds its all-acts cell
+    assert pick["cell_levels"] == {"act": 0, "pooled": 1, "type": 0, "zero": 2}
+    assert set(pick["cell_levels"]) == set(CELL_LEVELS)
+
+
+def test_choose_node_on_a_real_size_map_with_big_cells_is_fast():
+    # ~15 rows deep; rows 1-9 are two nodes wide and fully linked (2 ** 8 = 256 paths from each
+    # start, 512 in all), rows 10-15 a single chain; every cell holds 3000 survivor samples.
+    spec = {}
+    for row in range(1, 10):
+        for col in (0, 1):
+            spec[(col, row)] = (("Monster", "Elite", "Unknown", "RestSite")[(row + col) % 4],
+                                [(0, row + 1), (1, row + 1)] if row < 9 else [(0, 10)])
+    for row in range(10, 16):
+        spec[(0, row)] = (("Shop", "Monster", "Unknown")[row % 3], [(0, row + 1)] if row < 15 else [(3, 99)])
+    m = _map(spec)
+    rng = random.Random(0)
+    cells = {f"*|{t}|all": _cell(n=3000, n_died=60, hp=-3.0,
+                                 survivors=[(rng.randint(10, 80), rng.randint(0, 25))
+                                            for _ in range(2940)],
+                                 death_hp=[rng.randint(5, 50) for _ in range(60)])
+             for t in ("Monster", "Elite", "Unknown", "RestSite", "Shop")}
+    model = _model(cells)
+    state = _state([(0, 1, "Monster"), (1, 1, "Elite")], hp=60)
+    started = time.perf_counter()
+    pick = choose_node(m, state, "Defect", model)
+    elapsed = time.perf_counter() - started
+    assert pick["paths"] == 512
+    assert elapsed < 1.0, f"choose_node took {elapsed:.2f}s on a 512-path map"

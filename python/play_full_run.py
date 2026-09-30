@@ -293,13 +293,20 @@ def _load_route_model(path: str):
     return _ROUTE_MODEL_CACHE[path]
 
 
+def _load_route_planner():
+    """The agent.route_planner module. Imported lazily (the random policy never
+    needs it); the import pulls in agent.card_scoring, so main() does it up front
+    under the value policy to fail on missing card data before any game."""
+    _repo_root_on_path()
+    from agent import route_planner
+    return route_planner
+
+
 def _route_choose(map_reply: dict, state: dict, character: str, model):
     """agent.route_planner.choose_node -- the seam tests replace to script the
     planner's answers. The attribute is read at call time, so patching
     agent.route_planner.choose_node works too."""
-    _repo_root_on_path()
-    from agent import route_planner
-    return route_planner.choose_node(map_reply, state, character, model)
+    return _load_route_planner().choose_node(map_reply, state, character, model)
 
 
 def _find_dotnet():
@@ -357,10 +364,15 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              "ooc_event_stuck": 0,
              "ooc_knobs": greedy_knobs() if policy == "greedy" else {},
              "route_policy": route_policy(),
-             # map_selects routed by the planner / that fell back to the seeded
-             # random pick (planner raised, offered no usable node, or get_map failed)
+             # map_selects routed by the planner (>= 2 choices) / that fell back to
+             # the seeded random pick (planner raised, offered no usable node, or
+             # get_map failed) / with a single choice, taken without asking
              "route_plans": 0,
              "route_fallbacks": 0,
+             "route_forced": 0,
+             # rooms on planned paths whose transition cell fell back below the
+             # exact act cell (a sparse model), summed over planned decisions
+             "route_cell_fallbacks": 0,
              "game_log": None}
     result = _play_run(seed, character, verbose, log, ascension, stats)
     stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
@@ -387,8 +399,9 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
               stats: dict):
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
     stats["ooc_greedy"], stats["ooc_fallback_causes"][...],
-    stats["ooc_event_stuck"], stats["route_plans"] and stats["route_fallbacks"],
-    and sets stats["game_log"]."""
+    stats["ooc_event_stuck"], stats["route_plans"], stats["route_fallbacks"],
+    stats["route_forced"] and stats["route_cell_fallbacks"], and sets
+    stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
     # global `random` module and silently change behavior for every other
@@ -414,7 +427,10 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
     logger = GameLogger(character, seed, enabled=log,
                         run_context={"seed": seed, "character": character,
                                      "ascension": ascension,
-                                     "experiment": f"ooc={stats['ooc_policy']}"})
+                                     # the random arm's tag stays exactly as before
+                                     "experiment": f"ooc={stats['ooc_policy']}"
+                                     + (",route=value" if stats["route_policy"] == "value"
+                                        else "")})
     # stderr: inherit when verbose, otherwise DEVNULL -- never an unread PIPE,
     # which fills up and blocks the engine's Console.Error.WriteLine (the stderr
     # deadlock described in RunSimulator.cs DoPlanCombatTurn's diagnostics note).
@@ -592,6 +608,11 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if route_model is None:
                     # Random selection
                     choice = rng.choice(choices)
+                elif len(choices) == 1:
+                    # A forced move (about two thirds of all map_selects): nothing
+                    # to plan, so no get_map and not counted as a planned decision.
+                    stats["route_forced"] += 1
+                    choice = choices[0]
                 else:
                     # get_map is a read-only query: its reply must NOT replace
                     # `state`, which is still the pending map_select decision.
@@ -619,12 +640,16 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                         choice = rng.choice(choices)
                     else:
                         stats["route_plans"] += 1
+                        levels = pick.get("cell_levels") or {}
+                        stats["route_cell_fallbacks"] += sum(
+                            n for level, n in levels.items() if level != "act")
                         choice = pick
                         context = state.get("context") or {}
                         print("  [route] " + json.dumps({
                             "act": context.get("act"), "floor": context.get("floor"),
                             "choice": {"col": pick["col"], "row": pick["row"]},
                             "score": pick.get("score"), "p_alive": pick.get("p_alive"),
+                            "cell_levels": pick.get("cell_levels"),
                             "checkpoints": pick.get("checkpoints")}, default=str))
                 state = send({
                     "cmd": "action",
@@ -1002,6 +1027,8 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "route_policy": result.get("route_policy"),
         "route_plans": result.get("route_plans"),
         "route_fallbacks": result.get("route_fallbacks"),
+        "route_forced": result.get("route_forced"),
+        "route_cell_fallbacks": result.get("route_cell_fallbacks"),
         "game_log": result.get("game_log"),
         "game_log_error": result.get("game_log_error"),
     }
@@ -1124,8 +1151,11 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     if route_policies:
         planned = sum(r.get("route_plans") or 0 for r in results if r)
         route_fallbacks = sum(r.get("route_fallbacks") or 0 for r in results if r)
+        route_forced = sum(r.get("route_forced") or 0 for r in results if r)
+        cell_fallbacks = sum(r.get("route_cell_fallbacks") or 0 for r in results if r)
         lines.append(f"Route policy: {'/'.join(route_policies)} -- {planned} planned, "
-                     f"{route_fallbacks} fallbacks")
+                     f"{route_forced} forced, {route_fallbacks} fallbacks, "
+                     f"{cell_fallbacks} cell fallbacks")
         # Same blindness the OOC banner guards against: a value arm whose planner
         # never had a pick accepted is secretly the seeded-random arm.
         if route_policies == ["value"] and planned == 0:
@@ -1202,6 +1232,7 @@ def main():
     if route == "value":
         model_path = route_model_path()
         model = _load_route_model(model_path)  # a missing/corrupt model aborts now
+        _load_route_planner()  # and so does missing card data (the planner imports it)
         model_data = getattr(model, "data", None) or {}
         print(f"Route policy: value (model {model_path}, "
               f"n_games {(model_data.get('meta') or {}).get('n_games')}, "

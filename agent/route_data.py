@@ -92,15 +92,22 @@ def state_features(state: dict) -> dict:
 
 
 def extract_transitions(rows: list[dict]) -> dict | None:
-    """One json-parsed game log -> {character, ascension, seed, won, final_gf,
-    snapshots, transitions}; None when the log has no game_over decision (crash /
-    hang / truncated -- excluded, like agent/paired_eval.py).
+    """One json-parsed game log -> {character, ascension, seed, experiment,
+    has_map_state, won, final_gf, snapshots, transitions}; None when the log has
+    no game_over decision (crash / hang / truncated -- excluded, like
+    agent/paired_eval.py). ``experiment`` is run_meta's tag; ``has_map_state`` says
+    the log holds a ``{"type": "map"}`` reply, i.e. the harness asked the engine
+    for the map -- only the value route policy does, and its routes depend on the
+    state, so fit_route_model must not train on them by default.
 
     A move is a ``select_map_node`` action; its type comes from the choice with
     that (col, row) in the most recent map_select (a move to a node that was not
     offered is skipped). Its ``post`` is the next map_select -- everything in
     between (combat, rewards, events, rest, shop) is inside the room -- or the
-    game_over, which is a death (``died``) unless it is a victory. A move whose
+    game_over, which is a death (``died``) unless it is a victory. (A death in the
+    room entered from a map_select at floor f reports game_over floor f + 1 --
+    the map_select's floor is the row it offers -- so ``final_gf`` of that death is
+    ``pre.gf + 1``.) A move whose
     next map_select is in a different act is the boss: room_type "Boss". A
     second move sent before the first one resolved replaces it (cannot happen in
     a harness log: an engine error ends the run).
@@ -109,6 +116,7 @@ def extract_transitions(rows: list[dict]) -> dict | None:
     last_map_select = None
     pending = None
     over = None
+    has_map_state = False
     snapshots: list[dict] = []
     transitions: list[dict] = []
 
@@ -135,6 +143,8 @@ def extract_transitions(rows: list[dict]) -> dict | None:
             snapshots.append({"features": pre, "choice_type": room_type})
             pending = {"act": pre["act"], "room_type": room_type, "pre": pre}
             continue
+        if data.get("type") == "map":
+            has_map_state = True
         if data.get("type") != "decision":
             continue
         decision = data.get("decision")
@@ -160,6 +170,8 @@ def extract_transitions(rows: list[dict]) -> dict | None:
         "character": meta.get("character"),
         "ascension": meta.get("ascension"),
         "seed": meta.get("seed"),
+        "experiment": meta.get("experiment"),
+        "has_map_state": has_map_state,
         "won": bool(over.get("victory")),
         "final_gf": state_features(over)["gf"],
         "snapshots": snapshots,
@@ -169,14 +181,14 @@ def extract_transitions(rows: list[dict]) -> dict | None:
 
 def load_games(paths: list[str]) -> list[dict]:
     """extract_transitions over game-log files; skips logs it excludes and never
-    raises on one bad file (prints a warning and moves on)."""
+    raises on one bad file (prints the path and the exception and moves on)."""
     games = []
     for path in paths:
         try:
             with open(path) as fh:
                 rows = [json.loads(line) for line in fh if line.strip()]
             game = extract_transitions(rows)
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
             print(f"  !! route_data: skipping {path}: {exc!r}")
             continue
         if game is not None:

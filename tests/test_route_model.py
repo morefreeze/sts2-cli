@@ -4,13 +4,16 @@ Hermetic: games are built directly as agent.route_data.load_games-style dicts.
 """
 import json
 import math
+import os
+import random
 
 import numpy as np
 import pytest
 
+from agent import route_data
 from agent.route_model import (
-    DELTA_KEYS, FULL_FEATURES, HP_ONLY_FEATURES, RouteModel, death_prob_from_samples,
-    feature_vector, fit_transition_model, fit_value_model)
+    ACT_FLOORS, CELL_LEVELS, DELTA_KEYS, FULL_FEATURES, HP_ONLY_FEATURES, RouteModel,
+    death_prob_from_samples, feature_vector, fit_transition_model, fit_value_model)
 
 
 def _feat(floor=1, act=1, hp=80, max_hp=80, gold=0, burst=0.5, top8=6.0, deck_size=15, n_up=0,
@@ -36,21 +39,70 @@ def _trans(room_type, pre, post=None, died=False, act=None):
 
 
 # ------------------------------------------------------- death_prob_from_samples
+#
+# P(loss >= h) = (#survivors with pre >= h and loss >= h + #deaths with pre >= h)
+#              / (#survivors with pre >= h + #deaths with pre >= h)
+# survivors are (pre_hp, loss) pairs, deaths are pre_hp values.
 
-def test_death_prob_counts_only_deaths_that_are_informative_for_the_threshold():
-    assert death_prob_from_samples([0, 5, 10], [], 6) == pytest.approx(1 / 3)
-    # A death at pre-hp 3 says nothing about a threshold of 6: denominator 2, numerator 0.
-    assert death_prob_from_samples([0, 5], [3], 6) == 0.0
-    assert death_prob_from_samples([0, 5], [6], 6) == pytest.approx(1 / 3)
-    # A death at 8 counts for threshold 6: (0 losses >= 6 + 1 death) / (2 losses + 1 death).
-    assert death_prob_from_samples([0, 5], [8], 6) == pytest.approx(1 / 3)
+def test_death_prob_is_conditional_on_the_room_being_entered_with_at_least_h():
+    # h = 6, three survivors that all entered with 50: 1 of 3 lost >= 6 (the loss of 10).
+    assert death_prob_from_samples([(50, 0), (50, 5), (50, 10)], [], 6) == pytest.approx(1 / 3)
+    # A survivor that entered with 4 cannot have lost 6 and says nothing about h = 6: it is
+    # left OUT of the denominator (2 remain, 1 of them lost >= 6 -> 1/2; counting it would
+    # dilute the estimate to 1/3).
+    assert death_prob_from_samples([(4, 3), (50, 0), (50, 10)], [], 6) == pytest.approx(1 / 2)
+    # pre == h is included (pre >= h) and a loss of exactly h counts (loss >= h):
+    # (6, 5) entered with 6 but lost 5 -> no; (6, 6) lost 6 -> yes; 1 of 2.
+    assert death_prob_from_samples([(6, 5), (6, 6)], [], 6) == pytest.approx(1 / 2)
+    # nobody entered with >= h (the death at 3 is uninformative too) -> denominator 0
+    assert death_prob_from_samples([(5, 4)], [3], 6) == 0.0
+
+
+def test_death_prob_counts_deaths_that_entered_with_at_least_h():
+    # h = 6: deaths at 8 and 9 both imply loss >= 6; one survivor lost 0 of its 50 hp:
+    # (0 + 2 deaths) / (1 survivor + 2 deaths) = 2/3.
+    assert death_prob_from_samples([(50, 0)], [8, 9], 6) == pytest.approx(2 / 3)
+    # A death at pre-hp 3 (< 6) is uninformative for h = 6: denominator 2, numerator 0.
+    assert death_prob_from_samples([(50, 0), (50, 5)], [3], 6) == 0.0
+    # A death at exactly 6 counts: (0 + 1) / (2 + 1) = 1/3.
+    assert death_prob_from_samples([(50, 0), (50, 5)], [6], 6) == pytest.approx(1 / 3)
     assert death_prob_from_samples([], [8, 9], 6) == 1.0
 
 
 def test_death_prob_at_the_documented_boundaries():
-    assert death_prob_from_samples([1, 2], [5], 0) == 1.0
-    assert death_prob_from_samples([1, 2], [5], -3) == 1.0
+    assert death_prob_from_samples([(50, 1), (50, 2)], [5], 0) == 1.0
+    assert death_prob_from_samples([(50, 1), (50, 2)], [5], -3) == 1.0
     assert death_prob_from_samples([], [], 10) == 0.0
+
+
+def _reference_death_prob(survivors, deaths, h):
+    """The estimator straight from its definition, O(n)."""
+    if h <= 0:
+        return 1.0
+    entered = [(pre, loss) for pre, loss in survivors if pre >= h]
+    dead = [d for d in deaths if d >= h]
+    denom = len(entered) + len(dead)
+    if denom == 0:
+        return 0.0
+    return (sum(1 for _, loss in entered if loss >= h) + len(dead)) / denom
+
+
+def test_death_prob_matches_the_definition_on_random_samples():
+    rng = random.Random(7)
+    for _ in range(40):
+        survivors = [(rng.randint(1, 80), rng.randint(0, 60)) for _ in range(rng.randint(0, 40))]
+        deaths = [rng.randint(1, 80) for _ in range(rng.randint(0, 10))]
+        for h in (0.5, 5, 12.5, 30, 47, 80, 81):
+            assert death_prob_from_samples(survivors, deaths, h) == pytest.approx(
+                _reference_death_prob(survivors, deaths, h)), (survivors, deaths, h)
+
+
+def test_the_conditional_estimate_removes_the_low_bias_of_a_plain_loss_histogram():
+    # Elite samples: one fight entered at 45 hp cost 30; two entered at 20 / 25 hp cost 5.
+    # At h = 30 only the first could have lost 30 -> q = 1/1. A loss histogram over ALL
+    # three survivors (the estimator this replaces) would say 1/3.
+    survivors = [(45, 30), (20, 5), (25, 5)]
+    assert death_prob_from_samples(survivors, [], 30) == pytest.approx(1.0)
 
 
 # ------------------------------------------------------------------ value model
@@ -109,10 +161,60 @@ def test_fit_value_model_falls_back_to_hp_only_when_extra_features_are_noise():
     assert model.value(_feat(hp=80), "Defect") > model.value(_feat(hp=20), "Defect")
 
 
-def test_fit_value_model_needs_two_games():
+def test_fit_value_model_needs_two_cv_groups():
     game = _game(5, [_feat()])
-    with pytest.raises(ValueError, match="2 games"):
+    with pytest.raises(ValueError, match="2 CV groups"):
         fit_value_model([game])
+    # two games of ONE seed are still a single group
+    with pytest.raises(ValueError, match="2 CV groups"):
+        fit_value_model([_game(5, [_feat()], seed="same"), _game(6, [_feat()], seed="same")])
+
+
+def test_cv_groups_by_seed_so_a_seed_never_straddles_train_and_test(monkeypatch):
+    from sklearn.model_selection import GroupKFold
+    seen = []
+
+    class _Spy(GroupKFold):
+        def split(self, X, y=None, groups=None):
+            for train, test in super().split(X, y, groups):
+                seen.append((set(groups[train]), set(groups[test])))
+                yield train, test
+
+    monkeypatch.setattr("sklearn.model_selection.GroupKFold", _Spy)
+    # 6 seeds x 3 characters = 18 games; the same seed appears under every character
+    games = []
+    for seed_i in range(6):
+        for character in ("Defect", "Silent", "Ironclad"):
+            base = _feat(hp=40 + 5 * seed_i)
+            snaps = [dict(base, floor=fl, gf=fl) for fl in range(1, 4)]
+            games.append(_game(8 + seed_i, snaps, character=character, seed=f"seed{seed_i}"))
+    fit = fit_value_model(games)
+    assert fit["n_games"] == 18 and fit["n_groups"] == 6
+    assert len(seen) == 5 and all(train.isdisjoint(test) for train, test in seen)
+    assert sorted(g for _, test in seen for g in test) == list(range(6))  # each seed tested once
+
+
+def test_a_game_without_a_seed_is_its_own_cv_group():
+    games = [dict(_game(5 + i, [_feat(floor=1), _feat(floor=2)]), seed=None) for i in range(4)]
+    fit = fit_value_model(games, folds=4)
+    assert fit["n_groups"] == 4 and len(fit["cv"]["full"]) == 4
+
+
+def test_cv_falls_back_to_unshuffled_group_kfold_when_shuffle_is_unsupported(monkeypatch):
+    from sklearn.model_selection import GroupKFold
+
+    class _OldGroupKFold:  # scikit-learn < 1.6: no shuffle / random_state
+        def __init__(self, n_splits=5):
+            self._inner = GroupKFold(n_splits=n_splits)
+
+        def split(self, X, y=None, groups=None):
+            return self._inner.split(X, y, groups)
+
+    monkeypatch.setattr("sklearn.model_selection.GroupKFold", _OldGroupKFold)
+    games = [_game(5 + i, [_feat(floor=1, hp=40 + i), _feat(floor=2, hp=40 + i)], seed=f"s{i}")
+             for i in range(6)]
+    fit = fit_value_model(games, folds=3)
+    assert len(fit["cv"]["full"]) == 3 and fit["n_groups"] == 6
 
 
 # ------------------------------------------------------------- RouteModel / JSON
@@ -123,10 +225,11 @@ def _value_dict(features=("hp",), coef=(0.1,), intercept=0.0, mean=None, scale=N
             "scale": list(scale or [1.0] * n), "coef": list(coef), "intercept": intercept}
 
 
-def _cell(n=30, n_died=0, losses=(), death_hp=(), **delta):
+def _cell(n=30, n_died=0, survivors=(), death_hp=(), **delta):
+    """A transition cell; survivors = (pre_hp, hp_lost) pairs, death_hp = pre-room hp of deaths."""
     return {"n": n, "n_died": n_died,
             "mean_delta": {k: float(delta.get(k, 0.0)) for k in DELTA_KEYS},
-            "losses": list(losses), "death_hp": list(death_hp)}
+            "survivors": [list(p) for p in survivors], "death_hp": list(death_hp)}
 
 
 def _model(cells=None, value=None, split=0.5, min_n=20):
@@ -183,11 +286,11 @@ def test_cell_fallback_chain_ends_in_the_all_bucket_then_a_zero_cell():
     m2 = _model({"*|Elite|all": all_bucket})
     assert m2.cell(2, "Elite", _feat(burst=0.1)) is all_bucket  # lo bucket missing -> all
     unknown = m.cell(2, "Mystery", _feat())
-    assert unknown["n"] == 0 and unknown["losses"] == [] and unknown["death_hp"] == []
+    assert unknown["n"] == 0 and unknown["survivors"] == [] and unknown["death_hp"] == []
     assert all(v == 0.0 for v in unknown["mean_delta"].values())
     assert m.death_prob(2, "Mystery", _feat(hp=5)) == 0.0
-    stepped = m.step(2, "Mystery", _feat(floor=4, hp=33, gold=10))
-    assert (stepped["floor"], stepped["gf"]) == (5, 5)
+    stepped = m.step(2, "Mystery", _feat(floor=4, hp=33, gold=10), 4)
+    assert (stepped["floor"], stepped["gf"]) == (5, ACT_FLOORS + 5)  # row 4 of act 2
     assert all(stepped[k] == _feat(floor=4, hp=33, gold=10)[k] for k in DELTA_KEYS)
 
 
@@ -203,21 +306,60 @@ def test_cell_bucketing_uses_deck_burst_for_fights_and_hp_frac_for_rest():
 
 
 def test_death_prob_reads_the_cell_samples_at_the_current_hp():
-    m = _model({"*|Elite|all": _cell(n=40, n_died=1, losses=[10, 20, 30, 40], death_hp=[35])})
-    assert m.death_prob(1, "Elite", _feat(hp=25)) == pytest.approx(3 / 5)  # 30, 40, death@35
+    # survivors entered with 60 and lost 10/20/30/40; one death entered with 35.
+    m = _model({"*|Elite|all": _cell(n=40, n_died=1, death_hp=[35],
+                                     survivors=[(60, 10), (60, 20), (60, 30), (60, 40)])})
+    # h = 25: all 4 survivors + the death (35 >= 25) entered with >= 25; losses 30, 40 and
+    # the death are >= 25 -> (2 + 1) / (4 + 1)
+    assert m.death_prob(1, "Elite", _feat(hp=25)) == pytest.approx(3 / 5)
+    # h = 50: the death (35 < 50) is uninformative; 4 survivors, none lost >= 50 -> 0
     assert m.death_prob(1, "Elite", _feat(hp=50)) == pytest.approx(0.0)
+    # h = 35: the death counts (35 >= 35): only the loss of 40 is >= 35 -> (1 + 1) / (4 + 1)
+    assert m.death_prob(1, "Elite", _feat(hp=35)) == pytest.approx(2 / 5)
+    assert m.death_prob(1, "Elite", _feat(hp=0)) == 1.0
 
 
-def test_step_clamps_and_advances_the_floor():
+def test_model_death_prob_agrees_with_the_definition_and_stays_consistent_when_cached():
+    rng = random.Random(3)
+    survivors = [(rng.randint(5, 80), rng.randint(0, 40)) for _ in range(300)]
+    deaths = [rng.randint(5, 60) for _ in range(30)]
+    m = _model({"*|Monster|all": _cell(n=330, n_died=30, survivors=survivors, death_hp=deaths)})
+    for _ in range(2):  # the second pass runs on the cached sorted views
+        for hp in (1, 7.5, 20, 33.3, 50, 79, 90):
+            assert m.death_prob(1, "Monster", _feat(hp=hp)) == pytest.approx(
+                _reference_death_prob(survivors, deaths, hp))
+
+
+def test_resolve_reports_the_level_each_lookup_resolved_at():
+    act_cell, pooled, type_cell = _cell(n=25), _cell(n=90), _cell(n=200)
+    m = _model({"2|Monster|hi": act_cell, "*|Monster|hi": pooled, "*|Monster|all": type_cell,
+                "2|Shop|all": _cell(n=5), "*|Shop|all": _cell(n=60)})
+    hi = _feat(burst=0.9)
+    assert m.resolve(2, "Monster", hi) == ("act", act_cell)
+    assert m.resolve(3, "Monster", hi) == ("pooled", pooled)               # no act-3 cell
+    assert m.resolve(3, "Monster", _feat(burst=0.1)) == ("type", type_cell)  # no lo cell at all
+    assert m.resolve(2, "Shop", _feat())[0] == "pooled"                     # act cell n=5 < min_n
+    assert m.resolve(2, "Ancient", _feat())[0] == "zero"                    # unseen room type
+    assert m.resolve(2, "Ancient", _feat())[1]["n"] == 0
+    assert set(CELL_LEVELS) == {"act", "pooled", "type", "zero"}
+
+
+def test_ancient_is_an_ordinary_room_type_with_its_own_cell():
+    m = _model({"2|Ancient|all": _cell(n=30, hp=12.0, n_relics=1.0)})
+    level, cell = m.resolve(2, "Ancient", _feat(act=2))
+    assert level == "act" and cell["mean_delta"]["n_relics"] == 1.0
+
+
+def test_step_clamps_and_takes_the_floor_from_the_row():
     delta = _cell(n=30, hp=100.0, max_hp=-500.0, gold=-999.0, deck_burst=-5.0, deck_top8=50.0,
                   deck_size=-50.0, n_upgraded=-9.0, n_relics=-9.0, n_potions=10.0)
     m = _model({"*|Treasure|all": delta})
-    s = m.step(2, "Treasure", _feat(floor=8, act=2, hp=30, max_hp=80, gold=40, n_pot=1))
+    s = m.step(2, "Treasure", _feat(floor=8, act=2, hp=30, max_hp=80, gold=40, n_pot=1), 8)
     assert s["max_hp"] == 1.0 and s["hp"] == 1.0            # max_hp floored at 1, hp within [1, max_hp]
     assert s["gold"] == 0.0 and s["deck_burst"] == 0.0 and s["deck_top8"] == 10.0
     assert s["deck_size"] == 0.0 and s["n_upgraded"] == 0.0 and s["n_relics"] == 0.0
     assert s["n_potions"] == 3.0
-    assert (s["act"], s["floor"], s["gf"]) == (2, 9, 26)
+    assert (s["act"], s["floor"], s["gf"]) == (2, 9, 26)   # row 8 -> floor 9, gf 17 + 9
 
 
 def test_step_caps_hp_at_max_hp_and_does_not_mutate_its_input():
@@ -225,10 +367,61 @@ def test_step_caps_hp_at_max_hp_and_does_not_mutate_its_input():
                                         deck_burst=2.5)})
     f = _feat(hp=70, max_hp=80, burst=0.5, top8=6.0, n_pot=1)
     frozen = dict(f)
-    s = m.step(1, "RestSite", f)
+    s = m.step(1, "RestSite", f, 1)
     assert s["hp"] == 80.0 and s["deck_top8"] == 0.0 and s["n_potions"] == 0.0
     assert s["deck_burst"] == pytest.approx(3.0)  # burst is unbounded above: 0.5 + 2.5
     assert f == frozen
+
+
+def test_step_takes_the_floor_from_the_map_row_not_from_counting_rooms():
+    m = _model({})
+    f = _feat(floor=0, act=2, hp=50)  # Act 2 opens at floor 0 (gf 17)
+    ancient = m.step(2, "Ancient", f, 0)        # the row-0 Ancient room
+    assert (ancient["floor"], ancient["gf"]) == (1, 18)
+    via_ancient = m.step(2, "Monster", ancient, 1)
+    direct = m.step(2, "Monster", f, 1)         # skip the Ancient: straight to a row-1 Monster
+    assert (via_ancient["floor"], via_ancient["gf"]) == (direct["floor"], direct["gf"]) == (2, 19)
+    act3 = m.step(3, "Monster", _feat(floor=4, act=3), 7)
+    assert (act3["floor"], act3["gf"]) == (8, 2 * ACT_FLOORS + 8)
+
+
+def test_act_floors_matches_route_data():
+    assert ACT_FLOORS == route_data.ACT_FLOORS
+
+
+def test_load_rejects_an_unsupported_version(tmp_path):
+    path = tmp_path / "m.json"
+    data = {"version": 2, "value": _value_dict(),
+            "transitions": {"split": 0.5, "min_n": 20, "cells": {}}}
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="version"):
+        RouteModel.load(str(path))
+    path.write_text(json.dumps({k: v for k, v in data.items() if k != "version"}))
+    with pytest.raises(ValueError, match="version"):
+        RouteModel.load(str(path))
+    path.write_text(json.dumps(dict(data, version=1)))
+    assert RouteModel.load(str(path)).value(_feat(hp=10), "Defect") == pytest.approx(1.0)
+
+
+def test_save_writes_atomically_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    path = str(tmp_path / "m.json")
+    m = _model({"*|Shop|all": _cell(n=30)})
+    m.save(path)
+    first = open(path).read()
+    assert sorted(os.listdir(tmp_path)) == ["m.json"]
+    # a failing write neither clobbers the good file nor leaves its temp file behind
+    bad = RouteModel({"version": 1, "value": m.data["value"],
+                      "transitions": {"split": 0.5, "min_n": 20, "cells": {}}, "meta": object()})
+    with pytest.raises(TypeError):
+        bad.save(path)
+    assert open(path).read() == first
+    assert sorted(os.listdir(tmp_path)) == ["m.json"]
+    # the rename goes through os.replace, from a temp file in the same directory
+    calls = []
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", lambda a, b: (calls.append((a, b)), real_replace(a, b))[1])
+    _model({}).save(path)
+    assert len(calls) == 1 and calls[0][1] == path and os.path.dirname(calls[0][0]) == str(tmp_path)
 
 
 # ------------------------------------------------------------ transition model
@@ -273,7 +466,7 @@ def test_fit_transition_model_cell_contents_use_survivors_and_censored_deaths():
     tm = fit_transition_model([_game(9, [pre], [survived_a, survived_b, died_a, died_b])], min_n=1)
     cell = tm["cells"]["1|Elite|hi"]  # no Monsters -> split 0.5; deck_burst 0.5 is not < 0.5
     assert cell["n"] == 4 and cell["n_died"] == 2
-    assert cell["losses"] == [0, 15]
+    assert cell["survivors"] == [[60, 0], [60, 15]]  # (pre hp, hp lost); the heal loses 0
     assert cell["death_hp"] == [9, 22]
     md = cell["mean_delta"]
     assert md["hp"] == pytest.approx((-15 + 10) / 2)        # survivors only
@@ -316,8 +509,11 @@ def _fake_card_data(monkeypatch):
     monkeypatch.setattr(route_data, "deck_5turn_burst", lambda deck: 40.0)
 
 
-def _write_log(path, character, ascension, seed, hp_curve, final_floor):
-    """A JSONL game log: one map_select per floor 1..len(hp_curve), then game_over."""
+def _write_log(path, character, ascension, seed, hp_curve, final_floor, experiment=None,
+               map_state=False):
+    """A JSONL game log: one map_select per floor 1..len(hp_curve), then game_over.
+    `experiment` tags run_meta; `map_state` adds the {"type": "map"} reply a value-policy
+    run leaves after each map_select."""
     def ms(floor, hp):
         return {"type": "decision", "decision": "map_select",
                 "context": {"act": 1, "floor": floor},
@@ -326,8 +522,13 @@ def _write_log(path, character, ascension, seed, hp_curve, final_floor):
                            "deck": [{"id": "A", "type": "Attack", "upgraded": False}] * 10,
                            "relics": [{"name": "R"}], "potions": []}}
     rows = [{"type": "run_meta", "seed": seed, "character": character, "ascension": ascension}]
+    if experiment is not None:
+        rows[0]["experiment"] = experiment
     for floor, hp in enumerate(hp_curve, start=1):
         rows.append({"type": "state", "data": ms(floor, hp)})
+        if map_state:
+            rows.append({"type": "action", "data": {"cmd": "get_map"}})
+            rows.append({"type": "state", "data": {"type": "map", "rows": []}})
         rows.append({"type": "action", "data": {"cmd": "action", "action": "select_map_node",
                                                 "args": {"col": 0, "row": floor}}})
     rows.append({"type": "state", "data": {
@@ -363,6 +564,8 @@ def test_cli_end_to_end(tmp_path, capsys, _fake_card_data):
     assert "Defect" in report and "hp_only" in report
     assert "d_burst" in report and "d_top8" in report
     assert "deck_strength" not in report
+    assert "grouped by seed (3 seeds)" in report
+    assert "Sparse cells" in report and "Calibration" in report
 
 
 def test_cli_exits_with_an_error_when_no_games_match(tmp_path, _fake_card_data):
@@ -387,3 +590,97 @@ def test_cli_accepts_globs_and_repeated_logs_without_double_counting(tmp_path, c
     fit_route_model.main(["--logs", str(logs / "g*.jsonl"), "--logs", str(logs),
                           "--ascension", "1", "--out", str(out)])
     assert RouteModel.load(str(out)).data["meta"]["n_games"] == 3
+
+
+def _fit(tmp_path, logs, *extra, ascension="1", name="m.json"):
+    from agent import fit_route_model
+    out = tmp_path / name
+    argv = [arg for log in logs for arg in ("--logs", log)]
+    fit_route_model.main([*argv, "--ascension", ascension, "--out", str(out), "--min-n", "1",
+                          *extra])
+    return out
+
+
+def test_cli_skips_value_policy_logs_unless_allowed(tmp_path, capsys, _fake_card_data):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(logs / "r1.jsonl", "Defect", 1, "s1", [80, 70, 60], 4, experiment="ooc=greedy")
+    _write_log(logs / "r2.jsonl", "Defect", 1, "s2", [80, 70, 60], 4, experiment="ooc=greedy")
+    _write_log(logs / "v1.jsonl", "Defect", 1, "s3", [80, 70, 60], 4,
+               experiment="ooc=greedy,route=value")
+    _write_log(logs / "v2.jsonl", "Defect", 1, "s4", [80, 70, 60], 4)  # untagged, but asked for a map
+    with open(logs / "v2.jsonl") as fh:
+        rows = [json.loads(line) for line in fh]
+    rows.insert(2, {"type": "state", "data": {"type": "map", "rows": []}})
+    (logs / "v2.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    _write_log(logs / "v3.jsonl", "Defect", 1, "s5", [80, 70, 60], 4, map_state=True)
+
+    out = _fit(tmp_path, [str(logs)])
+    assert RouteModel.load(str(out)).data["meta"]["n_games"] == 2
+    assert "Skipped 3 game(s) played under the value route policy" in capsys.readouterr().out
+
+    out = _fit(tmp_path, [str(logs)], "--allow-value-logs", name="all.json")
+    assert RouteModel.load(str(out)).data["meta"]["n_games"] == 5
+    assert "Skipped" not in capsys.readouterr().out
+
+
+def test_cli_dedupes_the_same_run_seen_through_two_log_specs(tmp_path, capsys, _fake_card_data):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    _write_log(a / "x.jsonl", "Defect", 1, "s1", [80, 70, 60], 4)
+    _write_log(b / "y.jsonl", "Defect", 1, "s1", [80, 70, 60], 4)      # same run, other file
+    _write_log(a / "z.jsonl", "Silent", 1, "s1", [80, 70, 60], 4)      # same seed, other character
+    _write_log(a / "w.jsonl", "Defect", 1, "s2", [80, 65, 50], 4)
+    out = _fit(tmp_path, [str(a), str(b)])
+    meta = RouteModel.load(str(out)).data["meta"]
+    assert meta["n_games"] == 3 and meta["characters"] == {"Defect": 2, "Silent": 1}
+    assert "Dropped 1 duplicate game(s)" in capsys.readouterr().out
+
+
+def test_dedupe_games_never_merges_games_without_a_seed():
+    from agent.fit_route_model import dedupe_games
+    games = [dict(_game(5, [_feat()]), seed=None) for _ in range(3)]
+    assert len(dedupe_games(games)) == 3
+    same = [_game(5, [_feat()], seed="s"), _game(6, [_feat()], seed="s"),
+            _game(7, [_feat()], seed="s", character="Silent")]
+    assert [g["final_gf"] for g in dedupe_games(same)] == [5, 7]  # first of each (char, seed, asc)
+
+
+def test_sparse_cells_lists_each_thin_cell_and_where_it_falls_back():
+    from agent.fit_route_model import sparse_cells
+    transitions = {"split": 0.5, "min_n": 20, "cells": {
+        "1|Monster|hi": _cell(n=30), "1|Monster|lo": _cell(n=4), "2|Monster|hi": _cell(n=19),
+        "*|Monster|hi": _cell(n=49), "*|Monster|lo": _cell(n=8), "*|Monster|all": _cell(n=57),
+        "2|Ancient|all": _cell(n=7), "*|Ancient|all": _cell(n=7)}}
+    rows = {r["cell"]: r for r in sparse_cells(transitions)}
+    assert "1|Monster|hi" not in rows
+    assert rows["1|Monster|lo"] == {"cell": "1|Monster|lo", "n": 4,
+                                    "falls_back_to": "*|Monster|all"}   # pooled lo is thin too
+    assert rows["2|Monster|hi"]["falls_back_to"] == "*|Monster|hi"
+    assert rows["*|Monster|lo"]["falls_back_to"] == "*|Monster|all"
+    assert rows["2|Ancient|all"]["falls_back_to"] == "zero"             # the whole chain is thin
+    assert rows["*|Ancient|all"]["falls_back_to"] == "zero"
+
+
+def test_calibration_rows_compare_the_empirical_death_rate_with_the_model_q():
+    from agent.fit_route_model import calibration_rows
+    # Act 1 Monster fights at burst 0.5 (split 0.5 -> "hi"): 4 entered at 30 hp, 1 died;
+    # 4 entered at 70 hp, none died.
+    fights = ([_trans("Monster", _feat(hp=30), {"hp": 20}) for _ in range(3)]
+              + [_trans("Monster", _feat(hp=30), died=True)]
+              + [_trans("Monster", _feat(hp=70), {"hp": 60}) for _ in range(4)]
+              + [_trans("Shop", _feat(hp=30), {"hp": 30})])                # not a fight: ignored
+    games = [_game(9, [_feat()], fights)]
+    transitions = fit_transition_model(games, min_n=1)
+    model = RouteModel({"version": 1, "value": _value_dict(), "transitions": transitions})
+    rows = {(r["cell"], r["hp_bin"]): r for r in calibration_rows(games, model)}
+    assert set(rows) == {("1|Monster|hi", "25-35"), ("1|Monster|hi", ">=65")}
+    low = rows[("1|Monster|hi", "25-35")]
+    assert (low["n"], low["died"]) == (4, 1) and low["rate"] == pytest.approx(0.25)
+    # model q at 30 hp: samples entered with >= 30: 3 survivors (30, loss 10) + 4 (70, loss 10)
+    # + the death at 30 -> (0 losses >= 30 + 1 death) / (7 + 1) = 1/8; q at 70 hp: 4 survivors
+    # entered with >= 70, none lost 70 -> 0.
+    assert low["model_q"] == pytest.approx(1 / 8)
+    high = rows[("1|Monster|hi", ">=65")]
+    assert (high["n"], high["died"]) == (4, 0) and high["model_q"] == pytest.approx(0.0)

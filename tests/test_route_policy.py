@@ -135,6 +135,17 @@ def test_random_policy_never_asks_for_a_map_or_loads_a_model(monkeypatch):
     assert not _cmds(sent, "get_map")
     assert result["route_policy"] == "random"
     assert result["route_plans"] == 0 and result["route_fallbacks"] == 0
+    assert result["route_forced"] == 0 and result["route_cell_fallbacks"] == 0
+
+
+def test_random_policy_does_not_count_or_special_case_single_choice_map_selects(monkeypatch):
+    monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
+    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    lone = [{"col": 2, "row": 1, "type": "Monster"}]
+    result, sent = _run(monkeypatch, [{"type": "ready"}, _ms(1, lone), _game_over(2)])
+    assert [c.get("action") or c.get("cmd") for c in sent] == ["start_run", "select_map_node"]
+    assert sent[1]["args"] == {"col": 2, "row": 1}
+    assert result["route_forced"] == 0
 
 
 def test_random_route_is_the_seeded_rng_choice_sequence(monkeypatch):
@@ -239,11 +250,96 @@ def test_planned_and_fallback_picks_are_counted_separately(monkeypatch):
 
 
 def test_value_policy_stamps_the_eval_row(monkeypatch):
-    _value_env(monkeypatch, lambda m, s, c, mo: _pick(1, 1))
-    result, _ = _run(monkeypatch, [{"type": "ready"}, _ms(1), MAP_REPLY, _game_over(2)])
+    _value_env(monkeypatch, lambda m, s, c, mo: _pick(1, 1, cell_levels={"act": 4, "zero": 1}))
+    lone = [{"col": 0, "row": 2, "type": "Monster"}]
+    result, _ = _run(monkeypatch, [{"type": "ready"}, _ms(1), MAP_REPLY, _ms(2, lone),
+                                   _game_over(3)])
     row = play_full_run.result_to_eval_row(result, "Ironclad")
     assert row["route_policy"] == "value"
     assert row["route_plans"] == 1 and row["route_fallbacks"] == 0
+    assert row["route_forced"] == 1 and row["route_cell_fallbacks"] == 1
+
+
+def test_a_single_choice_map_select_is_taken_without_get_map_or_the_planner(monkeypatch, capsys):
+    _value_env(monkeypatch, lambda *a: pytest.fail("a forced move must not reach the planner"))
+    lone = [{"col": 2, "row": 1, "type": "Monster"}]
+    result, sent = _run(monkeypatch, [{"type": "ready"}, _ms(1, lone), _game_over(2)])
+    assert [c.get("action") or c.get("cmd") for c in sent] == ["start_run", "select_map_node"]
+    assert sent[1]["args"] == {"col": 2, "row": 1}
+    assert result["route_forced"] == 1
+    assert result["route_plans"] == 0 and result["route_fallbacks"] == 0
+    out = capsys.readouterr().out
+    assert "[route]" not in out and "fallback" not in out
+
+
+def test_forced_and_planned_map_selects_are_counted_separately(monkeypatch):
+    _value_env(monkeypatch, lambda m, s, c, mo: _pick(1, s["choices"][0]["row"]))
+    lone = lambda row: [{"col": 0, "row": row, "type": "Shop"}]
+    script = [{"type": "ready"}, _ms(1, lone(1)), _ms(2), MAP_REPLY, _ms(3, lone(3)), _ms(4),
+              MAP_REPLY, _game_over(5)]
+    result, sent = _run(monkeypatch, script)
+    assert len(_cmds(sent, "get_map")) == 2
+    assert result["route_forced"] == 2 and result["route_plans"] == 2
+    assert result["route_fallbacks"] == 0
+
+
+def test_cell_levels_are_logged_and_the_rooms_below_the_act_level_counted(monkeypatch, capsys):
+    levels = {"act": 9, "pooled": 3, "type": 1, "zero": 2}
+    _value_env(monkeypatch, lambda m, s, c, mo: _pick(1, s["choices"][0]["row"],
+                                                       cell_levels=levels))
+    script = [{"type": "ready"}, _ms(1), MAP_REPLY, _ms(2), MAP_REPLY, _game_over(3)]
+    result, _ = _run(monkeypatch, script)
+    assert result["route_plans"] == 2
+    assert result["route_cell_fallbacks"] == 2 * (3 + 1 + 2)   # everything below "act", per decision
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("  [route] ")]
+    assert len(lines) == 2
+    assert json.loads(lines[0][len("  [route] "):])["cell_levels"] == levels
+
+
+def test_a_pick_without_cell_levels_counts_no_cell_fallbacks(monkeypatch):
+    _value_env(monkeypatch, lambda m, s, c, mo: _pick(1, 1))   # a stub planner: no cell_levels
+    result, _ = _run(monkeypatch, [{"type": "ready"}, _ms(1), MAP_REPLY, _game_over(2)])
+    assert result["route_plans"] == 1 and result["route_cell_fallbacks"] == 0
+
+
+class _RecordingLogger:
+    """Stands in for GameLogger and remembers the run_context it was built with."""
+    contexts = []
+
+    def __init__(self, character, seed, enabled=True, run_context=None):
+        self.contexts.append(run_context)
+        self.path = None
+
+    def log_action(self, cmd):
+        pass
+
+    def log_state(self, state):
+        pass
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("route_env,ooc_env,expected", [
+    (None, None, "ooc=naive"),                    # the random arm's tag is untouched
+    ("random", "naive", "ooc=naive"),
+    (None, "greedy", "ooc=greedy"),
+    ("value", None, "ooc=naive,route=value"),
+    ("value", "greedy", "ooc=greedy,route=value"),
+])
+def test_run_meta_experiment_tag_marks_value_route_logs_only(monkeypatch, route_env, ooc_env,
+                                                             expected):
+    for name, value in (("STS2_ROUTE_POLICY", route_env), ("STS2_OOC_POLICY", ooc_env)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: _StubModel())
+    monkeypatch.setattr(play_full_run, "_load_greedy_action", lambda: (lambda state: None))
+    monkeypatch.setattr(play_full_run, "GameLogger", _RecordingLogger)
+    _RecordingLogger.contexts = []
+    _run(monkeypatch, [{"type": "ready"}, _game_over(1)])
+    assert _RecordingLogger.contexts[0]["experiment"] == expected
 
 
 def test_a_route_model_that_cannot_load_fails_the_game_as_an_error(monkeypatch):
@@ -263,10 +359,11 @@ def test_a_route_model_that_cannot_load_fails_the_game_as_an_error(monkeypatch):
 
 # ---- summary ----
 
-def _r(policy, plans, fallbacks):
+def _r(policy, plans, fallbacks, forced=0, cell_fallbacks=0):
     return {"victory": False, "seed": "s", "steps": 10, "act": 1, "floor": 5,
             "solver_plans": 1, "solver_errors": 0,
-            "route_policy": policy, "route_plans": plans, "route_fallbacks": fallbacks}
+            "route_policy": policy, "route_plans": plans, "route_fallbacks": fallbacks,
+            "route_forced": forced, "route_cell_fallbacks": cell_fallbacks}
 
 
 def _summary(results):
@@ -274,15 +371,16 @@ def _summary(results):
 
 
 def test_summary_reports_the_route_policy_and_counts():
-    text = _summary([_r("value", 12, 0), _r("value", 9, 0)])
-    assert "Route policy: value -- 21 planned, 0 fallbacks" in text
+    text = _summary([_r("value", 12, 0, forced=20, cell_fallbacks=5),
+                     _r("value", 9, 0, forced=13, cell_fallbacks=2)])
+    assert "Route policy: value -- 21 planned, 33 forced, 0 fallbacks, 7 cell fallbacks" in text
     assert "ROUTE PLANNER NEVER ENGAGED" not in text
     assert "route planner fell back" not in text
 
 
 def test_summary_banner_when_the_value_planner_never_engaged():
     text = _summary([_r("value", 0, 4)])
-    assert "Route policy: value -- 0 planned, 4 fallbacks" in text
+    assert "Route policy: value -- 0 planned, 0 forced, 4 fallbacks, 0 cell fallbacks" in text
     assert "!! ROUTE PLANNER NEVER ENGAGED" in text
 
 
@@ -294,8 +392,15 @@ def test_summary_banner_when_the_value_planner_fell_back():
 
 def test_summary_random_prints_the_policy_without_banners():
     text = _summary([_r("random", 0, 0)])
-    assert "Route policy: random -- 0 planned, 0 fallbacks" in text
+    assert "Route policy: random -- 0 planned, 0 forced, 0 fallbacks, 0 cell fallbacks" in text
     assert "NEVER ENGAGED" not in text and "fell back" not in text
+
+
+def test_summary_tolerates_results_from_before_the_forced_and_cell_counters():
+    old = {"victory": False, "seed": "s", "act": 1, "floor": 5, "solver_plans": 1,
+           "solver_errors": 0, "route_policy": "value", "route_plans": 3, "route_fallbacks": 0}
+    assert "Route policy: value -- 3 planned, 0 forced, 0 fallbacks, 0 cell fallbacks" in \
+        _summary([old])
 
 
 def test_summary_tolerates_results_without_route_fields():
@@ -324,13 +429,16 @@ def test_main_announces_the_route_model_under_value(monkeypatch, capsys):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
     monkeypatch.setenv("STS2_ROUTE_MODEL", "/models/m.json")
     monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
-    loaded = []
+    loaded, planner_loads = [], []
     monkeypatch.setattr(play_full_run, "_load_route_model",
                         lambda path: loaded.append(path) or _StubModel())
+    monkeypatch.setattr(play_full_run, "_load_route_planner",
+                        lambda: planner_loads.append(1))
     played = []
     _main(monkeypatch, ["2", "Ironclad"], played)
     out = capsys.readouterr().out
     assert loaded == ["/models/m.json"]  # once, before any game
+    assert planner_loads == [1]          # the planner (and card data) is imported up front too
     assert "Route policy: value (model /models/m.json, n_games 7, value hp_only)" in out
     assert len(played) == 2
 
@@ -344,6 +452,26 @@ def test_main_aborts_before_any_game_when_the_route_model_cannot_load(monkeypatc
     with pytest.raises(FileNotFoundError):
         _main(monkeypatch, ["2", "Ironclad"], played)
     assert played == []
+
+
+def test_main_aborts_before_any_game_when_the_planner_cannot_be_imported(monkeypatch):
+    monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
+    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: _StubModel())
+
+    def broken():
+        raise FileNotFoundError("data/relics.json")  # card data missing
+
+    monkeypatch.setattr(play_full_run, "_load_route_planner", broken)
+    played = []
+    with pytest.raises(FileNotFoundError, match="relics"):
+        _main(monkeypatch, ["2", "Ironclad"], played)
+    assert played == []
+
+
+def test_the_real_planner_module_loads_through_the_seam():
+    planner = play_full_run._load_route_planner()
+    assert callable(planner.choose_node) and planner.__name__ == "agent.route_planner"
 
 
 def test_main_rejects_an_unknown_route_policy_before_any_game(monkeypatch):
@@ -360,6 +488,8 @@ def test_main_under_random_never_loads_a_route_model(monkeypatch, capsys):
     monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
     monkeypatch.setattr(play_full_run, "_load_route_model",
                         lambda path: pytest.fail("random must not load a route model"))
+    monkeypatch.setattr(play_full_run, "_load_route_planner",
+                        lambda: pytest.fail("random must not import the planner"))
     _main(monkeypatch, ["1", "Ironclad"], [])
     out = capsys.readouterr().out
     assert "Route policy: value (model" not in out
