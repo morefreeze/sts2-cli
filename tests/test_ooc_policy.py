@@ -181,8 +181,16 @@ def test_eval_row_carries_phase3a_fields():
     assert row["ooc_greedy"] == 12 and row["ooc_fallbacks"] == 1
     assert row["ooc_fallback_causes"]["refused"] == 1
     assert row["ooc_event_stuck"] == 2 and row["ooc_knobs"] == {"STS2_RANDOMIZE": "shop"}
+    assert row["game_log_error"] is None  # absent on the result -> None on the row
     assert row["game_log"] == "/x/Ironclad_p3a_1.jsonl"
     assert row["status"] == "dead" and row["floor"] == 9
+
+
+def test_eval_row_carries_game_log_error():
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 3,
+         "game_log_error": "[Errno 17] File exists: 'x'"}, "Ironclad")
+    assert row["game_log_error"] == "[Errno 17] File exists: 'x'"
 
 
 def _decision(kind, **extra):
@@ -265,14 +273,26 @@ def test_map_and_combat_are_never_delegated(monkeypatch):
         raise AssertionError(f"greedy called for {state['decision']}")
 
     _greedy_env(monkeypatch, policy)
+    # solver off: combat_play goes through the old one-card heuristic, no engine solver
     monkeypatch.setenv("STS2_SOLVER_CHARS", "none")
-    script = [{"type": "ready"},
-              _decision("map_select", choices=[{"col": 0, "row": 1}]),
-              _game_over()]
-    result, sent = _run(monkeypatch, script)
+
+    map_script = [{"type": "ready"},
+                  _decision("map_select", choices=[{"col": 0, "row": 1}]),
+                  _game_over()]
+    result, sent = _run(monkeypatch, map_script)
     assert sent[1]["action"] == "select_map_node"
     # the policy's AssertionError would be swallowed by the fallback's except:
     # a delegated map/combat decision would show up here as a counted fallback
+    assert result["ooc_greedy"] == 0 and result["ooc_fallbacks"] == 0
+
+    combat = {"type": "decision", "decision": "combat_play",
+              "hand": [{"index": 0, "id": "c1", "can_play": True, "cost": 1,
+                        "target_type": "Self"}],
+              "energy": 3, "enemies": [{"hp": 10}], "round": 1,
+              "context": {"act": 1, "floor": 1},
+              "player": {"hp": 50, "max_hp": 80, "gold": 0}}
+    result, sent = _run(monkeypatch, [{"type": "ready"}, combat, _game_over()])
+    assert sent[1] == _cmd("play_card", card_index=0)
     assert result["ooc_greedy"] == 0 and result["ooc_fallbacks"] == 0
 
 
@@ -585,3 +605,45 @@ def test_summary_no_fallback_rate_banner_at_or_below_the_threshold():
                                        ooc_event_stuck=0)], 1, "Ironclad",
                                    solver_chars={"Ironclad"})
     assert "OOC FALLBACK RATE" not in text  # exactly 5.0% is not above the threshold
+
+
+def _summ(results):
+    return play_full_run.summarize(results, len(results), "Ironclad", solver_chars={"Ironclad"})
+
+
+def test_summary_banner_when_any_greedy_action_raised():
+    # 1 raise in 1000 decisions: far under the 5% rate banner, still never legitimate
+    causes_a = {"raised": 2, "refused": 0, "none": 0, "shop_cap": 0}
+    causes_b = {"raised": 1, "refused": 0, "none": 0, "shop_cap": 0}
+    text = _summ([_r("greedy", 500, 2, ooc_fallback_causes=causes_a, ooc_event_stuck=0),
+                  _r("greedy", 500, 1, ooc_fallback_causes=causes_b, ooc_event_stuck=0)])
+    assert ("!! greedy_action raised 3 times -- see the tracebacks in this log; "
+            "those decisions ran the naive policy") in text
+    assert "OOC FALLBACK RATE" not in text
+
+
+def test_summary_banner_when_a_shop_visit_hit_the_cap():
+    causes = {"raised": 0, "refused": 0, "none": 0, "shop_cap": 2}
+    text = _summ([_r("greedy", 500, 2, ooc_fallback_causes=causes, ooc_event_stuck=0)])
+    assert ("!! 2 shop visit(s) hit SHOP_ACTION_CAP -- a greedy shop command made "
+            "no progress") in text
+    assert "OOC FALLBACK RATE" not in text
+    assert "greedy_action raised" not in text
+
+
+def test_summary_no_raise_or_cap_banners_for_refusals_only():
+    causes = {"raised": 0, "refused": 3, "none": 1, "shop_cap": 0}
+    text = _summ([_r("greedy", 500, 4, ooc_fallback_causes=causes, ooc_event_stuck=0)])
+    assert "greedy_action raised" not in text and "SHOP_ACTION_CAP" not in text
+
+
+def test_summary_banner_counts_unkept_game_logs():
+    text = _summ([_r("naive", 0, 0, game_log_error="boom"),
+                  _r("naive", 0, 0),
+                  _r("naive", 0, 0, game_log_error="boom again")])
+    assert ("!! 2 game log(s) could not be kept -- their game_log points into logs/, "
+            "which is purged after 7 days") in text
+
+
+def test_summary_no_game_log_banner_when_all_logs_were_kept():
+    assert "could not be kept" not in _summ([_r("naive", 0, 0)])

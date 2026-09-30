@@ -894,6 +894,7 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "ooc_event_stuck": result.get("ooc_event_stuck"),
         "ooc_knobs": result.get("ooc_knobs"),
         "game_log": result.get("game_log"),
+        "game_log_error": result.get("game_log_error"),
     }
 
 
@@ -998,6 +999,22 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
         if attempts and total_fallbacks / attempts > OOC_FALLBACK_RATE_WARN:
             lines.append(f"!! OOC FALLBACK RATE {100 * total_fallbacks / attempts:.1f}% -- "
                          f"the greedy arm is partly running the naive policy")
+        # Two causes that are never legitimate, and that the rate banner misses:
+        # a raise is a greedy_action bug, and a capped shop is at most 1/21 of a
+        # visit's decisions however broken the shop command is.
+        if cause_rows:
+            raised = sum(row.get("raised", 0) for row in cause_rows)
+            capped = sum(row.get("shop_cap", 0) for row in cause_rows)
+            if raised:
+                lines.append(f"!! greedy_action raised {raised} times -- see the tracebacks "
+                             f"in this log; those decisions ran the naive policy")
+            if capped:
+                lines.append(f"!! {capped} shop visit(s) hit SHOP_ACTION_CAP -- a greedy "
+                             f"shop command made no progress")
+    unkept = sum(1 for r in results if r and r.get("game_log_error"))
+    if unkept:
+        lines.append(f"!! {unkept} game log(s) could not be kept -- their game_log points "
+                     f"into logs/, which is purged after 7 days")
     # Zero engagement is only alarming for a character the solver is SUPPOSED
     # to drive -- for the A/B's control arm (character not in solver_chars),
     # zero plans is the whole point and must stay silent. This is the check
