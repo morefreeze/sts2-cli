@@ -133,3 +133,132 @@ def test_eval_row_carries_phase3a_fields():
     assert row["ooc_greedy"] == 12 and row["ooc_fallbacks"] == 1
     assert row["game_log"] == "/x/Ironclad_p3a_1.jsonl"
     assert row["status"] == "dead" and row["floor"] == 9
+
+
+def _decision(kind, **extra):
+    d = {"type": "decision", "decision": kind,
+         "context": {"act": 1, "floor": 5, "room_type": extra.pop("room_type", "")},
+         "player": {"hp": 50, "max_hp": 80, "gold": extra.pop("gold", 100), "deck_size": 10}}
+    d.update(extra)
+    return d
+
+
+def _greedy_env(monkeypatch, policy_fn):
+    monkeypatch.setenv("STS2_OOC_POLICY", "greedy")
+    monkeypatch.setattr(play_full_run, "_load_greedy_action", lambda: policy_fn)
+
+
+def test_greedy_policy_answers_card_reward(monkeypatch):
+    seen = []
+
+    def policy(state):
+        seen.append(state["decision"])
+        return {"cmd": "action", "action": "select_card_reward", "args": {"card_index": 1}}
+
+    _greedy_env(monkeypatch, policy)
+    script = [{"type": "ready"},
+              _decision("card_reward", cards=[{"index": 0}, {"index": 1}]),
+              _game_over()]
+    result, sent = _run(monkeypatch, script)
+    assert seen == ["card_reward"]
+    assert {"cmd": "action", "action": "select_card_reward", "args": {"card_index": 1}} in sent
+    assert result["ooc_policy"] == "greedy"
+    assert result["ooc_greedy"] == 1 and result["ooc_fallbacks"] == 0
+
+
+def test_naive_policy_never_loads_greedy(monkeypatch):
+    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+
+    def boom():
+        raise AssertionError("naive policy must not import greedy_action")
+
+    monkeypatch.setattr(play_full_run, "_load_greedy_action", boom)
+    script = [{"type": "ready"},
+              _decision("card_reward", cards=[{"index": 0}, {"index": 1}]),
+              _game_over()]
+    result, sent = _run(monkeypatch, script)
+    assert {"cmd": "action", "action": "select_card_reward", "args": {"card_index": 0}} in sent
+    assert result["ooc_greedy"] == 0
+
+
+def test_refused_greedy_command_falls_back_and_is_counted(monkeypatch):
+    _greedy_env(monkeypatch, lambda s: {"cmd": "action", "action": "select_card_reward",
+                                        "args": {"card_index": 1}})
+    script = [{"type": "ready"},
+              _decision("card_reward", cards=[{"index": 0}, {"index": 1}]),
+              {"type": "error", "message": "nope"},
+              _game_over()]
+    result, sent = _run(monkeypatch, script)
+    actions = [c.get("action") for c in sent]
+    assert actions[1:3] == ["select_card_reward", "skip_card_reward"]
+    assert result["ooc_greedy"] == 1 and result["ooc_fallbacks"] == 1
+    assert "error" not in result  # the fallback recovered; the run ended normally
+
+
+def test_greedy_exception_falls_back_without_counting_a_greedy_decision(monkeypatch):
+    def policy(state):
+        raise RuntimeError("scoring blew up")
+
+    _greedy_env(monkeypatch, policy)
+    script = [{"type": "ready"}, _decision("rest_site", options=[]), _game_over()]
+    result, sent = _run(monkeypatch, script)
+    assert sent[1] == {"cmd": "action", "action": "leave_room"}
+    assert result["ooc_greedy"] == 0 and result["ooc_fallbacks"] == 1
+
+
+def test_map_and_combat_are_never_delegated(monkeypatch):
+    def policy(state):
+        raise AssertionError(f"greedy called for {state['decision']}")
+
+    _greedy_env(monkeypatch, policy)
+    monkeypatch.setenv("STS2_SOLVER_CHARS", "none")
+    script = [{"type": "ready"},
+              _decision("map_select", choices=[{"col": 0, "row": 1}]),
+              _game_over()]
+    result, sent = _run(monkeypatch, script)
+    assert sent[1]["action"] == "select_map_node"
+    assert result["ooc_greedy"] == 0
+
+
+def test_shop_visit_is_capped(monkeypatch):
+    _greedy_env(monkeypatch, lambda s: {"cmd": "action", "action": "buy_card",
+                                        "args": {"card_index": 0}})
+    cap = play_full_run.SHOP_ACTION_CAP
+    # gold changes every step so the global STUCK detector stays quiet
+    shops = [_decision("shop", gold=1000 - i) for i in range(cap + 1)]
+    script = [{"type": "ready"}, *shops, _game_over()]
+    result, sent = _run(monkeypatch, script)
+    actions = [c.get("action") for c in sent[1:]]
+    assert actions == ["buy_card"] * cap + ["leave_room"]
+    assert result["ooc_greedy"] == cap and result["ooc_fallbacks"] == 1
+
+
+def test_shop_cap_resets_for_a_new_shop(monkeypatch):
+    # Cap of 1: a second action in the SAME visit would be forced to leave_room,
+    # so two buys with zero fallbacks proves the counter reset at the new floor.
+    monkeypatch.setattr(play_full_run, "SHOP_ACTION_CAP", 1)
+    _greedy_env(monkeypatch, lambda s: {"cmd": "action", "action": "buy_card",
+                                        "args": {"card_index": 0}})
+    first = _decision("shop", gold=100)
+    second = _decision("shop", gold=90)
+    second["context"] = {"act": 1, "floor": 11, "room_type": ""}
+    script = [{"type": "ready"}, first, second, _game_over()]
+    result, sent = _run(monkeypatch, script)
+    assert [c.get("action") for c in sent[1:]] == ["buy_card", "buy_card"]
+    assert result["ooc_greedy"] == 2 and result["ooc_fallbacks"] == 0
+
+
+def test_event_page_stuck_guard_applies_under_greedy(monkeypatch):
+    calls = []
+
+    def policy(state):
+        calls.append(1)
+        return {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}
+
+    _greedy_env(monkeypatch, policy)
+    page = _decision("event_choice",
+                     options=[{"index": 0, "is_locked": False, "was_chosen": True}])
+    script = [{"type": "ready"}, page, page, page, page, _game_over()]
+    result, sent = _run(monkeypatch, script)
+    assert len(calls) == 3
+    assert sent[-1] == {"cmd": "action", "action": "leave_room"}

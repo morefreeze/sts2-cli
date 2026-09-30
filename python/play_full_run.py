@@ -336,6 +336,11 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         # key it was collected under.
         refused_ids = set()
         refused_turn_key = None
+        # Phase 3a: out-of-combat decisions go to agent.combat_env.greedy_action
+        # when STS2_OOC_POLICY=greedy (see OOC_GREEDY_DECISIONS). None = naive.
+        greedy = _load_greedy_action() if stats["ooc_policy"] == "greedy" else None
+        shop_visit = None
+        shop_actions = 0
 
         while step < max_steps:
             step += 1
@@ -579,6 +584,42 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                         if state.get("type") == "error":
                             # Try proceeding instead
                             state = send({"cmd": "action", "action": "proceed"})
+
+            elif greedy is not None and decision in OOC_GREEDY_DECISIONS:
+                context = state.get("context") or {}
+                if decision == "shop":
+                    visit = (context.get("act"), context.get("floor"))
+                    if visit != shop_visit:
+                        shop_visit, shop_actions = visit, 0
+                    shop_actions += 1
+                if decision == "event_choice" and stuck_count >= 3:
+                    # Same guard as the naive event branch below: a page that keeps
+                    # coming back unchanged means the chosen option is a latched
+                    # no-op (was_chosen) -- leave rather than spin to STUCK.
+                    print("  event_choice stuck on same page, leaving room")
+                    state = send({"cmd": "action", "action": "leave_room"})
+                elif decision == "shop" and shop_actions > SHOP_ACTION_CAP:
+                    print(f"  !! shop visit exceeded {SHOP_ACTION_CAP} actions, leaving")
+                    stats["ooc_fallbacks"] += 1
+                    state = send({"cmd": "action", "action": "leave_room"})
+                else:
+                    try:
+                        cmd = greedy(state)
+                    except Exception as exc:
+                        print(f"  !! greedy_action raised on {decision}: {exc!r} -- using fallback")
+                        cmd = None
+                    if cmd is None:
+                        stats["ooc_fallbacks"] += 1
+                        state = send(ooc_fallback_command(state))
+                    else:
+                        stats["ooc_greedy"] += 1
+                        reply = send(cmd)
+                        if reply.get("type") == "error":
+                            print(f"  !! greedy {cmd.get('action')} refused on {decision}: "
+                                  f"{reply.get('message', 'unknown')} -- using fallback")
+                            stats["ooc_fallbacks"] += 1
+                            reply = send(ooc_fallback_command(state))
+                        state = reply
 
             elif decision == "event_choice":
                 options = state.get("options", [])
