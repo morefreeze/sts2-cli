@@ -20,6 +20,7 @@ import subprocess
 import sys
 import random
 import os
+import shutil
 from game_log import GameLogger
 from engine_process import EngineHang, EngineProcess
 from combat_plan_driver import (
@@ -114,6 +115,69 @@ def solver_budget_seconds(env=None) -> int:
 def solver_call_timeout_s(budget_s: int) -> float:
     """Watchdog deadline for one plan_combat_turn reply."""
     return budget_s + SOLVER_WATCHDOG_MARGIN_S
+
+
+# Out-of-combat decision policy (Phase 3a,
+# docs/superpowers/specs/2026-09-30-phase3-outofcombat-and-route-design.md).
+# "naive" is the original placeholder policy (card 0, always HEAL, never shop,
+# first unlocked event option); "greedy" hands those decisions to
+# agent.combat_env.greedy_action, the tuned policy the RL harness uses.
+# map_select (seeded random route) and combat_play (solver) are never
+# delegated, so an A/B between the two isolates the out-of-combat policy.
+OOC_POLICIES = ("naive", "greedy")
+OOC_POLICY_DEFAULT = "naive"
+OOC_GREEDY_DECISIONS = frozenset({"card_reward", "rest_site", "event_choice",
+                                  "bundle_select", "card_select", "shop"})
+# A greedy shop visit normally ends in a few buys and a leave_room; this cap
+# only exists so a buy the engine accepts without changing anything cannot
+# spin until the global STUCK detector kills the run.
+SHOP_ACTION_CAP = 20
+
+
+def ooc_policy(env=None) -> str:
+    """Resolve STS2_OOC_POLICY ("naive" | "greedy"; blank/unset = default).
+
+    An unknown value raises instead of silently running the default, for the
+    same reason solver_characters() does: an A/B arm that quietly measured the
+    wrong policy still prints "Completed: N/N".
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("STS2_OOC_POLICY") or "").strip().lower()
+    if not raw:
+        return OOC_POLICY_DEFAULT
+    if raw not in OOC_POLICIES:
+        raise ValueError(f"STS2_OOC_POLICY={raw!r} is not one of {OOC_POLICIES}")
+    return raw
+
+
+def _load_greedy_action():
+    """Import agent.combat_env.greedy_action lazily -- the import pulls in
+    gymnasium/numpy and the card data (~3 s), which the naive policy never needs.
+    Also the seam tests replace to script the policy's answers."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from agent.combat_env import greedy_action
+    return greedy_action
+
+
+def ooc_fallback_command(state: dict) -> dict:
+    """What to send when a greedy command is refused, or greedy_action raises.
+
+    Chosen to always make progress: skip a card reward, take the first bundle,
+    select the first card of a mandatory card_select, and otherwise leave the
+    room (the same escape the naive branches use after an engine error).
+    """
+    decision = state.get("decision", "")
+    if decision == "card_reward":
+        return {"cmd": "action", "action": "skip_card_reward"}
+    if decision == "bundle_select":
+        return {"cmd": "action", "action": "select_bundle", "args": {"bundle_index": 0}}
+    if decision == "card_select":
+        if state.get("cards"):
+            return {"cmd": "action", "action": "select_cards", "args": {"indices": "0"}}
+        return {"cmd": "action", "action": "skip_select"}
+    return {"cmd": "action", "action": "leave_room"}
 
 
 def _find_dotnet():
