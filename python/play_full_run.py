@@ -212,8 +212,37 @@ def engine_argv() -> list:
     return [DOTNET, "run", "--no-build", "--project", PROJECT]
 
 
-def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True):
-    """Play a complete run and return the result."""
+def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True,
+             ascension: int = 0, keep_log_dir: str | None = None):
+    """Play a complete run and return the result.
+
+    Thin wrapper over _play_run() that stamps the fields every result needs
+    regardless of which of _play_run's many return paths produced it:
+    ascension, the out-of-combat policy and its counters, and the path of the
+    game's full state log. With keep_log_dir, that log is copied out of
+    logs/ first -- game_log.cleanup_old_logs() deletes anything older than
+    7 days, which already erased every Phase 2 game, and Phase 3b fits its
+    route model from these logs.
+    """
+    stats = {"ooc_policy": ooc_policy(), "ooc_greedy": 0, "ooc_fallbacks": 0,
+             "game_log": None}
+    result = _play_run(seed, character, verbose, log, ascension, stats)
+    game_log = stats.pop("game_log")
+    if keep_log_dir and game_log and os.path.exists(game_log):
+        os.makedirs(keep_log_dir, exist_ok=True)
+        kept = os.path.join(keep_log_dir, f"{character}_{str(seed).replace('/', '_')}.jsonl")
+        shutil.copy2(game_log, kept)
+        game_log = kept
+    result.update(stats)
+    result["ascension"] = ascension
+    result["game_log"] = game_log
+    return result
+
+
+def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: int,
+              stats: dict):
+    """The run loop. `stats` is play_run()'s per-run dict: this function bumps
+    stats["ooc_greedy"]/["ooc_fallbacks"] and sets stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
     # global `random` module and silently change behavior for every other
@@ -236,7 +265,10 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     solver_plans = 0
     solver_errors = 0
     solver_error_printed = False
-    logger = GameLogger(character, seed, enabled=log)
+    logger = GameLogger(character, seed, enabled=log,
+                        run_context={"seed": seed, "character": character,
+                                     "ascension": ascension,
+                                     "experiment": f"ooc={stats['ooc_policy']}"})
     # stderr: inherit when verbose, otherwise DEVNULL -- never an unread PIPE,
     # which fills up and blocks the engine's Console.Error.WriteLine (the stderr
     # deadlock described in RunSimulator.cs DoPlanCombatTurn's diagnostics note).
@@ -292,7 +324,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
             print(f"Connected: {ready}")
 
         # Start run
-        state = send({"cmd": "start_run", "character": character, "seed": seed})
+        state = send({"cmd": "start_run", "character": character, "seed": seed,
+                      "ascension": ascension})
 
         step = 0
         max_steps = 500  # Safety limit
@@ -646,6 +679,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
 
     finally:
         logger.close()
+        stats["game_log"] = logger.path
         if logger.path:
             print(f"  [log] Saved to {logger.path}")
         engine.close()
@@ -709,6 +743,11 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "solver_errors": result.get("solver_errors"),
         "solver": sorted(solver_characters()),
         "solver_budget_s": solver_budget_seconds(),
+        "ascension": result.get("ascension"),
+        "ooc_policy": result.get("ooc_policy"),
+        "ooc_greedy": result.get("ooc_greedy"),
+        "ooc_fallbacks": result.get("ooc_fallbacks"),
+        "game_log": result.get("game_log"),
     }
 
 
@@ -825,22 +864,37 @@ def main():
     parser.add_argument("--results-log", default=None,
                         help="Append one JSONL row per run, in agent/paired_eval.py's "
                              "input format (seed/status/floor). Use for A/B arms.")
+    parser.add_argument("--ascension", type=int, default=0,
+                        help="Ascension level sent with start_run (default 0).")
+    parser.add_argument("--seed-prefix", default="run_",
+                        help="Seeds are <prefix><i> for i = 1..num_runs (default run_). "
+                             "Use a fresh prefix per experiment so a verdict never "
+                             "runs on seeds an earlier phase tuned on.")
+    parser.add_argument("--keep-game-logs", default=None, metavar="DIR",
+                        help="Copy each game's full state log to DIR/<character>_<seed>.jsonl "
+                             "(logs/ is purged after 7 days) and record that path in the "
+                             "results row.")
     args = parser.parse_args()
 
     if args.num_runs <= 0:
         parser.error(f"num_runs must be a positive integer, got {args.num_runs}")
+    if args.ascension < 0:
+        parser.error(f"--ascension must be >= 0, got {args.ascension}")
+    policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
 
     num_runs = args.num_runs
     character = args.character
 
-    print(f"Playing {num_runs} runs as {character}")
+    print(f"Playing {num_runs} runs as {character} "
+          f"(ascension {args.ascension}, ooc policy {policy})")
     print("=" * 60)
 
     results = []
     for i in range(num_runs):
-        seed = f"run_{i+1}"
+        seed = f"{args.seed_prefix}{i+1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
-        result = play_run(seed, character, verbose=True)
+        result = play_run(seed, character, verbose=True, ascension=args.ascension,
+                          keep_log_dir=args.keep_game_logs)
         results.append(result)
         if args.results_log:
             with open(args.results_log, "a") as fh:
