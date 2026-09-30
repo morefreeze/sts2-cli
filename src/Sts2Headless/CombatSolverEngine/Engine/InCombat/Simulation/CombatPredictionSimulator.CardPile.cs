@@ -17,6 +17,17 @@ internal sealed partial class CombatPredictionSimulator
     // accumulated battle history. Reaching this safety boundary invalidates the action;
     // returning a partially drawn hand would silently invent a different combat state.
     private const int MaximumNestedDrawDepth = 100;
+
+    // LOCAL PATCH (sts2-cli, agent/bug.md BUG-040 -- see VENDORED.md): cap the cards drawn along one
+    // simulated line, the same way CombatPredictionSimulator.Orb.cs caps channels with
+    // MaxSimulatedChanneledOrbs + PredictionRiskReason.OrbChannelLimitExceeded. Upstream already declares
+    // PredictionRiskReason.CardDrawLimitExceeded and keeps an O(1) card-drawn counter in
+    // CombatPredictionHistory, but never checks either; MaximumNestedDrawDepth only bounds NESTED draws,
+    // and a draw loop draws one card at a time at depth 1. Without this, a loop the real game itself
+    // never exits spins a search worker forever: Pillage ("draw until a non-Attack") while Hellraiser
+    // auto-plays each drawn Strike and Ringing vetoes that auto-play, so the Strike goes to the discard
+    // unplayed, the hand never grows, and the next draw after the reshuffle is another Strike.
+    private const int MaxSimulatedCardDraws = 1000;
     private int _activeDrawDepth;
 
     /// <summary>
@@ -72,6 +83,13 @@ internal sealed partial class CombatPredictionSimulator
         for (int index = next; index < drawCount; index++)
         {
             if (IsOverOrEnding || state.Hand.Cards.Count >= maxHandSize) break;
+            if (History.Count<CombatPredictionCardDrawnEntry>() >= MaxSimulatedCardDraws) // LOCAL PATCH, BUG-040
+            {
+                // Draw nothing: a "draw until" loop sees no card and stops, and the line is flagged as an
+                // uncompensated prediction gap rather than presented as a faithful simulation.
+                History.RecordRisk(PredictionRiskReason.CardDrawLimitExceeded);
+                break;
+            }
             ShuffleIfNecessary(player);
             if (HasPendingChoice)
             {

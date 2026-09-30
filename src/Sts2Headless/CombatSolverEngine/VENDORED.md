@@ -93,4 +93,24 @@ need, re-vendor the affected file(s) from a fresh clone instead of patching
 by hand, so we don't silently diverge from upstream. The four exceptions
 above (two hand-extracted enum files, one RitsuLib-touchpoint file with its
 mod-patcher interface stripped, and one hand-written logging shim) are the
-only deliberate departures from "verbatim file copy" in this directory.
+only deliberate departures from "verbatim file copy" in this directory,
+apart from the local patches listed below.
+
+## Local patches to vendored algorithm files
+
+One deliberate, user-approved departure from "never hand-edit ported
+algorithm logic" (2026-09-30). Each is marked `LOCAL PATCH` in the source and
+must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
+
+- `Engine/InCombat/Simulation/CombatPredictionSimulator.CardPile.cs` --
+  `MaxSimulatedCardDraws = 1000`: `ContinueDrawExecution` stops drawing once
+  one simulated line has drawn 1000 cards and records
+  `PredictionRiskReason.CardDrawLimitExceeded` (an existing upstream enum value
+  that upstream never raised; the count is upstream's own O(1)
+  `CombatPredictionCardDrawnEntry` counter). Without it a search worker spins
+  forever on a loop the real game also never exits -- Pillage's "draw until a
+  non-Attack" while Hellraiser auto-plays each drawn Strike and Ringing vetoes
+  the auto-play (agent/bug.md BUG-040). Same shape as upstream's own
+  `MaxSimulatedChanneledOrbs` / `OrbChannelLimitExceeded` cap in
+  `CombatPredictionSimulator.Orb.cs`. It only changes lines that draw 1000+
+  cards, i.e. lines that are already non-terminating in the real game.
