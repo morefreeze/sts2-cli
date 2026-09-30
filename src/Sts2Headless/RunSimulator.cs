@@ -1778,6 +1778,9 @@ public class RunSimulator
 
         try
         {
+            // BUG-046: the purchase clears entry.Model, so read the name BEFORE buying --
+            // dereferencing it afterwards threw NRE and reported a successful buy as an error.
+            var relicName = entry.Model?.GetType().Name ?? "?";
             // The pickup effect can open a card_select (e.g. KIFUDA → enchant up to 3 with
             // Adroit, #80). Run the purchase on a background task and yield as soon as a
             // pending selection appears so the caller can resolve it; the background task
@@ -1794,12 +1797,12 @@ public class RunSimulator
             }
             if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
             {
-                Log($"Buy relic {entry.Model.GetType().Name}: yielded for pending selection");
+                Log($"Buy relic {relicName}: yielded for pending selection");
                 return DetectDecisionPoint();
             }
             if (!task.IsCompleted) task.Wait(2000);
             _syncCtx.Pump();
-            Log($"Bought relic: {entry.Model.GetType().Name} for {entry.Cost}g");
+            Log($"Bought relic: {relicName} for {entry.Cost}g");
         }
         catch (Exception ex) { return Error($"Buy relic failed: {ex.Message}"); }
 
@@ -1823,9 +1826,11 @@ public class RunSimulator
 
         try
         {
+            // BUG-046: the purchase clears entry.Model -- capture the name before buying.
+            var potionName = entry.Model?.GetType().Name ?? "?";
             entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
-            Log($"Bought potion: {entry.Model.GetType().Name} for {entry.Cost}g");
+            Log($"Bought potion: {potionName} for {entry.Cost}g");
         }
         catch (Exception ex)
         {
