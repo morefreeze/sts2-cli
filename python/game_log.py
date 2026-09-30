@@ -67,9 +67,21 @@ class GameLogger:
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_seed = str(seed).replace("/", "_")
-        filename = f"{ts}_{character}_{safe_seed}.jsonl"
-        self._path = os.path.join(LOG_DIR, filename)
-        self._file = open(self._path, "w")
+        stem = f"{ts}_{character}_{safe_seed}"
+        # Mode "x", never "w": two processes playing the same character+seed in
+        # the same second used to truncate and then interleave ONE file. On a
+        # collision take the pid-suffixed name (and a counter if even that is
+        # taken, e.g. the same process replaying a seed within one second).
+        suffixes = ["", f"_{os.getpid()}"] + [f"_{os.getpid()}_{n}" for n in range(2, 100)]
+        for suffix in suffixes:
+            self._path = os.path.join(LOG_DIR, f"{stem}{suffix}.jsonl")
+            try:
+                self._file = open(self._path, "x")
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError(f"no free game log name for {stem}")
         self._write_run_meta_header(character, seed, run_context)
 
     def _write_run_meta_header(self, character: str, seed: str,

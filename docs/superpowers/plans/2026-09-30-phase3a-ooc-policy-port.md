@@ -272,7 +272,7 @@ def test_keep_game_logs_copies_the_log_and_records_the_kept_path(monkeypatch, tm
     keep = tmp_path / "kept"
     result, _ = _run(monkeypatch, [{"type": "ready"}, _game_over()], seed="p3a_7",
                      ascension=1, log=True, keep_log_dir=str(keep))
-    kept = keep / "Ironclad_p3a_7.jsonl"
+    kept = keep / "Ironclad_naive_a1_p3a_7.jsonl"
     assert result["game_log"] == str(kept)
     lines = [json.loads(l) for l in kept.read_text().splitlines()]
     meta = lines[0]
@@ -322,7 +322,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     game_log = stats.pop("game_log")
     if keep_log_dir and game_log and os.path.exists(game_log):
         os.makedirs(keep_log_dir, exist_ok=True)
-        kept = os.path.join(keep_log_dir, f"{character}_{str(seed).replace('/', '_')}.jsonl")
+        kept = os.path.join(keep_log_dir,
+                            f"{character}_{ooc_policy()}_a{ascension}_{str(seed).replace('/', '_')}.jsonl")
         shutil.copy2(game_log, kept)
         game_log = kept
     result.update(stats)
@@ -381,7 +382,8 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                              "Use a fresh prefix per experiment so a verdict never "
                              "runs on seeds an earlier phase tuned on.")
     parser.add_argument("--keep-game-logs", default=None, metavar="DIR",
-                        help="Copy each game's full state log to DIR/<character>_<seed>.jsonl "
+                        help="Copy each game's full state log to "
+                             "DIR/<character>_<policy>_a<ascension>_<seed>.jsonl "
                              "(logs/ is purged after 7 days) and record that path in the "
                              "results row.")
 ```
@@ -724,6 +726,21 @@ git commit -m "feat(play_full_run): SUMMARY reports the OOC policy, greedy/fallb
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
+#### Review fixes (2026-09-30)
+
+代码评审（34e1a47..b889568）后追加的一次提交。上面 Task 1-4 的代码块是**原始版本**；与本小节冲突处，以本小节和已提交的代码为准。
+
+- `ooc_greedy` 只数引擎**接受**的 greedy 命令；被拒/抛异常/返回 None 的不计入。
+- 回落按原因计数：`ooc_fallback_causes = {raised, refused, none, shop_cap}`，`ooc_fallbacks` = 四项之和；事件页卡死退出（naive 也这样做）单独计入 `ooc_event_stuck`，不算回落。
+- 回落命令 = **naive 的选择**：新增 `naive_ooc_command(state)`（逐条对应 `_play_run` 里 naive 分支的首条命令，有 15 组状态的一致性测试，跑真实的 naive 臂来对照）；它的回复若是 error，再发 `ooc_escape_command(state)`（原 `ooc_fallback_command` 改名，行为不变）。
+- 可见性：每种决策首次 `greedy_action` 抛异常时打印完整 traceback（之后只打一行）；SUMMARY 行带分类与 event-stuck 数：`OOC policy: greedy -- N greedy decisions, M fallbacks (raised a, refused b, none c, shop_cap d), E event-stuck exits`；`M / (N + M) > OOC_FALLBACK_RATE_WARN`（0.05）时加 `!! OOC FALLBACK RATE x.x% -- the greedy arm is partly running the naive policy` 横幅。
+- 结果行额外带 `ooc_fallback_causes`、`ooc_event_stuck`、`ooc_knobs`。
+- 日志拷贝失败（`OSError`）不再丢掉整局结果：打印 `!! could not keep game log ...`，`game_log` 保持 `logs/` 原路径，结果里加 `game_log_error`。
+- 保留的日志文件名改为 `<character>_<policy>_a<ascension>_<seed>.jsonl`（naive/greedy 两臂、a0/a1 不会互相覆盖）。
+- `GameLogger` 用 `"x"` 模式开文件；同名冲突时改用带 pid 后缀的文件名（不再截断/交错另一个进程正在写的日志）。
+- `main()` 在 greedy 时先 `_load_greedy_action()`（导入坏了立刻中止，而不是 N 局 `crash`），并对显式设置的 `STS2_RANDOMIZE` / `STS2_DECISION_ADVISOR` / `STS2_CARD_THRESHOLD_LIFT` / `STS2_BASIC_PURGE_ALL` / `STS2_CARD_QUALITY_GATE` 打印 `!! greedy_action knob set: NAME=value`，并把它们记入每局结果的 `ooc_knobs`（naive 下为 `{}`）。
+- 补测试：greedy 返回 None、naive 回落也被拒（走 escape）、bundle_select 走 greedy、错误返回路径也带政策字段、商店无变化的重复状态被上限截断（不是 STUCK）、map/combat 测试同时断言 `ooc_fallbacks == 0`。
+
 ---
 
 ### Task 5: 真引擎冒烟（greedy，a1，每角色 2 局）
@@ -742,22 +759,24 @@ for char in Ironclad Silent Defect Regent Necrobinder; do
       --results-log "$OUT/${char}.jsonl" > "$OUT/${char}.log" 2>&1 &
 done
 wait
-grep -H -E "Wins: |OOC policy|NEVER ENGAGED|Run [0-9]+: (TIMEOUT|ERROR|HANG)" "$OUT"/*.log
+grep -H -E "Wins: |OOC policy|NEVER ENGAGED|OOC FALLBACK RATE|Run [0-9]+: (TIMEOUT|ERROR|HANG)" "$OUT"/*.log
 ```
 
-Expected（观察项）：每个角色 `Completed: 2/2`；`OOC policy: greedy -- N greedy decisions` 且 N > 0；没有 NEVER ENGAGED。
+Expected（观察项）：每个角色 `Completed: 2/2`；`OOC policy: greedy -- N greedy decisions` 且 N > 0（N 只数引擎**接受**的 greedy 命令）；没有 NEVER ENGAGED，没有 `OOC FALLBACK RATE`（回落率 > 5% 就出这条横幅）。
 
 - [ ] **Step 2: 检查回落与保留日志**
 
 ```bash
 OUT=$(cat ~/.sts2-train/last_phase3a_smoke_dir.txt)
-grep -h -E "!! greedy|!! shop visit" "$OUT"/*.log | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -20
+grep -h -E "!! greedy|!! shop visit|!! naive fallback" "$OUT"/*.log | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -20
+grep -h -B1 -A14 "^Traceback" "$OUT"/*.log | head -60   # 每局、每种决策首次 greedy_action 抛异常时的完整 traceback
+grep -h "^OOC policy" "$OUT"/*.log      # 回落按 raised/refused/none/shop_cap 分类；event-stuck 退出不算回落
 ls "$OUT/games" | wc -l            # 期望 10
 head -1 "$OUT/games/"*_p3a_smoke_1.jsonl | head -5   # 期望 run_meta 行，ascension=1, experiment=ooc=greedy
 grep -h '"action": "buy_\|"action": "remove_card"\|SMITH' "$OUT"/*.log | wc -l   # 期望 > 0：商店/锻造确实发生了
 ```
 
-判定：回落是**某一种命令被系统性拒绝**（同一条 `!! greedy <action> refused` 反复出现）→ 这是 greedy 与 solver harness 的协议差异，停下来把日志行贴给协调者，不要自己改 `greedy_action`。零星几次回落可以接受。
+判定：回落是**某一种命令被系统性拒绝**（同一条 `!! greedy <action> refused` 反复出现）或 **`greedy_action` 抛异常**（`raised` > 0：贴出 traceback）→ 这是 greedy 与 solver harness 的协议差异或 greedy 自身的 bug，停下来把日志行贴给协调者，不要自己改 `greedy_action`。零星几次回落可以接受（回落时走的是 **naive 的选择**，不是"随便什么"）。
 
 - [ ] **Step 3: 把冒烟结果写进本文件**
 
@@ -788,10 +807,10 @@ for arm in naive greedy; do
       > "$OUT/regression_${arm}.log" 2>&1 &
 done
 wait
-grep -H -E "^===== |Wins: |OOC policy|NEVER ENGAGED|Run [0-9]+: (TIMEOUT|ERROR|HANG)" "$OUT"/regression_*.log
+grep -H -E "^===== |Wins: |OOC policy|NEVER ENGAGED|OOC FALLBACK RATE|Run [0-9]+: (TIMEOUT|ERROR|HANG)" "$OUT"/regression_*.log
 ```
 
-Expected: 两个日志里 5 个角色全部 `Completed: 5/5`；naive 日志 `OOC policy: naive -- 0 greedy decisions, 0 fallbacks`；greedy 日志 greedy 决策数 > 0、没有 NEVER ENGAGED。**任一角色不到 5/5 就停**：用同 seed 重跑定位（路线由 `random.Random(seed)` 锁定，可复现），修好再从 Step 1 重来。
+Expected: 两个日志里 5 个角色全部 `Completed: 5/5`；naive 日志 `OOC policy: naive -- 0 greedy decisions, 0 fallbacks (raised 0, refused 0, none 0, shop_cap 0), 0 event-stuck exits`；greedy 日志 greedy 决策数 > 0、没有 NEVER ENGAGED、没有 `OOC FALLBACK RATE`。**任一角色不到 5/5 就停**：用同 seed 重跑定位（路线由 `random.Random(seed)` 锁定，可复现），修好再从 Step 1 重来。
 
 - [ ] **Step 2: （已并入 Step 1）**
 
@@ -839,7 +858,7 @@ for char in Ironclad Silent Defect Regent Necrobinder; do
     echo "########## $char ##########"
     .venv/bin/python -m agent.paired_eval "$AB/${char}_naive.jsonl" "$AB/${char}_greedy.jsonl" \
         --label-a "naive" --label-b "greedy"
-    grep -h -E "Wins: |OOC policy|NEVER ENGAGED" "$AB/${char}_naive.log" "$AB/${char}_greedy.log"
+    grep -h -E "Wins: |OOC policy|NEVER ENGAGED|OOC FALLBACK RATE" "$AB/${char}_naive.log" "$AB/${char}_greedy.log"
 done
 ```
 

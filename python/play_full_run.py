@@ -21,6 +21,7 @@ import sys
 import random
 import os
 import shutil
+import traceback
 from game_log import GameLogger
 from engine_process import EngineHang, EngineProcess
 from combat_plan_driver import (
@@ -132,6 +133,18 @@ OOC_GREEDY_DECISIONS = frozenset({"card_reward", "rest_site", "event_choice",
 # only exists so a buy the engine accepts without changing anything cannot
 # spin until the global STUCK detector kills the run.
 SHOP_ACTION_CAP = 20
+# A greedy arm whose fallbacks exceed this share of (accepted greedy decisions +
+# fallbacks) is partly running the naive policy; summarize() prints a banner.
+OOC_FALLBACK_RATE_WARN = 0.05
+# Why a greedy decision fell back to the naive command. "raised": greedy_action
+# threw; "none": it returned nothing; "refused": the engine rejected its command;
+# "shop_cap": a shop visit exceeded SHOP_ACTION_CAP.
+OOC_FALLBACK_CAUSES = ("raised", "refused", "none", "shop_cap")
+# Env knobs agent.combat_env.greedy_action reads. Any that is explicitly set is
+# announced by main() and stamped into every result, so an A/B arm that differs
+# by one of them cannot be mistaken for a pure policy comparison.
+GREEDY_KNOBS = ("STS2_RANDOMIZE", "STS2_DECISION_ADVISOR", "STS2_CARD_THRESHOLD_LIFT",
+                "STS2_BASIC_PURGE_ALL", "STS2_CARD_QUALITY_GATE")
 
 
 def ooc_policy(env=None) -> str:
@@ -161,8 +174,56 @@ def _load_greedy_action():
     return greedy_action
 
 
-def ooc_fallback_command(state: dict) -> dict:
-    """What to send when a greedy command is refused, or greedy_action raises.
+def greedy_knobs(env=None) -> dict:
+    """The GREEDY_KNOBS that are explicitly set in `env` (name -> raw value)."""
+    env = os.environ if env is None else env
+    return {k: env[k] for k in GREEDY_KNOBS if k in env}
+
+
+def naive_ooc_command(state: dict) -> dict:
+    """The FIRST command the naive policy sends for this out-of-combat decision.
+
+    Mirrors the naive branches in _play_run() exactly (tests/test_ooc_policy.py
+    pins the parity by running the naive arm). It is what a greedy decision falls
+    back to when greedy_action raises, returns nothing, or has its command
+    refused -- so a fallback plays the control arm's move, never a third policy.
+    The naive event-page stuck exit is not mirrored; the greedy branch applies
+    that same guard before it ever asks for a fallback.
+    """
+    decision = state.get("decision", "")
+    if decision == "card_reward":
+        if state.get("cards", []):
+            return {"cmd": "action", "action": "select_card_reward",
+                    "args": {"card_index": 0}}
+        return {"cmd": "action", "action": "skip_card_reward"}
+    if decision == "rest_site":
+        enabled = [o for o in state.get("options", []) if o.get("is_enabled", True)]
+        heal = next((o for o in enabled if o.get("option_id") == "HEAL"), None)
+        choice = heal or (enabled[0] if enabled else None)
+        if choice:
+            return {"cmd": "action", "action": "choose_option",
+                    "args": {"option_index": choice["index"]}}
+        return {"cmd": "action", "action": "leave_room"}
+    if decision == "event_choice":
+        options = state.get("options", [])
+        if options:
+            choice = next((o for o in options if not o.get("is_locked")), options[0])
+            return {"cmd": "action", "action": "choose_option",
+                    "args": {"option_index": choice["index"]}}
+        return {"cmd": "action", "action": "leave_room"}
+    if decision == "bundle_select":
+        return {"cmd": "action", "action": "select_bundle", "args": {"bundle_index": 0}}
+    if decision == "card_select":
+        if state.get("cards", []):
+            return {"cmd": "action", "action": "select_cards", "args": {"indices": "0"}}
+        return {"cmd": "action", "action": "skip_select"}
+    # "shop" (the naive policy never buys) -- and any decision outside
+    # OOC_GREEDY_DECISIONS, which never reaches here.
+    return {"cmd": "action", "action": "leave_room"}
+
+
+def ooc_escape_command(state: dict) -> dict:
+    """Last resort when even naive_ooc_command's reply is an error.
 
     Chosen to always make progress: skip a card reward, take the first bundle,
     select the first card of a mandatory card_select, and otherwise leave the
@@ -224,15 +285,32 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     7 days, which already erased every Phase 2 game, and Phase 3b fits its
     route model from these logs.
     """
-    stats = {"ooc_policy": ooc_policy(), "ooc_greedy": 0, "ooc_fallbacks": 0,
+    policy = ooc_policy()
+    stats = {"ooc_policy": policy,
+             # commands greedy_action produced AND the engine accepted
+             "ooc_greedy": 0,
+             "ooc_fallbacks": 0,  # = sum(ooc_fallback_causes), set below
+             "ooc_fallback_causes": {cause: 0 for cause in OOC_FALLBACK_CAUSES},
+             # greedy-arm event-page stuck exits (leave_room); the naive branch
+             # exits the same way, so these are NOT fallbacks
+             "ooc_event_stuck": 0,
+             "ooc_knobs": greedy_knobs() if policy == "greedy" else {},
              "game_log": None}
     result = _play_run(seed, character, verbose, log, ascension, stats)
+    stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
     game_log = stats.pop("game_log")
     if keep_log_dir and game_log and os.path.exists(game_log):
-        os.makedirs(keep_log_dir, exist_ok=True)
-        kept = os.path.join(keep_log_dir, f"{character}_{str(seed).replace('/', '_')}.jsonl")
-        shutil.copy2(game_log, kept)
-        game_log = kept
+        # Keeping the log is a convenience -- it must never cost the game's result.
+        kept = os.path.join(
+            keep_log_dir,
+            f"{character}_{policy}_a{ascension}_{str(seed).replace('/', '_')}.jsonl")
+        try:
+            os.makedirs(keep_log_dir, exist_ok=True)
+            shutil.copy2(game_log, kept)
+            game_log = kept
+        except OSError as exc:
+            print(f"  !! could not keep game log {game_log} -> {kept}: {exc}")
+            result["game_log_error"] = str(exc)
     result.update(stats)
     result["ascension"] = ascension
     result["game_log"] = game_log
@@ -242,7 +320,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
 def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: int,
               stats: dict):
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
-    stats["ooc_greedy"]/["ooc_fallbacks"] and sets stats["game_log"]."""
+    stats["ooc_greedy"], stats["ooc_fallback_causes"][...] and
+    stats["ooc_event_stuck"], and sets stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
     # global `random` module and silently change behavior for every other
@@ -341,6 +420,20 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         greedy = _load_greedy_action() if stats["ooc_policy"] == "greedy" else None
         shop_visit = None
         shop_actions = 0
+        raised_decisions = set()  # decision types whose first raise printed a traceback
+
+        def ooc_fallback(state, cause):
+            """Play the naive choice for a greedy decision that could not be
+            answered, count it under `cause`, and return the engine's reply. If
+            that reply is an error too, send the escape command (the same
+            recovery the naive branches use)."""
+            stats["ooc_fallback_causes"][cause] += 1
+            reply = send(naive_ooc_command(state))
+            if reply.get("type") == "error":
+                print(f"  !! naive fallback refused on {state.get('decision')}: "
+                      f"{reply.get('message', 'unknown')} -- using escape command")
+                reply = send(ooc_escape_command(state))
+            return reply
 
         while step < max_steps:
             step += 1
@@ -595,31 +688,40 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if decision == "event_choice" and stuck_count >= 3:
                     # Same guard as the naive event branch below: a page that keeps
                     # coming back unchanged means the chosen option is a latched
-                    # no-op (was_chosen) -- leave rather than spin to STUCK.
+                    # no-op (was_chosen) -- leave rather than spin to STUCK. The
+                    # naive arm exits the same way, so this is not a fallback.
                     print("  event_choice stuck on same page, leaving room")
+                    stats["ooc_event_stuck"] += 1
                     state = send({"cmd": "action", "action": "leave_room"})
                 elif decision == "shop" and shop_actions > SHOP_ACTION_CAP:
                     print(f"  !! shop visit exceeded {SHOP_ACTION_CAP} actions, leaving")
-                    stats["ooc_fallbacks"] += 1
-                    state = send({"cmd": "action", "action": "leave_room"})
+                    state = ooc_fallback(state, "shop_cap")
                 else:
                     try:
                         cmd = greedy(state)
+                        raised = False
                     except Exception as exc:
-                        print(f"  !! greedy_action raised on {decision}: {exc!r} -- using fallback")
-                        cmd = None
-                    if cmd is None:
-                        stats["ooc_fallbacks"] += 1
-                        state = send(ooc_fallback_command(state))
+                        raised = True
+                        print(f"  !! greedy_action raised on {decision}: {exc!r} "
+                              f"-- using naive fallback")
+                        if decision not in raised_decisions:
+                            raised_decisions.add(decision)
+                            print(traceback.format_exc())
+                    if raised:
+                        state = ooc_fallback(state, "raised")
+                    elif cmd is None:
+                        print(f"  !! greedy_action returned None on {decision} "
+                              f"-- using naive fallback")
+                        state = ooc_fallback(state, "none")
                     else:
-                        stats["ooc_greedy"] += 1
                         reply = send(cmd)
                         if reply.get("type") == "error":
                             print(f"  !! greedy {cmd.get('action')} refused on {decision}: "
-                                  f"{reply.get('message', 'unknown')} -- using fallback")
-                            stats["ooc_fallbacks"] += 1
-                            reply = send(ooc_fallback_command(state))
-                        state = reply
+                                  f"{reply.get('message', 'unknown')} -- using naive fallback")
+                            state = ooc_fallback(state, "refused")
+                        else:
+                            stats["ooc_greedy"] += 1
+                            state = reply
 
             elif decision == "event_choice":
                 options = state.get("options", [])
@@ -788,6 +890,9 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "ooc_policy": result.get("ooc_policy"),
         "ooc_greedy": result.get("ooc_greedy"),
         "ooc_fallbacks": result.get("ooc_fallbacks"),
+        "ooc_fallback_causes": result.get("ooc_fallback_causes"),
+        "ooc_event_stuck": result.get("ooc_event_stuck"),
+        "ooc_knobs": result.get("ooc_knobs"),
         "game_log": result.get("game_log"),
     }
 
@@ -872,14 +977,27 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     if policies:
         total_greedy = sum(r.get("ooc_greedy") or 0 for r in results if r)
         total_fallbacks = sum(r.get("ooc_fallbacks") or 0 for r in results if r)
-        lines.append(f"OOC policy: {'/'.join(policies)} -- {total_greedy} greedy decisions, "
-                     f"{total_fallbacks} fallbacks")
+        line = (f"OOC policy: {'/'.join(policies)} -- {total_greedy} greedy decisions, "
+                f"{total_fallbacks} fallbacks")
+        cause_rows = [r["ooc_fallback_causes"] for r in results
+                      if r and r.get("ooc_fallback_causes")]
+        if cause_rows:
+            by_cause = {c: sum(row.get(c, 0) for row in cause_rows) for c in OOC_FALLBACK_CAUSES}
+            line += " (" + ", ".join(f"{c} {n}" for c, n in by_cause.items()) + ")"
+        if any(r and r.get("ooc_event_stuck") is not None for r in results):
+            line += (f", {sum(r.get('ooc_event_stuck') or 0 for r in results if r)} "
+                     f"event-stuck exits")
+        lines.append(line)
         # Same blindness the solver banner guards against: a greedy arm whose
-        # policy never answered anything is secretly the naive arm.
+        # policy never had a command accepted is secretly the naive arm.
         if policies == ["greedy"] and total_greedy == 0:
             lines.append("!! OOC POLICY NEVER ENGAGED -- STS2_OOC_POLICY=greedy but "
-                         "greedy_action answered no decision; these results measure "
-                         "the fallback commands")
+                         "the engine accepted no greedy_action command; these results "
+                         "measure the naive fallback")
+        attempts = total_greedy + total_fallbacks
+        if attempts and total_fallbacks / attempts > OOC_FALLBACK_RATE_WARN:
+            lines.append(f"!! OOC FALLBACK RATE {100 * total_fallbacks / attempts:.1f}% -- "
+                         f"the greedy arm is partly running the naive policy")
     # Zero engagement is only alarming for a character the solver is SUPPOSED
     # to drive -- for the A/B's control arm (character not in solver_chars),
     # zero plans is the whole point and must stay silent. This is the check
@@ -924,7 +1042,8 @@ def main():
                              "Use a fresh prefix per experiment so a verdict never "
                              "runs on seeds an earlier phase tuned on.")
     parser.add_argument("--keep-game-logs", default=None, metavar="DIR",
-                        help="Copy each game's full state log to DIR/<character>_<seed>.jsonl "
+                        help="Copy each game's full state log to "
+                             "DIR/<character>_<policy>_a<ascension>_<seed>.jsonl "
                              "(logs/ is purged after 7 days) and record that path in the "
                              "results row.")
     args = parser.parse_args()
@@ -934,6 +1053,10 @@ def main():
     if args.ascension < 0:
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
     policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
+    if policy == "greedy":
+        _load_greedy_action()  # a broken import aborts now, not as N "crash" games
+        for knob, value in greedy_knobs().items():
+            print(f"!! greedy_action knob set: {knob}={value}")
 
     num_runs = args.num_runs
     character = args.character
