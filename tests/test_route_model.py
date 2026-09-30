@@ -286,3 +286,75 @@ def test_fit_value_model_caps_folds_at_the_number_of_games():
     fit = fit_value_model(games, folds=5)
     assert len(fit["cv"]["full"]) == 3  # min(folds, n_games)
     assert all(math.isfinite(v) for v in fit["cv"]["full"] + fit["cv"]["hp_only"])
+
+
+# --------------------------------------------------------------------- CLI
+
+def _write_log(path, character, ascension, seed, hp_curve, final_floor):
+    """A JSONL game log: one map_select per floor 1..len(hp_curve), then game_over."""
+    def ms(floor, hp):
+        return {"type": "decision", "decision": "map_select",
+                "context": {"act": 1, "floor": floor},
+                "choices": [{"col": 0, "row": floor, "type": "Monster"}],
+                "player": {"hp": hp, "max_hp": 80, "gold": 50,
+                           "deck": [{"id": "A", "type": "Attack", "upgraded": False}] * 10,
+                           "relics": [{"name": "R"}], "potions": []}}
+    rows = [{"type": "run_meta", "seed": seed, "character": character, "ascension": ascension}]
+    for floor, hp in enumerate(hp_curve, start=1):
+        rows.append({"type": "state", "data": ms(floor, hp)})
+        rows.append({"type": "action", "data": {"cmd": "action", "action": "select_map_node",
+                                                "args": {"col": 0, "row": floor}}})
+    rows.append({"type": "state", "data": {
+        "type": "decision", "decision": "game_over", "victory": False,
+        "context": {"act": 1, "floor": final_floor}, "act": 1, "floor": final_floor,
+        "player": {"hp": 0, "max_hp": 80, "gold": 50, "deck_size": 10, "potions": []}}})
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+def test_cli_end_to_end(tmp_path, capsys):
+    from agent import fit_route_model
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    curves = [[80, 70, 55, 40], [80, 78, 60, 50, 30], [80, 72, 66]]
+    for i, curve in enumerate(curves):
+        _write_log(logs / f"g{i}.jsonl", ["Defect", "Silent", "Defect"][i], 1, f"seed{i}",
+                   curve, len(curve) + 1)
+    _write_log(logs / "a0.jsonl", "Defect", 0, "seed_a0", [80, 70, 60], 4)
+    out = tmp_path / "out" / "route_model.json"
+    rc = fit_route_model.main(["--logs", str(logs), "--ascension", "1", "--out", str(out),
+                               "--min-n", "1"])
+    assert rc in (None, 0)
+    model = RouteModel.load(str(out))
+    assert model.data["meta"]["n_games"] == 3
+    assert model.data["meta"]["ascension"] == 1
+    assert model.data["meta"]["characters"] == {"Defect": 2, "Silent": 1}
+    assert model.data["meta"]["n_transitions"] == 12
+    assert model.data["validation"]["chosen"] in ("full", "hp_only")
+    assert set(model.data["validation"]["cv"]) == {"full", "hp_only"}
+    assert model.value(_feat(hp=70), "Defect") >= 0.0
+    report = capsys.readouterr().out
+    assert "dropped 1" in report.lower() or "dropped: 1" in report.lower()
+    assert "Defect" in report and "hp_only" in report
+
+
+def test_cli_exits_with_an_error_when_no_games_match(tmp_path):
+    from agent import fit_route_model
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(logs / "a0.jsonl", "Defect", 0, "seed_a0", [80, 70, 60], 4)
+    with pytest.raises(SystemExit):
+        fit_route_model.main(["--logs", str(logs), "--ascension", "1",
+                              "--out", str(tmp_path / "m.json")])
+    assert not (tmp_path / "m.json").exists()
+
+
+def test_cli_accepts_globs_and_repeated_logs_without_double_counting(tmp_path, capsys):
+    from agent import fit_route_model
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for i in range(3):
+        _write_log(logs / f"g{i}.jsonl", "Ironclad", 1, f"seed{i}", [80, 60, 40], 4)
+    out = tmp_path / "m.json"
+    fit_route_model.main(["--logs", str(logs / "g*.jsonl"), "--logs", str(logs),
+                          "--ascension", "1", "--out", str(out)])
+    assert RouteModel.load(str(out)).data["meta"]["n_games"] == 3
