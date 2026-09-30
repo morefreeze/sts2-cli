@@ -1267,7 +1267,18 @@ internal sealed partial class CombatBeamSolver
                     claimSources,
                     selectedSet,
                     packetComparer);
-            HashSet<OrderedMutationAdmissionClaim> appliedAdmissionClaims = [];
+            // LOCAL PATCH (sts2-cli, agent/bug.md BUG-047 -- see VENDORED.md): reference equality.
+            // OrderedMutationAdmissionClaim is a record that holds SearchNode Candidate (and a Packet
+            // holding SearchNodes), so the default comparer hashes it with the compiler-generated
+            // record GetHashCode, which walks SearchNode.Parent chains and every
+            // CycleSearchState.PriorCycleEndpoint chain with no memoization: exponential in the number
+            // of cycle endpoints on the line, i.e. a deterministic hang on long repeating combo lines.
+            // Every other SearchNode set in this file already uses ReferenceEqualityComparer. Claims are
+            // only ever re-added as the very object built by CoalesceOrderedMutationAdmissionClaims (via
+            // admissionClaims, work.Claim and work.AliasedClaims), and each claim owns a distinct
+            // Reasons set instance, so structural equality could never match two different claims.
+            HashSet<OrderedMutationAdmissionClaim> appliedAdmissionClaims = new(
+                ReferenceEqualityComparer.Instance);
             foreach (OrderedMutationAdmissionClaim selectedClaim in admissionClaims
                          .Where(claim => HasPaidOrderedMutationAdmission(claim.Candidate)))
             {

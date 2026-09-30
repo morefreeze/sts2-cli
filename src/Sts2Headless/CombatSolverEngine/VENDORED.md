@@ -98,9 +98,9 @@ apart from the local patches listed below.
 
 ## Local patches to vendored algorithm files
 
-One deliberate, user-approved departure from "never hand-edit ported
-algorithm logic" (2026-09-30). Each is marked `LOCAL PATCH` in the source and
-must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
+Three deliberate, user-approved departures from "never hand-edit ported
+algorithm logic" (all 2026-09-30). Each is marked `LOCAL PATCH` in the source
+and must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
 
 - `Engine/InCombat/Simulation/CombatPredictionSimulator.CardPile.cs` --
   `MaxSimulatedCardDraws = 1000`: `ContinueDrawExecution` stops drawing once
@@ -114,3 +114,30 @@ must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
   `MaxSimulatedChanneledOrbs` / `OrbChannelLimitExceeded` cap in
   `CombatPredictionSimulator.Orb.cs`. It only changes lines that draw 1000+
   cards, i.e. lines that are already non-terminating in the real game.
+
+- `Search/CombatBeamSolver.BeamRetentionPolicy.cs` -- `appliedAdmissionClaims`
+  (in `AddOrderedMutationPortfolio`) is now `new(ReferenceEqualityComparer.Instance)`
+  instead of `[]`. `OrderedMutationAdmissionClaim` is a record holding
+  `SearchNode Candidate` (and a `Packet` holding SearchNodes), so the default comparer
+  hashed it with the compiler-generated record `GetHashCode`, which walks
+  `SearchNode.Parent` chains and every `CycleSearchState.PriorCycleEndpoint` chain
+  without memoization -- exponential in the number of cycle endpoints on a line, so a
+  long repeating combo line (Creative AI / Reboot loops) hangs `plan_combat_turn`
+  deterministically (agent/bug.md BUG-047). Every other `SearchNode` set in the
+  search code already uses reference equality; claims are only ever re-added as the
+  same object (built once by `CoalesceOrderedMutationAdmissionClaims`, then reached
+  via `admissionClaims`, `work.Claim` and `work.AliasedClaims`) and every claim owns a
+  distinct `Reasons` set instance, so reference semantics cannot change which claims
+  count as already applied. Upstream (Torch1230/CombatSolver @ 7236330) has the same
+  code at `src/Search/CombatBeamSolver.BeamRetentionPolicy.OrderedMutation.cs:485`.
+
+- `Prediction/CardEffectSpecRegistry.cs` -- `Apply`'s first `switch (card)` gains
+  `case Scourge:` that calls `simulator.Draw(card.Owner, card.DynamicVars.Cards.BaseValue)`.
+  Scourge ("Apply {Doom} Doom. Draw {Cards} cards.") was registered only as
+  `Target<DoomPower>` in `PowerEffects`, and in this headless build nothing else
+  simulates its draw (the upstream IL-based OnPlay inferrer is stubbed out, see
+  `CardOnPlayInferrer.cs`), so the predicted hand never contained the drawn cards and
+  later planned plays were refused by the live engine (agent/bug.md BUG-042). The real
+  `Scourge.OnPlay` is `TriggerAnim; PowerCmd.Apply<DoomPower>(target, Doom.BaseValue);
+  CardPileCmd.Draw(Cards.BaseValue)`; the `switch` runs after the `PowerEffects` loop,
+  so the simulated order (Doom, then draw) matches. No other card is touched.

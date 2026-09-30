@@ -358,6 +358,15 @@ internal static class CardEffectSpecRegistry
                 applied = true;
                 break;
             }
+            // LOCAL PATCH (sts2-cli, agent/bug.md BUG-042 -- see VENDORED.md): Scourge is "Apply Doom.
+            // Draw Cards cards." The real Scourge.OnPlay applies the Doom to the target and THEN calls
+            // CardPileCmd.Draw(Cards.BaseValue). Its PowerEffects entry above already applies the Doom
+            // (this switch runs after that loop, so the order matches); the draw was dropped, so the
+            // predicted hand never contained the drawn cards and later planned plays were refused live.
+            case Scourge:
+                simulator.Draw(card.Owner, card.DynamicVars.Cards.BaseValue);
+                applied = true;
+                break;
             case WroughtInWar:
                 PersistentPowerSupport.Forge(simulator, card.Owner, card.DynamicVars.Forge.IntValue);
                 applied = true;
