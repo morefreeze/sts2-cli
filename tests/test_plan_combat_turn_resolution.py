@@ -9,6 +9,9 @@ play_full_run.
 """
 import sys
 import os
+
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 import play_full_run
 
@@ -181,3 +184,114 @@ def test_resolve_choice_indices_unresolvable_token_returns_none():
     pending_cards = [{"id": "CARD.STRIKE", "index": 0, "upgraded": False}]
     choice = {"cards": [{"card_id": "DEFEND", "option_occurrence": 0, "upgrade_level": 0}]}
     assert play_full_run._resolve_choice_indices(pending_cards, choice) is None
+
+
+# ---------------------------------------------------------------------------
+# _execute_combat_plan_actions: live CanPlay refusals are stale plans (BUG-042)
+# ---------------------------------------------------------------------------
+
+def _combat(hand_ids, energy=1):
+    return {"type": "decision", "decision": "combat_play", "round": 1,
+            "energy": energy, "enemies": [],
+            "hand": [{"id": f"CARD.{cid}", "index": i} for i, cid in enumerate(hand_ids)]}
+
+
+def _scripted_send(replies):
+    """A send() that answers each command with the next scripted reply and
+    records what was sent."""
+    sent = []
+    it = iter(replies)
+
+    def send(cmd):
+        sent.append(cmd)
+        return next(it)
+
+    return send, sent
+
+
+def _play(card_id):
+    return {"action": "play_card", "card_id": card_id, "card_occurrence": 0}
+
+
+TWO_PLAYS_THEN_END = [_play("STRIKE"), _play("BODYGUARD"), {"action": "end_turn"}]
+
+
+def test_live_can_play_refusal_is_a_stale_plan_not_a_failure(capsys):
+    start = _combat(["STRIKE", "BODYGUARD"])
+    after_strike = _combat(["BODYGUARD"], energy=0)
+    refusal = {"type": "error", "message": "Cannot play card Bodyguard: EnergyCostTooHigh"}
+    send, sent = _scripted_send([after_strike, refusal])
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, TWO_PLAYS_THEN_END, stats=stats)
+    assert ok is True
+    # The last GOOD decision (after the first play), never the error dict.
+    assert state is after_strike
+    assert stats == {"stale_refusals": 1}
+    # Both plays were attempted, then nothing: no end_turn, no retry.
+    assert [c["action"] for c in sent] == ["play_card", "play_card"]
+    out = capsys.readouterr().out
+    assert "live engine refused BODYGUARD" in out
+    assert "Cannot play card Bodyguard: EnergyCostTooHigh" in out
+    assert "BUG-042" in out and "re-planning from the live state" in out
+
+
+def test_refusal_of_the_first_action_returns_the_input_state():
+    start = _combat(["BODYGUARD"])
+    refusal = {"type": "error", "message": "Cannot play card Bodyguard: EnergyCostTooHigh"}
+    send, sent = _scripted_send([refusal])
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, [_play("BODYGUARD"), {"action": "end_turn"}])
+    assert ok is True and state is start  # stats is optional
+    assert len(sent) == 1
+
+
+def test_stale_refusals_accumulate_in_a_caller_supplied_stats_dict():
+    start = _combat(["BODYGUARD"])
+    refusal = {"type": "error", "message": "Cannot play card Bodyguard: EnergyCostTooHigh"}
+    send, _ = _scripted_send([refusal, refusal])
+    stats = {"stale_refusals": 1}
+    play_full_run._execute_combat_plan_actions(send, start, [_play("BODYGUARD")], stats=stats)
+    play_full_run._execute_combat_plan_actions(send, start, [_play("BODYGUARD")], stats=stats)
+    assert stats["stale_refusals"] == 3
+
+
+def test_still_in_hand_after_action_stays_a_hard_failure():
+    start = _combat(["STRIKE", "BODYGUARD"])
+    err = {"type": "error", "message":
+           "Card could not be played (still in hand after action): Bodyguard [CARD.BODYGUARD]"}
+    send, _ = _scripted_send([_combat(["BODYGUARD"], energy=0), err])
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, TWO_PLAYS_THEN_END, stats=stats)
+    assert ok is False and state is err
+    assert stats == {}
+
+
+@pytest.mark.parametrize("message", [
+    "'target_index' is required when multiple enemies are alive (2)",
+    "Invalid target_index 5",
+    "Not in play phase",
+])
+def test_other_play_card_errors_stay_hard_failures(message):
+    start = _combat(["STRIKE"])
+    err = {"type": "error", "message": message}
+    send, _ = _scripted_send([err])
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, [_play("STRIKE")], stats=stats)
+    assert ok is False and state is err
+    assert stats == {}
+
+
+def test_potion_errors_stay_hard_failures():
+    start = _combat(["STRIKE"])
+    start["player"] = {"potions": [{"id": "POTION.FIRE_POTION", "index": 0}]}
+    err = {"type": "error", "message": "Cannot play card Whatever: EnergyCostTooHigh"}
+    send, _ = _scripted_send([err])
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, [{"action": "use_potion", "potion_id": "FIRE_POTION"}], stats=stats)
+    # The BUG-042 relaxation is for a planned play_card only.
+    assert ok is False and state is err
+    assert stats == {}
