@@ -122,8 +122,12 @@ copy" in this directory, apart from the local patches listed below.
 
 ## Local patches to vendored algorithm files
 
-Three deliberate, user-approved departures from "never hand-edit ported
-algorithm logic" (all 2026-09-30). Each is marked `LOCAL PATCH` in the source
+Two deliberate, user-approved departures from "never hand-edit ported
+algorithm logic" (both 2026-09-30). (A third, a Scourge draw in
+`CardEffectSpecRegistry.cs`, was added and then removed the same week with
+the user's approval: once BUG-048 restored the IL inferrer, the inferrer
+simulates Scourge's draw itself, so the patch would have drawn twice. That
+file is verbatim upstream again.) Each is marked `LOCAL PATCH` in the source
 and must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
 
 - `Engine/InCombat/Simulation/CombatPredictionSimulator.CardPile.cs` --
@@ -154,20 +158,3 @@ and must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
   distinct `Reasons` set instance, so reference semantics cannot change which claims
   count as already applied. Upstream (Torch1230/CombatSolver @ 7236330) has the same
   code at `src/Search/CombatBeamSolver.BeamRetentionPolicy.OrderedMutation.cs:485`.
-
-- `Prediction/CardEffectSpecRegistry.cs` -- `Apply`'s first `switch (card)` gains
-  `case Scourge:` that calls `simulator.Draw(card.Owner, card.DynamicVars.Cards.BaseValue)`.
-  Scourge ("Apply {Doom} Doom. Draw {Cards} cards.") was registered only as
-  `Target<DoomPower>` in `PowerEffects`, and in this headless build nothing else
-  simulates its draw (at the time the upstream IL-based OnPlay inferrer was stubbed
-  out, see BUG-048), so the predicted hand never contained the drawn cards and
-  later planned plays were refused by the live engine (agent/bug.md BUG-042). The real
-  `Scourge.OnPlay` is `TriggerAnim; PowerCmd.Apply<DoomPower>(target, Doom.BaseValue);
-  CardPileCmd.Draw(Cards.BaseValue)`; the `switch` runs after the `PowerEffects` loop,
-  so the simulated order (Doom, then draw) matches. No other card is touched.
-  **NOTE (2026-09-30, BUG-048): that rationale no longer holds.** The inferrer is
-  restored (`CardOnPlayInferrer.cs` verbatim + `RitsuLibHarmonyIlShim.cs`), and it
-  infers Scourge's `CardPileCmd.Draw` from the original `OnPlay` IL, so with both in
-  place Scourge's draw is simulated twice. Drop this patch once a build + probe
-  confirms the inferred draw (the patch stays until then, only because removing it
-  was not requested).
