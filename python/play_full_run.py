@@ -91,9 +91,12 @@ SOLVER_BUDGET_DEFAULT_S = 120
 SOLVER_WATCHDOG_MARGIN_S = 60
 # A plan whose next planned play_card the live engine refuses ("Cannot play
 # card ...") is a stale plan and the harness re-plans (agent/bug.md BUG-042).
-# A turn with MORE than this many refusals gets no further plan_combat_turn
-# call: a solver that keeps planning the same refused card would otherwise
-# loop until the STUCK detector ends the run. The heuristic plays the rest.
+# So is a plan naming a card_id/potion_id that is not in the live hand/potions
+# at all (the Run 15 recovery; it sends nothing, so it is the likelier loop --
+# agent/bug.md BUG-051). A turn with MORE than this many stale returns, of
+# either kind combined, gets no further plan_combat_turn call: a solver that
+# keeps planning the same stale plan would otherwise loop until the STUCK
+# detector ends the run. The heuristic plays the rest of the turn.
 SOLVER_STALE_REFUSALS_PER_TURN = 3
 # Every other engine reply arrives in well under a second; 120 s only fires on
 # a genuine stall.
@@ -328,8 +331,11 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              "ooc_event_stuck": 0,
              "ooc_knobs": greedy_knobs() if policy == "greedy" else {},
              # BUG-042: planned play_cards the live engine refused (each one
-             # re-planned), and turns handed to the heuristic by the guard
+             # re-planned), and turns handed to the heuristic by the guard.
+             # BUG-051: plans whose card_id/potion_id was not in the live hand
+             # (also re-planned, and counted toward the same per-turn guard)
              "solver_stale_refusals": 0,
+             "solver_stale_unresolved": 0,
              "solver_turn_fallbacks": 0,
              "game_log": None}
     result = _play_run(seed, character, verbose, log, ascension, stats)
@@ -357,8 +363,9 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
               stats: dict):
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
     stats["ooc_greedy"], stats["ooc_fallback_causes"][...] and
-    stats["ooc_event_stuck"], stats["solver_stale_refusals"] and
-    stats["solver_turn_fallbacks"], and sets stats["game_log"]."""
+    stats["ooc_event_stuck"], stats["solver_stale_refusals"],
+    stats["solver_stale_unresolved"] and stats["solver_turn_fallbacks"], and
+    sets stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
     # global `random` module and silently change behavior for every other
@@ -453,10 +460,15 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         # key it was collected under.
         refused_ids = set()
         refused_turn_key = None
-        # Live CanPlay refusals of planned cards this combat turn (BUG-042),
-        # keyed like refused_turn_key; see SOLVER_STALE_REFUSALS_PER_TURN.
+        # Stale plans this combat turn, keyed like refused_turn_key; see
+        # SOLVER_STALE_REFUSALS_PER_TURN. Live CanPlay refusals of planned
+        # cards (BUG-042) and plans naming a card/potion that is not in the
+        # live hand (BUG-051) are tallied apart but limited together;
+        # `no_progress` is how many of them executed nothing.
         stale_turn_key = None
         stale_turn_refusals = 0
+        stale_turn_unresolved = 0
+        stale_turn_no_progress = 0
         stale_turn_fallback_counted = False
         # Phase 3a: out-of-combat decisions go to agent.combat_env.greedy_action
         # when STS2_OOC_POLICY=greedy (see OOC_GREEDY_DECISIONS). None = naive.
@@ -598,14 +610,20 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if turn_key != stale_turn_key:
                     stale_turn_key = turn_key
                     stale_turn_refusals = 0
+                    stale_turn_unresolved = 0
+                    stale_turn_no_progress = 0
                     stale_turn_fallback_counted = False
+                stale_turn_total = stale_turn_refusals + stale_turn_unresolved
                 stale_guard = (character in solver_chars
-                               and stale_turn_refusals > SOLVER_STALE_REFUSALS_PER_TURN)
+                               and stale_turn_total > SOLVER_STALE_REFUSALS_PER_TURN)
                 if stale_guard and not stale_turn_fallback_counted:
                     stale_turn_fallback_counted = True
                     stats["solver_turn_fallbacks"] += 1
-                    print(f"  !! plan_combat_turn refused {stale_turn_refusals} times this "
-                          f"turn -- heuristic for the rest of the turn")
+                    print(f"  !! plan_combat_turn refused {stale_turn_total} times this "
+                          f"turn -- heuristic for the rest of the turn "
+                          f"({stale_turn_refusals} live refusals, "
+                          f"{stale_turn_unresolved} unresolved-card plans, "
+                          f"{stale_turn_no_progress} made no progress)")
                 if character in solver_chars and not stale_guard:
                     plan = send({"cmd": "action", "action": "plan_combat_turn"})
                     if plan.get("type") == "error":
@@ -663,8 +681,12 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                         state, plan_ok = _execute_combat_plan_actions(
                             send, state, plan_actions, stats=exec_stats)
                         refusals = exec_stats.get("stale_refusals", 0)
+                        unresolved = exec_stats.get("stale_unresolved", 0)
                         stats["solver_stale_refusals"] += refusals
+                        stats["solver_stale_unresolved"] += unresolved
                         stale_turn_refusals += refusals
+                        stale_turn_unresolved += unresolved
+                        stale_turn_no_progress += exec_stats.get("stale_no_progress", 0)
                         if not plan_ok:
                             print("  ERROR: plan_combat_turn's plan did not execute "
                                   "cleanly against the live engine")
@@ -959,6 +981,7 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "solver_plans": result.get("solver_plans"),
         "solver_errors": result.get("solver_errors"),
         "solver_stale_refusals": result.get("solver_stale_refusals"),
+        "solver_stale_unresolved": result.get("solver_stale_unresolved"),
         "solver_turn_fallbacks": result.get("solver_turn_fallbacks"),
         "solver": sorted(solver_characters()),
         "solver_budget_s": solver_budget_seconds(),
@@ -1052,11 +1075,13 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
                  f"avg_floor={avg_floor}")
     total_solver_attempts = total_solver_plans + total_solver_errors
     total_stale = sum(r.get("solver_stale_refusals") or 0 for r in results if r)
+    total_unresolved = sum(r.get("solver_stale_unresolved") or 0 for r in results if r)
     total_turn_fallbacks = sum(r.get("solver_turn_fallbacks") or 0 for r in results if r)
     lines.append(f"Solver engagement: {total_solver_plans}/{total_solver_attempts} "
                  f"plan_combat_turn calls returned a usable plan, "
                  f"{total_stale} stale-plan refusals re-planned, "
-                 f"{total_turn_fallbacks} turns fell back to the heuristic")
+                 f"{total_turn_fallbacks} turns fell back to the heuristic, "
+                 f"{total_unresolved} unresolved-card re-plans")
     policies = sorted({r.get("ooc_policy") for r in results if r and r.get("ooc_policy")})
     if policies:
         total_greedy = sum(r.get("ooc_greedy") or 0 for r in results if r)

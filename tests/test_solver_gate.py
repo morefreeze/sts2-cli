@@ -556,6 +556,7 @@ def test_plan_execution_failure_reports_act_and_floor_from_the_last_decision(mon
 def test_results_stamp_the_new_counters_even_without_combat(monkeypatch):
     result, _ = _run_solver(monkeypatch, [{"type": "ready"}, GAME_OVER])
     assert result["solver_stale_refusals"] == 0 and result["solver_turn_fallbacks"] == 0
+    assert result["solver_stale_unresolved"] == 0
 
 
 def test_eval_row_carries_the_stale_refusal_counters():
@@ -573,3 +574,100 @@ def test_summarize_reports_stale_refusals_and_turn_fallbacks():
     # The start of the line is what tests and greps match; the new counts follow it.
     assert ("Solver engagement: 85/87 plan_combat_turn calls returned a usable plan, "
             "7 stale-plan refusals re-planned, 1 turns fell back to the heuristic") in out
+
+
+# --- BUG-051: unresolved-card stale plans count toward the same per-turn guard --
+
+def test_four_unresolved_card_plans_in_one_turn_hand_the_turn_to_the_heuristic(
+        monkeypatch, capsys):
+    # The regression_naive.log shape: the solver's hand never contains the card
+    # the live hand has, so every plan names a card that is not there. The
+    # driver sends NOTHING for such a plan (no replies are scripted for it) and
+    # the state never changes -- before BUG-051 this looped until the STUCK
+    # detector ended the run (timeout), because only live refusals were counted.
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand]
+    for _ in range(4):
+        script += [_plan(_play("STRIKE"), END)]   # STRIKE is not in the live hand
+    script += [
+        _combat([], energy=0),   # heuristic play_card (index 0) succeeds
+        GAME_OVER,               # heuristic end_turn: empty hand, nothing to play
+    ]
+    result, sent = _run_solver(monkeypatch, script)
+    acts = _actions(sent)
+    # The guard is "more than 3": the 4th stale return trips it, so exactly 4
+    # plans are requested and the 5th loop iteration goes to the heuristic.
+    assert acts.count("plan_combat_turn") == 4, "the 5th plan must not be requested"
+    assert acts[-2:] == ["play_card", "end_turn"]
+    assert "timeout" not in result and "error" not in result
+    assert (result["act"], result["floor"]) == (2, 6)
+    assert result["solver_stale_unresolved"] == 4
+    assert result["solver_stale_refusals"] == 0
+    assert result["solver_turn_fallbacks"] == 1   # one turn, however many heuristic steps
+    out = capsys.readouterr().out
+    assert out.count("plan_combat_turn refused 4 times this turn -- "
+                     "heuristic for the rest of the turn") == 1
+    assert "0 live refusals, 4 unresolved-card plans, 4 made no progress" in out
+
+
+def test_three_unresolved_card_plans_still_allow_another_plan(monkeypatch):
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand]
+    for _ in range(3):
+        script += [_plan(_play("STRIKE"), END)]
+    script += [_plan(END), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert _actions(sent).count("plan_combat_turn") == 4
+    assert result["solver_stale_unresolved"] == 3 and result["solver_turn_fallbacks"] == 0
+
+
+def test_live_refusals_and_unresolved_cards_share_one_per_turn_limit(monkeypatch):
+    # 2 live refusals + 2 unresolved ids = 4 stale returns > 3: the guard counts
+    # EVERY kind toward the same limit, not each kind against its own.
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand,
+              _plan(_play("BODYGUARD"), END), REFUSAL,
+              _plan(_play("STRIKE"), END),
+              _plan(_play("BODYGUARD"), END), REFUSAL,
+              _plan(_play("STRIKE"), END),
+              _combat([], energy=0), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert _actions(sent).count("plan_combat_turn") == 4
+    assert result["solver_stale_refusals"] == 2
+    assert result["solver_stale_unresolved"] == 2
+    assert result["solver_turn_fallbacks"] == 1
+
+
+def test_the_unresolved_card_budget_resets_on_the_next_turn(monkeypatch):
+    turn1 = _combat(["BODYGUARD"], round_=1)
+    turn2 = _combat(["BODYGUARD"], round_=2)
+    script = [{"type": "ready"}, turn1]
+    for _ in range(3):
+        script += [_plan(_play("STRIKE"), END)]
+    script += [_plan(END), turn2]                     # turn 1 ends after 3 stale plans
+    for _ in range(3):
+        script += [_plan(_play("STRIKE"), END)]
+    script += [_plan(END), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert result["solver_stale_unresolved"] == 6 and result["solver_turn_fallbacks"] == 0
+    assert _actions(sent).count("plan_combat_turn") == 8
+
+
+def test_eval_row_carries_the_unresolved_card_counter():
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 9,
+         "solver_stale_unresolved": 6}, "Ironclad")
+    assert row["solver_stale_unresolved"] == 6
+
+
+def test_summarize_reports_unresolved_card_replans():
+    results = [dict(_result("s1", 40, 0), solver_stale_refusals=3, solver_turn_fallbacks=1,
+                    solver_stale_unresolved=2),
+               dict(_result("s2", 35, 2), solver_stale_refusals=4, solver_stale_unresolved=5),
+               _result("s3", 10, 0)]   # a row from before the counter existed counts as 0
+    out = play_full_run.summarize(results, 3, character="Silent", solver_chars={"Silent"})
+    # The beginning of the line is unchanged (BUG-042 tests and greps match it);
+    # the new count is appended.
+    assert ("Solver engagement: 85/87 plan_combat_turn calls returned a usable plan, "
+            "7 stale-plan refusals re-planned, 1 turns fell back to the heuristic, "
+            "7 unresolved-card re-plans") in out

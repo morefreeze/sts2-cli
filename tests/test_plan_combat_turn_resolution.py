@@ -295,3 +295,77 @@ def test_potion_errors_stay_hard_failures():
     # The BUG-042 relaxation is for a planned play_card only.
     assert ok is False and state is err
     assert stats == {}
+
+
+# ---------------------------------------------------------------------------
+# _execute_combat_plan_actions: unresolved card_id / potion_id are stale plans
+# too, and are counted (BUG-051)
+# ---------------------------------------------------------------------------
+
+def test_unresolved_card_id_is_counted_as_a_stale_plan(capsys):
+    start = _combat(["DEFEND"])
+    send, sent = _scripted_send([])   # nothing may be sent: next() would raise
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, [_play("STRIKE"), {"action": "end_turn"}], stats=stats)
+    assert ok is True and state is start
+    assert sent == []
+    assert stats["stale_unresolved"] == 1
+    assert "stale_refusals" not in stats
+    assert "not found in live hand" in capsys.readouterr().out
+
+
+def test_unresolved_potion_id_is_counted_as_a_stale_plan():
+    start = _combat(["STRIKE"])
+    start["player"] = {"potions": [{"id": "POTION.BLOCK_POTION", "index": 0}]}
+    send, sent = _scripted_send([])
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, [{"action": "use_potion", "potion_id": "FIRE_POTION"},
+                      {"action": "end_turn"}], stats=stats)
+    assert ok is True and state is start
+    assert sent == []
+    assert stats["stale_unresolved"] == 1
+
+
+def test_unresolved_ids_accumulate_in_a_caller_supplied_stats_dict():
+    start = _combat(["DEFEND"])
+    send, _ = _scripted_send([])
+    stats = {"stale_unresolved": 2}
+    play_full_run._execute_combat_plan_actions(send, start, [_play("STRIKE")], stats=stats)
+    assert stats["stale_unresolved"] == 3
+
+
+def test_unresolved_id_without_stats_still_returns_the_input_state():
+    start = _combat(["DEFEND"])
+    send, sent = _scripted_send([])
+    state, ok = play_full_run._execute_combat_plan_actions(send, start, [_play("STRIKE")])
+    assert ok is True and state is start and sent == []
+
+
+def test_a_stale_plan_that_executed_nothing_is_counted_as_no_progress():
+    # Unresolved first action: nothing sent. Refused first action: the one
+    # command sent was refused, so the engine is untouched. Both are plans
+    # that made no progress -- the shape that looped until STUCK in BUG-051.
+    refusal = {"type": "error", "message": "Cannot play card Bodyguard: EnergyCostTooHigh"}
+    stats = {}
+    send, _ = _scripted_send([])
+    play_full_run._execute_combat_plan_actions(
+        send, _combat(["DEFEND"]), [_play("STRIKE")], stats=stats)
+    send, _ = _scripted_send([refusal])
+    play_full_run._execute_combat_plan_actions(
+        send, _combat(["BODYGUARD"]), [_play("BODYGUARD")], stats=stats)
+    assert stats == {"stale_unresolved": 1, "stale_refusals": 1, "stale_no_progress": 2}
+
+
+def test_a_stale_plan_that_executed_something_is_not_no_progress():
+    # The first play was accepted, so this plan changed the live state (and the
+    # outer loop's STUCK detector sees a different state next time).
+    start = _combat(["STRIKE", "DEFEND"])
+    after_strike = _combat(["DEFEND"], energy=0)
+    send, sent = _scripted_send([after_strike])
+    stats = {}
+    state, ok = play_full_run._execute_combat_plan_actions(
+        send, start, [_play("STRIKE"), _play("BASH"), {"action": "end_turn"}], stats=stats)
+    assert ok is True and state is after_strike and len(sent) == 1
+    assert stats == {"stale_unresolved": 1}
