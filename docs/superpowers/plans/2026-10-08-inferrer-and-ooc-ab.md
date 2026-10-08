@@ -42,6 +42,21 @@ with the inferrer on must be Completed 5/5 for every character, with no HANG.
   diff over characters is >= 0 and no character is significantly worse; otherwise report.
 - Then Phase 3b Task 6 (fit the route model on arm C's logs) and its own A/B.
 
+## Change of plan (2026-10-09): arm A dropped
+
+The inferrer question was answered by data we already had, so arm A (a third of the compute, ~1
+day) was dropped and the batch runs B vs C only. The 9/30 BUG-040 regression (inferrer OFF, naive,
+a0, seeds run_1..5 x 5 characters, all 25 completed) and the 10/08 gate2 naive lane (inferrer ON,
+naive, a0, the same 25 seeds) pair seed-for-seed: global floor 17.5 -> 39.3, **+21.84 (se 2.16,
+t = 10.1)**, 24 of 25 pairs improved, every character +13.6..+27.8, wins 0 -> 2. The only other
+changes between the two runs (BUG-046/047/049/050/051) only alter games that hang, stall or crash,
+and the OFF run had none, so the difference is the inferrer. Evidence:
+`~/.sts2-train/bug040_fix_gate_20260930_100630/regression.log`,
+`~/.sts2-train/gate2_20261008_202822/regression_naive.log`.
+
+Gate (`~/.sts2-train/gate2_20261008_202822/`): naive and greedy, inferrer on, 5 x 5 each --
+Completed 5/5 for all 10 character/policy lanes, no HANG/TIMEOUT/ERROR, 6 wins in 50 games.
+
 ## Results
 
 (filled in after the run)
