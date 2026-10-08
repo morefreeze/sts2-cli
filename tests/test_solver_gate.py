@@ -248,6 +248,7 @@ def _fake_engine(monkeypatch, tmp_path, *extra):
                         lambda: [sys.executable, FAKE_ENGINE, "--pidfile", str(pidfile), *extra])
     monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
     monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
 
 
 def test_play_run_turns_a_solver_hang_into_a_hang_result(monkeypatch, tmp_path):
@@ -280,6 +281,132 @@ def test_play_run_fails_loudly_if_the_engine_reports_no_budget_at_all(monkeypatc
     assert "stale build" in result["error"]
 
 
+# --- solver IL inferrer switch (BUG-048 A/B) -----------------------------------
+
+def test_solver_inferrer_defaults_to_on():
+    assert play_full_run.solver_inferrer({}) == "on"
+
+
+@pytest.mark.parametrize("blank", ["", "  ", "\t"])
+def test_blank_solver_inferrer_means_on(blank):
+    assert play_full_run.solver_inferrer({"STS2_SOLVER_INFERRER": blank}) == "on"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("on", "on"), ("1", "on"), ("off", "off"), ("0", "off"),
+    ("ON", "on"), ("  Off ", "off"), (" 1 ", "on"), ("OFF", "off"),
+])
+def test_solver_inferrer_accepts_on_off_1_0_ignoring_case_and_space(raw, expected):
+    assert play_full_run.solver_inferrer({"STS2_SOLVER_INFERRER": raw}) == expected
+
+
+@pytest.mark.parametrize("bad", ["yes", "true", "2", "-1", "of", "onoff", "false"])
+def test_solver_inferrer_rejects_anything_else(bad):
+    # The engine tolerates an unknown value (on + a stderr warning); the harness
+    # must not: a typo'd "off" would label an inferrer-ON run as the OFF arm.
+    with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
+        play_full_run.solver_inferrer({"STS2_SOLVER_INFERRER": bad})
+
+
+def test_play_run_accepts_a_matching_inferrer_and_stamps_it(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path)
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "error" not in result
+    assert result["solver_inferrer"] == "on"
+
+
+def test_play_run_accepts_a_matching_off_inferrer_and_stamps_it(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path, "--plan-inferrer", "off")
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "off")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "error" not in result
+    assert result["solver_inferrer"] == "off"
+
+
+def test_play_run_fails_loudly_if_engine_and_harness_disagree_on_the_inferrer(monkeypatch, tmp_path):
+    # Harness resolves "on" (unset); the fake engine claims "off".
+    _fake_engine(monkeypatch, tmp_path, "--plan-inferrer", "off")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver inferrer" in result["error"]
+    assert "stale build" not in result["error"]
+    assert not result.get("hang")
+    assert result["solver_inferrer"] == "on"   # stamped even on the failure path
+
+
+def test_play_run_fails_loudly_if_harness_wants_off_but_engine_reports_on(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path, "--plan-inferrer", "on")
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "off")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver inferrer" in result["error"]
+
+
+def test_play_run_fails_loudly_if_the_engine_reports_no_inferrer_field(monkeypatch, tmp_path):
+    # An engine built before the switch existed always runs the inferrer ON; an
+    # OFF arm against it would silently measure ON vs ON. Same hazard as a
+    # missing budget: `dotnet run --no-build` runs whatever is in bin/.
+    _fake_engine(monkeypatch, tmp_path, "--no-inferrer")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver inferrer" in result["error"]
+    assert "stale build" in result["error"]
+
+
+def test_play_run_rejects_a_bad_inferrer_value_before_any_engine_starts(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path)
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "maybe")
+    with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
+        play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+
+
+def test_result_row_carries_the_inferrer_the_run_was_played_with(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "on")
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 5, "solver_inferrer": "off"}, "Silent")
+    assert row["solver_inferrer"] == "off"
+
+
+def test_result_row_falls_back_to_the_env_inferrer_for_unstamped_results(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "0")
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 5}, "Silent")
+    assert row["solver_inferrer"] == "off"
+
+
+def _run_main(monkeypatch, played, argv=("1", "Ironclad")):
+    monkeypatch.setattr(sys, "argv", ["play_full_run.py", *argv])
+    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+
+    def fake_play_run(seed, character, verbose=True, **kw):
+        played.append(seed)
+        return {"victory": False, "seed": seed, "act": 1, "floor": 3, "steps": 1,
+                "solver_plans": 1, "solver_errors": 0}
+
+    monkeypatch.setattr(play_full_run, "play_run", fake_play_run)
+    play_full_run.main()
+
+
+def test_main_header_names_the_inferrer(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    _run_main(monkeypatch, [])
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on)"]
+
+
+def test_main_header_names_an_off_inferrer(monkeypatch, capsys):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "OFF")
+    _run_main(monkeypatch, [])
+    out = capsys.readouterr().out
+    assert "solver inferrer off)" in out
+
+
+def test_main_rejects_a_bad_inferrer_before_any_game(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "maybe")
+    played = []
+    with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
+        _run_main(monkeypatch, played)
+    assert played == []
+
+
 def test_summarize_labels_a_hang_as_hang_and_not_completed():
     out = play_full_run.summarize(
         [{"victory": False, "seed": "s", "act": 1, "floor": 8, "steps": 40,
@@ -308,7 +435,7 @@ def _combat(hand, energy=1, round_=1):
 
 def _plan(*actions):
     return {"type": "combat_plan", "actions": list(actions),
-            "search": {"budget_ms": 120_000}}
+            "search": {"budget_ms": 120_000, "inferrer": "on"}}
 
 
 def _play(card_id):
@@ -333,6 +460,7 @@ def _run_solver(monkeypatch, script, seed="s1"):
     monkeypatch.setattr(play_full_run, "EngineProcess", _fake)
     monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
     monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
     monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
     result = play_full_run.play_run(seed, character="Ironclad", verbose=False, log=False)
     return result, [json.loads(line) for line in created[0].sent]

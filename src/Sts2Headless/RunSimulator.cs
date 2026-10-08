@@ -1135,6 +1135,27 @@ public class RunSimulator
         return null;
     }
 
+    /// <summary>
+    /// "on" | "off": whether the solver's IL card-effect inferrer is live (env STS2_SOLVER_INFERRER,
+    /// agent/bug.md BUG-048). "off" reproduces the pre-restore stub (no simulated Attack/Block/Draw for
+    /// cards without a hand-written mirror) and exists only for paired A/Bs. The switch itself lives in
+    /// CombatSolverEngine/RitsuLibHarmonyIlShim.cs (<c>InferrerSwitch</c>, resolved once, warns on an
+    /// unrecognised value); this field only logs the mode once at startup like the budget/threads above
+    /// and is reported on every plan as <c>combat_plan.search.inferrer</c>, which play_full_run.py
+    /// cross-checks against its own resolution of the same variable.
+    /// </summary>
+    private static readonly string SolverInferrerMode = ResolveSolverInferrerAndLog();
+
+    private static string ResolveSolverInferrerAndLog()
+    {
+        var mode = global::STS2RitsuLib.Utils.HarmonyIl.InferrerSwitch.Mode;
+        var raw = Environment.GetEnvironmentVariable(global::STS2RitsuLib.Utils.HarmonyIl.InferrerSwitch.EnvVar);
+        Console.Error.WriteLine(
+            $"[Sts2Headless] Solver IL inferrer: {mode} " +
+            $"(STS2_SOLVER_INFERRER={(string.IsNullOrWhiteSpace(raw) ? "<unset>" : raw)})");
+        return mode;
+    }
+
     private static readonly int SolverThreads = ResolveSolverThreadsAndLog();
 
     /// <summary>
@@ -1335,6 +1356,8 @@ public class RunSimulator
                 ["boundary"] = result.BoundaryReason.ToString(),
                 ["expanded_nodes"] = result.ExpandedNodes,
                 ["total_expanded_nodes"] = result.TotalExpandedNodes,
+                // "on" | "off" (STS2_SOLVER_INFERRER, BUG-048): which arm of the inferrer A/B produced this plan.
+                ["inferrer"] = SolverInferrerMode,
             },
         };
     }

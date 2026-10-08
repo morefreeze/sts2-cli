@@ -119,6 +119,30 @@ def solver_budget_seconds(env=None) -> int:
         f"{', '.join(str(t) for t in SOLVER_BUDGET_TIERS_S)} (seconds)")
 
 
+def solver_inferrer(env=None) -> str:
+    """Resolve STS2_SOLVER_INFERRER to "on" | "off" (agent/bug.md BUG-048).
+
+    "on" (default; unset/blank/"on"/"1") is the real solver, with the IL
+    card-effect inferrer simulating Attack/Block/Draw for cards that have no
+    hand-written mirror. "off"/"0" disables it, reproducing the pre-restore stub
+    (~486 card classes simulated as doing nothing); it exists only so a paired
+    A/B can measure the inferrer. Case and surrounding space are ignored.
+
+    Anything else raises. The engine is lenient (unknown -> on, with a stderr
+    warning), but the harness must not be: a typo'd "of" would silently label an
+    inferrer-ON run as the OFF arm, the same hazard as a typo'd budget tier.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("STS2_SOLVER_INFERRER") or "").strip().lower()
+    if raw in ("", "on", "1"):
+        return "on"
+    if raw in ("off", "0"):
+        return "off"
+    raise ValueError(
+        f"STS2_SOLVER_INFERRER={raw!r} is not one of on/off/1/0 "
+        f"(blank = on; off reproduces the pre-BUG-048 stub, for A/Bs only)")
+
+
 def solver_call_timeout_s(budget_s: int) -> float:
     """Watchdog deadline for one plan_combat_turn reply."""
     return budget_s + SOLVER_WATCHDOG_MARGIN_S
@@ -293,6 +317,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     """
     policy = ooc_policy()
     stats = {"ooc_policy": policy,
+             # BUG-048 A/B arm: whether the solver's IL inferrer was on
+             "solver_inferrer": solver_inferrer(),
              # commands greedy_action produced AND the engine accepted
              "ooc_greedy": 0,
              "ooc_fallbacks": 0,  # = sum(ooc_fallback_causes), set below
@@ -344,6 +370,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
     rng = random.Random(seed)
     solver_chars = solver_characters()
     solver_budget_s = solver_budget_seconds()
+    solver_inferrer_mode = solver_inferrer()
     # Engagement counters for this one run: how many plan_combat_turn calls
     # returned a usable plan vs. an error (which silently falls back to the
     # one-card-at-a-time heuristic below). A 3-game Silent smoke test once
@@ -611,6 +638,16 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                                 f"resolved here as {solver_budget_s} s"
                                 + (" (engine reported none -- stale build? rebuild "
                                    "src/Sts2Headless)" if reported is None else ""))
+                        # Same guard for STS2_SOLVER_INFERRER (BUG-048). A MISSING field
+                        # is an engine built before the switch existed: it always runs
+                        # the inferrer ON, so an OFF arm would measure ON against ON.
+                        reported_inferrer = (plan.get("search") or {}).get("inferrer")
+                        if reported_inferrer != solver_inferrer_mode:
+                            raise RuntimeError(
+                                f"engine solver inferrer {reported_inferrer!r} != "
+                                f"STS2_SOLVER_INFERRER resolved here as {solver_inferrer_mode!r}"
+                                + (" (engine reported none -- stale build? rebuild "
+                                   "src/Sts2Headless)" if reported_inferrer is None else ""))
                 else:
                     plan = {"type": "error"}
                 if plan.get("type") != "error":
@@ -925,6 +962,9 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "solver_turn_fallbacks": result.get("solver_turn_fallbacks"),
         "solver": sorted(solver_characters()),
         "solver_budget_s": solver_budget_seconds(),
+        # The arm the run was actually played with (stamped by play_run); env only
+        # for results that predate the stamp.
+        "solver_inferrer": result.get("solver_inferrer") or solver_inferrer(),
         "ascension": result.get("ascension"),
         "ooc_policy": result.get("ooc_policy"),
         "ooc_greedy": result.get("ooc_greedy"),
@@ -1113,6 +1153,7 @@ def main():
     if args.ascension < 0:
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
     policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
+    inferrer = solver_inferrer()  # ...and on a bad STS2_SOLVER_INFERRER
     if policy == "greedy":
         _load_greedy_action()  # a broken import aborts now, not as N "crash" games
         for knob, value in greedy_knobs().items():
@@ -1122,7 +1163,8 @@ def main():
     character = args.character
 
     print(f"Playing {num_runs} runs as {character} "
-          f"(ascension {args.ascension}, ooc policy {policy})")
+          f"(ascension {args.ascension}, ooc policy {policy}, "
+          f"solver inferrer {inferrer})")
     print("=" * 60)
 
     results = []

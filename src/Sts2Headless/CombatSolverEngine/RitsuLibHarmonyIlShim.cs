@@ -43,6 +43,52 @@ namespace STS2RitsuLib.Utils.HarmonyIl;
 //
 // This shim contains no algorithm logic -- it only decodes CodeInstructions. Every decision about
 // what a card does lives in the verbatim CardOnPlayInferrer.
+//
+// A/B SWITCH (BUG-048). `InferrerSwitch` reads env STS2_SOLVER_INFERRER once per process. OFF makes
+// `GetOriginalIl` throw, which the inferrer catches and turns into `return null` -- exactly what the
+// pre-restore `=> null` stub did, so OFF reproduces the old behaviour with no edit to any vendored
+// algorithm file. It exists only so one build can run the paired inferrer-on vs inferrer-off
+// experiment; ON (the default) is the real behaviour.
+
+/// <summary>
+/// Per-process on/off switch for the IL card-effect inferrer, from env <c>STS2_SOLVER_INFERRER</c>
+/// (agent/bug.md BUG-048). unset/blank/"on"/"1" -> on; "off"/"0" -> off (the pre-restore stub
+/// behaviour: <c>GetOriginalIl</c> throws and the inferrer returns
+/// null); anything else -> on plus a one-time warning on stderr (never stdout: that is the JSON
+/// protocol). Resolved once, on first use; the engine touches it at startup so the mode is logged then.
+/// </summary>
+internal static class InferrerSwitch
+{
+    public const string EnvVar = "STS2_SOLVER_INFERRER";
+
+    /// <summary>False only when the env var says off. Fixed for the life of the process.</summary>
+    public static readonly bool Enabled = ResolveFromEnvironment();
+
+    /// <summary>"on" or "off" -- the value reported as <c>combat_plan.search.inferrer</c>.</summary>
+    public static string Mode => Enabled ? "on" : "off";
+
+    private static bool ResolveFromEnvironment()
+    {
+        bool enabled = Resolve(Environment.GetEnvironmentVariable(EnvVar), out string? warning);
+        if (warning is not null)
+            Console.Error.WriteLine(warning);
+        return enabled;
+    }
+
+    /// <summary>Pure parse of the raw env value. An unrecognised value is ON with a warning naming it.</summary>
+    internal static bool Resolve(string? raw, out string? warning)
+    {
+        warning = null;
+        string value = raw?.Trim() ?? "";
+        if (value.Length == 0
+            || value.Equals("on", StringComparison.OrdinalIgnoreCase) || value == "1")
+            return true;
+        if (value.Equals("off", StringComparison.OrdinalIgnoreCase) || value == "0")
+            return false;
+        warning = $"[WARN] {EnvVar}='{raw}' is not on/off/1/0; using on";
+        return true;
+    }
+}
 
 /// <summary>
 /// The original (unpatched) IL of one method, as Harmony instructions.
@@ -68,6 +114,10 @@ internal static class HarmonyIlMethodExtensions
     public static HarmonyIlMethodBody GetOriginalIl(this MethodInfo method)
     {
         ArgumentNullException.ThrowIfNull(method);
+
+        // BUG-048 A/B: OFF = the old `=> null` stub. The inferrer catches this and returns null.
+        if (!InferrerSwitch.Enabled)
+            throw new InvalidOperationException($"{InferrerSwitch.EnvVar}=off");
 
         MethodBase body = method;
         // inherit: false -- the state machine belongs to this exact method, not to one it overrides.

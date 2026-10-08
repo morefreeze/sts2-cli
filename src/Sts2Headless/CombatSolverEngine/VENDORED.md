@@ -103,7 +103,11 @@ Five deliberate exceptions to "verbatim file copy" in this directory:
   the async state switch). `TryGetCalledMethod` reports only `call`/`callvirt` with
   a `MethodInfo` operand (constructor calls carry a `ConstructorInfo`). The shim
   contains no algorithm logic: it only decodes `CodeInstruction`s; every decision
-  about what a card does stays in the verbatim inferrer. If upstream's inferrer
+  about what a card does stays in the verbatim inferrer. It also carries the
+  `STS2_SOLVER_INFERRER` on/off switch (`InferrerSwitch`, read once per process):
+  `off` makes `GetOriginalIl` throw, which the inferrer catches and turns into
+  `return null` -- exactly the old stub -- so a paired A/B needs no edit to any
+  vendored file (still no algorithm logic). If upstream's inferrer
   starts using more of RitsuLib, extend the shim by hand.
 
 NOT vendored: Runtime/ (remainder, including SolverSettings.cs and
