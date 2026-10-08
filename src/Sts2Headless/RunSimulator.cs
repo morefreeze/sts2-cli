@@ -1044,6 +1044,12 @@ public class RunSimulator
         Log($"Playing card {card.GetType().Name} (index {cardIndex}) targeting {(target != null ? target.Monster?.GetType().Name ?? "creature" : "none")}");
 
         var handCountBefore = hand.Count;
+        // BUG-050: snapshot the real signals that a play happened. "Same hand size, same card at
+        // the same index" is ALSO exactly what a card that returns itself to the hand looks like
+        // after it resolved (Regent Particle Wall: Block, then back to the hand).
+        var playsStartedBefore = CountCardPlaysStarted();
+        var energyBefore = pcs.Energy;
+        var starsBefore = pcs.Stars;
 
         var combatStateForCrash = CombatManager.Instance.DebugOnlyGetState();
         var aliveEnemiesForCrash = combatStateForCrash?.Enemies?.Count(e => e != null && e.IsAlive) ?? 0;
@@ -1054,14 +1060,45 @@ public class RunSimulator
         RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
         WaitForActionExecutor();
 
-        // Check if card play had no effect (hand unchanged, same card still at same index)
+        // Check if card play had no effect (hand unchanged, same card still at same index).
+        // BUG-004/006: a play the action queue silently dropped must still be an error. But the
+        // unchanged hand alone cannot prove that (BUG-050) -- a card that returns itself to the
+        // hand was played and put back -- so the error needs the absence of every play signal too.
         var handAfter = pcs.Hand.Cards;
-        if (handAfter.Count == handCountBefore && cardIndex < handAfter.Count && handAfter[cardIndex] == card)
+        if (handAfter.Count == handCountBefore && cardIndex < handAfter.Count && handAfter[cardIndex] == card
+            && !CardPlayHappened(pcs, playsStartedBefore, energyBefore, starsBefore))
         {
             return Error($"Card could not be played (still in hand after action): {card.GetType().Name} [{card.Id}]");
         }
 
         return DetectDecisionPoint();
+    }
+
+    /// <summary>
+    /// Number of CardPlayStarted entries in the live combat history (monotonic within a combat --
+    /// CombatHistory is only cleared when the combat ends or resets). OnPlayWrapper appends one for
+    /// every card play that actually starts resolving, after resources are spent and BeforeCardPlayed
+    /// ran. -1 when the history is unreadable.
+    /// </summary>
+    private static int CountCardPlaysStarted()
+    {
+        try { return CombatManager.Instance.History.CardPlaysStarted.Count(); }
+        catch (Exception) { return -1; }
+    }
+
+    /// <summary>
+    /// BUG-050: did the PlayCardAction just run actually play a card? Any one signal is enough:
+    /// a new CardPlayStarted history entry, or energy / stars spent (the cost is paid inside the
+    /// play, so a dropped action never pays it). Conservative on purpose: it only ever REMOVES the
+    /// "could not be played" error, so a play with no signal at all (dropped by the action queue)
+    /// still errors exactly as before.
+    /// </summary>
+    private static bool CardPlayHappened(PlayerCombatState pcs, int playsStartedBefore, int energyBefore, int starsBefore)
+    {
+        if (playsStartedBefore >= 0 && CountCardPlaysStarted() > playsStartedBefore)
+            return true;
+        try { return pcs.Energy < energyBefore || pcs.Stars < starsBefore; }
+        catch (Exception) { return false; }
     }
 
     /// <summary>
@@ -1480,6 +1517,18 @@ public class RunSimulator
     /// </summary>
     private bool HasPendingSelection =>
         _cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null;
+
+    /// <summary>
+    /// A prompt DetectDecisionPoint's three leading checks (bundle_select, card_reward,
+    /// card_select) WILL surface right now. Mirrors those checks' conditions exactly, so
+    /// "goto recheckPending" on this can never fall through to the combat branch again
+    /// (BUG-049) -- unlike <see cref="HasPendingSelection"/>, which also counts a stale
+    /// _pendingBundles whose TCS is already completed.
+    /// </summary>
+    private bool HasSurfaceablePrompt =>
+        (_pendingBundles != null && _pendingBundleTcs != null && !_pendingBundleTcs.Task.IsCompleted)
+        || _cardSelector.HasPendingReward
+        || (_cardSelector.HasPending && _cardSelector.PendingOptions != null);
 
     private Dictionary<string, object?> DoEndTurn(Player player)
     {
@@ -1939,6 +1988,17 @@ public class RunSimulator
         _syncCtx.Pump();
         WaitForActionExecutor();
 
+        // Resolving can run the game on to its NEXT prompt before ResolvePending returns
+        // (Burning Pact's draw shuffling into Stratagem's pick; Knowledge Demon's curse pick
+        // running into the next turn's shuffle -- BUG-049). Surface it as it stands: the
+        // room-specific follow-ups below (rest-site force-to-map, shop refresh) would otherwise
+        // run over an unanswered prompt and drop it.
+        if (HasSurfaceablePrompt)
+        {
+            Log("Card selection resolved; the continuation opened another prompt");
+            return DetectDecisionPoint();
+        }
+
         // Extra wait for rest-site SMITH: the background ChooseLocalOption task
         // needs time to complete the upgrade after card selection resolves.
         if (_runState?.CurrentRoom is RestSiteRoom)
@@ -2271,6 +2331,10 @@ public class RunSimulator
             return GameOverState(false);
         }
 
+        // The combat branch below jumps back here when a prompt appears after its Pump / wait
+        // (start-of-turn selections, chained selections -- BUG-024 / BUG-049).
+        recheckPending:
+
         // Check if there's a pending bundle selection (Scroll Boxes: pick 1 of N packs)
         if (_pendingBundles != null && _pendingBundleTcs != null && !_pendingBundleTcs.Task.IsCompleted)
         {
@@ -2342,7 +2406,6 @@ public class RunSimulator
         }
 
         // Check if there's a pending card selection (upgrade, remove, transform, start-of-turn powers)
-        checkCardSelect:
         if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
         {
             var opts = _cardSelector.PendingOptions.Select((card, i) =>
@@ -2405,11 +2468,14 @@ public class RunSimulator
             _syncCtx.Pump();
             WaitForActionExecutor();
 
-            // Re-check for pending card selections AFTER pump (BUG-024: start-of-turn effects
-            // like Tools of Trade create card selections during Pump, AFTER the initial HasPending check)
-            if (_cardSelector.HasPending && _cardSelector.PendingOptions != null)
+            // Re-check for pending prompts AFTER pump (BUG-024: start-of-turn effects like Tools of
+            // Trade create card selections during Pump, AFTER the initial HasPending check).
+            // combat_play must never be reported while a prompt is pending (BUG-049): the game is
+            // parked on the selector's TCS, so the combat is not in a playable state and nothing
+            // but the matching select_cards / skip_select can move it.
+            if (HasSurfaceablePrompt)
             {
-                goto checkCardSelect;  // Jump back to card_select handling
+                goto recheckPending;  // Jump back to the bundle / reward / card_select handling
             }
 
             if (CombatManager.Instance.IsInProgress && IsPlayPhase())
@@ -2425,9 +2491,12 @@ public class RunSimulator
             {
                 _syncCtx.Pump();
                 Thread.Sleep(5);
+                // A prompt opened by the still-running turn start / enemy turn (BUG-049).
+                if (HasSurfaceablePrompt) goto recheckPending;
                 if (IsPlayPhase()) return CombatPlayState(player);
                 if (!CombatManager.Instance.IsInProgress) return DetectPostCombatState(player, combatRoom);
             }
+            if (HasSurfaceablePrompt) goto recheckPending;
             return CombatPlayState(player);
         }
 
@@ -4494,11 +4563,24 @@ public class RunSimulator
             return _pendingTcs.Task;
         }
 
+        /// <summary>
+        /// BUG-049: detach the pending state BEFORE completing the TCS, never after.
+        /// TrySetResult runs the awaiting game code's continuation synchronously on this thread
+        /// (the headless InlineSynchronizationContext, or the inline default for a continuation
+        /// with no captured context), and that continuation can open the NEXT selection before
+        /// TrySetResult returns -- Burning Pact's draw shuffling into Stratagem's "choose a card
+        /// from the draw pile", or Knowledge Demon's curse pick running on into the next turn's
+        /// shuffle. GetSelectedCards stores the new options and TCS in these same fields, so
+        /// clearing them AFTER TrySetResult wiped the new selection while the game stayed parked on
+        /// its TCS: DetectDecisionPoint saw nothing pending and reported a dead combat_play forever.
+        /// Same ordering DoSelectBundle already uses.
+        /// </summary>
         public void ResolvePending(IEnumerable<CardModel> selected)
         {
-            _pendingTcs?.TrySetResult(selected);
+            var tcs = _pendingTcs;
             PendingOptions = null;
             _pendingTcs = null;
+            tcs?.TrySetResult(selected);
         }
 
         public void ResolvePendingByIndices(int[] indices)
@@ -4513,9 +4595,11 @@ public class RunSimulator
 
         public void CancelPending()
         {
-            _pendingTcs?.TrySetResult(Array.Empty<CardModel>());
+            // Same ordering as ResolvePending (BUG-049): detach first, then complete.
+            var tcs = _pendingTcs;
             PendingOptions = null;
             _pendingTcs = null;
+            tcs?.TrySetResult(Array.Empty<CardModel>());
         }
 
         // Pending card reward from events (GetSelectedCardReward blocks until resolved)
