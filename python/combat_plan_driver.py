@@ -203,7 +203,13 @@ def _apply_action_choices(send, cur, action):
     return cur, True
 
 
-def _send_and_apply_choices(send, cur, action, action_name, index_key, idx):
+# Prefix RunSimulator.cs's DoPlayCard gives every live CanPlay refusal
+# ($"Cannot play card {card.GetType().Name}: {reason}"). Distinct from the
+# post-play "Card could not be played (still in hand after action)" check.
+CAN_PLAY_REFUSAL_PREFIX = "Cannot play card "
+
+
+def _send_and_apply_choices(send, cur, action, action_name, index_key, idx, stats=None):
     """Shared post-resolution part of a play_card/use_potion plan action, run
     once the primary index (card_index/potion_index) has already been
     resolved by the caller. Resolves target_combat_id to a live target_index
@@ -214,9 +220,11 @@ def _send_and_apply_choices(send, cur, action, action_name, index_key, idx):
     Returns (cur, ok, done). ok=False is a real live-engine failure the
     caller should propagate as (cur, False). done=True means the caller
     should return (cur, True) -- either the action fully resolved and left
-    combat_play, or a hard failure already returned. done=False means the
-    target was no longer alive (skipped) and the caller's for-loop should
-    continue to the next planned action."""
+    combat_play, or a hard failure already returned (or a planned play_card
+    was refused by the live CanPlay check, a stale plan: BUG-042, see
+    _execute_combat_plan_actions). done=False means the target was no
+    longer alive (skipped) and the caller's for-loop should continue to the
+    next planned action."""
     args = {index_key: idx}
     if "target_combat_id" in action:
         t_idx = _resolve_enemy_target_index(cur.get("enemies", []), action["target_combat_id"])
@@ -235,8 +243,19 @@ def _send_and_apply_choices(send, cur, action, action_name, index_key, idx):
         # No stable id available -- shouldn't happen for AnyEnemy cards per
         # ConvertPlanActionsToJson, but keep the raw index as a fallback.
         args["target_index"] = action["target_index"]
+    good = cur  # the last decision state, before this send
     cur = send({"cmd": "action", "action": action_name, "args": args})
     if cur.get("type") == "error":
+        message = str(cur.get("message") or "")
+        if action_name == "play_card" and message.startswith(CAN_PLAY_REFUSAL_PREFIX):
+            # A refusal leaves the engine untouched, so `good` is still exact.
+            print(f"  ~~ plan_combat_turn: live engine refused {action.get('card_id')}: "
+                  f"{message} -- the solver's predicted state diverged from the live "
+                  f"one (agent/bug.md BUG-042); stopping this plan and re-planning "
+                  f"from the live state")
+            if stats is not None:
+                stats["stale_refusals"] = stats.get("stale_refusals", 0) + 1
+            return good, True, True
         print(f"  !! plan_combat_turn: {action_name} failed: {cur.get('message')}")
         return cur, False, True
     cur, ok = _apply_action_choices(send, cur, action)
@@ -247,7 +266,7 @@ def _send_and_apply_choices(send, cur, action, action_name, index_key, idx):
     return cur, True, False
 
 
-def _execute_combat_plan_actions(send, state, actions):
+def _execute_combat_plan_actions(send, state, actions, stats=None):
     """Execute a plan_combat_turn action list up through (and including) the
     first end_turn -- never the whole multi-turn plan blindly, per CLAUDE.md's
     "Protocol notes" on plan_combat_turn: later turns assume draws and enemy
@@ -321,6 +340,21 @@ def _execute_combat_plan_actions(send, state, actions):
     established "re-plan when stale" philosophy (CLAUDE.md's Protocol notes)
     and the sanctioned Run 8 fallback ("skip the action, or trigger a fresh
     re-plan, don't just guess a random target").
+
+    Live CanPlay refusals are stale plans too (BUG-042): the same divergence
+    can surface one step later, when the plan's next play_card is refused by
+    the live engine with "Cannot play card <Card>: <reason>" (RunSimulator.cs
+    DoPlayCard; e.g. EnergyCostTooHigh after a planned Restlessness -- "if
+    your hand is empty, draw 2 and gain energy" -- did nothing because the
+    solver mispredicted the hand, e.g. by dropping Scourge's "Draw N cards").
+    That is the solver's prediction going stale, not a harness failure, so it
+    is handled like the unresolved card_id above: stop, report ok=True, and
+    return the last good decision state (NEVER the error dict) so the caller
+    re-plans from the live state. If `stats` is given, each such refusal
+    bumps stats["stale_refusals"]; the caller uses it to stop re-planning a
+    turn that keeps refusing. Only a planned play_card's "Cannot play card "
+    reply is relaxed -- "Card could not be played (still in hand after
+    action)", target/potion errors and every other error stay ok=False.
     """
     cur = state
     for action in actions:
@@ -338,7 +372,7 @@ def _execute_combat_plan_actions(send, state, actions):
                       f"the current live state.")
                 return cur, True
             cur, ok, done = _send_and_apply_choices(
-                send, cur, action, "play_card", "card_index", idx)
+                send, cur, action, "play_card", "card_index", idx, stats=stats)
             if done:
                 return cur, ok
         elif kind == "use_potion":

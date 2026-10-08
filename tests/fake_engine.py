@@ -3,7 +3,8 @@
 Speaks just enough of the JSON line protocol: a non-JSON warm-up line, then
 {"type": "ready"}, then one reply per command. `start_run` returns a
 combat_play decision; `plan_combat_turn` returns a combat_plan whose
-search.budget_ms is --plan-budget-ms; the command or action named by
+search.budget_ms is --plan-budget-ms and search.inferrer is --plan-inferrer
+(omitted with --no-inferrer); the command or action named by
 --hang-on never gets a reply (the BUG-040 shape); `quit` exits.
 
 It also starts a long-sleeping child and writes its pid to --pidfile. That child
@@ -24,6 +25,10 @@ parser.add_argument("--plan-budget-ms", type=int, default=120_000)
 # Omit the `search` dict from combat_plan replies, like an engine binary built
 # before the budget tiers existed.
 parser.add_argument("--no-search", action="store_true")
+# What search.inferrer reports (STS2_SOLVER_INFERRER, BUG-048), and a way to
+# omit just that field -- an engine binary built before the inferrer switch.
+parser.add_argument("--plan-inferrer", default="on")
+parser.add_argument("--no-inferrer", action="store_true")
 args = parser.parse_args()
 
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
@@ -53,6 +58,8 @@ for line in sys.stdin:
             reply["search"] = {"budget_ms": args.plan_budget_ms, "elapsed_ms": 1,
                                "boundary": "None", "expanded_nodes": 1,
                                "total_expanded_nodes": 1}
+            if not args.no_inferrer:
+                reply["search"]["inferrer"] = args.plan_inferrer
     else:
         reply = {"type": "decision", "decision": "echo", "echo": cmd}
     print(json.dumps(reply), flush=True)

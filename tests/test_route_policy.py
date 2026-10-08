@@ -393,7 +393,9 @@ def test_summary_banner_when_the_value_planner_fell_back():
 def test_summary_random_prints_the_policy_without_banners():
     text = _summary([_r("random", 0, 0)])
     assert "Route policy: random -- 0 planned, 0 forced, 0 fallbacks, 0 cell fallbacks" in text
-    assert "NEVER ENGAGED" not in text and "fell back" not in text
+    # "fell back" alone also appears in the solver engagement line ("N turns fell
+    # back to the heuristic"), so name the route banner's own wording.
+    assert "NEVER ENGAGED" not in text and "route planner fell back" not in text
 
 
 def test_summary_tolerates_results_from_before_the_forced_and_cell_counters():

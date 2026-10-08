@@ -5,6 +5,7 @@ itself to one character). Phase 2 makes it configurable so each character can
 be smoke-tested without editing code, and so lifting the gate is a one-line
 default change.
 """
+import json
 import sys
 import os
 
@@ -13,6 +14,7 @@ import pytest
 # Same sys.path pattern tests/test_plan_combat_turn_resolution.py uses.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 import play_full_run
+from tests.test_map_route_determinism import _FakeEngine
 
 
 def test_default_is_every_character():
@@ -246,6 +248,7 @@ def _fake_engine(monkeypatch, tmp_path, *extra):
                         lambda: [sys.executable, FAKE_ENGINE, "--pidfile", str(pidfile), *extra])
     monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
     monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
 
 
 def test_play_run_turns_a_solver_hang_into_a_hang_result(monkeypatch, tmp_path):
@@ -278,6 +281,133 @@ def test_play_run_fails_loudly_if_the_engine_reports_no_budget_at_all(monkeypatc
     assert "stale build" in result["error"]
 
 
+# --- solver IL inferrer switch (BUG-048 A/B) -----------------------------------
+
+def test_solver_inferrer_defaults_to_on():
+    assert play_full_run.solver_inferrer({}) == "on"
+
+
+@pytest.mark.parametrize("blank", ["", "  ", "\t"])
+def test_blank_solver_inferrer_means_on(blank):
+    assert play_full_run.solver_inferrer({"STS2_SOLVER_INFERRER": blank}) == "on"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("on", "on"), ("1", "on"), ("off", "off"), ("0", "off"),
+    ("ON", "on"), ("  Off ", "off"), (" 1 ", "on"), ("OFF", "off"),
+])
+def test_solver_inferrer_accepts_on_off_1_0_ignoring_case_and_space(raw, expected):
+    assert play_full_run.solver_inferrer({"STS2_SOLVER_INFERRER": raw}) == expected
+
+
+@pytest.mark.parametrize("bad", ["yes", "true", "2", "-1", "of", "onoff", "false"])
+def test_solver_inferrer_rejects_anything_else(bad):
+    # The engine tolerates an unknown value (on + a stderr warning); the harness
+    # must not: a typo'd "off" would label an inferrer-ON run as the OFF arm.
+    with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
+        play_full_run.solver_inferrer({"STS2_SOLVER_INFERRER": bad})
+
+
+def test_play_run_accepts_a_matching_inferrer_and_stamps_it(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path)
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "error" not in result
+    assert result["solver_inferrer"] == "on"
+
+
+def test_play_run_accepts_a_matching_off_inferrer_and_stamps_it(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path, "--plan-inferrer", "off")
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "off")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "error" not in result
+    assert result["solver_inferrer"] == "off"
+
+
+def test_play_run_fails_loudly_if_engine_and_harness_disagree_on_the_inferrer(monkeypatch, tmp_path):
+    # Harness resolves "on" (unset); the fake engine claims "off".
+    _fake_engine(monkeypatch, tmp_path, "--plan-inferrer", "off")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver inferrer" in result["error"]
+    assert "stale build" not in result["error"]
+    assert not result.get("hang")
+    assert result["solver_inferrer"] == "on"   # stamped even on the failure path
+
+
+def test_play_run_fails_loudly_if_harness_wants_off_but_engine_reports_on(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path, "--plan-inferrer", "on")
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "off")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver inferrer" in result["error"]
+
+
+def test_play_run_fails_loudly_if_the_engine_reports_no_inferrer_field(monkeypatch, tmp_path):
+    # An engine built before the switch existed always runs the inferrer ON; an
+    # OFF arm against it would silently measure ON vs ON. Same hazard as a
+    # missing budget: `dotnet run --no-build` runs whatever is in bin/.
+    _fake_engine(monkeypatch, tmp_path, "--no-inferrer")
+    result = play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+    assert "solver inferrer" in result["error"]
+    assert "stale build" in result["error"]
+
+
+def test_play_run_rejects_a_bad_inferrer_value_before_any_engine_starts(monkeypatch, tmp_path):
+    _fake_engine(monkeypatch, tmp_path)
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "maybe")
+    with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
+        play_full_run.play_run("seed_x", "Ironclad", verbose=False, log=False)
+
+
+def test_result_row_carries_the_inferrer_the_run_was_played_with(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "on")
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 5, "solver_inferrer": "off"}, "Silent")
+    assert row["solver_inferrer"] == "off"
+
+
+def test_result_row_falls_back_to_the_env_inferrer_for_unstamped_results(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "0")
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 5}, "Silent")
+    assert row["solver_inferrer"] == "off"
+
+
+def _run_main(monkeypatch, played, argv=("1", "Ironclad")):
+    monkeypatch.setattr(sys, "argv", ["play_full_run.py", *argv])
+    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
+
+    def fake_play_run(seed, character, verbose=True, **kw):
+        played.append(seed)
+        return {"victory": False, "seed": seed, "act": 1, "floor": 3, "steps": 1,
+                "solver_plans": 1, "solver_errors": 0}
+
+    monkeypatch.setattr(play_full_run, "play_run", fake_play_run)
+    play_full_run.main()
+
+
+def test_main_header_names_the_inferrer(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    _run_main(monkeypatch, [])
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on, route policy random)"]
+
+
+def test_main_header_names_an_off_inferrer(monkeypatch, capsys):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "OFF")
+    _run_main(monkeypatch, [])
+    out = capsys.readouterr().out
+    assert "solver inferrer off, route policy random)" in out
+
+
+def test_main_rejects_a_bad_inferrer_before_any_game(monkeypatch):
+    monkeypatch.setenv("STS2_SOLVER_INFERRER", "maybe")
+    played = []
+    with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
+        _run_main(monkeypatch, played)
+    assert played == []
+
+
 def test_summarize_labels_a_hang_as_hang_and_not_completed():
     out = play_full_run.summarize(
         [{"victory": False, "seed": "s", "act": 1, "floor": 8, "steps": 40,
@@ -286,3 +416,161 @@ def test_summarize_labels_a_hang_as_hang_and_not_completed():
         1, character="Ironclad", solver_chars={"Ironclad"})
     assert "Run 1: HANG" in out
     assert "Completed: 0/1" in out
+
+
+# --- BUG-042: live CanPlay refusals of planned cards are re-planned ------------
+
+REFUSAL = {"type": "error", "message": "Cannot play card Bodyguard: EnergyCostTooHigh"}
+STILL_IN_HAND = {"type": "error", "message":
+                 "Card could not be played (still in hand after action): Bodyguard [CARD.BODYGUARD]"}
+
+
+def _combat(hand, energy=1, round_=1):
+    return {"type": "decision", "decision": "combat_play", "round": round_,
+            "energy": energy, "enemies": [{"index": 0, "hp": 30, "combat_id": 1}],
+            "context": {"act": 2, "floor": 5, "room_type": "Monster"},
+            "player": {"hp": 40, "max_hp": 80, "gold": 0},
+            "hand": [{"index": i, "id": f"CARD.{cid}", "can_play": True, "cost": 1,
+                      "target_type": "Self"} for i, cid in enumerate(hand)]}
+
+
+def _plan(*actions):
+    return {"type": "combat_plan", "actions": list(actions),
+            "search": {"budget_ms": 120_000, "inferrer": "on"}}
+
+
+def _play(card_id):
+    return {"action": "play_card", "card_id": card_id, "card_occurrence": 0}
+
+
+END = {"action": "end_turn"}
+GAME_OVER = {"type": "decision", "decision": "game_over", "victory": False,
+             "act": 2, "floor": 6,
+             "player": {"hp": 0, "max_hp": 80, "gold": 0, "deck_size": 10}}
+
+
+def _run_solver(monkeypatch, script, seed="s1"):
+    """play_run(Ironclad) with the solver on, against a scripted engine.
+    Returns (result, sent commands)."""
+    created = []
+
+    def _fake(argv, **kw):
+        created.append(_FakeEngine(script))
+        return created[-1]
+
+    monkeypatch.setattr(play_full_run, "EngineProcess", _fake)
+    monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
+    monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    result = play_full_run.play_run(seed, character="Ironclad", verbose=False, log=False)
+    return result, [json.loads(line) for line in created[0].sent]
+
+
+def _actions(sent):
+    return [c.get("action") or c.get("cmd") for c in sent]
+
+
+def test_stale_refusal_replans_and_the_game_continues(monkeypatch):
+    start = _combat(["STRIKE", "BODYGUARD"])
+    after_strike = _combat(["BODYGUARD"], energy=0)
+    script = [
+        {"type": "ready"},
+        start,
+        _plan(_play("STRIKE"), _play("BODYGUARD"), END),
+        after_strike,   # play_card STRIKE
+        REFUSAL,        # play_card BODYGUARD: the live engine refuses it
+        _plan(END),     # the harness must re-plan from the live state
+        GAME_OVER,      # end_turn
+    ]
+    result, sent = _run_solver(monkeypatch, script)
+    assert _actions(sent) == ["start_run", "plan_combat_turn", "play_card", "play_card",
+                              "plan_combat_turn", "end_turn"]
+    assert "error" not in result
+    assert result["solver_stale_refusals"] == 1
+    assert result["solver_turn_fallbacks"] == 0
+    assert result["solver_plans"] == 2
+    assert (result["act"], result["floor"]) == (2, 6)
+
+
+def test_four_refusals_in_one_turn_hand_the_rest_of_the_turn_to_the_heuristic(
+        monkeypatch, capsys):
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand]
+    for _ in range(4):
+        script += [_plan(_play("BODYGUARD"), END), REFUSAL]
+    script += [
+        _combat([], energy=0),   # heuristic play_card (index 0) succeeds
+        GAME_OVER,               # heuristic end_turn: empty hand, nothing to play
+    ]
+    result, sent = _run_solver(monkeypatch, script)
+    acts = _actions(sent)
+    assert acts.count("plan_combat_turn") == 4, "the 5th plan must not be requested"
+    assert acts[-2:] == ["play_card", "end_turn"]
+    assert "error" not in result
+    assert result["solver_stale_refusals"] == 4
+    assert result["solver_turn_fallbacks"] == 1   # one turn, however many heuristic steps
+    out = capsys.readouterr().out
+    assert out.count("plan_combat_turn refused 4 times this turn -- "
+                     "heuristic for the rest of the turn") == 1
+
+
+def test_three_refusals_still_allow_another_plan(monkeypatch):
+    # The guard is "more than 3": the 4th plan of the turn is still requested.
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand]
+    for _ in range(3):
+        script += [_plan(_play("BODYGUARD"), END), REFUSAL]
+    script += [_plan(END), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert _actions(sent).count("plan_combat_turn") == 4
+    assert result["solver_stale_refusals"] == 3 and result["solver_turn_fallbacks"] == 0
+
+
+def test_the_refusal_budget_resets_on_the_next_turn(monkeypatch):
+    turn1 = _combat(["BODYGUARD"], round_=1)
+    turn2 = _combat(["BODYGUARD"], round_=2)
+    script = [{"type": "ready"}, turn1]
+    for _ in range(3):
+        script += [_plan(_play("BODYGUARD"), END), REFUSAL]
+    script += [_plan(END), turn2]                     # turn 1 ends after 3 refusals
+    for _ in range(3):
+        script += [_plan(_play("BODYGUARD"), END), REFUSAL]
+    script += [_plan(END), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert result["solver_stale_refusals"] == 6 and result["solver_turn_fallbacks"] == 0
+    assert _actions(sent).count("plan_combat_turn") == 8
+
+
+def test_plan_execution_failure_reports_act_and_floor_from_the_last_decision(monkeypatch):
+    # BUG-042's second defect: the failing reply is an error dict with no
+    # context/player, so the row used to read act=None floor=None.
+    script = [{"type": "ready"}, _combat(["BODYGUARD"]),
+              _plan(_play("BODYGUARD"), END), STILL_IN_HAND]
+    result, _ = _run_solver(monkeypatch, script)
+    assert result["error"] == "plan_combat_turn_execution_failed"
+    assert (result["act"], result["floor"]) == (2, 5)
+    assert (result["hp"], result["max_hp"]) == (40, 80)
+    assert result["solver_stale_refusals"] == 0
+
+
+def test_results_stamp_the_new_counters_even_without_combat(monkeypatch):
+    result, _ = _run_solver(monkeypatch, [{"type": "ready"}, GAME_OVER])
+    assert result["solver_stale_refusals"] == 0 and result["solver_turn_fallbacks"] == 0
+
+
+def test_eval_row_carries_the_stale_refusal_counters():
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 9,
+         "solver_stale_refusals": 5, "solver_turn_fallbacks": 2}, "Ironclad")
+    assert row["solver_stale_refusals"] == 5 and row["solver_turn_fallbacks"] == 2
+
+
+def test_summarize_reports_stale_refusals_and_turn_fallbacks():
+    results = [dict(_result("s1", 40, 0), solver_stale_refusals=3, solver_turn_fallbacks=1),
+               dict(_result("s2", 35, 2), solver_stale_refusals=4, solver_turn_fallbacks=0),
+               _result("s3", 10, 0)]   # a row from before the counters existed counts as 0
+    out = play_full_run.summarize(results, 3, character="Silent", solver_chars={"Silent"})
+    # The start of the line is what tests and greps match; the new counts follow it.
+    assert ("Solver engagement: 85/87 plan_combat_turn calls returned a usable plan, "
+            "7 stale-plan refusals re-planned, 1 turns fell back to the heuristic") in out

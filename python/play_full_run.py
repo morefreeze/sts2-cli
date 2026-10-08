@@ -89,6 +89,12 @@ SOLVER_BUDGET_DEFAULT_S = 120
 # solves was 0.4 s, so 60 s is ~150x headroom while still costing one game
 # instead of a whole day.
 SOLVER_WATCHDOG_MARGIN_S = 60
+# A plan whose next planned play_card the live engine refuses ("Cannot play
+# card ...") is a stale plan and the harness re-plans (agent/bug.md BUG-042).
+# A turn with MORE than this many refusals gets no further plan_combat_turn
+# call: a solver that keeps planning the same refused card would otherwise
+# loop until the STUCK detector ends the run. The heuristic plays the rest.
+SOLVER_STALE_REFUSALS_PER_TURN = 3
 # Every other engine reply arrives in well under a second; 120 s only fires on
 # a genuine stall.
 ENGINE_REPLY_TIMEOUT_S = 120
@@ -111,6 +117,30 @@ def solver_budget_seconds(env=None) -> int:
     raise ValueError(
         f"STS2_SOLVER_BUDGET={raw!r} is not a supported tier; use one of "
         f"{', '.join(str(t) for t in SOLVER_BUDGET_TIERS_S)} (seconds)")
+
+
+def solver_inferrer(env=None) -> str:
+    """Resolve STS2_SOLVER_INFERRER to "on" | "off" (agent/bug.md BUG-048).
+
+    "on" (default; unset/blank/"on"/"1") is the real solver, with the IL
+    card-effect inferrer simulating Attack/Block/Draw for cards that have no
+    hand-written mirror. "off"/"0" disables it, reproducing the pre-restore stub
+    (~486 card classes simulated as doing nothing); it exists only so a paired
+    A/B can measure the inferrer. Case and surrounding space are ignored.
+
+    Anything else raises. The engine is lenient (unknown -> on, with a stderr
+    warning), but the harness must not be: a typo'd "of" would silently label an
+    inferrer-ON run as the OFF arm, the same hazard as a typo'd budget tier.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("STS2_SOLVER_INFERRER") or "").strip().lower()
+    if raw in ("", "on", "1"):
+        return "on"
+    if raw in ("off", "0"):
+        return "off"
+    raise ValueError(
+        f"STS2_SOLVER_INFERRER={raw!r} is not one of on/off/1/0 "
+        f"(blank = on; off reproduces the pre-BUG-048 stub, for A/Bs only)")
 
 
 def solver_call_timeout_s(budget_s: int) -> float:
@@ -355,6 +385,8 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     """
     policy = ooc_policy()
     stats = {"ooc_policy": policy,
+             # BUG-048 A/B arm: whether the solver's IL inferrer was on
+             "solver_inferrer": solver_inferrer(),
              # commands greedy_action produced AND the engine accepted
              "ooc_greedy": 0,
              "ooc_fallbacks": 0,  # = sum(ooc_fallback_causes), set below
@@ -373,6 +405,10 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              # rooms on planned paths whose transition cell fell back below the
              # exact act cell (a sparse model), summed over planned decisions
              "route_cell_fallbacks": 0,
+             # BUG-042: planned play_cards the live engine refused (each one
+             # re-planned), and turns handed to the heuristic by the guard
+             "solver_stale_refusals": 0,
+             "solver_turn_fallbacks": 0,
              "game_log": None}
     result = _play_run(seed, character, verbose, log, ascension, stats)
     stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
@@ -400,7 +436,8 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
     stats["ooc_greedy"], stats["ooc_fallback_causes"][...],
     stats["ooc_event_stuck"], stats["route_plans"], stats["route_fallbacks"],
-    stats["route_forced"] and stats["route_cell_fallbacks"], and sets
+    stats["route_forced"], stats["route_cell_fallbacks"],
+    stats["solver_stale_refusals"] and stats["solver_turn_fallbacks"], and sets
     stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
@@ -413,6 +450,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
     rng = random.Random(seed)
     solver_chars = solver_characters()
     solver_budget_s = solver_budget_seconds()
+    solver_inferrer_mode = solver_inferrer()
     # Engagement counters for this one run: how many plan_combat_turn calls
     # returned a usable plan vs. an error (which silently falls back to the
     # one-card-at-a-time heuristic below). A 3-game Silent smoke test once
@@ -498,6 +536,11 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         # key it was collected under.
         refused_ids = set()
         refused_turn_key = None
+        # Live CanPlay refusals of planned cards this combat turn (BUG-042),
+        # keyed like refused_turn_key; see SOLVER_STALE_REFUSALS_PER_TURN.
+        stale_turn_key = None
+        stale_turn_refusals = 0
+        stale_turn_fallback_counted = False
         # Phase 3a: out-of-combat decisions go to agent.combat_env.greedy_action
         # when STS2_OOC_POLICY=greedy (see OOC_GREEDY_DECISIONS). None = naive.
         greedy = _load_greedy_action() if stats["ooc_policy"] == "greedy" else None
@@ -681,7 +724,20 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 # Which characters take this path is resolved by
                 # solver_characters() (STS2_SOLVER_CHARS); see
                 # docs/superpowers/plans/2026-09-21-combatsolver-port-phase2.md.
-                if character in solver_chars:
+                context = state.get("context", {}) or {}
+                turn_key = (context.get("act"), context.get("floor"), state.get("round"))
+                if turn_key != stale_turn_key:
+                    stale_turn_key = turn_key
+                    stale_turn_refusals = 0
+                    stale_turn_fallback_counted = False
+                stale_guard = (character in solver_chars
+                               and stale_turn_refusals > SOLVER_STALE_REFUSALS_PER_TURN)
+                if stale_guard and not stale_turn_fallback_counted:
+                    stale_turn_fallback_counted = True
+                    stats["solver_turn_fallbacks"] += 1
+                    print(f"  !! plan_combat_turn refused {stale_turn_refusals} times this "
+                          f"turn -- heuristic for the rest of the turn")
+                if character in solver_chars and not stale_guard:
                     plan = send({"cmd": "action", "action": "plan_combat_turn"})
                     if plan.get("type") == "error":
                         solver_errors += 1
@@ -713,6 +769,16 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                                 f"resolved here as {solver_budget_s} s"
                                 + (" (engine reported none -- stale build? rebuild "
                                    "src/Sts2Headless)" if reported is None else ""))
+                        # Same guard for STS2_SOLVER_INFERRER (BUG-048). A MISSING field
+                        # is an engine built before the switch existed: it always runs
+                        # the inferrer ON, so an OFF arm would measure ON against ON.
+                        reported_inferrer = (plan.get("search") or {}).get("inferrer")
+                        if reported_inferrer != solver_inferrer_mode:
+                            raise RuntimeError(
+                                f"engine solver inferrer {reported_inferrer!r} != "
+                                f"STS2_SOLVER_INFERRER resolved here as {solver_inferrer_mode!r}"
+                                + (" (engine reported none -- stale build? rebuild "
+                                   "src/Sts2Headless)" if reported_inferrer is None else ""))
                 else:
                     plan = {"type": "error"}
                 if plan.get("type") != "error":
@@ -724,12 +790,20 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                         # if it somehow doesn't.
                         state = send({"cmd": "action", "action": "end_turn"})
                     else:
-                        state, plan_ok = _execute_combat_plan_actions(send, state, plan_actions)
+                        exec_stats = {}
+                        state, plan_ok = _execute_combat_plan_actions(
+                            send, state, plan_actions, stats=exec_stats)
+                        refusals = exec_stats.get("stale_refusals", 0)
+                        stats["solver_stale_refusals"] += refusals
+                        stale_turn_refusals += refusals
                         if not plan_ok:
                             print("  ERROR: plan_combat_turn's plan did not execute "
                                   "cleanly against the live engine")
-                            player = state.get("player", {}) or {}
-                            context = state.get("context", {}) or {}
+                            # `state` can be the engine's error dict, which carries
+                            # no context/player (BUG-042) -- fall back to the last
+                            # decision, as the engine-error return above does.
+                            player = state.get("player") or last_decision.get("player", {})
+                            context = state.get("context") or last_decision.get("context", {})
                             return {"victory": False, "seed": seed, "steps": step,
                                      "act": context.get("act"), "floor": context.get("floor"),
                                      "hp": player.get("hp"), "max_hp": player.get("max_hp"),
@@ -1015,8 +1089,13 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "character": character,
         "solver_plans": result.get("solver_plans"),
         "solver_errors": result.get("solver_errors"),
+        "solver_stale_refusals": result.get("solver_stale_refusals"),
+        "solver_turn_fallbacks": result.get("solver_turn_fallbacks"),
         "solver": sorted(solver_characters()),
         "solver_budget_s": solver_budget_seconds(),
+        # The arm the run was actually played with (stamped by play_run); env only
+        # for results that predate the stamp.
+        "solver_inferrer": result.get("solver_inferrer") or solver_inferrer(),
         "ascension": result.get("ascension"),
         "ooc_policy": result.get("ooc_policy"),
         "ooc_greedy": result.get("ooc_greedy"),
@@ -1108,8 +1187,12 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     lines.append(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}, "
                  f"avg_floor={avg_floor}")
     total_solver_attempts = total_solver_plans + total_solver_errors
+    total_stale = sum(r.get("solver_stale_refusals") or 0 for r in results if r)
+    total_turn_fallbacks = sum(r.get("solver_turn_fallbacks") or 0 for r in results if r)
     lines.append(f"Solver engagement: {total_solver_plans}/{total_solver_attempts} "
-                 f"plan_combat_turn calls returned a usable plan")
+                 f"plan_combat_turn calls returned a usable plan, "
+                 f"{total_stale} stale-plan refusals re-planned, "
+                 f"{total_turn_fallbacks} turns fell back to the heuristic")
     policies = sorted({r.get("ooc_policy") for r in results if r and r.get("ooc_policy")})
     if policies:
         total_greedy = sum(r.get("ooc_greedy") or 0 for r in results if r)
@@ -1223,6 +1306,7 @@ def main():
     if args.ascension < 0:
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
     policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
+    inferrer = solver_inferrer()  # ...and on a bad STS2_SOLVER_INFERRER
     if policy == "greedy":
         _load_greedy_action()  # a broken import aborts now, not as N "crash" games
         for knob, value in greedy_knobs().items():
@@ -1242,7 +1326,8 @@ def main():
     character = args.character
 
     print(f"Playing {num_runs} runs as {character} "
-          f"(ascension {args.ascension}, ooc policy {policy}, route policy {route})")
+          f"(ascension {args.ascension}, ooc policy {policy}, "
+          f"solver inferrer {inferrer}, route policy {route})")
     print("=" * 60)
 
     results = []

@@ -31,7 +31,7 @@ CardDynamicVarWarmup call sites below). The 13 files above (beyond the
 original CombatRootSnapshot.cs) were vendored unmodified to supply them, each
 confirmed clean of Godot/RitsuLib coupling before vendoring.
 
-Four deliberate exceptions to "verbatim file copy" in this directory:
+Five deliberate exceptions to "verbatim file copy" in this directory:
 
 - `SolverSettingsEnums.cs` hand-extracts only the `SolverPotionPolicy` and
   `BossHpStrategy` enum declarations out of upstream `Runtime/SolverSettings.cs`.
@@ -82,6 +82,34 @@ Four deliberate exceptions to "verbatim file copy" in this directory:
   correct if this ever changes. See the comment at the top of the file for
   the full reasoning.
 
+- `RitsuLibHarmonyIlShim.cs` is **hand-written, not vendored from any single
+  upstream file** (2026-09-30, agent/bug.md BUG-048). It stands in for the small
+  used surface of RitsuLib's `STS2RitsuLib.Utils.HarmonyIl` -- the extension
+  `MethodInfo.GetOriginalIl()`, `HarmonyIlMethodBody.Instructions`, and
+  `HarmonyIl.{TryGetCalledMethod,TryGetLocalLoadIndex,LoadsInt32}` -- so that
+  `Engine/InCombat/Mirrors/Cards/OnPlay/CardOnPlayInferrer.cs` can be vendored
+  **verbatim** again (its `using STS2RitsuLib.Utils.HarmonyIl;` compiles
+  unchanged because the shim declares exactly that namespace). RitsuLib is a Steam
+  Workshop mod library this headless build does not have. The port (09311aa) had
+  instead stubbed the inferrer's `Infer`/`InferStrict` to `=> null`, which silently
+  removed the generic Attack/Block/Draw simulation of every card without a
+  hand-written mirror (~486 card classes; BUG-048). The shim reads the ORIGINAL
+  (unpatched) IL with `HarmonyLib.PatchProcessor.GetOriginalInstructions` -- our
+  build applies Harmony patches to some game methods -- and, because card `OnPlay`
+  overrides are `async`, reads the compiler-generated state machine's `MoveNext`
+  (found through `[AsyncStateMachine]`), which is the IL the inferrer's heuristics
+  were written against (it ignores `stfld` to the state-machine type, skips branches
+  preceded by `get_IsCompleted`, and reads "local 0 near the start of MoveNext" as
+  the async state switch). `TryGetCalledMethod` reports only `call`/`callvirt` with
+  a `MethodInfo` operand (constructor calls carry a `ConstructorInfo`). The shim
+  contains no algorithm logic: it only decodes `CodeInstruction`s; every decision
+  about what a card does stays in the verbatim inferrer. It also carries the
+  `STS2_SOLVER_INFERRER` on/off switch (`InferrerSwitch`, read once per process):
+  `off` makes `GetOriginalIl` throw, which the inferrer catches and turns into
+  `return null` -- exactly the old stub -- so a paired A/B needs no edit to any
+  vendored file (still no algorithm logic). If upstream's inferrer
+  starts using more of RitsuLib, extend the shim by hand.
+
 NOT vendored: Runtime/ (remainder, including SolverSettings.cs and
 SolverController.cs as wholes, and Entry.cs), UI/, Api/, Diagnostics/,
 Replay/, Testing/ — these are the live-mod / RitsuLib / overlay glue this
@@ -90,17 +118,21 @@ docs/superpowers/specs/2026-09-17-combatsolver-port-design.md.
 
 Do not hand-edit ported files' algorithm logic. If upstream fixes a bug we
 need, re-vendor the affected file(s) from a fresh clone instead of patching
-by hand, so we don't silently diverge from upstream. The four exceptions
+by hand, so we don't silently diverge from upstream. The five exceptions
 above (two hand-extracted enum files, one RitsuLib-touchpoint file with its
-mod-patcher interface stripped, and one hand-written logging shim) are the
-only deliberate departures from "verbatim file copy" in this directory,
-apart from the local patches listed below.
+mod-patcher interface stripped, and two hand-written shims -- logging and the
+HarmonyIl IL reader) are the only deliberate departures from "verbatim file
+copy" in this directory, apart from the local patches listed below.
 
 ## Local patches to vendored algorithm files
 
-One deliberate, user-approved departure from "never hand-edit ported
-algorithm logic" (2026-09-30). Each is marked `LOCAL PATCH` in the source and
-must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
+Two deliberate, user-approved departures from "never hand-edit ported
+algorithm logic" (both 2026-09-30). (A third, a Scourge draw in
+`CardEffectSpecRegistry.cs`, was added and then removed the same week with
+the user's approval: once BUG-048 restored the IL inferrer, the inferrer
+simulates Scourge's draw itself, so the patch would have drawn twice. That
+file is verbatim upstream again.) Each is marked `LOCAL PATCH` in the source
+and must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
 
 - `Engine/InCombat/Simulation/CombatPredictionSimulator.CardPile.cs` --
   `MaxSimulatedCardDraws = 1000`: `ContinueDrawExecution` stops drawing once
@@ -114,3 +146,19 @@ must be re-applied (or dropped, if upstream fixed it) on any re-vendor.
   `MaxSimulatedChanneledOrbs` / `OrbChannelLimitExceeded` cap in
   `CombatPredictionSimulator.Orb.cs`. It only changes lines that draw 1000+
   cards, i.e. lines that are already non-terminating in the real game.
+
+- `Search/CombatBeamSolver.BeamRetentionPolicy.cs` -- `appliedAdmissionClaims`
+  (in `AddOrderedMutationPortfolio`) is now `new(ReferenceEqualityComparer.Instance)`
+  instead of `[]`. `OrderedMutationAdmissionClaim` is a record holding
+  `SearchNode Candidate` (and a `Packet` holding SearchNodes), so the default comparer
+  hashed it with the compiler-generated record `GetHashCode`, which walks
+  `SearchNode.Parent` chains and every `CycleSearchState.PriorCycleEndpoint` chain
+  without memoization -- exponential in the number of cycle endpoints on a line, so a
+  long repeating combo line (Creative AI / Reboot loops) hangs `plan_combat_turn`
+  deterministically (agent/bug.md BUG-047). Every other `SearchNode` set in the
+  search code already uses reference equality; claims are only ever re-added as the
+  same object (built once by `CoalesceOrderedMutationAdmissionClaims`, then reached
+  via `admissionClaims`, `work.Claim` and `work.AliasedClaims`) and every claim owns a
+  distinct `Reasons` set instance, so reference semantics cannot change which claims
+  count as already applied. Upstream (Torch1230/CombatSolver @ 7236330) has the same
+  code at `src/Search/CombatBeamSolver.BeamRetentionPolicy.OrderedMutation.cs:485`.

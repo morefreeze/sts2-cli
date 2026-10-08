@@ -1135,6 +1135,27 @@ public class RunSimulator
         return null;
     }
 
+    /// <summary>
+    /// "on" | "off": whether the solver's IL card-effect inferrer is live (env STS2_SOLVER_INFERRER,
+    /// agent/bug.md BUG-048). "off" reproduces the pre-restore stub (no simulated Attack/Block/Draw for
+    /// cards without a hand-written mirror) and exists only for paired A/Bs. The switch itself lives in
+    /// CombatSolverEngine/RitsuLibHarmonyIlShim.cs (<c>InferrerSwitch</c>, resolved once, warns on an
+    /// unrecognised value); this field only logs the mode once at startup like the budget/threads above
+    /// and is reported on every plan as <c>combat_plan.search.inferrer</c>, which play_full_run.py
+    /// cross-checks against its own resolution of the same variable.
+    /// </summary>
+    private static readonly string SolverInferrerMode = ResolveSolverInferrerAndLog();
+
+    private static string ResolveSolverInferrerAndLog()
+    {
+        var mode = global::STS2RitsuLib.Utils.HarmonyIl.InferrerSwitch.Mode;
+        var raw = Environment.GetEnvironmentVariable(global::STS2RitsuLib.Utils.HarmonyIl.InferrerSwitch.EnvVar);
+        Console.Error.WriteLine(
+            $"[Sts2Headless] Solver IL inferrer: {mode} " +
+            $"(STS2_SOLVER_INFERRER={(string.IsNullOrWhiteSpace(raw) ? "<unset>" : raw)})");
+        return mode;
+    }
+
     private static readonly int SolverThreads = ResolveSolverThreadsAndLog();
 
     /// <summary>
@@ -1335,6 +1356,8 @@ public class RunSimulator
                 ["boundary"] = result.BoundaryReason.ToString(),
                 ["expanded_nodes"] = result.ExpandedNodes,
                 ["total_expanded_nodes"] = result.TotalExpandedNodes,
+                // "on" | "off" (STS2_SOLVER_INFERRER, BUG-048): which arm of the inferrer A/B produced this plan.
+                ["inferrer"] = SolverInferrerMode,
             },
         };
     }
@@ -1778,6 +1801,9 @@ public class RunSimulator
 
         try
         {
+            // BUG-046: the purchase clears entry.Model, so read the name BEFORE buying --
+            // dereferencing it afterwards threw NRE and reported a successful buy as an error.
+            var relicName = entry.Model?.GetType().Name ?? "?";
             // The pickup effect can open a card_select (e.g. KIFUDA → enchant up to 3 with
             // Adroit, #80). Run the purchase on a background task and yield as soon as a
             // pending selection appears so the caller can resolve it; the background task
@@ -1794,12 +1820,12 @@ public class RunSimulator
             }
             if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
             {
-                Log($"Buy relic {entry.Model.GetType().Name}: yielded for pending selection");
+                Log($"Buy relic {relicName}: yielded for pending selection");
                 return DetectDecisionPoint();
             }
             if (!task.IsCompleted) task.Wait(2000);
             _syncCtx.Pump();
-            Log($"Bought relic: {entry.Model.GetType().Name} for {entry.Cost}g");
+            Log($"Bought relic: {relicName} for {entry.Cost}g");
         }
         catch (Exception ex) { return Error($"Buy relic failed: {ex.Message}"); }
 
@@ -1823,9 +1849,11 @@ public class RunSimulator
 
         try
         {
+            // BUG-046: the purchase clears entry.Model -- capture the name before buying.
+            var potionName = entry.Model?.GetType().Name ?? "?";
             entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
-            Log($"Bought potion: {entry.Model.GetType().Name} for {entry.Cost}g");
+            Log($"Bought potion: {potionName} for {entry.Cost}g");
         }
         catch (Exception ex)
         {
