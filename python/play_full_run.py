@@ -551,6 +551,31 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
             if decision == "game_over":
                 victory = state.get("victory", False)
                 player = state.get("player", {})
+                kind = state.get("technical_failure_kind")
+                if kind:
+                    # BUG-053: the engine's "nuclear fallback" (RunSimulator.cs, a turn loop that
+                    # never reached the play phase again) terminates the run as GameOverState(false)
+                    # TAGGED technical_failure_kind precisely so evaluations can exclude it. Treating
+                    # it as a loss counted a stalled engine as a death: it was "Completed", status
+                    # "dead", and dragged every measured floor down (eval_rl already excludes it).
+                    # Same technical-result shape as the other engine failures: an "error", so
+                    # summarize() does not count it Completed, plus the kind for the status mapping.
+                    print(f"\nENGINE-{str(kind).upper()}: engine-forced game_over at act {state.get('act')}, "
+                          f"floor {state.get('floor')} (HP: {player.get('hp')}/{player.get('max_hp')}) "
+                          f"-- a technical failure, NOT a defeat (agent/bug.md BUG-053)")
+                    return {
+                        "victory": False,
+                        "seed": seed,
+                        "steps": step,
+                        "act": state.get("act"),
+                        "floor": state.get("floor"),
+                        "hp": player.get("hp"),
+                        "max_hp": player.get("max_hp"),
+                        "error": f"engine_{kind}: forced game_over",
+                        "technical_failure_kind": kind,
+                        "solver_plans": solver_plans,
+                        "solver_errors": solver_errors,
+                    }
                 print(f"\n{'VICTORY' if victory else 'DEFEAT'} at act {state.get('act')}, "
                       f"floor {state.get('floor')} "
                       f"(HP: {player.get('hp')}/{player.get('max_hp')}, "
@@ -924,6 +949,12 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         engine.close()
 
 
+# The technical_failure_kind values agent/eval_rl.py / combat_env.py's _terminal_status_for treat as
+# "the run did not really end" (paired_eval pairs only win/dead rows). Anything else the engine might
+# invent maps to "invalid" rather than being counted as a death.
+TECHNICAL_FAILURE_KINDS = frozenset({"crash", "timeout", "stuck", "invalid"})
+
+
 def global_floor(act, floor):
     """Absolute run floor from the engine's ACT-LOCAL floor.
 
@@ -961,6 +992,11 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         # "stuck" is in eval_rl's technical-status set, so paired_eval drops the
         # seed from pairing instead of averaging a killed run in as a death.
         status = "stuck"
+    elif result.get("technical_failure_kind"):
+        # BUG-053: an engine-forced game_over (nuclear fallback) is the engine telling us the
+        # turn loop stalled, in the same words eval_rl uses -- never an ordinary death.
+        kind = result["technical_failure_kind"]
+        status = kind if kind in TECHNICAL_FAILURE_KINDS else "invalid"
     elif result.get("timeout"):
         status = "timeout"
     elif result.get("error"):
@@ -1025,6 +1061,11 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     action. Same class as the plan_combat_turn "问题 1" postmortem in
     docs/superpowers/plans/2026-09-17-combatsolver-port-phase1.md.
 
+    An engine-forced game_over (the engine's nuclear fallback after a turn loop
+    that never resumed, tagged technical_failure_kind) is the same kind of
+    non-result: it renders as ENGINE-<KIND> with a banner, carries an "error",
+    and is neither Completed nor a LOSS (BUG-053).
+
     Solver engagement ("solver=<plans>/<attempts>" per run, plus an aggregate
     line) is reported alongside -- but deliberately NOT folded into
     Completed/WIN/LOSS/TIMEOUT/ERROR above: a run that fell back to the
@@ -1049,6 +1090,8 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
                 status = "WIN"
             elif r.get("hang"):
                 status = "HANG"
+            elif r.get("technical_failure_kind"):
+                status = f"ENGINE-{str(r['technical_failure_kind']).upper()}"
             elif r.get("timeout"):
                 status = "TIMEOUT"
             elif r.get("error"):
@@ -1073,6 +1116,11 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     avg_floor = round(sum(floors) / len(floors), 1) if floors else 0.0
     lines.append(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}, "
                  f"avg_floor={avg_floor}")
+    forced = [r for r in results if r and r.get("technical_failure_kind")]
+    if forced:
+        lines.append(f"!! {len(forced)} run(s) ended in an engine-forced game_over (technical_failure_kind: "
+                     f"{', '.join(sorted({str(r['technical_failure_kind']) for r in forced}))}) -- the engine's "
+                     f"turn loop stalled; they are NOT losses and NOT Completed (agent/bug.md BUG-053)")
     total_solver_attempts = total_solver_plans + total_solver_errors
     total_stale = sum(r.get("solver_stale_refusals") or 0 for r in results if r)
     total_unresolved = sum(r.get("solver_stale_unresolved") or 0 for r in results if r)

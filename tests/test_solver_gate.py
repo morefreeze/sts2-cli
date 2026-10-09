@@ -671,3 +671,80 @@ def test_summarize_reports_unresolved_card_replans():
     assert ("Solver engagement: 85/87 plan_combat_turn calls returned a usable plan, "
             "7 stale-plan refusals re-planned, 1 turns fell back to the heuristic, "
             "7 unresolved-card re-plans") in out
+
+
+# --- BUG-053: an engine-forced game_over is a technical failure, not a death ----
+#
+# The engine's "nuclear fallback" ends a run whose turn loop never resumed with
+# GameOverState(false) TAGGED technical_failure_kind, precisely so evaluations
+# can exclude it. play_full_run used to treat every game_over as a finished
+# game: Completed, status "dead", floor averaged in.
+
+MAP = {"type": "decision", "decision": "map_select", "choices": [{"col": 0, "row": 1}]}
+
+
+def _game_over(**extra):
+    state = {"type": "decision", "decision": "game_over", "victory": False, "act": 2, "floor": 6,
+             "player": {"hp": 31, "max_hp": 80, "gold": 12, "deck_size": 11}}
+    state.update(extra)
+    return state
+
+
+def _play_game_over(monkeypatch, state):
+    result, _ = _run_solver(monkeypatch, [{"type": "ready"}, MAP, state])
+    return result
+
+
+def test_forced_game_over_is_a_technical_result_not_a_defeat(monkeypatch):
+    result = _play_game_over(monkeypatch, _game_over(technical_failure_kind="stuck"))
+    assert result["victory"] is False
+    assert result["error"] == "engine_stuck: forced game_over"
+    assert result["technical_failure_kind"] == "stuck"
+    # where the run was when the engine gave up is kept (act/floor/hp/max_hp)
+    assert (result["act"], result["floor"], result["hp"], result["max_hp"]) == (2, 6, 31, 80)
+    assert not result.get("timeout") and not result.get("hang")
+
+
+def test_forced_game_over_maps_to_eval_status_stuck(monkeypatch):
+    row = play_full_run.result_to_eval_row(
+        _play_game_over(monkeypatch, _game_over(technical_failure_kind="stuck")), "Regent")
+    assert row["status"] == "stuck"          # in eval_rl's technical set: paired_eval drops the seed
+    assert row["floor"] == 17 + 6            # still the GLOBAL floor of where it stalled
+    assert row["character"] == "Regent"
+
+
+@pytest.mark.parametrize("kind, status", [("stuck", "stuck"), ("crash", "crash"), ("timeout", "timeout"),
+                                          ("invalid", "invalid"), ("never-heard-of-it", "invalid")])
+def test_forced_game_over_kinds_map_onto_technical_statuses(monkeypatch, kind, status):
+    row = play_full_run.result_to_eval_row(
+        _play_game_over(monkeypatch, _game_over(technical_failure_kind=kind)), "Silent")
+    assert row["status"] == status
+
+
+def test_summarize_labels_a_forced_game_over_and_does_not_count_it_completed(monkeypatch):
+    forced = _play_game_over(monkeypatch, _game_over(technical_failure_kind="stuck"))
+    ordinary = _play_game_over(monkeypatch, _game_over())
+    out = play_full_run.summarize([forced, ordinary], 2, character="Ironclad", solver_chars=set())
+    assert "Run 1: ENGINE-STUCK" in out
+    assert "error=engine_stuck: forced game_over" in out
+    assert "Run 2: LOSS" in out
+    assert "Completed: 1/2" in out           # only the ordinary defeat completed
+    assert "1 run(s) ended in an engine-forced game_over" in out and "NOT losses" in out
+    # a batch with no forced game_over prints no banner at all
+    clean = play_full_run.summarize([ordinary], 1, character="Ironclad", solver_chars=set())
+    assert "engine-forced" not in clean and "Completed: 1/1" in clean
+
+
+def test_an_ordinary_game_over_is_unaffected(monkeypatch):
+    result = _play_game_over(monkeypatch, _game_over())
+    assert "error" not in result and "technical_failure_kind" not in result
+    assert play_full_run.result_to_eval_row(result, "Ironclad")["status"] == "dead"
+    assert play_full_run.result_to_eval_row(
+        _play_game_over(monkeypatch, _game_over(victory=True, act=3, floor=17)), "Ironclad")["status"] == "win"
+
+
+@pytest.mark.parametrize("blank", ["", None])
+def test_an_empty_technical_failure_kind_is_an_ordinary_defeat(monkeypatch, blank):
+    result = _play_game_over(monkeypatch, _game_over(technical_failure_kind=blank))
+    assert "error" not in result
+    assert play_full_run.result_to_eval_row(result, "Ironclad")["status"] == "dead"
