@@ -1,4 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Replacement for the real GodotSharp.dll (AssemblyName below). sts2.dll binds to the real Godot API by exact
+    name + parameter types + return type; a member missing here fails the CALLING method with a
+    MissingMethodException at JIT time, mid-game (BUG-052).
+
+    After a game update or any edit here, from the repo root:
+        .venv/bin/python tools/audit_godot_stub_refs.py     # must say "TOTAL missing: 0"
+        .venv/bin/python tools/jit_probe.py                 # optional, the CLR's own verdict
+    (both compile a COPY of this directory under a temp dir, never src/**/bin|obj). New holes: run the
+    audit with its emit-stubs option (see the docstring of tools/audit_godot_stub_refs.py) and write the
+    output to src/GodotStubs/GeneratedAuditStubsN.cs.
+    Every type is `partial` so generated/extra members can be added from another file.
+  -->
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <RootNamespace>Godot</RootNamespace>

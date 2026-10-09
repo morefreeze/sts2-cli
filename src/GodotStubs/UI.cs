@@ -1,7 +1,7 @@
 namespace Godot;
 
 // CanvasItem
-public class CanvasItem : Node
+public partial class CanvasItem : Node
 {
     public Color Modulate { get; set; } = Color.White;
     public Color SelfModulate { get; set; } = Color.White;
@@ -23,15 +23,15 @@ public class CanvasItem : Node
 }
 
 // Control
-public class Control : CanvasItem
+public partial class Control : CanvasItem
 {
-    public enum FocusModeEnum { None, Click, All }
-    public enum MouseFilterEnum { Stop, Pass, Ignore }
-    public enum LayoutPreset { TopLeft, TopRight, BottomLeft, BottomRight, FullRect }
+    public enum FocusModeEnum : long { None = 0, Click = 1, All = 2 }
+    public enum MouseFilterEnum : long { Stop = 0, Pass = 1, Ignore = 2 }
+    public enum LayoutPreset : long { TopLeft = 0, TopRight = 1, BottomLeft = 2, BottomRight = 3, FullRect = 15 }
 
-    public new class MethodName : Node.MethodName { }
-    public new class PropertyName : Node.PropertyName { }
-    public new class SignalName : Node.SignalName
+    public new partial class MethodName : Node.MethodName { }
+    public new partial class PropertyName : Node.PropertyName { }
+    public new partial class SignalName : Node.SignalName
     {
         public static readonly StringName FocusEntered = "FocusEntered";
         public static readonly StringName FocusExited = "FocusExited";
@@ -58,18 +58,14 @@ public class Control : CanvasItem
     public Viewport? GetViewport() => null;
 
     public virtual void _GuiInput(InputEvent @event) { }
-
-    public void Connect(StringName signal, Callable callable) { }
-    public void Disconnect(StringName signal, Callable callable) { }
-    public void EmitSignal(StringName signal, params Variant[] args) { }
 }
 
 // Node2D
-public class Node2D : CanvasItem
+public partial class Node2D : CanvasItem
 {
-    public new class MethodName : Node.MethodName { }
-    public new class PropertyName : Node.PropertyName { }
-    public new class SignalName : Node.SignalName { }
+    public new partial class MethodName : Node.MethodName { }
+    public new partial class PropertyName : Node.PropertyName { }
+    public new partial class SignalName : Node.SignalName { }
 
     public Vector2 Position { get; set; }
     public Vector2 GlobalPosition { get; set; }
@@ -81,54 +77,54 @@ public class Node2D : CanvasItem
 }
 
 // Resource
-public class Resource : GodotObject
+public partial class Resource : GodotObject
 {
     public string ResourcePath { get; set; } = "";
-    public class MethodName { }
-    public class PropertyName { }
-    public class SignalName { }
+    public partial class MethodName { }
+    public partial class PropertyName { }
+    public partial class SignalName { }
 }
 
 // PackedScene
-public class PackedScene : Resource
+public partial class PackedScene : Resource
 {
-    public enum GenEditState { Disabled, Instance, Main }
+    public enum GenEditState : long { Disabled = 0, Instance = 1, Main = 2 }
     public T Instantiate<T>(GenEditState editState = GenEditState.Disabled) where T : Node, new() => new T();
     public Node Instantiate(GenEditState editState = GenEditState.Disabled) => new Node();
 }
 
 // Texture types
-public class Texture2D : Resource { }
-public class CompressedTexture2D : Texture2D { }
-public class AtlasTexture : Texture2D
+public partial class Texture2D : Resource { }
+public partial class CompressedTexture2D : Texture2D { }
+public partial class AtlasTexture : Texture2D
 {
     public Rect2 Region { get; set; }
     public Texture2D? Atlas { get; set; }
 }
-public class ImageTexture : Texture2D { }
+public partial class ImageTexture : Texture2D { }
 
 // Material types
-public class Material : Resource { }
-public class ShaderMaterial : Material
+public partial class Material : Resource { }
+public partial class ShaderMaterial : Material
 {
     public void SetShaderParameter(StringName param, Variant value) { }
     public Variant GetShaderParameter(StringName param) => default;
 }
-public class Shader : Resource { }
+public partial class Shader : Resource { }
 
 // Curve
-public class Curve : Resource
+public partial class Curve : Resource
 {
     public float Sample(float offset) => 0f;
 }
 
 // Tween
-public class Tween : GodotObject
+public partial class Tween : GodotObject
 {
-    public enum EaseType { In, Out, InOut, OutIn }
-    public enum TransitionType { Linear, Sine, Quint, Quart, Quad, Expo, Elastic, Cubic, Circ, Bounce, Back, Spring }
+    public enum EaseType : long { In = 0, Out = 1, InOut = 2, OutIn = 3 }
+    public enum TransitionType : long { Linear = 0, Sine = 1, Quint = 2, Quart = 3, Quad = 4, Expo = 5, Elastic = 6, Cubic = 7, Circ = 8, Bounce = 9, Back = 10, Spring = 11 }
 
-    public new class SignalName : GodotObject.SignalName
+    public new partial class SignalName : GodotObject.SignalName
     {
         public static readonly StringName Finished = "finished";
     }
@@ -158,7 +154,7 @@ public class Tween : GodotObject
     public enum ProcessModeEnum { Physics, Idle, Always }
 }
 
-public class PropertyTweener
+public partial class PropertyTweener : GodotObject
 {
     public PropertyTweener From(Variant value) => this;
     public PropertyTweener SetEase(Tween.EaseType ease) => this;
@@ -167,59 +163,59 @@ public class PropertyTweener
     public PropertyTweener AsRelative() => this;
 }
 
-public class CallbackTweener
+public partial class CallbackTweener : GodotObject
 {
     public CallbackTweener SetDelay(double delay) => this;
 }
 
-public class MethodTweener
+public partial class MethodTweener : GodotObject
 {
     public MethodTweener SetEase(Tween.EaseType ease) => this;
     public MethodTweener SetTrans(Tween.TransitionType trans) => this;
     public MethodTweener SetDelay(double delay) => this;
 }
 
-public class IntervalTweener { }
+public partial class IntervalTweener : GodotObject { }
 
 // UI Controls
-public class TextureRect : Control
+public partial class TextureRect : Control
 {
-    public new class MethodName : Control.MethodName { }
-    public new class PropertyName : Control.PropertyName { }
-    public new class SignalName : Control.SignalName { }
+    public new partial class MethodName : Control.MethodName { }
+    public new partial class PropertyName : Control.PropertyName { }
+    public new partial class SignalName : Control.SignalName { }
     public Texture2D? Texture { get; set; }
 }
 
-public class ColorRect : Control
+public partial class ColorRect : Control
 {
     public Color Color { get; set; }
 }
 
-public class Panel : Control { }
-public class PanelContainer : Control { }
+public partial class Panel : Control { }
+public partial class PanelContainer : Control { }
 
-public class Container : Control { }
-public class BoxContainer : Container { }
-public class VBoxContainer : BoxContainer { }
-public class HBoxContainer : BoxContainer { }
-public class FlowContainer : Container { }
-public class HFlowContainer : FlowContainer { }
-public class GridContainer : Container
+public partial class Container : Control { }
+public partial class BoxContainer : Container { }
+public partial class VBoxContainer : BoxContainer { }
+public partial class HBoxContainer : BoxContainer { }
+public partial class FlowContainer : Container { }
+public partial class HFlowContainer : FlowContainer { }
+public partial class GridContainer : Container
 {
     public int Columns { get; set; }
 }
-public class MarginContainer : Container { }
-public class CenterContainer : Container { }
-public class ScrollContainer : Container { }
-public class SubViewportContainer : Container { }
-public class SubViewport : Viewport { }
+public partial class MarginContainer : Container { }
+public partial class CenterContainer : Container { }
+public partial class ScrollContainer : Container { }
+public partial class SubViewportContainer : Container { }
+public partial class SubViewport : Viewport { }
 
-public class Label : Control
+public partial class Label : Control
 {
     public string Text { get; set; } = "";
 }
 
-public class RichTextLabel : Control
+public partial class RichTextLabel : Control
 {
     public string Text { get; set; } = "";
     public void Clear() { Text = ""; }
@@ -227,9 +223,9 @@ public class RichTextLabel : Control
     public void AddText(string text) { Text += text; }
 }
 
-public class Button : Control
+public partial class Button : BaseButton
 {
-    public new class SignalName : Control.SignalName
+    public new partial class SignalName : Control.SignalName
     {
         public static readonly StringName Pressed = "Pressed";
     }
@@ -237,67 +233,67 @@ public class Button : Control
     public event Action? Pressed;
 }
 
-public class BaseButton : Control
+public partial class BaseButton : Control
 {
-    public new class SignalName : Control.SignalName
+    public new partial class SignalName : Control.SignalName
     {
         public static readonly StringName Pressed = "Pressed";
     }
 }
 
-public class CheckBox : Button { }
-public class CheckButton : Button { }
+public partial class CheckBox : Button { }
+public partial class CheckButton : Button { }
 
-public class OptionButton : Button
+public partial class OptionButton : Button
 {
     public int Selected { get; set; }
     public void AddItem(string label, int id = -1) { }
     public void Select(int idx) { Selected = idx; }
 }
 
-public class LineEdit : Control
+public partial class LineEdit : Control
 {
     public string Text { get; set; } = "";
     public string PlaceholderText { get; set; } = "";
-    public new class SignalName : Control.SignalName
+    public new partial class SignalName : Control.SignalName
     {
         public static readonly StringName TextChanged = "TextChanged";
         public static readonly StringName TextSubmitted = "TextSubmitted";
     }
 }
 
-public class TextEdit : Control
+public partial class TextEdit : Control
 {
     public string Text { get; set; } = "";
 }
 
-public class SpinBox : Control
+public partial class SpinBox : Control
 {
     public double Value { get; set; }
 }
 
-public class Slider : Control
+public partial class Slider : Control
 {
     public double Value { get; set; }
 }
-public class HSlider : Slider { }
-public class VSlider : Slider { }
+public partial class HSlider : Slider { }
+public partial class VSlider : Slider { }
 
-public class ScrollBar : Control
+public partial class ScrollBar : Control
 {
     public double Value { get; set; }
 }
-public class HScrollBar : ScrollBar { }
-public class VScrollBar : ScrollBar { }
+public partial class HScrollBar : ScrollBar { }
+public partial class VScrollBar : ScrollBar { }
 
-public class Separator : Control { }
-public class HSeparator : Separator { }
-public class VSeparator : Separator { }
+public partial class Separator : Control { }
+public partial class HSeparator : Separator { }
+public partial class VSeparator : Separator { }
 
-public class TabContainer : Container { }
+public partial class TabContainer : Container { }
 
 // Timer
-public class Timer : Node
+public partial class Timer : Node
 {
     public double WaitTime { get; set; } = 1.0;
     public bool OneShot { get; set; }
@@ -308,10 +304,10 @@ public class Timer : Node
 }
 
 // Audio
-public class AudioStream : Resource { }
-public class AudioStreamPlayer : Node
+public partial class AudioStream : Resource { }
+public partial class AudioStreamPlayer : Node
 {
-    public new class SignalName : Node.SignalName
+    public new partial class SignalName : Node.SignalName
     {
         public static readonly StringName Finished = "Finished";
     }
@@ -322,39 +318,39 @@ public class AudioStreamPlayer : Node
 }
 
 // Input
-public class InputEvent : Resource
+public partial class InputEvent : Resource
 {
     public virtual bool IsActionPressed(StringName action, bool allowEcho = false) => false;
     public virtual bool IsActionReleased(StringName action) => false;
     public bool IsPressed() => false;
     public bool IsReleased() => true;
 }
-public class InputEventKey : InputEvent { }
-public class InputEventMouseButton : InputEvent
+public partial class InputEventKey : InputEventWithModifiers { }
+public partial class InputEventMouseButton : InputEventMouse
 {
     public Vector2 Position { get; set; }
     public Vector2 GlobalPosition { get; set; }
 }
-public class InputEventMouseMotion : InputEvent
+public partial class InputEventMouseMotion : InputEventMouse
 {
     public Vector2 Position { get; set; }
     public Vector2 Relative { get; set; }
 }
 
 // FileAccess
-public class FileAccess : GodotObject, IDisposable
+public partial class FileAccess : GodotObject, IDisposable
 {
-    public enum ModeFlags { Read, Write, ReadWrite, WriteRead }
+    public enum ModeFlags : long { Read = 1, Write = 2, ReadWrite = 3, WriteRead = 7 }
     public static FileAccess? Open(string path, ModeFlags flags) => null;
     public static bool FileExists(string path) => File.Exists(path);
     public string GetAsText(bool skipCr = false) => "";
-    public void StoreString(string str) { }
+    public bool StoreString(string str) => true;
     public void Close() { }
     public void Dispose() { }
 }
 
 // DirAccess
-public class DirAccess : GodotObject, IDisposable
+public partial class DirAccess : GodotObject, IDisposable
 {
     public static bool DirExistsAbsolute(string path) => Directory.Exists(path);
     public static Error MakeDirAbsolute(string path) { try { Directory.CreateDirectory(path); return Error.Ok; } catch { return Error.Failed; } }
@@ -370,9 +366,9 @@ public class DirAccess : GodotObject, IDisposable
 }
 
 // Animation
-public class AnimationPlayer : Node
+public partial class AnimationPlayer : AnimationMixer
 {
-    public new class SignalName : Node.SignalName
+    public new partial class SignalName : Node.SignalName
     {
         public static readonly StringName AnimationFinished = "AnimationFinished";
     }
@@ -381,11 +377,11 @@ public class AnimationPlayer : Node
 }
 
 // Particles — no-op stubs prevent headless crashes (KinPriest VFX, etc.)
-public class GpuParticles2D : Node2D
+public partial class GpuParticles2D : Node2D
 {
     public int Amount { get; set; }
     public bool Emitting { get; set; }
-    public float Lifetime { get; set; }
+    public double Lifetime { get; set; }
     public float LifetimeRandomness { get; set; }
     public bool OneShot { get; set; }
     public bool LocalCoords { get; set; }
@@ -399,36 +395,36 @@ public class GpuParticles2D : Node2D
 }
 
 // Sprite
-public class Sprite2D : Node2D
+public partial class Sprite2D : Node2D
 {
     public Texture2D? Texture { get; set; }
 }
 
 // CharFXTransform for RichTextEffects
-public class CharFXTransform : GodotObject
+public partial class CharFXTransform : GodotObject
 {
     public Color Color { get; set; } = Color.White;
     public Vector2 Offset { get; set; }
     public Transform2D Transform { get; set; }
     public bool Visible { get; set; } = true;
     public double ElapsedTime { get; set; }
-    public uint RelativeIndex { get; set; }
-    public Dictionary<Variant, Variant>? Env { get; set; }
+    public int RelativeIndex { get; set; }
+    public Godot.Collections.Dictionary? Env { get; set; }
 }
 
 // RichTextEffect
-public class RichTextEffect : Resource
+public partial class RichTextEffect : Resource
 {
-    public new class SignalName { }
+    public new partial class SignalName { }
     public virtual bool _ProcessCustomFX(CharFXTransform charFx) => false;
 }
 
 // ResourceFormatLoader
-public class ResourceFormatLoader : GodotObject
+public partial class ResourceFormatLoader : GodotObject
 {
-    public class MethodName { }
-    public class PropertyName { }
-    public class SignalName { }
+    public partial class MethodName { }
+    public partial class PropertyName { }
+    public partial class SignalName { }
 
     public virtual Variant _Load(string path, string originalPath, bool useSubThreads, int cacheMode) => default;
     public virtual string[] _GetRecognizedExtensions() => Array.Empty<string>();
@@ -440,9 +436,9 @@ public class ResourceFormatLoader : GodotObject
 }
 
 // Image
-public class Image : Resource
+public partial class Image : Resource
 {
-    public enum Format { Rgba8 }
+    public enum Format : long { Rgba8 = 5 }
     public static Image CreateEmpty(int width, int height, bool useMipmaps, Format format) => new();
     public void SetPixel(int x, int y, Color color) { }
 }

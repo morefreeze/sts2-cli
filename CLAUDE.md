@@ -103,7 +103,15 @@ lib/sts2.dll (game engine, IL-patched)
 - **`agent/sts2_bridge.py`** — HTTP bridge that wraps the C# process; supports compact JSON mode, game logging (JSONL), and replay.
 - **`agent/coordinator.py`** — Multi-agent coordination layer for orchestrating LLM/RL agents.
 - **`agent/bug.md`** — Active bug tracker. Check here before fixing anything—many issues have known workarounds or are already tracked.
-- **`src/GodotStubs/`** — Minimal Godot API stubs (no-op implementations of Node, Vector2, UI components, etc.) that let the game engine compile and run without Godot.
+- **`src/GodotStubs/`** — Our GodotSharp.dll replacement: no-op (or small working) implementations of the Godot API that let the game engine run without Godot. `lib/sts2.dll` binds to the REAL Godot signatures by exact name + parameter types + return type, and a member the stubs lack is not a build error but a `MissingMethodException` when the *calling* method is JIT-compiled mid-game (BUG-052: a dead combat turn loop -> forced `game_over`). Every stub type is `partial`; `GeneratedAuditStubs.cs` is generated (don't hand-edit), `UtilityStubs.cs` holds real implementations (math, collections, scene-tree child list) where a no-op would be silently wrong.
+- **`tools/audit_godot_stub_refs.py`** — Audits the stubs against `lib/sts2.dll`. **Run it after every game update and after any edit to `src/GodotStubs`; it must print `TOTAL missing: 0`** (it compiles a *copy* of the stubs under a temp dir, so it never touches `src/**/bin|obj` and is safe next to a running `dotnet run --no-build` experiment):
+  ```bash
+  .venv/bin/python tools/audit_godot_stub_refs.py                              # the audit
+  .venv/bin/python tools/audit_godot_stub_refs.py --emit-stubs src/GodotStubs/GeneratedAuditStubs2.cs   # no-op stubs for new holes; review its `// MANUAL` lines
+  .venv/bin/python tools/audit_godot_stub_refs.py --check-oracle               # self-test: the real GodotSharp.dll must report 0
+  .venv/bin/python tools/jit_probe.py                                          # second check: the CLR JIT-compiles every sts2.dll method (no game code runs)
+  ```
+  `--emit-stubs`/`--check-oracle`/the hierarchy+enum checks use the real `GodotSharp.dll` from the Steam game dir (`$STS2_GAME_DIR` or the default path) as a read-only reference; it is never copied into the repo. Covered by `tests/test_audit_godot_stub_refs.py`.
 
 ## JSON Protocol
 
