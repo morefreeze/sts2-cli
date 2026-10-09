@@ -1502,7 +1502,9 @@ def test_large_deck_history_uses_bounded_index_and_exact_streamed_outcomes(
     assert entry["record_count"] == 120
     assert any("deck_history.jsonl:78" in error for error in entry["errors"])
     assert indexed.records_complete is False
-    assert len(indexed.records or ()) == 8
+    # Nothing reads the raw prefix of an incomplete deck history (the compact
+    # outcomes carry everything), so it is not kept at all.
+    assert indexed.records is None
     assert len(indexed.deck_outcomes) == 40
 
     cohort = catalog.list_cohorts()[0]
@@ -2914,17 +2916,18 @@ def test_late_summary_identity_uses_one_cached_whole_replay_parse(
     assert len(entry["errors"]) == 1
     indexed = catalog._sources[entry["source_id"]]
     assert indexed.records_complete is False
-    assert indexed.records is not None
-    assert len(indexed.records) <= catalog_module.INDEX_RECORD_LIMIT
+    assert indexed.records is None
     assert parser_call_sizes == [513]
-    assert read_count == 2
+    # One read: the index scan's parsed records feed the whole-list parser, so
+    # the file is not opened a second time to be re-parsed.
+    assert read_count == 1
     assert cohort["run_ids"] == ["late-summary-run"]
 
     run = catalog.get_run("late-summary-run")["run"]
 
     assert run["run_id"] == "late-summary-run"
     assert parser_call_sizes == [513, 513]
-    assert read_count == 3
+    assert read_count == 2
 
     with source.open("a", encoding="utf-8") as handle:
         handle.write(
@@ -2949,10 +2952,9 @@ def test_late_summary_identity_uses_one_cached_whole_replay_parse(
 
     assert refreshed["record_count"] == 514
     assert refreshed["error_count"] == 1
-    assert refreshed_index.records is not None
-    assert len(refreshed_index.records) <= catalog_module.INDEX_RECORD_LIMIT
+    assert refreshed_index.records is None
     assert parser_call_sizes == [513, 513, 514]
-    assert read_count == 5
+    assert read_count == 3
 
 
 def test_mixed_replay_eval_terminal_matches_for_511_and_513_records(

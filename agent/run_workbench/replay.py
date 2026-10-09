@@ -16,20 +16,73 @@ MAX_FLOOR = 17
 _COMBAT_BOUNDARY_ACTIONS = frozenset({"choose_option", "select_map_node"})
 
 
+# Exact types `_json_safe_value` returns unchanged.  Checked by identity before
+# recursing so the (overwhelmingly scalar) leaves of a logged state cost no call.
+_PLAIN_SCALAR_TYPES = frozenset({str, int, bool})
+
+
 def _json_safe_value(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or type(value) in _PLAIN_SCALAR_TYPES:
+        return value
+    if isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
-    if isinstance(value, Mapping):
+    if type(value) is dict or isinstance(value, Mapping):
         return {
-            key: _json_safe_value(item)
+            key: (
+                item
+                if item is None or type(item) in _PLAIN_SCALAR_TYPES
+                else _json_safe_value(item)
+            )
             for key, item in value.items()
             if isinstance(key, str)
         }
     if isinstance(value, list):
-        return [_json_safe_value(item) for item in value]
+        return [
+            (
+                item
+                if item is None or type(item) in _PLAIN_SCALAR_TYPES
+                else _json_safe_value(item)
+            )
+            for item in value
+        ]
     return None
+
+
+def _shallow_safe(value: Any) -> Any:
+    """Classify ``value`` exactly as `_json_safe_value` would, without copying.
+
+    Scalars come back sanitised (non-finite floats and unsupported types become
+    None); a Mapping or list comes back as the same object, so callers can run
+    their container checks (``isinstance``) on it and then copy only the parts
+    they keep.  ``_json_safe_value(x)`` is a Mapping / list / None exactly when
+    ``_shallow_safe(x)`` is.
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (Mapping, list)):
+        return value
+    return None
+
+
+def _shallow_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy the top level only (str keys, like `_json_safe_value`).
+
+    Values are shared with ``value``.  Only use it for a dict whose values the
+    caller either replaces with sanitised copies or never reads; see
+    `_normalize_state`.
+    """
+    return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
+def _project(item: Mapping[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    """Sanitised copy of just ``fields`` of ``item``."""
+    return {
+        field: _json_safe_value(item[field]) for field in fields if field in item
+    }
 
 
 def _require_mapping(value: Any, label: str) -> dict[str, Any]:
@@ -41,23 +94,34 @@ def _require_mapping(value: Any, label: str) -> dict[str, Any]:
 def _optional_mapping(
     record: Mapping[str, Any], key: str, label: str
 ) -> dict[str, Any]:
-    value = record.get(key)
+    value = _shallow_safe(record.get(key))
     if value is None:
         return {}
     return _require_mapping(value, label)
 
 
-def _mapping_list(record: Mapping[str, Any], key: str, label: str) -> list[dict[str, Any]]:
-    value = record.get(key)
+def _mapping_list(
+    record: Mapping[str, Any],
+    key: str,
+    label: str,
+    fields: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Sanitised copies of the mapping items of ``record[key]``.
+
+    ``fields`` limits each copy to the keys the parser reads (the rest of a
+    deck/relic/potion entry is multi-kilobyte description text that never
+    reaches the output).
+    """
+    value = _shallow_safe(record.get(key))
     if value is None:
         return []
     if not isinstance(value, list):
         raise ValueError(f"{label} must be a list")
-    return [
-        _json_safe_value(item)
-        for item in value
-        if isinstance(item, Mapping)
-    ]
+    if fields is None:
+        return [
+            _json_safe_value(item) for item in value if isinstance(item, Mapping)
+        ]
+    return [_project(item, fields) for item in value if isinstance(item, Mapping)]
 
 
 def _finite_number(value: Any) -> int | float | None:
@@ -89,9 +153,9 @@ def _normalize_action(raw_action: Any) -> dict[str, Any]:
     action = _require_mapping(raw_action, "action data")
     _normalize_text_field(action, "cmd")
     _normalize_text_field(action, "action")
-    raw_args = raw_action.get("args")
-    if raw_args is not None or "args" in raw_action:
-        args = _optional_mapping(raw_action, "args", "action args")
+    raw_args = action.get("args")
+    if raw_args is not None or "args" in action:
+        args = _optional_mapping(action, "args", "action args")
         _normalize_numeric_fields(
             args,
             "option_index",
@@ -105,10 +169,41 @@ def _normalize_action(raw_action: Any) -> dict[str, Any]:
     return action
 
 
+# Fields of each list item the parser reads.  Everything else on a deck card,
+# relic or potion (descriptions, keywords, upgrade previews...) is never
+# looked at, but it is most of a logged state, so it is not copied.
+_PLAYER_DECK_FIELDS = ("id", "name", "type", "upgraded")
+_PLAYER_RELIC_FIELDS = ("id", "relic_id", "name")
+_PLAYER_POTION_FIELDS = ("index", "id", "potion_id", "name", "target_type")
+
+
 def _normalize_state(raw_state: Any) -> dict[str, Any]:
-    state = _require_mapping(raw_state, "state data")
+    """Sanitised view of one logged state, limited to what the parser reads.
+
+    A logged state also carries draw/discard piles, the full player deck with
+    card text, forecasts and solver replies: tens of kilobytes the parser never
+    reads.  The returned dict therefore shares those untouched values with
+    ``raw_state`` (its top level is copied, nothing is mutated) and holds
+    sanitised copies of every key the parser does read:
+
+    * ``decision``, ``event_name``, ``description`` and the numeric counters are
+      normalised in place on the copy;
+    * ``victory`` is only ever compared with ``type(...) is bool``;
+    * ``context``, ``player`` and the six record lists are replaced by deep
+      sanitised copies (``player`` deck/relics/potions keep only the fields
+      `_compact_player` / `_combat_snapshot` read).
+    """
+    if not isinstance(raw_state, Mapping):
+        raise ValueError("state data must be an object")
+    state = _shallow_mapping(raw_state)
     context = _optional_mapping(raw_state, "context", "state context")
-    player = _optional_mapping(raw_state, "player", "state player")
+    raw_player = _shallow_safe(raw_state.get("player"))
+    if raw_player is None:
+        player: dict[str, Any] = {}
+    elif isinstance(raw_player, Mapping):
+        player = _shallow_mapping(raw_player)
+    else:
+        raise ValueError("state player must be an object")
 
     for key in ("room_type", "act_name", "run_id", "character", "seed"):
         _normalize_text_field(context, key)
@@ -123,13 +218,18 @@ def _normalize_state(raw_state: Any) -> dict[str, Any]:
     for key in ("name",):
         _normalize_text_field(player, key)
     _normalize_numeric_fields(player, "hp", "max_hp", "block", "gold", "deck_size")
-    raw_player = raw_state.get("player")
-    for key in ("deck", "relics", "potions"):
+    for key, fields in (
+        ("deck", _PLAYER_DECK_FIELDS),
+        ("relics", _PLAYER_RELIC_FIELDS),
+        ("potions", _PLAYER_POTION_FIELDS),
+    ):
         if isinstance(raw_player, Mapping) and key in raw_player:
-            player[key] = _mapping_list(raw_player, key, f"state player {key}")
+            player[key] = _mapping_list(
+                raw_player, key, f"state player {key}", fields
+            )
 
-    for card in player.get("deck") or []:
-        _normalize_numeric_fields(card, "index", "cost")
+    # Deck cards are only read for id/name/type/upgraded, so there is no
+    # card index/cost left to normalise.
     for potion in player.get("potions") or []:
         _normalize_numeric_fields(potion, "index")
 
@@ -926,10 +1026,13 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
         return room
 
     for source_index, raw_entry in enumerate(entries):
-        entry = _require_mapping(raw_entry, "entry")
-        _normalize_numeric_fields(entry, "step")
-        entry_type = entry.get("type")
-        raw_data = entry.get("data")
+        # Only type/step/ts/data are read from an entry.  Copying the whole
+        # entry would deep-copy its (large) state payload a third time.
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError("entry must be an object")
+        entry_step = _finite_number(raw_entry.get("step"))
+        entry_type = _shallow_safe(raw_entry.get("type"))
+        raw_data = raw_entry.get("data")
         if entry_type == "action":
             data = _normalize_action(raw_data)
             evidence = (entry_type, data)
@@ -945,14 +1048,14 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
             last_evidence = None
         else:
             data = {}
-        current_step = _observed_coordinate(entry.get("step"))
+        current_step = _observed_coordinate(entry_step)
         prior_entry_type = previous_entry_type
         prior_action = previous_action
         prior_step = previous_step
         previous_entry_type = entry_type if isinstance(entry_type, str) else None
         previous_action = data if entry_type == "action" else None
         previous_step = current_step
-        timestamp = _timestamp(entry.get("ts"))
+        timestamp = _timestamp(raw_entry.get("ts"))
         if timestamp is not None:
             ended_at = timestamp
             if started_at is None:
@@ -981,10 +1084,10 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
                     modifiers = normalized_modifiers
                 continue
             if last_state_room is not None:
-                action_row = _combat_action_row(action, last_state_data, entry.get("step"))
+                action_row = _combat_action_row(action, last_state_data, entry_step)
                 last_state_room["actions"].append(action_row)
                 _mark_selected(last_state_room, action)
-                _append_combat_action(last_state_room, action, last_state_data, entry.get("step"))
+                _append_combat_action(last_state_room, action, last_state_data, entry_step)
             continue
 
         if entry_type != "state":

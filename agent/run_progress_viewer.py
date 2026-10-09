@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import gc
 import json
 import mimetypes
 import posixpath
@@ -1494,8 +1495,9 @@ def serve(
     )
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Run progress viewer: {url}", flush=True)
-    # Warm the catalog off the request path. Measured on a real logs/ tree,
-    # /api/cohorts is ~163s cold and 0.32s warm, and the page keeps its
+    # Warm the catalog off the request path. Measured on the real logs/ + data/
+    # trees (a 6 GB deck history, ~400k runs), /api/cohorts is minutes cold and
+    # a few seconds warm while logs grow, and the page keeps its
     # controls (including the single-record loader) disabled until that first
     # request returns — so without this a user opens the workbench to a dead UI
     # for over two minutes. Daemon thread: warming must not hold up shutdown,
@@ -1517,7 +1519,14 @@ def _warm_catalog(catalog) -> None:
     try:
         catalog._build_cohorts()
     except Exception:
-        pass
+        return
+    # The catalog now holds a few hundred thousand long-lived run summaries.
+    # Without this, every request that allocates (any cohort rebuild does) can
+    # trigger a full collection that walks all of them again -- about half of a
+    # rebuild at that size.  Freezing parks the startup heap outside the
+    # collector; reference counting still frees it when a source is replaced.
+    gc.collect()
+    gc.freeze()
 
 
 def main(argv: list[str] | None = None) -> int:
