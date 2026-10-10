@@ -407,6 +407,48 @@ def test_main_rejects_a_bad_inferrer_before_any_game(monkeypatch):
     assert played == []
 
 
+def test_main_default_seed_offset_plays_prefix_1_to_n_with_the_unchanged_header(
+        monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    played = []
+    _run_main(monkeypatch, played, argv=("3", "Ironclad", "--seed-prefix", "p_"))
+    assert played == ["p_1", "p_2", "p_3"]
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 3 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on)"]
+
+
+def test_main_explicit_zero_seed_offset_is_the_default(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    played = []
+    _run_main(monkeypatch, played,
+              argv=("2", "Ironclad", "--seed-prefix", "p_", "--seed-offset", "0"))
+    assert played == ["p_1", "p_2"]
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 2 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on)"]
+
+
+def test_main_seed_offset_shifts_the_seed_range(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    played = []
+    _run_main(monkeypatch, played,
+              argv=("2", "Ironclad", "--seed-prefix", "p_", "--seed-offset", "20"))
+    assert played == ["p_21", "p_22"]
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 2 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on, seeds p_21..p_22)"]
+
+
+def test_main_rejects_a_negative_seed_offset_before_any_game(monkeypatch, capsys):
+    played = []
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, played,
+                  argv=("2", "Ironclad", "--seed-offset", "-1"))
+    assert played == []
+    assert "--seed-offset must be >= 0" in capsys.readouterr().err
+
+
 def test_summarize_labels_a_hang_as_hang_and_not_completed():
     out = play_full_run.summarize(
         [{"victory": False, "seed": "s", "act": 1, "floor": 8, "steps": 40,

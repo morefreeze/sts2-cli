@@ -1214,6 +1214,9 @@ def main():
                         help="Seeds are <prefix><i> for i = 1..num_runs (default run_). "
                              "Use a fresh prefix per experiment so a verdict never "
                              "runs on seeds an earlier phase tuned on.")
+    parser.add_argument("--seed-offset", type=int, default=0,
+                        help="Start seeds at <prefix><offset+1> (default 0) -- lets one "
+                             "experiment's seed range be split across several processes.")
     parser.add_argument("--keep-game-logs", default=None, metavar="DIR",
                         help="Copy each game's full state log to "
                              "DIR/<character>_<policy>_a<ascension>_<seed>.jsonl "
@@ -1225,6 +1228,8 @@ def main():
         parser.error(f"num_runs must be a positive integer, got {args.num_runs}")
     if args.ascension < 0:
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
+    if args.seed_offset < 0:
+        parser.error(f"--seed-offset must be >= 0, got {args.seed_offset}")
     policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
     inferrer = solver_inferrer()  # ...and on a bad STS2_SOLVER_INFERRER
     if policy == "greedy":
@@ -1235,14 +1240,19 @@ def main():
     num_runs = args.num_runs
     character = args.character
 
+    # Only name the range when it is shifted, so the default header stays byte-identical.
+    seed_range = ""
+    if args.seed_offset:
+        seed_range = (f", seeds {args.seed_prefix}{args.seed_offset + 1}"
+                      f"..{args.seed_prefix}{args.seed_offset + num_runs}")
     print(f"Playing {num_runs} runs as {character} "
           f"(ascension {args.ascension}, ooc policy {policy}, "
-          f"solver inferrer {inferrer})")
+          f"solver inferrer {inferrer}{seed_range})")
     print("=" * 60)
 
     results = []
     for i in range(num_runs):
-        seed = f"{args.seed_prefix}{i+1}"
+        seed = f"{args.seed_prefix}{args.seed_offset + i + 1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
         result = play_run(seed, character, verbose=True, ascension=args.ascension,
                           keep_log_dir=args.keep_game_logs)
