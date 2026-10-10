@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import stat as stat_module
 from threading import RLock
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Sequence
 
@@ -46,6 +47,11 @@ from .sources import SourceDescriptor, SourceFormatError, classify_records, read
 
 
 SUPPORTED_SUFFIXES = frozenset({".run", ".json", ".jsonl"})
+# A single-run replay log that has no terminal state yet counts as an
+# in-progress game (not as an anonymous unfinished source) only while its file
+# is still being written: modified within this many seconds of "now".  An
+# unfinished log older than that keeps the classification it always had.
+IN_PROGRESS_STALE_SECONDS = 30 * 60
 INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
@@ -175,6 +181,9 @@ class _CompactRun:
     observed_max_floor_label: str | None = None
     outcome_max_floor: int | None = None
     latest_timestamp: float | None = None
+    # (act, act-local floor, hp, max_hp) of the newest replay state row seen;
+    # only ever read for a game that is still being played.
+    live_state: tuple[int | None, int | None, int | None, int | None] | None = None
     has_outcome: bool = False
     has_floor: bool = False
     has_card_pick: bool = False
@@ -328,6 +337,25 @@ _CohortItem = RunRecord | _CompactRun
 
 
 @dataclass(frozen=True)
+class InProgressRun:
+    """What a cohort's run list shows for a game that is still being played."""
+
+    run_id: str
+    source_id: str
+    seed: str | None
+    started_at: float | None
+    # When its log was last written to.
+    updated_at: float | None
+    # Furthest global floor, and where the newest state row puts the player.
+    global_floor: int | None
+    act: int | None
+    floor: int | None
+    hp: int | None
+    max_hp: int | None
+    has_map: bool
+
+
+@dataclass(frozen=True)
 class _CohortMemo:
     """The descriptor computed for one cohort, valid while its members are the
     very same objects (compact runs and joined records are never mutated)."""
@@ -403,12 +431,17 @@ class RunCatalog:
         replay_parser: Callable[[list[dict], str | None], dict] | None = None,
         *,
         include_policy: str = "all",
+        in_progress_window: float | None = IN_PROGRESS_STALE_SECONDS,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if include_policy not in {"all", "workbench"}:
             raise ValueError("include_policy must be 'all' or 'workbench'")
         self.roots = tuple(sorted({Path(root).resolve() for root in roots}, key=str))
         self.replay_parser = replay_parser
         self.include_policy = include_policy
+        # `None` switches in-progress detection off altogether.
+        self.in_progress_window = in_progress_window
+        self._clock = clock
         self._sources: dict[str, _IndexedSource] = {}
         self._run_sources: dict[str, tuple[str, ...]] = {}
         self._adapt_cache: dict[tuple[Path, int, int], AdaptedSource] = {}
@@ -422,8 +455,11 @@ class RunCatalog:
         self._join_memo: dict[tuple[int, ...], tuple[tuple[Any, ...], Any]] = {}
         self._joined_records: list[RunRecord] = []
         self._cohort_records: dict[str, tuple[_CohortItem, ...]] = {}
+        # Games still being played, per cohort: never part of `_cohort_records`
+        # (which feeds every statistic), only of the cohort's run list.
+        self._cohort_in_progress: dict[str, tuple[_CohortItem, ...]] = {}
         self._cohort_descriptors: list[dict[str, Any]] = []
-        self._cohort_cache_key: tuple[tuple[Path, int, int], ...] | None = None
+        self._cohort_cache_key: tuple[Any, ...] | None = None
         self._lock = RLock()
 
     def list_sources(self) -> list[dict[str, Any]]:
@@ -537,12 +573,16 @@ class RunCatalog:
             if len(merged) != 1:
                 raise CatalogError(f"ambiguous run id: {run_id}")
             payload = _scrub_paths(merged[0].to_dict(), path_ids)
-            return {
+            result = {
                 "view": "run",
                 "run": payload,
                 "sources": sorted(sources, key=lambda item: item["source_id"]),
                 "errors": _scrub_paths(list(dict.fromkeys(errors)), path_ids),
             }
+            self._mark_live(
+                result, merged[0], [self._sources[sid] for sid in candidate_ids]
+            )
+            return result
 
     def get_run_by_source(self, source_id: str) -> dict[str, Any]:
         """Resolve the one canonical run in a source that has no usable run
@@ -606,12 +646,31 @@ class RunCatalog:
                 )
             redactions = _source_redactions(source)
             payload = _scrub_paths(records[0].to_dict(), redactions)
-            return {
+            result = {
                 "view": "run",
                 "run": payload,
                 "sources": [deepcopy(source.entry)],
                 "errors": _scrub_paths(list(dict.fromkeys(errors)), redactions),
             }
+            self._mark_live(result, records[0], [source])
+            return result
+
+    def _mark_live(
+        self,
+        result: dict[str, Any],
+        record: RunRecord,
+        sources: Sequence[_IndexedSource],
+    ) -> None:
+        """Say whether a run with no end is still being written to.
+
+        Only an in-progress run gets the key, so the payload of a
+        finished run is exactly what it always was.  A viewer that polls an
+        unfinished run stops when ``live`` turns false: the log has not been
+        written to for longer than the in-progress window.
+        """
+
+        if record.outcome.status is RunStatus.IN_PROGRESS:
+            result["live"] = any(self._is_live_source(source) for source in sources)
 
     def list_cohorts(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -622,6 +681,80 @@ class RunCatalog:
         with self._lock:
             self._build_cohorts()
             return tuple(self._iter_cohort_records(self._cohort_items_for_id(cohort_id)))
+
+    def get_cohort_runs(
+        self, cohort_id: str
+    ) -> tuple[tuple[RunRecord, ...], tuple[InProgressRun, ...]]:
+        """A cohort's finished runs and its games still being played.
+
+        One snapshot of the catalog for both.  The games under way are the
+        cohort's members but never part of its statistics: they are not in the
+        records (nor in `get_metrics`), and are listed most recently started
+        first.
+        """
+
+        with self._lock:
+            self._build_cohorts()
+            finished = tuple(
+                self._iter_cohort_records(self._cohort_items_for_id(cohort_id))
+            )
+            playing = [
+                self._in_progress_run(item)
+                for item in self._cohort_in_progress.get(cohort_id, ())
+            ]
+        playing.sort(
+            key=lambda row: (
+                row.started_at is None,
+                -(row.started_at or 0.0),
+                -(row.updated_at or 0.0),
+                row.source_id,
+            )
+        )
+        return finished, tuple(playing)
+
+    def get_cohort_in_progress(self, cohort_id: str) -> tuple[InProgressRun, ...]:
+        """Only the games still being played, most recently started first."""
+
+        return self.get_cohort_runs(cohort_id)[1]
+
+    def _in_progress_run(self, item: _CohortItem) -> InProgressRun:
+        if isinstance(item, _CompactRun):
+            compact = item
+            record = item.to_record()
+        else:
+            record = item
+            compact = None
+        source = self._sources.get(record.source_id)
+        if compact is None and source is not None and source.deck_outcomes:
+            # A small replay is adapted, but the index scan has already noted
+            # where its newest state row put the player.
+            compact = source.deck_outcomes[0]
+        live = compact.live_state if compact is not None else None
+        act, floor, hp, max_hp = live if live is not None else (None, None, None, None)
+        global_floor = record.outcome.max_global_floor
+        if global_floor is None and act is not None and floor is not None and act > 0:
+            global_floor = (act - 1) * 17 + floor
+        if (
+            isinstance(global_floor, int)
+            and not isinstance(global_floor, bool)
+            and global_floor > 0
+        ):
+            if act is None or floor is None:
+                act = (global_floor - 1) // 17 + 1
+                floor = (global_floor - 1) % 17 + 1
+        return InProgressRun(
+            run_id=_safe_run_id(record.run_id) or "",
+            source_id=record.source_id,
+            seed=record.metadata.seed,
+            started_at=record.metadata.started_at,
+            updated_at=source.entry["mtime"] if source is not None else None,
+            global_floor=global_floor,
+            act=act,
+            floor=floor,
+            hp=hp,
+            max_hp=max_hp,
+            has_map=bool(record.capabilities.visited_route),
+        )
 
     def get_metrics(
         self, current_id: str, baseline_id: str | None = None
@@ -994,26 +1127,86 @@ class RunCatalog:
             "errors": _scrub_paths(list(adapted.errors), redactions),
         }
 
+    def _fresh_replay_source_ids(self) -> frozenset[str]:
+        """Single-run replay sources written to within the in-progress window."""
+
+        window = self.in_progress_window
+        if window is None:
+            return frozenset()
+        now = self._clock()
+        return frozenset(
+            source.source_id
+            for source in self._sources.values()
+            if source.entry["open_mode"] == "run"
+            and source.descriptor.kind is SourceKind.REPLAY_JSONL
+            and now - source.entry["mtime"] <= window
+        )
+
+    def _is_live_source(self, source: _IndexedSource) -> bool:
+        window = self.in_progress_window
+        return (
+            window is not None
+            and source.descriptor.kind is SourceKind.REPLAY_JSONL
+            and self._clock() - source.entry["mtime"] <= window
+        )
+
     def _build_cohorts(self) -> list[dict[str, Any]]:
         self._refresh()
-        cache_key = tuple(
-            source.cache_key for source in self._ordered_sources()
+        # Whether a log is "still being played" depends on the clock as well as
+        # on the files, so the set of recently written replay sources is part of
+        # the cache key: a log that stops being written must leave the
+        # in-progress list even though no file changed.
+        fresh = self._fresh_replay_source_ids()
+        cache_key = (
+            tuple(source.cache_key for source in self._ordered_sources()),
+            fresh,
         )
         if self._cohort_cache_key == cache_key:
             return deepcopy(self._cohort_descriptors)
         records: list[RunRecord] = []
         compact_records: list[_CompactRun] = []
+        # Unfinished runs of recently written single-run replay logs.  They are
+        # held back from the join below, so nothing that is computed for the
+        # finished runs (joined records, cohort summaries, metrics) can see them.
+        unfinished: list[_CohortItem] = []
         for source in self._ordered_sources():
             if source.entry["open_mode"] != "run":
                 continue
+            live = source.source_id in fresh
             if not source.records_complete and source.deck_outcomes:
-                compact_records.extend(source.deck_outcomes)
+                for compact in source.deck_outcomes:
+                    if live and _item_status(compact) in _UNFINISHED_STATUSES:
+                        unfinished.append(compact)
+                    else:
+                        compact_records.append(compact)
             else:
                 public = self._cohort_source_records.get(source.cache_key)
                 if public is None:
                     public = self._public_records(source, self._adapt(source))
                     self._cohort_source_records[source.cache_key] = public
-                records.extend(public)
+                for record in public:
+                    if live and _item_status(record) in _UNFINISHED_STATUSES:
+                        unfinished.append(record)
+                    else:
+                        records.append(record)
+        if unfinished:
+            # A run id that other items also carry belongs to a joined run; the
+            # join decides what it is, as it always did.
+            taken: dict[str, int] = {}
+            for item in (*records, *compact_records, *unfinished):
+                if item.run_id:
+                    taken[item.run_id] = taken.get(item.run_id, 0) + 1
+            in_progress: list[_CohortItem] = []
+            for item in unfinished:
+                if item.run_id and taken[item.run_id] > 1:
+                    if isinstance(item, _CompactRun):
+                        compact_records.append(item)
+                    else:
+                        records.append(item)
+                else:
+                    in_progress.append(item)
+        else:
+            in_progress = []
         identified, historical = _group_by_run_id(records, compact_records)
         join_memo = _IdentityMemo(self._join_memo, self._joined_records)
         merged = _merge_identified(identified, historical, join_memo)
@@ -1025,47 +1218,22 @@ class RunCatalog:
         ]
         grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
         for record in eligible:
-            (
-                experiment,
-                checkpoint,
-                character,
-                game_version,
-                evaluation_mode,
-                scenario,
-                ascension,
-            ) = _item_cohort_fields(record)
-            if checkpoint is None and experiment is None:
-                # No checkpoint and no experiment: this run cannot be
-                # attributed to any training/eval batch. Collapse all such
-                # runs into one cohort per (character, ascension) rather
-                # than exploding into one cohort per source file.
-                key = (
-                    None,
-                    None,
-                    character,
-                    None,
-                    None,
-                    None,
-                    ascension,
-                )
-            else:
-                key = (
-                    experiment,
-                    checkpoint,
-                    character,
-                    game_version,
-                    evaluation_mode,
-                    scenario,
-                    ascension,
-                )
-            grouped.setdefault(key, []).append(record)
+            grouped.setdefault(_cohort_key(record), []).append(record)
+        in_progress_grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
+        for record in in_progress:
+            in_progress_grouped.setdefault(_cohort_key(record), []).append(record)
 
         descriptors: list[dict[str, Any]] = []
         cohort_records: dict[str, tuple[_CohortItem, ...]] = {}
+        cohort_in_progress: dict[str, tuple[_CohortItem, ...]] = {}
         cohort_memo: dict[str, _CohortMemo] = {}
-        for key, group in sorted(
-            grouped.items(), key=lambda item: _sortable_key(item[0])
-        ):
+        # Insertion order, then a stable sort: ties keep the order they always had.
+        cohort_keys = [
+            *grouped,
+            *(key for key in in_progress_grouped if key not in grouped),
+        ]
+        for key in sorted(cohort_keys, key=_sortable_key):
+            group = grouped.get(key, [])
             cohort_id = _cohort_id(key)
             previous = self._cohort_memo.get(cohort_id)
             if (
@@ -1084,7 +1252,21 @@ class RunCatalog:
             # The baseline link below is assigned per descriptor, so every
             # build gets its own top-level dict (nested values are shared and
             # read-only: they are deep-copied before leaving the catalog).
-            descriptors.append(dict(memo.descriptor))
+            descriptor = dict(memo.descriptor)
+            playing = tuple(in_progress_grouped.get(key, ()))
+            cohort_in_progress[cohort_id] = playing
+            descriptor["in_progress_count"] = len(playing)
+            if playing and not group:
+                # Nothing finished yet: the only evidence of when this batch
+                # ran is the games under way, and without it the batch would
+                # sink below every dated one in the tree.
+                stamps = [
+                    stamp
+                    for item in playing
+                    if (stamp := _item_timestamp(item)) is not None
+                ]
+                descriptor["latest_at"] = max(stamps) if stamps else None
+            descriptors.append(descriptor)
         sorted_descriptors = sorted(
             descriptors,
             key=lambda item: (
@@ -1113,6 +1295,7 @@ class RunCatalog:
                 )
 
         self._cohort_records = cohort_records
+        self._cohort_in_progress = cohort_in_progress
         self._cohort_memo = cohort_memo
         self._join_memo = join_memo.entries
         self._joined_records = join_memo.joined
@@ -1251,6 +1434,40 @@ class RunCatalog:
             ),
         }
         return _CohortMemo(tuple(group), ordered, descriptor, summary)
+
+
+# A replay with neither of these has no terminal state.  Which of the two a log
+# gets depends on its size (see `_adapt_replay` and `_update_compact_replay`).
+_UNFINISHED_STATUSES = frozenset({RunStatus.UNKNOWN, RunStatus.IN_PROGRESS})
+
+
+def _cohort_key(record: _CohortItem) -> tuple[Any, ...]:
+    """The cohort a run belongs to; the same for a finished and a live run."""
+
+    (
+        experiment,
+        checkpoint,
+        character,
+        game_version,
+        evaluation_mode,
+        scenario,
+        ascension,
+    ) = _item_cohort_fields(record)
+    if checkpoint is None and experiment is None:
+        # No checkpoint and no experiment: this run cannot be
+        # attributed to any training/eval batch. Collapse all such
+        # runs into one cohort per (character, ascension) rather
+        # than exploding into one cohort per source file.
+        return (None, None, character, None, None, None, ascension)
+    return (
+        experiment,
+        checkpoint,
+        character,
+        game_version,
+        evaluation_mode,
+        scenario,
+        ascension,
+    )
 
 
 def _source_id(root: Path, relative: str) -> str:
@@ -2099,6 +2316,8 @@ def _update_compact_replay(
     if floor is None:
         floor = _first_integral_int(data, "global_floor", "floor")
     _update_observed_floor(compact, floor, floor_label)
+    if record_type == "state":
+        _update_compact_live_state(compact, data, context)
 
     nested_status, nested_victory, nested_technical_kind = _compact_status(data)
     if (
@@ -2113,6 +2332,32 @@ def _update_compact_replay(
         or nested_status is not RunStatus.UNKNOWN
     ):
         compact.has_outcome = True
+
+
+def _update_compact_live_state(
+    compact: _CompactRun, data: dict[str, Any], context: Any
+) -> None:
+    """Remember where a replay's newest state row put the player."""
+
+    act = floor = None
+    if isinstance(context, dict):
+        act = _first_integral_int(context, "act")
+        floor = _first_integral_int(context, "floor")
+    player = data.get("player")
+    hp = max_hp = None
+    if isinstance(player, dict):
+        hp = _first_integral_int(player, "hp")
+        max_hp = _first_integral_int(player, "max_hp")
+    previous = compact.live_state
+    if previous is not None:
+        # A state row without a player block (or without a context) must not
+        # erase what an earlier one said.
+        act = previous[0] if act is None else act
+        floor = previous[1] if floor is None else floor
+        hp = previous[2] if hp is None else hp
+        max_hp = previous[3] if max_hp is None else max_hp
+    if act is not None or floor is not None or hp is not None or max_hp is not None:
+        compact.live_state = (act, floor, hp, max_hp)
 
 
 def _finalize_compact(compact: _CompactRun) -> None:

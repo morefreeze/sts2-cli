@@ -479,6 +479,7 @@ _TREE_COHORT_KEYS = {
     "avg_global_floor",
     "valid_n",
     "technical_count",
+    "in_progress_count",
     "latest_at",
     "unarchived",
 }

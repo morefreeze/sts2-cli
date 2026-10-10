@@ -3252,3 +3252,508 @@ def test_combat_replay_renders_card_names_targets_and_effects():
     # A zero delta is not an effect; it must not render an empty "⇒".
     assert result["zeroDelta"] == "结束回合"
     assert result["stripped"] == "Test Subject"
+
+
+# ---------------------------------------------------------------------------
+# Games that are still being played
+# ---------------------------------------------------------------------------
+
+
+def test_tree_leaf_counts_the_games_still_being_played_after_the_usual_label():
+    """`20 局 · 平均 45.9` stays exactly as it was; a batch with games under
+    way gets ` · N 进行中` appended, and a batch with nothing finished yet still
+    renders (no average, never 0)."""
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    tree_script = (STATIC_DIR / "tree.js").read_text(encoding="utf-8")
+    element_fn = _javascript_section(util_script, "function element(tag", "function svgElement")
+    tree_source = tree_script.replace("window.Tree = (() => {", "const Tree = (() => {", 1)
+
+    payload = _run_node_json(
+        f"""
+        {_FAKE_TREE_DOM}
+        {element_fn}
+        {tree_source}
+
+        const base = {{ technical_count: 0, latest_at: 1, unarchived: false }};
+        Tree.render([{{ game_version: null, characters: [{{ character: 'Ironclad', cohorts: [
+          {{ ...base, cohort_id: 'a', label: 'finished only', run_count: 20, avg_global_floor: 45.9, in_progress_count: 0 }},
+          {{ ...base, cohort_id: 'b', label: 'mixed', run_count: 20, avg_global_floor: 45.9, in_progress_count: 2 }},
+          {{ ...base, cohort_id: 'c', label: 'only live', run_count: 0, avg_global_floor: null, in_progress_count: 3 }},
+          {{ ...base, cohort_id: 'd', label: 'old server', run_count: 4, avg_global_floor: 10 }},
+        ] }}] }}]);
+        const leaves = treeNode.querySelectorAll('[role="treeitem"]')
+          .filter((item) => item._attrs['data-cohort-id'] !== undefined);
+        console.log(JSON.stringify(leaves.map((leaf) => leaf.children[1].textContent)));
+        """
+    )
+
+    assert payload == [
+        "20 局 · 平均 45.9",
+        "20 局 · 平均 45.9 · 2 进行中",
+        "0 局 · 平均 — · 3 进行中",
+        "4 局 · 平均 10",
+    ]
+
+
+def _table_harness() -> tuple[str, str]:
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    setup = "\n".join(
+        [
+            _FAKE_TABLE_DOM,
+            _javascript_section(util_script, "const STATUS_LABELS", "const CAPABILITY_LABELS"),
+            _javascript_section(util_script, "function element(tag", "function svgElement"),
+            _javascript_section(util_script, "function clear(node)", "function setStatus"),
+            _javascript_section(util_script, "function renderEmpty", "function setSelectOptions"),
+            "function formatTime(value) { return `T${value}`; }",
+            "let sortKey = null; let sortDir = 'desc';",
+            _javascript_section(script, "const TOP_RUNS_RECENT_WINDOW", "function missingCell"),
+            _javascript_section(script, "function missingCell", "async function render"),
+            """
+            const state = { selectedCohortId: 'c' };
+            const navigateCalls = [];
+            function navigate(hash) { navigateCalls.push(hash); }
+            function runRoute(cohortId, ref) { return `#/batch/${cohortId}/run/${ref.kind}:${ref.id}`; }
+            function collect(node, test, out = []) {
+              if (test(node)) out.push(node);
+              node.children.forEach((child) => collect(child, test, out));
+              return out;
+            }
+            """,
+        ]
+    )
+    return setup, script
+
+
+_LIVE_ROW = """{
+  seed: 'live', status: 'in_progress', global_floor: 22, act: 2, floor: 5, hp: 41, max_hp: 70,
+  started_at: 900, has_map: true, ref: { kind: 'source', id: 'src-live' },
+}"""
+
+
+def test_runs_table_marks_games_in_progress_with_a_badge_and_where_they_are():
+    setup, _ = _table_harness()
+    payload = _run_node_json(
+        f"""
+        {setup}
+        renderTable([
+          {_LIVE_ROW},
+          {{ seed: 'done', status: 'dead', global_floor: 30, act: 2, started_at: 100,
+             has_map: true, ref: {{ kind: 'source', id: 'src-done' }} }},
+        ]);
+        const rows = tableContainer.querySelectorAll('tr').slice(1);
+        const badge = collect(rows[0], (n) => n.className.includes('status-badge-in-progress'));
+        const note = collect(rows[0], (n) => n.className.includes('runs-table-live-note'));
+        const doneBadges = collect(rows[1], (n) => n.className.includes('status-badge'));
+        rows[0].dispatchClick();
+        console.log(JSON.stringify({{
+          badgeText: badge.map((n) => n.textContent),
+          noteText: note.map((n) => n.textContent),
+          liveRowClass: rows[0].className,
+          liveLabel: rows[0].getAttribute('aria-label'),
+          doneStatusCell: rows[1].children[2].textContent,
+          doneBadges: doneBadges.length,
+          doneRowClass: rows[1].className,
+          floorCell: rows[0].children[3].textContent,
+          navigateCalls,
+        }}));
+        """
+    )
+
+    assert payload["badgeText"] == ["进行中"]
+    assert payload["noteText"] == ["A2F5 · HP 41/70"]
+    assert "runs-table-row-in-progress" in payload["liveRowClass"]
+    assert payload["liveLabel"] == "查看第 1 行进行中的对局"
+    # A finished row is exactly what it was: plain status text, no badge.
+    assert payload["doneStatusCell"] == "正常结束"
+    assert payload["doneBadges"] == 0
+    assert "in-progress" not in payload["doneRowClass"]
+    assert payload["floorCell"] == "22"
+    # ...and opening a live game goes through the same ref route.
+    assert payload["navigateCalls"] == ["#/batch/c/run/source:src-live"]
+
+
+def test_runs_table_keeps_games_in_progress_on_top_and_out_of_the_highlights():
+    setup, _ = _table_harness()
+    payload = _run_node_json(
+        f"""
+        {setup}
+        const rows = [
+          {_LIVE_ROW},
+          {{ seed: 'a', status: 'dead', global_floor: 10, started_at: 100 }},
+          {{ seed: 'b', status: 'win', global_floor: 40, started_at: 200 }},
+          {{ seed: 'c', status: 'dead', global_floor: 25, started_at: 150 }},
+        ];
+        const order = (key, dir) => {{
+          sortKey = key; sortDir = dir;
+          return sortedRows(rows).map((row) => row.seed);
+        }};
+        sortKey = null;
+        const unsorted = sortedRows(rows).map((row) => row.seed);
+        const result = {{
+          unsorted,
+          floorDesc: order('global_floor', 'desc'),
+          floorAsc: order('global_floor', 'asc'),
+          statusDesc: order('status', 'desc'),
+          // live has the newest start and a floor: it still must not rank
+          top: selectTopRuns(rows).map((row) => row.seed),
+        }};
+        console.log(JSON.stringify(result));
+        """
+    )
+
+    assert payload["unsorted"] == ["live", "a", "b", "c"]
+    assert payload["floorDesc"] == ["live", "b", "c", "a"]
+    assert payload["floorAsc"] == ["live", "a", "c", "b"]
+    assert payload["statusDesc"][0] == "live"
+    assert payload["top"] == ["b", "c", "a"]
+
+
+def _run_view_harness() -> str:
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    view_script = (STATIC_DIR / "run-view.js").read_text(encoding="utf-8")
+    return "\n".join(
+        [
+            """
+            function makeNode(tag) {
+              return {
+                tag, className: '', textContent: '', hidden: false, dataset: {}, children: [],
+                setAttribute() {}, removeAttribute() {},
+                append(...items) { this.children.push(...items); },
+                replaceChildren(...items) { this.children = items; this.textContent = ''; },
+              };
+            }
+            const document = { createElement: (tag) => makeNode(tag) };
+            const nodes = {};
+            function byId(id) { return nodes[id] || (nodes[id] = makeNode('x')); }
+            const statuses = [];
+            function setStatus(message) { statuses.push(message); }
+            const state = { cohorts: [], currentRunReplay: null };
+            """,
+            _javascript_section(util_script, "const STATUS_LABELS", "const CAPABILITY_LABELS"),
+            _javascript_section(util_script, "function element(tag", "function svgElement"),
+            _javascript_section(util_script, "function clear(node)", "function setStatus"),
+            _javascript_section(app_script, "function parseRoute", "function navigate"),
+            _javascript_section(app_script, "function runHasMapCapability", "function renderCanonicalRun"),
+            """
+            // Timers the test fires by hand, in order.
+            const timers = [];
+            let nextTimer = 1;
+            function setTimeout(fn, ms) {
+              const timer = { id: nextTimer++, fn, ms, cleared: false };
+              timers.push(timer);
+              return timer.id;
+            }
+            function clearTimeout(id) {
+              const timer = timers.find((candidate) => candidate.id === id);
+              if (timer) timer.cleared = true;
+            }
+            const pending = () => timers.filter((timer) => !timer.cleared && !timer.fired);
+            async function fire(timer) { timer.fired = true; await timer.fn(); }
+
+            const mapCalls = [];
+            const window = {
+              STS2Map: {
+                openRun(ref) { mapCalls.push('open'); },
+                refreshRun(ref) { mapCalls.push('refresh'); },
+                showMapPage() { mapCalls.push('no-map'); },
+              },
+            };
+            const location = { hash: '' };
+            const fetches = [];
+            let responses = [];
+            async function getJSON(url) {
+              fetches.push(url);
+              const next = responses.shift();
+              if (next instanceof Error) throw next;
+              return next;
+            }
+            const livePayload = (extra = {}) => ({
+              view: 'run', live: true,
+              run: { outcome: { status: 'in_progress', max_global_floor: 5 },
+                     metadata: { seed: 's' }, capabilities: { visited_route: true } },
+              ...extra,
+            });
+            const endedPayload = {
+              view: 'run',
+              run: { outcome: { status: 'dead', max_global_floor: 9 },
+                     metadata: { seed: 's' }, capabilities: { visited_route: true } },
+            };
+            const ref = { kind: 'source', id: 'src1' };
+            const notice = () => byId('runLiveNotice');
+            const reset = () => {
+              fetches.length = 0; mapCalls.length = 0; statuses.length = 0;
+              location.hash = '#/batch/c/run/source:src1';
+            };
+            """,
+            view_script,
+        ]
+    )
+
+
+def test_run_view_refreshes_a_live_run_every_30_seconds_until_it_ends():
+    payload = _run_node_json(
+        f"""
+        {_run_view_harness()}
+        (async () => {{
+          const out = {{}};
+          reset();
+          responses = [livePayload(), livePayload(), endedPayload];
+          await window.RunView.render('c', ref);
+          out.afterOpen = {{
+            notice: notice().textContent, hidden: notice().hidden,
+            timers: pending().map((timer) => timer.ms), fetches: fetches.length,
+            mapCalls: [...mapCalls], status: statuses.at(-1),
+          }};
+          await fire(pending()[0]);
+          out.afterTick1 = {{
+            notice: notice().textContent, timers: pending().map((timer) => timer.ms),
+            fetches: [...fetches], mapCalls: [...mapCalls],
+          }};
+          await fire(pending()[0]);
+          out.afterEnd = {{
+            notice: notice().textContent, hidden: notice().hidden,
+            timers: pending().length, fetches: fetches.length, mapCalls: [...mapCalls],
+          }};
+          console.log(JSON.stringify(out));
+        }})();
+        """
+    )
+
+    assert payload["afterOpen"] == {
+        "notice": "进行中 · 每 30 秒自动刷新",
+        "hidden": False,
+        "timers": [30000],
+        "fetches": 1,
+        "mapCalls": ["open"],
+        "status": "已载入对局",
+    }
+    # A tick re-reads the run (same address) and the map, then schedules the next.
+    assert payload["afterTick1"]["fetches"] == ["/api/run?source=src1", "/api/run?source=src1"]
+    assert payload["afterTick1"]["mapCalls"] == ["open", "refresh"]
+    assert payload["afterTick1"]["timers"] == [30000]
+    assert payload["afterTick1"]["notice"] == "进行中 · 每 30 秒自动刷新"
+    # Once the run has an end it is shown, polling stops, and the page says why.
+    assert payload["afterEnd"]["timers"] == 0
+    assert payload["afterEnd"]["fetches"] == 3
+    assert payload["afterEnd"]["mapCalls"] == ["open", "refresh", "refresh"]
+    assert payload["afterEnd"]["notice"] == "对局已结束，已停止自动刷新"
+
+
+def test_run_view_stops_refreshing_when_the_user_leaves_the_run():
+    payload = _run_node_json(
+        f"""
+        {_run_view_harness()}
+        (async () => {{
+          const out = {{}};
+
+          // Navigating to another view: the router calls stop().
+          reset();
+          responses = [livePayload()];
+          await window.RunView.render('c', ref);
+          const armed = pending()[0];
+          window.RunView.stop();
+          await armed.fn();   // even a timer that slipped through does nothing
+          out.afterStop = {{
+            pending: pending().length, fetches: fetches.length,
+            hidden: notice().hidden, text: notice().textContent,
+          }};
+
+          // The hash changed without stop() being called (e.g. typed in the bar).
+          reset();
+          responses = [livePayload()];
+          await window.RunView.render('c', ref);
+          location.hash = '#/batch/c';
+          await fire(pending()[0]);
+          out.afterHashChange = {{
+            pending: pending().length, fetches: fetches.length, hidden: notice().hidden,
+          }};
+
+          // Opening a different run supersedes the first one's timer.
+          reset();
+          responses = [livePayload(), livePayload()];
+          await window.RunView.render('c', ref);
+          const first = pending()[0];
+          location.hash = '#/batch/c/run/source:src2';
+          await window.RunView.render('c', {{ kind: 'source', id: 'src2' }});
+          await first.fn();
+          out.afterSwitch = {{ fetches: [...fetches], pending: pending().length }};
+          console.log(JSON.stringify(out));
+        }})();
+        """
+    )
+
+    assert payload["afterStop"] == {"pending": 0, "fetches": 1, "hidden": True, "text": ""}
+    assert payload["afterHashChange"] == {"pending": 0, "fetches": 1, "hidden": True}
+    assert payload["afterSwitch"]["fetches"] == [
+        "/api/run?source=src1",
+        "/api/run?source=src2",
+    ]
+    assert payload["afterSwitch"]["pending"] == 1  # only the second run's timer
+
+
+def test_run_view_does_not_poll_finished_abandoned_or_failing_runs_wrongly():
+    payload = _run_node_json(
+        f"""
+        {_run_view_harness()}
+        (async () => {{
+          const out = {{}};
+
+          reset();
+          responses = [endedPayload];
+          await window.RunView.render('c', ref);
+          out.finished = {{ pending: pending().length, hidden: notice().hidden, mapCalls: [...mapCalls] }};
+
+          // Unfinished but its log has gone quiet: shown, labelled, not polled.
+          reset();
+          responses = [livePayload({{ live: false }})];
+          await window.RunView.render('c', ref);
+          out.abandoned = {{ pending: pending().length, text: notice().textContent }};
+
+          // A failed refresh keeps the screen and tries again.
+          reset();
+          responses = [livePayload(), new Error('boom'), livePayload()];
+          await window.RunView.render('c', ref);
+          await fire(pending()[0]);
+          out.failed = {{
+            text: notice().textContent, pending: pending().map((timer) => timer.ms),
+            mapCalls: [...mapCalls],
+          }};
+          await fire(pending()[0]);
+          out.recovered = {{ text: notice().textContent, mapCalls: [...mapCalls] }};
+
+          // A run with no map yet, then one with a route: first open, then refresh.
+          reset();
+          const noRoute = livePayload();
+          noRoute.run.capabilities = {{}};
+          responses = [noRoute, livePayload()];
+          await window.RunView.render('c', ref);
+          await fire(pending()[0]);
+          out.noMapYet = [...mapCalls];
+          console.log(JSON.stringify(out));
+        }})();
+        """
+    )
+
+    assert payload["finished"] == {"pending": 0, "hidden": True, "mapCalls": ["open"]}
+    assert payload["abandoned"] == {
+        "pending": 0,
+        "text": "进行中 · 日志已长时间未更新，已停止自动刷新",
+    }
+    assert "本次刷新失败：boom" in payload["failed"]["text"]
+    assert payload["failed"]["pending"] == [30000]
+    assert payload["failed"]["mapCalls"] == ["open"]
+    assert payload["recovered"]["text"] == "进行中 · 每 30 秒自动刷新"
+    assert payload["recovered"]["mapCalls"] == ["open", "refresh"]
+    assert payload["noMapYet"] == ["no-map", "open"]
+
+
+def test_router_stops_the_live_refresh_on_every_route_but_a_run():
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    route_fn = _javascript_section(
+        app_script, "async function applyRoute", "window.addEventListener('popstate'"
+    )
+
+    assert "window.RunView.stop()" in route_fn
+    assert route_fn.index("window.RunView.stop()") < route_fn.index("route.view === 'root'")
+    assert "route.view !== 'run'" in route_fn
+    assert 'id="runLiveNotice"' in html
+    # the notice sits with the run detail it describes, hidden until needed
+    assert html.index('id="runMeta"') < html.index('id="runLiveNotice"') < html.index('id="actTabs"')
+    assert re.search(r'id="runLiveNotice"[^>]*\bhidden\b', html)
+
+
+def test_map_refresh_redraws_in_place_keeps_the_selected_node_and_survives_errors():
+    script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    load = _javascript_section(script, "async function loadAct", "function closeMapPage")
+
+    result = _run_node_json(
+        f"""
+        const log = [];
+        let respond = null;
+        const mapState = {{
+          runId: '', ref: null, actIndex: 0, opener: null, requestToken: 0,
+          abortController: null, positionedMapKey: '', selectedNodeId: null,
+        }};
+        const mapScroll = {{ scrollTop: 0, scrollLeft: 0 }};
+        const groups = [{{ id: 'g0' }}, {{ id: 'g1' }}, {{ id: 'g2' }}];
+        const svg = {{ parentElement: mapScroll, querySelectorAll: () => groups }};
+        const elements = new Map([['mapSvg', svg]]);
+        function byId(id) {{
+          if (!elements.has(id)) elements.set(id, {{ hidden: false, textContent: '' }});
+          return elements.get(id);
+        }}
+        function showMapPage() {{ log.push('showMapPage'); }}
+        function renderEmpty(node, message) {{ log.push(`renderEmpty:${{message}}`); }}
+        function clear() {{ log.push('clear'); }}
+        function hideDecisionPopover() {{ log.push('hidePopover'); }}
+        const history = {{ state: null, pushState() {{}}, replaceState() {{}} }};
+        function mapLocation() {{ return ''; }}
+        function setStatus(message, tone) {{ log.push(`status:${{message}}`); }}
+        async function getJSON() {{
+          if (respond instanceof Error) throw respond;
+          return respond;
+        }}
+        function renderActTabs() {{ return null; }}
+        function renderMap() {{ log.push('renderMap'); }}
+        function renderActSummary() {{ log.push('renderActSummary'); }}
+        function selectNode(node, element) {{
+          mapState.selectedNodeId = node.id;
+          log.push(`select:${{node.id}}:${{element ? element.id : '-'}}`);
+        }}
+        {load}
+        const node = (id, index) => ({{ id, visited: true, path_index: index }});
+        const payload = (nodes) => ({{
+          act: {{ index: 0 }}, nodes, full_map: false, fallback_reason: null,
+        }});
+        (async () => {{
+          const ref = {{ kind: 'source', id: 'src1' }};
+          respond = payload([node('n0', 0), node('n1', 1)]);
+          await loadAct(ref, 0);
+          const opened = log.splice(0);
+
+          // The user picks the second node; two ticks later the run is a node longer.
+          mapState.selectedNodeId = 'n1';
+          respond = payload([node('n0', 0), node('n1', 1), node('n2', 2)]);
+          await loadAct(ref, 0, {{ refresh: true }});
+          const refreshed = log.splice(0);
+
+          // The selected node is gone from the new payload: fall back to the first.
+          mapState.selectedNodeId = 'gone';
+          await loadAct(ref, 0, {{ refresh: true }});
+          const fellBack = log.splice(0);
+
+          respond = new Error('server down');
+          await loadAct(ref, 0, {{ refresh: true }});
+          const failed = log.splice(0);
+          console.log(JSON.stringify({{ opened, refreshed, fellBack, failed }}));
+        }})();
+        """
+    )
+
+    # A normal open clears, shows the page and the loading state, as before.
+    assert "showMapPage" in result["opened"]
+    assert "clear" in result["opened"]
+    assert any(item.startswith("renderEmpty:") for item in result["opened"])
+    # A refresh does none of that: no flicker, no focus grab, no busy status.
+    assert result["refreshed"] == [
+        "hidePopover",
+        "renderMap",
+        "renderActSummary",
+        "select:n1:g1",
+        "status:已载入记录路线",
+    ]
+    assert result["fellBack"][-2:] == ["select:n0:-", "status:已载入记录路线"]
+    # A failed refresh leaves what is on screen alone and says so in the status.
+    assert result["failed"] == ["status:地图刷新失败：server down"]
+
+
+def test_map_namespace_exposes_refresh_run_for_the_run_view():
+    map_script = (STATIC_DIR / "map.js").read_text(encoding="utf-8")
+    view_script = (STATIC_DIR / "run-view.js").read_text(encoding="utf-8")
+
+    namespace = _javascript_section(map_script, "window.STS2Map = Object.freeze", "})();")
+    assert "refreshRun(ref)" in namespace
+    assert "window.STS2Map.refreshRun(ref)" in view_script

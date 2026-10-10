@@ -1093,6 +1093,7 @@ def _build_cohort_tree(cohorts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                             "avg_global_floor": cohort.get("avg_global_floor"),
                             "valid_n": cohort.get("valid_n"),
                             "technical_count": cohort["technical_count"],
+                            "in_progress_count": cohort.get("in_progress_count", 0),
                             "latest_at": cohort["latest_at"],
                             "unarchived": bool(cohort.get("unarchived", False)),
                         }
@@ -1135,12 +1136,46 @@ def _cohort_run_row(record: Any) -> dict[str, Any]:
     }
 
 
+def _in_progress_run_row(run: Any) -> dict[str, Any]:
+    """A cohort run-list row for a game that is still being played.
+
+    Same keys as a finished row (so the table needs no special case) plus where
+    the player currently is.  ``status`` is always ``in_progress``.
+    """
+    global_floor = run.global_floor
+    run_id = run.run_id or None
+    ref = (
+        {"kind": "run", "id": run_id}
+        if run_id
+        else {"kind": "source", "id": run.source_id or None}
+    )
+    return {
+        "run_id": run_id,
+        "source_id": run.source_id or None,
+        "seed": run.seed,
+        "status": "in_progress",
+        "global_floor": global_floor,
+        "act": run.act,
+        "floor": run.floor,
+        "hp": run.hp,
+        "max_hp": run.max_hp,
+        "started_at": run.started_at,
+        "updated_at": run.updated_at,
+        "has_map": run.has_map,
+        "ref": ref,
+    }
+
+
 def _cohort_runs_payload(catalog: RunCatalog, cohort_id: str) -> dict[str, Any]:
-    records = catalog.get_cohort_records(cohort_id)
+    records, playing = catalog.get_cohort_runs(cohort_id)
     runs_complete = len(records) <= _COHORT_RUNS_LIMIT
+    # Games still being played come first, newest first, and do not count
+    # against the row limit: the finished rows are exactly what they were
+    # before in-progress games were listed.
     return {
         "cohort_id": cohort_id,
-        "runs": [_cohort_run_row(record) for record in records[:_COHORT_RUNS_LIMIT]],
+        "runs": [_in_progress_run_row(run) for run in playing]
+        + [_cohort_run_row(record) for record in records[:_COHORT_RUNS_LIMIT]],
         "runs_complete": runs_complete,
     }
 

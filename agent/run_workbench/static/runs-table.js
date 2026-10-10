@@ -24,8 +24,10 @@ window.RunsTable = (() => {
   // Recent-first, then best-of-recent -- a run with no started_at can't be
   // placed in the recency window, and one with no global_floor carries no
   // ranking information, so both are excluded rather than faked into place.
+  // A game that is still being played has no final floor yet, so it never
+  // competes for a place here.
   function selectTopRuns(rows) {
-    const timed = rows.filter((row) => Number.isFinite(row.started_at));
+    const timed = rows.filter((row) => row.status !== 'in_progress' && Number.isFinite(row.started_at));
     timed.sort((a, b) => b.started_at - a.started_at);
     const recentPool = timed.slice(0, TOP_RUNS_RECENT_WINDOW);
     const ranked = recentPool.filter((row) => Number.isFinite(row.global_floor));
@@ -71,8 +73,12 @@ window.RunsTable = (() => {
     top.forEach((row, index) => container.append(topRunCard(row, index + 1)));
   }
 
-  function sortedRows(rows) {
-    if (!sortKey) return rows;
+  function sortedRows(allRows) {
+    if (!sortKey) return allRows;
+    // Games still being played stay pinned above the sorted rows: their floor
+    // is not final, and they are the ones being watched.
+    const pinned = allRows.filter((row) => row.status === 'in_progress');
+    const rows = allRows.filter((row) => row.status !== 'in_progress');
     const withIndex = rows.map((row, index) => ({ row, index }));
     withIndex.sort((a, b) => {
       let result;
@@ -93,7 +99,7 @@ window.RunsTable = (() => {
       if (result === 0) return a.index - b.index;
       return sortDir === 'asc' ? result : -result;
     });
-    return withIndex.map((item) => item.row);
+    return [...pinned, ...withIndex.map((item) => item.row)];
   }
 
   function headerCell(label, key) {
@@ -147,16 +153,32 @@ window.RunsTable = (() => {
       const ref = row.ref && typeof row.ref === 'object' && typeof row.ref.id === 'string' && row.ref.id
         ? row.ref
         : null;
+      const inProgress = row.status === 'in_progress';
       const tr = element('tr', {
-        className: `runs-table-row${row.has_map === false ? ' runs-table-row-no-map' : ''}`,
+        className: `runs-table-row${row.has_map === false ? ' runs-table-row-no-map' : ''}${inProgress ? ' runs-table-row-in-progress' : ''}`,
         attrs: ref
-          ? { tabindex: '0', role: 'button', 'aria-label': `查看第 ${index + 1} 行对局` }
+          ? { tabindex: '0', role: 'button', 'aria-label': `查看第 ${index + 1} 行${inProgress ? '进行中的' : ''}对局` }
           : { 'aria-disabled': 'true' },
       });
+      // A live game gets a badge, and where it is right now (floor in its act,
+      // hit points) next to it; a finished one keeps its plain status text.
+      const statusCell = element('td');
+      if (inProgress) {
+        statusCell.append(element('span', {
+          className: 'status-badge status-badge-in-progress',
+          text: STATUS_LABELS.in_progress || '进行中',
+        }));
+        const where = [];
+        if (Number.isFinite(row.act) && Number.isFinite(row.floor)) where.push(`A${row.act}F${row.floor}`);
+        if (Number.isFinite(row.hp)) where.push(Number.isFinite(row.max_hp) ? `HP ${row.hp}/${row.max_hp}` : `HP ${row.hp}`);
+        if (where.length) statusCell.append(element('span', { className: 'runs-table-live-note', text: where.join(' · ') }));
+      } else {
+        statusCell.textContent = STATUS_LABELS[row.status] || missingCell(row.status);
+      }
       tr.append(
         element('td', { text: String(index + 1) }),
         element('td', { text: missingCell(row.seed) }),
-        element('td', { text: STATUS_LABELS[row.status] || missingCell(row.status) }),
+        statusCell,
         element('td', { text: missingCell(row.global_floor) }),
         element('td', { text: missingCell(row.act) }),
         element('td', { text: Number.isFinite(row.started_at) ? formatTime(row.started_at) : '—' }),

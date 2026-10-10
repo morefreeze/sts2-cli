@@ -93,6 +93,11 @@ async function applyRoute(route) {
   if (window.STS2Map && typeof window.STS2Map.showDashboardPage === 'function') {
     window.STS2Map.showDashboardPage();
   }
+  // Only a run route keeps a game that is still being played refreshing;
+  // RunView.render() restarts it for the run it opens.
+  if (route.view !== 'run' && window.RunView && typeof window.RunView.stop === 'function') {
+    window.RunView.stop();
+  }
   if (route.view === 'root') {
     const firstId = firstCohortIdInTree(state.tree);
     if (firstId) {

@@ -378,6 +378,14 @@ input:disabled {
   font-size: 10px;
 }
 
+.tree-leaf-has-live {
+  flex-wrap: wrap;
+}
+
+.tree-leaf-has-live .tree-leaf-count {
+  margin-left: auto;
+}
+
 .tree-leaf-unarchived {
   color: var(--slate-500);
   font-style: italic;
@@ -482,6 +490,44 @@ input:disabled {
 .runs-table-no-map-note {
   color: var(--slate-500);
   font-size: 10px;
+}
+
+/* A game that is still being played: a badge in the run table, and the notice
+   above the run detail that says it refreshes itself. */
+.status-badge-in-progress,
+.run-live-notice {
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-weight: 750;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10px;
+}
+
+.runs-table-row-in-progress {
+  background: rgba(255, 240, 209, 0.45);
+}
+
+.runs-table-live-note {
+  margin-left: 8px;
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+.run-live-notice {
+  display: inline-block;
+  margin: 12px 0 16px;
+  padding: 4px 12px;
+  border-radius: 99px;
+  font-size: 11px;
+}
+
+.run-live-notice[hidden] {
+  display: none;
 }
 
 #catalogToggle[aria-pressed="true"] {
