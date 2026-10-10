@@ -2,8 +2,9 @@
 
 // Left navigation tree: fetches nothing itself -- app.js's bootstrap loads
 // /api/tree once and calls Tree.render(tree). Renders 游戏版本 › 角色 › 批次
-// exactly in server order (newest first, the null-version bucket last) and
-// never re-sorts client-side. Supports expand/collapse, a selected leaf
+// exactly in server order (version groups by their newest batch, newest first,
+// the null-version bucket ordered like any other) and never re-sorts
+// client-side. Supports expand/collapse, a selected leaf
 // marked with aria-current="true", and roving-tabindex arrow-key navigation.
 
 window.Tree = (() => {

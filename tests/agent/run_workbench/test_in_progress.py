@@ -27,6 +27,7 @@ import agent.run_workbench.catalog as catalog_module
 from agent.run_progress_viewer import make_viewer_handler
 from agent.run_workbench.catalog import (
     IN_PROGRESS_STALE_SECONDS,
+    REINDEX_MIN_INTERVAL_SECONDS,
     CatalogNotFoundError,
     RunCatalog,
 )
@@ -557,11 +558,14 @@ def test_a_run_that_ends_moves_from_the_live_list_into_the_statistics(
 ) -> None:
     _finished_batch(tmp_path)
     path = _write_log(tmp_path, "game.jsonl", _game_log(seed="p9", final_floor=40))
-    catalog = _catalog(tmp_path)
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
     cohort = _cohort(catalog, "ooc=greedy · Ironclad · a1")
     assert (cohort["run_count"], cohort["in_progress_count"]) == (3, 1)
 
     _write_log(tmp_path, path.name, _game_log(seed="p9", final_floor=40, ended="dead"))
+    # An unfinished log is re-indexed at most once per interval.
+    clock.now += REINDEX_MIN_INTERVAL_SECONDS
     cohort = _cohort(catalog, "ooc=greedy · Ironclad · a1")
     assert (cohort["run_count"], cohort["in_progress_count"]) == (4, 0)
     assert cohort["avg_global_floor"] == pytest.approx((10 + 20 + 30 + 40) / 4)
@@ -673,3 +677,193 @@ def test_http_surfaces_in_progress_runs_everywhere_the_page_reads_them(
         status, metrics = _get(base, f"/api/metrics?current={cohort['cohort_id']}")
         assert metrics["current"]["all_n"] == 3
         assert deepcopy(metrics["current"]["valid_n"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Re-index throttle: a growing, unfinished log is not re-parsed on every request
+# ---------------------------------------------------------------------------
+
+LABEL = "ooc=greedy · Ironclad · a1"
+
+
+@pytest.fixture
+def scans(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The name of every log the catalog parses (indexes), in order."""
+    names: list[str] = []
+    original = catalog_module._scan_jsonl_index
+
+    def counting(path: Path):
+        names.append(path.name)
+        return original(path)
+
+    monkeypatch.setattr(catalog_module, "_scan_jsonl_index", counting)
+    return names
+
+
+def _grow(path: Path, **kwargs) -> None:
+    """Rewrite a log with more rows and a newer mtime, as a running game would."""
+    _write_log(path.parent, path.name, _game_log(**kwargs), mtime=NOW - 1.0)
+
+
+def _live_floor(catalog: RunCatalog) -> int | None:
+    _, playing = catalog.get_cohort_runs(_cohort(catalog, LABEL)["cohort_id"])
+    (row,) = playing
+    return row.global_floor
+
+
+def test_growing_unfinished_log_is_not_reparsed_within_the_interval(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    path = _write_log(tmp_path, "live.jsonl", _game_log(seed="p1", final_floor=6))
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    assert _live_floor(catalog) == 6
+    assert scans == ["live.jsonl"]
+
+    _grow(path, seed="p1", final_floor=9)
+    clock.now += REINDEX_MIN_INTERVAL_SECONDS - 1
+    for _ in range(3):  # every kind of request goes through the same refresh
+        assert _live_floor(catalog) == 6
+        catalog.list_cohorts()
+        catalog.list_sources()
+    assert scans == ["live.jsonl"]
+
+    clock.now += 1
+    assert _live_floor(catalog) == 9
+    assert scans == ["live.jsonl", "live.jsonl"]
+    # The new index is itself throttled from the moment it was made.
+    _grow(path, seed="p1", final_floor=12)
+    assert _live_floor(catalog) == 9
+    assert scans == ["live.jsonl", "live.jsonl"]
+
+
+def test_cohort_cache_key_changes_when_a_throttled_log_is_reindexed(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    path = _write_log(tmp_path, "live.jsonl", _game_log(seed="p1", final_floor=6))
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    catalog.list_cohorts()
+    first_key = catalog._cohort_cache_key
+
+    _grow(path, seed="p1", final_floor=9)
+    clock.now += 10
+    catalog.list_cohorts()
+    assert catalog._cohort_cache_key == first_key  # throttled: nothing to rebuild
+
+    clock.now += REINDEX_MIN_INTERVAL_SECONDS
+    catalog.list_cohorts()
+    assert catalog._cohort_cache_key != first_key
+    assert _live_floor(catalog) == 9
+
+
+def test_a_game_that_ends_is_finished_within_one_interval(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    _finished_batch(tmp_path)
+    path = _write_log(tmp_path, "game.jsonl", _game_log(seed="p9", final_floor=40))
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    cohort = _cohort(catalog, LABEL)
+    assert (cohort["run_count"], cohort["in_progress_count"]) == (3, 1)
+
+    _grow(path, seed="p9", final_floor=40, ended="dead")
+    clock.now += REINDEX_MIN_INTERVAL_SECONDS - 1
+    cohort = _cohort(catalog, LABEL)
+    assert (cohort["run_count"], cohort["in_progress_count"]) == (3, 1)
+
+    clock.now += 1
+    cohort = _cohort(catalog, LABEL)
+    assert (cohort["run_count"], cohort["in_progress_count"]) == (4, 0)
+    assert cohort["avg_global_floor"] == pytest.approx((10 + 20 + 30 + 40) / 4)
+
+
+def test_changed_finished_log_is_reindexed_immediately(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    path = _write_log(
+        tmp_path,
+        "done.jsonl",
+        _game_log(seed="s1", final_floor=10, ended="dead"),
+        mtime=NOW - 3000.0,
+    )
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    assert _cohort(catalog, LABEL)["avg_global_floor"] == 10
+    assert scans == ["done.jsonl"]
+
+    _write_log(
+        tmp_path,
+        path.name,
+        _game_log(seed="s1", final_floor=25, ended="dead"),
+        mtime=NOW - 2000.0,
+    )
+    clock.now += 1  # nowhere near the interval
+    assert _cohort(catalog, LABEL)["avg_global_floor"] == 25
+    assert scans == ["done.jsonl", "done.jsonl"]
+
+
+def test_new_log_is_indexed_immediately(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    _write_log(tmp_path, "one.jsonl", _game_log(seed="p1"))
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    assert _cohort(catalog, LABEL)["in_progress_count"] == 1
+
+    _write_log(tmp_path, "two.jsonl", _game_log(seed="p2"))
+    clock.now += 1
+    assert _cohort(catalog, LABEL)["in_progress_count"] == 2
+    assert scans == ["one.jsonl", "two.jsonl"]
+
+
+def test_only_the_unfinished_log_waits_when_several_change(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    live = _write_log(tmp_path, "live.jsonl", _game_log(seed="p1", final_floor=6))
+    done = _write_log(
+        tmp_path,
+        "done.jsonl",
+        _game_log(seed="s1", final_floor=10, ended="dead"),
+        mtime=NOW - 3000.0,
+    )
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    catalog.list_cohorts()
+    scans.clear()
+
+    _grow(live, seed="p1", final_floor=9)
+    _write_log(
+        tmp_path,
+        done.name,
+        _game_log(seed="s1", final_floor=12, ended="dead"),
+        mtime=NOW - 2000.0,
+    )
+    clock.now += 5
+    catalog.list_cohorts()
+    assert scans == ["done.jsonl"]
+
+
+def test_reindex_throttle_can_be_switched_off(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    path = _write_log(tmp_path, "live.jsonl", _game_log(seed="p1", final_floor=6))
+    catalog = _catalog(tmp_path, reindex_min_interval=0)
+    assert _live_floor(catalog) == 6
+
+    _grow(path, seed="p1", final_floor=9)
+    assert _live_floor(catalog) == 9
+    assert scans == ["live.jsonl", "live.jsonl"]
+
+
+def test_a_clock_that_goes_backwards_does_not_freeze_the_index(
+    tmp_path: Path, log_size: str, scans: list[str]
+) -> None:
+    path = _write_log(tmp_path, "live.jsonl", _game_log(seed="p1", final_floor=6))
+    clock = _Clock()
+    catalog = _catalog(tmp_path, clock)
+    assert _live_floor(catalog) == 6
+
+    _grow(path, seed="p1", final_floor=9)
+    clock.now -= 3600
+    assert _live_floor(catalog) == 9

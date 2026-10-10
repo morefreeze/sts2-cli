@@ -567,7 +567,9 @@ def test_source_adaptation_is_lazy_cached_and_invalidated_by_file_change(tmp_pat
         calls += 1
         return _replay_parser(records, source_name)
 
-    catalog = RunCatalog([tmp_path], replay_parser=parser)
+    # The replay is unfinished, which the re-index throttle would hold back;
+    # this test is about invalidation by a file change, so switch that off.
+    catalog = RunCatalog([tmp_path], replay_parser=parser, reindex_min_interval=0)
     source_id = catalog.list_sources()[0]["source_id"]
     assert calls == 0
 
@@ -623,7 +625,9 @@ def test_refresh_reuses_unchanged_index_records_without_rereading(
         return _replay_parser(records, source_name)
 
     monkeypatch.setattr(catalog_module, "_scan_jsonl_index", scanner)
-    catalog = RunCatalog([tmp_path], replay_parser=parser)
+    # The replay is unfinished, which the re-index throttle would hold back;
+    # this test is about invalidation by a file change, so switch that off.
+    catalog = RunCatalog([tmp_path], replay_parser=parser, reindex_min_interval=0)
 
     source_id = catalog.list_sources()[0]["source_id"]
     catalog.list_sources()

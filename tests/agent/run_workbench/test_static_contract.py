@@ -2033,9 +2033,9 @@ function cohortRoute(id) { return `#/batch/${id}`; }
 
 
 def test_tree_renders_version_character_cohort_nesting_in_server_order():
-    """The tree must reproduce /api/tree's order verbatim -- newest-first
-    within a version, with the null game_version bucket last -- and must
-    never re-sort client-side (the old numeric-version-descending sort is
+    """The tree must reproduce /api/tree's order verbatim -- version groups
+    by their newest batch, the null game_version bucket wherever the server
+    put it -- and must never re-sort client-side (the old numeric-version-descending sort is
     gone along with the dropdown filters it used to serve)."""
     util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
     tree_script = (STATIC_DIR / "tree.js").read_text(encoding="utf-8")
@@ -2065,17 +2065,17 @@ def test_tree_renders_version_character_cohort_nesting_in_server_order():
         }};
         // Deliberately NOT numerically descending (0.50.0 before 0.111.0)
         // to prove the tree renders whatever order the server sent rather
-        // than re-deriving one client-side. The null-version bucket is
-        // last, per the API contract.
+        // than re-deriving one client-side. The null-version bucket sits in
+        // the middle: it is an ordinary group, not pinned to either end.
         const tree = [
           {{ game_version: '0.50.0', characters: [
             {{ character: 'Ironclad', cohorts: [cohortA] }},
           ] }},
-          {{ game_version: '0.111.0', characters: [
-            {{ character: null, cohorts: [cohortB] }},
-          ] }},
           {{ game_version: null, characters: [
             {{ character: 'Silent', cohorts: [cohortC] }},
+          ] }},
+          {{ game_version: '0.111.0', characters: [
+            {{ character: null, cohorts: [cohortB] }},
           ] }},
         ];
 
@@ -2090,7 +2090,7 @@ def test_tree_renders_version_character_cohort_nesting_in_server_order():
     )
 
     text = payload["text"]
-    order = ["0.50.0", "Ironclad", "Batch A", "0.111.0", "Batch B", "Silent", "Batch C"]
+    order = ["0.50.0", "Ironclad", "Batch A", "Silent", "Batch C", "0.111.0", "Batch B"]
     positions = [text.index(fragment) for fragment in order]
     assert positions == sorted(positions), text
     # 3 version groups + 3 character groups + 3 cohort leaves = 9 treeitems.

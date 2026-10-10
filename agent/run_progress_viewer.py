@@ -1049,14 +1049,22 @@ _COHORT_RUNS_LIMIT = 512
 def _tree_version_sort_key(
     version: str | None,
     cohorts_by_version: dict[str | None, list[dict[str, Any]]],
-) -> tuple[bool, bool, float]:
-    """Newest cohort first within a version; the null-version bucket last."""
+) -> tuple[bool, float, bool, str]:
+    """Order version groups by their newest cohort, newest group first.
+
+    The null-version bucket is an ordinary group: every `play_full_run.py` log
+    carries no game version, so pinning that bucket last hid the newest
+    batches below older archived ones.  A group with no dated cohort at all
+    sorts after every dated one.  Ties (same newest `latest_at`, or no
+    `latest_at` at all) go to a versioned group before the null bucket, then to
+    the version string, so the order never depends on dict insertion order.
+    """
     cohorts = cohorts_by_version[version]
     latest_values = [
         cohort["latest_at"] for cohort in cohorts if cohort["latest_at"] is not None
     ]
     newest = max(latest_values) if latest_values else None
-    return (version is None, newest is None, -(newest or 0.0))
+    return (newest is None, -(newest or 0.0), version is None, version or "")
 
 
 def _build_cohort_tree(cohorts: list[dict[str, Any]]) -> list[dict[str, Any]]:

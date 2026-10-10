@@ -485,7 +485,7 @@ _TREE_COHORT_KEYS = {
 }
 
 
-def test_tree_groups_by_version_then_character_with_null_version_always_last(
+def test_tree_orders_version_groups_by_newest_cohort_null_bucket_included(
     tmp_path: Path,
 ) -> None:
     common = {
@@ -525,8 +525,8 @@ def test_tree_groups_by_version_then_character_with_null_version_always_last(
             "ts": 20,
         },
         {
-            # No game_version at all -- has the newest ts of any record, but
-            # the null-version bucket must still sort last regardless.
+            # No game_version at all -- has the newest ts of any record, so
+            # the null-version bucket is the newest group and sorts first.
             **common,
             "run_id": "noversion",
             "character": "Ironclad",
@@ -543,9 +543,9 @@ def test_tree_groups_by_version_then_character_with_null_version_always_last(
     assert status == 200
     tree = payload["tree"]
     versions = [entry["game_version"] for entry in tree]
-    # v2's cohort (latest_at=20) is newer than v1's (latest_at=10), so it
-    # sorts first; the null-version bucket sorts last no matter its ts.
-    assert versions == ["v2", "v1", None]
+    # Groups go purely by their newest cohort: the null-version bucket
+    # (latest_at=999) beats v2 (20), which beats v1 (10).
+    assert versions == [None, "v2", "v1"]
 
     v1_entry = next(entry for entry in tree if entry["game_version"] == "v1")
     character_names = [character["character"] for character in v1_entry["characters"]]
@@ -556,6 +556,37 @@ def test_tree_groups_by_version_then_character_with_null_version_always_last(
             for cohort in character["cohorts"]:
                 assert set(cohort) == _TREE_COHORT_KEYS
                 assert cohort["unarchived"] is False
+
+
+def test_tree_null_version_bucket_with_older_cohorts_stays_below_newer_versions(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "event": "eval_result",
+        "status": "dead",
+        "max_global_floor": 8,
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "ascension": 0,
+        "character": "Ironclad",
+    }
+    _write_jsonl(
+        tmp_path / "eval.jsonl",
+        [
+            {**common, "run_id": "v1", "game_version": "v1", "checkpoint": "c1",
+             "seed": "a", "ts": 10},
+            {**common, "run_id": "v2", "game_version": "v2", "checkpoint": "c2",
+             "seed": "b", "ts": 20},
+            {**common, "run_id": "none", "checkpoint": "c3", "seed": "c", "ts": 15},
+        ],
+    )
+
+    with _server(RunCatalog([tmp_path], replay_parser=_replay_parser)) as base:
+        status, payload = _request(base, "/api/tree")
+
+    assert status == 200
+    # v2 (20) > null bucket (15) > v1 (10): the null bucket is only a group.
+    assert [entry["game_version"] for entry in payload["tree"]] == ["v2", None, "v1"]
 
 
 def test_tree_rejects_unexpected_query_parameters(tmp_path: Path) -> None:

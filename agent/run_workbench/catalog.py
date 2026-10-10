@@ -52,6 +52,13 @@ SUPPORTED_SUFFIXES = frozenset({".run", ".json", ".jsonl"})
 # is still being written: modified within this many seconds of "now".  An
 # unfinished log older than that keeps the classification it always had.
 IN_PROGRESS_STALE_SECONDS = 30 * 60
+# A replay log that was still unfinished when it was last indexed and has
+# changed since is re-indexed at most this often.  Indexing parses the whole
+# file, and a running experiment appends to every live log continuously, so
+# without a floor each request re-parses several tens of MB per log.  A
+# finished source that changes, and a source seen for the first time, are
+# always indexed straight away.
+REINDEX_MIN_INTERVAL_SECONDS = 60.0
 INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
@@ -117,6 +124,8 @@ class _IndexedSource:
     deck_outcomes: tuple["_CompactRun", ...]
     run_ids: tuple[str, ...]
     cache_key: tuple[Path, int, int]
+    # Catalog clock reading when indexing finished (see `_reindex_deferred`).
+    indexed_at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -433,6 +442,7 @@ class RunCatalog:
         include_policy: str = "all",
         in_progress_window: float | None = IN_PROGRESS_STALE_SECONDS,
         clock: Callable[[], float] = time.time,
+        reindex_min_interval: float | None = REINDEX_MIN_INTERVAL_SECONDS,
     ) -> None:
         if include_policy not in {"all", "workbench"}:
             raise ValueError("include_policy must be 'all' or 'workbench'")
@@ -442,6 +452,8 @@ class RunCatalog:
         # `None` switches in-progress detection off altogether.
         self.in_progress_window = in_progress_window
         self._clock = clock
+        # `None` (or 0) re-indexes every changed source on every request.
+        self.reindex_min_interval = reindex_min_interval
         self._sources: dict[str, _IndexedSource] = {}
         self._run_sources: dict[str, tuple[str, ...]] = {}
         self._adapt_cache: dict[tuple[Path, int, int], AdaptedSource] = {}
@@ -883,7 +895,10 @@ class RunCatalog:
                     source_id = _source_id(root, relative)
                     cache_key = (path, file_stat.st_mtime_ns, file_stat.st_size)
                     previous = self._sources.get(source_id)
-                    if previous is not None and previous.cache_key == cache_key:
+                    if previous is not None and (
+                        previous.cache_key == cache_key
+                        or self._reindex_deferred(previous)
+                    ):
                         source = previous
                     else:
                         source = self._index_source(root, path, file_stat)
@@ -917,6 +932,30 @@ class RunCatalog:
             for key, public in self._cohort_source_records.items()
             if key in live_cache_keys
         }
+
+    def _reindex_deferred(self, previous: _IndexedSource) -> bool:
+        """Whether a changed source keeps its current index for now.
+
+        Only a replay log that looked unfinished when it was indexed -- a game
+        under way, whose file grows all the time -- waits; it is re-indexed once
+        that index is `reindex_min_interval` old, so a game that ends is shown
+        as finished within one interval.  Anything else that changed (a finished
+        log, any other kind of source) is re-indexed at once, and a source with
+        no previous index never reaches here.
+        """
+
+        interval = self.reindex_min_interval
+        if not interval or interval <= 0:
+            return False
+        if previous.descriptor.kind is not SourceKind.REPLAY_JSONL:
+            return False
+        if not all(
+            _item_status(compact) in _UNFINISHED_STATUSES
+            for compact in previous.deck_outcomes
+        ):
+            return False
+        # A clock that went backwards must not freeze the index.
+        return 0 <= self._clock() - previous.indexed_at < interval
 
     def _discover(self) -> list[tuple[Path, Path]]:
         discovered: list[tuple[Path, Path]] = []
@@ -1060,6 +1099,7 @@ class RunCatalog:
             deck_outcomes=deck_outcomes,
             run_ids=run_ids,
             cache_key=(path, file_stat.st_mtime_ns, file_stat.st_size),
+            indexed_at=self._clock(),
         )
 
     def _ordered_sources(self) -> list[_IndexedSource]:
