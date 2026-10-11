@@ -22,6 +22,7 @@ import random
 import os
 import shutil
 import traceback
+import uuid
 from game_log import GameLogger
 from engine_process import EngineHang, EngineProcess
 from combat_plan_driver import (
@@ -214,6 +215,66 @@ def _load_greedy_action():
     return greedy_action
 
 
+def _run_metadata():
+    """agent.run_metadata, imported lazily like _load_greedy_action (python/ is
+    this script's own directory; the repo root is not on sys.path)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import agent.run_metadata
+    return agent.run_metadata
+
+
+def resolve_run_game_version(cli_value=None, environment=None):
+    """Version of the game this batch plays, or None when nothing names one.
+
+    --game-version, then STS2_GAME_VERSION, then the install's own
+    release_info.json (one directory above STS2_GAME_DIR); the result's `.source`
+    is "cli" / "environment" / "release_info". The run workbench files a batch
+    under this version and refuses baseline comparison without it. An invalid
+    explicit value raises ValueError; an unresolvable one is None (the caller
+    warns once and plays on -- a log without a version beats a lost batch).
+    """
+    return _run_metadata().resolve_optional_game_version(cli_value, environment)
+
+
+def batch_name(experiment, seed_prefix):
+    """The batch part of the experiment label: --experiment, else the seed prefix
+    without its trailing underscore (`run_` -> `run`). None if neither names one."""
+    name = (experiment or "").strip() or (seed_prefix or "").strip().rstrip("_")
+    return name or None
+
+
+def experiment_label(batch, policy):
+    """What the workbench's `experiment` axis shows: `<batch>:ooc=<policy>`.
+    The batch keeps two batches under the same policy from landing in one cohort."""
+    return f"{batch}:ooc={policy}" if batch else f"ooc={policy}"
+
+
+def new_run_id():
+    """A fresh per-game id, shared by the game log's run_meta header and the
+    results row so the two can be joined."""
+    return f"pfr-{uuid.uuid4().hex[:12]}"
+
+
+def build_run_context(seed, character, ascension, experiment, run_id, game_version=None):
+    """The run_meta header play_run hands GameLogger.
+
+    The workbench cohorts logs by (experiment, checkpoint, character,
+    game_version, evaluation_mode, scenario, ascension): every harness game is a
+    fixed-seed, single-player full run, and is_multiplayer must be a strict bool
+    or the run's map view degrades to "Multiplayer flag must be a boolean".
+    game_version is a ResolvedGameVersion or None (then simply omitted).
+    """
+    context = {"run_id": run_id, "seed": seed, "character": character,
+               "ascension": ascension, "experiment": experiment,
+               "evaluation_mode": "fixed", "scenario": "full_run",
+               "is_multiplayer": False}
+    if game_version is not None:
+        context.update(game_version.to_fields())
+    return context
+
+
 def greedy_knobs(env=None) -> dict:
     """The GREEDY_KNOBS that are explicitly set in `env` (name -> raw value)."""
     env = os.environ if env is None else env
@@ -314,8 +375,13 @@ def engine_argv() -> list:
 
 
 def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True,
-             ascension: int = 0, keep_log_dir: str | None = None):
+             ascension: int = 0, keep_log_dir: str | None = None,
+             game_version=None, batch: str | None = None):
     """Play a complete run and return the result.
+
+    `game_version` (a ResolvedGameVersion, or None) and `batch` (see
+    batch_name) go into the game log's run_meta header so the run workbench can
+    file the game; every result carries the game's `run_id`, which is the same id.
 
     Thin wrapper over _play_run() that stamps the fields every result needs
     regardless of which of _play_run's many return paths produced it:
@@ -345,7 +411,11 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              "solver_stale_unresolved": 0,
              "solver_turn_fallbacks": 0,
              "game_log": None}
-    result = _play_run(seed, character, verbose, log, ascension, stats)
+    stats["run_id"] = new_run_id()
+    run_context = build_run_context(seed, character, ascension,
+                                    experiment_label(batch, policy), stats["run_id"],
+                                    game_version)
+    result = _play_run(seed, character, verbose, log, ascension, stats, run_context)
     stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
     game_log = stats.pop("game_log")
     if keep_log_dir and game_log and os.path.exists(game_log):
@@ -367,7 +437,7 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
 
 
 def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: int,
-              stats: dict):
+              stats: dict, run_context: dict | None = None):
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
     stats["ooc_greedy"], stats["ooc_fallback_causes"][...] and
     stats["ooc_event_stuck"], stats["solver_stale_refusals"],
@@ -396,10 +466,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
     solver_plans = 0
     solver_errors = 0
     solver_error_printed = False
-    logger = GameLogger(character, seed, enabled=log,
-                        run_context={"seed": seed, "character": character,
-                                     "ascension": ascension,
-                                     "experiment": f"ooc={stats['ooc_policy']}"})
+    logger = GameLogger(character, seed, enabled=log, run_context=run_context)
     # stderr: inherit when verbose, otherwise DEVNULL -- never an unread PIPE,
     # which fills up and blocks the engine's Console.Error.WriteLine (the stderr
     # deadlock described in RunSimulator.cs DoPlanCombatTurn's diagnostics note).
@@ -1040,6 +1107,8 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "ooc_knobs": result.get("ooc_knobs"),
         "game_log": result.get("game_log"),
         "game_log_error": result.get("game_log_error"),
+        # the game log's run_meta run_id, to join this row to that log
+        "run_id": result.get("run_id"),
     }
 
 
@@ -1224,6 +1293,15 @@ def main():
     parser.add_argument("--seed-offset", type=int, default=0,
                         help="Start seeds at <prefix><offset+1> (default 0) -- lets one "
                              "experiment's seed range be split across several processes.")
+    parser.add_argument("--game-version", default=None, metavar="VERSION",
+                        help="Game version to record in every game log (e.g. v0.111.0). "
+                             "Default: $STS2_GAME_VERSION, else the install's "
+                             "release_info.json (one directory above $STS2_GAME_DIR). The "
+                             "run workbench files a batch under this version.")
+    parser.add_argument("--experiment", default=None, metavar="NAME",
+                        help="Batch name in the logs' experiment label "
+                             "(<NAME>:ooc=<policy>). Default: the seed prefix without its "
+                             "trailing underscore, so each --seed-prefix is its own cohort.")
     parser.add_argument("--keep-game-logs", default=None, metavar="DIR",
                         help="Copy each game's full state log to "
                              "DIR/<character>_<policy>_a<ascension>_<seed>.jsonl "
@@ -1237,6 +1315,14 @@ def main():
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
     if args.seed_offset < 0:
         parser.error(f"--seed-offset must be >= 0, got {args.seed_offset}")
+    if args.experiment is not None and not args.experiment.strip():
+        parser.error("--experiment must not be blank")
+    if args.experiment is not None and len(args.experiment.strip()) > 100:
+        parser.error("--experiment must be at most 100 characters")
+    try:
+        game_version = resolve_run_game_version(args.game_version)
+    except ValueError as exc:  # a malformed explicit value: surface it before any game
+        parser.error(str(exc))
     policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
     inferrer = solver_inferrer()  # ...and on a bad STS2_SOLVER_INFERRER
     if policy == "greedy":
@@ -1255,6 +1341,16 @@ def main():
     print(f"Playing {num_runs} runs as {character} "
           f"(ascension {args.ascension}, ooc policy {policy}, "
           f"solver inferrer {inferrer}{seed_range})")
+    batch = batch_name(args.experiment, args.seed_prefix)
+    if game_version is None:
+        print("!! game version unresolved (no --game-version, no STS2_GAME_VERSION, no "
+              f"release_info.json beside STS2_GAME_DIR={os.environ.get('STS2_GAME_DIR')}): "
+              "game logs carry no game_version, so the run workbench files this batch "
+              "under 未知版本（未归档） and cannot compare it")
+        version_note = "game version unknown"
+    else:
+        version_note = f"game version {game_version.value} ({game_version.source})"
+    print(f"Run metadata: {version_note}, experiment {experiment_label(batch, policy)}")
     print("=" * 60)
 
     results = []
@@ -1262,7 +1358,8 @@ def main():
         seed = f"{args.seed_prefix}{args.seed_offset + i + 1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
         result = play_run(seed, character, verbose=True, ascension=args.ascension,
-                          keep_log_dir=args.keep_game_logs)
+                          keep_log_dir=args.keep_game_logs,
+                          game_version=game_version, batch=batch)
         results.append(result)
         if args.results_log:
             with open(args.results_log, "a") as fh:

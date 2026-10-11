@@ -31,6 +31,9 @@ _RUN_META_KEYS = (
     "game_version_source",
     "evaluation_mode",
     "scenario",
+    # Must be a strict bool: the workbench's map view refuses anything else
+    # ("Multiplayer flag must be a boolean"). False is a value, not "absent".
+    "is_multiplayer",
 )
 
 

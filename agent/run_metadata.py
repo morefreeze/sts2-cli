@@ -14,7 +14,12 @@ MAX_GAME_VERSION_LENGTH = 128
 MAX_NATIVE_SAVE_METADATA_BYTES = 64 * 1024
 MAX_RUN_ID_LENGTH = 256
 MAX_SEED_LENGTH = 256
-GameVersionSource = Literal["cli", "environment"]
+# release_info.json is ~150 bytes in practice; anything near this is not one.
+MAX_RELEASE_INFO_BYTES = 16 * 1024
+# "release_info" is the automatic source for direct game runs
+# (resolve_optional_game_version). build_run_context deliberately still accepts
+# only the two explicit sources.
+GameVersionSource = Literal["cli", "environment", "release_info"]
 _SEED_UNSET = object()
 
 
@@ -192,23 +197,87 @@ def load_native_save_seed(save_path: str | os.PathLike[str]) -> str | None:
     return seed
 
 
-def resolve_game_version(
-    cli_value: str | None, environment: Mapping[str, str] | None = None
-) -> ResolvedGameVersion:
+def _explicit_game_version(
+    cli_value: str | None, values: Mapping[str, str]
+) -> ResolvedGameVersion | None:
     cli_version = _nonempty_text(cli_value, name="--game-version")
     if cli_version is not None:
         return ResolvedGameVersion(cli_version, "cli")
 
-    values = os.environ if environment is None else environment
     environment_version = _nonempty_text(
         values.get("STS2_GAME_VERSION"), name="STS2_GAME_VERSION"
     )
     if environment_version is not None:
         return ResolvedGameVersion(environment_version, "environment")
+    return None
+
+
+def resolve_game_version(
+    cli_value: str | None, environment: Mapping[str, str] | None = None
+) -> ResolvedGameVersion:
+    values = os.environ if environment is None else environment
+    explicit = _explicit_game_version(cli_value, values)
+    if explicit is not None:
+        return explicit
 
     raise ValueError(
         "game version is required; pass --game-version or set STS2_GAME_VERSION"
     )
+
+
+def read_release_info_version(game_dir: str | os.PathLike[str] | None) -> str | None:
+    """Read the installed game's own version from ``release_info.json``.
+
+    The file lives next to the ``.pck`` -- one directory ABOVE ``STS2_GAME_DIR``
+    (``.../Contents/Resources/release_info.json`` for
+    ``.../Contents/Resources/data_sts2_macos_arm64``) -- and looks like
+    ``{"commit": "41cef1ea", "version": "v0.111.0", ...}``. Anything unusable
+    (missing, oversized, not an object, no bounded non-empty string ``version``)
+    reads as ``None``: a log without a version is better than a failed run.
+    """
+
+    if game_dir is None or not os.fspath(game_dir).strip():
+        return None
+    try:
+        info_path = Path(os.path.normpath(os.fspath(game_dir))).parent / "release_info.json"
+        with info_path.open("rb") as handle:
+            payload = handle.read(MAX_RELEASE_INFO_BYTES + 1)
+        if len(payload) > MAX_RELEASE_INFO_BYTES:
+            return None
+        value = json.loads(payload.decode("utf-8", errors="strict"))
+        if not isinstance(value, dict):
+            return None
+        return _nonempty_text(value.get("version"), name="release_info version")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def resolve_optional_game_version(
+    cli_value: str | None,
+    environment: Mapping[str, str] | None = None,
+    *,
+    game_dir: str | os.PathLike[str] | None = None,
+) -> ResolvedGameVersion | None:
+    """``resolve_game_version`` plus the install's ``release_info.json`` fallback.
+
+    Order: ``--game-version`` (source ``cli``), ``STS2_GAME_VERSION``
+    (``environment``), then ``<STS2_GAME_DIR>/../release_info.json``
+    (``release_info``; ``game_dir`` overrides the environment's STS2_GAME_DIR).
+    Returns ``None`` when nothing resolves. An explicit value that is invalid
+    (too long, not text) still raises ``ValueError`` -- that is a typo to
+    surface, not a reason to fall through to a different version.
+    """
+
+    values = os.environ if environment is None else environment
+    explicit = _explicit_game_version(cli_value, values)
+    if explicit is not None:
+        return explicit
+    version = read_release_info_version(
+        game_dir if game_dir is not None else values.get("STS2_GAME_DIR")
+    )
+    if version is None:
+        return None
+    return ResolvedGameVersion(version, "release_info")
 
 
 def validate_ascension(value: int) -> int:

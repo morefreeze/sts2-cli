@@ -917,3 +917,16 @@ git commit -m "feat: greedy out-of-combat policy is the play_full_run default (P
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+## Follow-up (2026-10-12): run metadata
+
+`play_full_run.py` 的 game log 之前只带 `seed/character/ascension/experiment=ooc=<policy>`，run workbench（`agent/run_progress_viewer.py`，:8765）因此把每一批都归到「未知版本（未归档）」，并提示「元数据不完整，仅展示本批次：缺少游戏版本、评测模式、场景」（基线对比被禁用）；单局详情页还会报 "Multiplayer flag must be a boolean"。
+
+现在 `run_meta` 头部额外写入：
+
+- `game_version` + `game_version_source`：`--game-version`（`cli`）> `$STS2_GAME_VERSION`（`environment`）> `<STS2_GAME_DIR>/../release_info.json` 的 `version`（`release_info`）。解析不到则省略并只告警一次，不影响跑局。该来源在 workbench 里只用于展示，不参与分组/可比性，所以 `release_info` 无需特殊处理；`agent.run_metadata.build_run_context`（train/eval 用）仍只接受 `cli`/`environment`。
+- `evaluation_mode: "fixed"`、`scenario: "full_run"`、`is_multiplayer: false`。workbench 的 replay 适配器（`adapters._adapt_replay`、`catalog._update_compact_replay_metadata`）此前不读 replay 头部的 `is_multiplayer`（eval_rl 靠 deck-history 旁路提供）；现已读取严格 bool。
+- `experiment: "<batch>:ooc=<policy>"`：batch = `--experiment NAME`，否则 `--seed-prefix` 去掉末尾下划线（默认 `run_` → `run`），同一 policy 的不同批次不会再合并成一个 cohort。
+- 每局一个 `run_id`（`pfr-<12 hex>`），同时写进 `result_to_eval_row`，便于把 `--results-log` 行与 game log 对上。
+
+未做：往 game log 里记 `get_map` 快照。workbench 的完整地图只认 deck-history 里的 `map_snapshot` 行（`run_progress_viewer._trusted_recorded_map_rows`），replay 适配器不读 game log 里的地图行；且 `map_service.SUPPORTED_MAP_BUILDS` 目前只有 `v0.103.2`，所以 `v0.111.0` 的跑局即使元数据完整，地图页也只显示已走路线（"Unsupported game build"）。经 `send()` 记录 `get_map` 还会在 map_select 房间的 actions 里多出一条 `{"cmd": "get_map"}`。若 Phase 3b 的路线模型需要完整地图，应单独用 `logger.log_map_snapshot`（不经 `send()`）记录，并扩展 workbench 的地图生成器到 `v0.111.0`。
