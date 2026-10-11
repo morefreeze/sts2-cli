@@ -154,6 +154,61 @@ var module = ModuleDefinition.ReadModule(dllPath, new ReaderParameters {
 
 int patches = 0;
 
+// Cecil never widens short-form branches. Patch 4 inserts ~13 bytes (dup/brfalse/br/pop/ldnull, all
+// long-form) between a compiler-emitted `br.s`/`brtrue.s`/`brfalse.s`/`leave.s`/... and its target;
+// when that pushes the displacement past the signed-byte range, Cecil's writer silently truncates it
+// (`(sbyte)130 == -126`), so the branch lands mid-instruction or on the wrong instruction and the CLR
+// rejects the method with InvalidProgramException the first time it is JIT-compiled (BUG-054:
+// NRollingBoulderVfx.<PlayAnim>d__22 and SandpitPower.<UpdateCreaturePositions>d__18, whose original
+// displacements sat at 117..127 of the 127 allowed). The fix is the one the C# compiler itself would
+// have made: use the long form of exactly those branches that no longer fit. Branches that still fit
+// are left alone, so every other method body stays byte-for-byte what it was.
+static OpCode? LongBranchForm(OpCode op)
+{
+    if (op == OpCodes.Br_S) return OpCodes.Br;
+    if (op == OpCodes.Brfalse_S) return OpCodes.Brfalse;
+    if (op == OpCodes.Brtrue_S) return OpCodes.Brtrue;
+    if (op == OpCodes.Beq_S) return OpCodes.Beq;
+    if (op == OpCodes.Bge_S) return OpCodes.Bge;
+    if (op == OpCodes.Bgt_S) return OpCodes.Bgt;
+    if (op == OpCodes.Ble_S) return OpCodes.Ble;
+    if (op == OpCodes.Blt_S) return OpCodes.Blt;
+    if (op == OpCodes.Bne_Un_S) return OpCodes.Bne_Un;
+    if (op == OpCodes.Bge_Un_S) return OpCodes.Bge_Un;
+    if (op == OpCodes.Bgt_Un_S) return OpCodes.Bgt_Un;
+    if (op == OpCodes.Ble_Un_S) return OpCodes.Ble_Un;
+    if (op == OpCodes.Blt_Un_S) return OpCodes.Blt_Un;
+    if (op == OpCodes.Leave_S) return OpCodes.Leave;
+    return null;
+}
+
+// Returns how many short branches had to be widened. Loops to a fixed point: widening one branch
+// grows the code and can push another one out of range.
+static int WidenOutOfRangeShortBranches(MethodBody body)
+{
+    int widened = 0;
+    bool again = true;
+    while (again)
+    {
+        again = false;
+        int offset = 0;
+        foreach (var ins in body.Instructions) { ins.Offset = offset; offset += ins.GetSize(); }
+        foreach (var ins in body.Instructions)
+        {
+            if (ins.OpCode.OperandType != OperandType.ShortInlineBrTarget) continue;
+            var target = (Instruction)ins.Operand;
+            int disp = target.Offset - (ins.Offset + ins.GetSize());
+            if (disp >= sbyte.MinValue && disp <= sbyte.MaxValue) continue;
+            var longForm = LongBranchForm(ins.OpCode);
+            if (longForm == null) throw new InvalidOperationException($"no long form for {ins.OpCode.Name}");
+            ins.OpCode = longForm.Value;
+            widened++;
+            again = true;
+        }
+    }
+    return widened;
+}
+
 // Patch 1: Task.Yield() — make YieldAwaitable.YieldAwaiter.IsCompleted return true
 // This prevents async deadlocks in headless mode
 foreach (var type in module.Types)
@@ -482,6 +537,25 @@ foreach (var type in module.Types)
     }
 }
 
+// Final pass over EVERY method body (not just Patch 4's), so a future patch that inserts code cannot
+// reintroduce the BUG-054 truncation. Only branches that no longer fit are touched.
+{
+    int widenedBranches = 0, widenedMethods = 0;
+    foreach (var t in module.GetTypes())
+    {
+        foreach (var m in t.Methods)
+        {
+            if (m.Body == null) continue;
+            int w = WidenOutOfRangeShortBranches(m.Body);
+            if (w == 0) continue;
+            widenedBranches += w;
+            widenedMethods++;
+            Console.WriteLine($"  Widened {w} short branch(es) that no longer fit a signed byte in {t.Name}.{m.Name} (BUG-054)");
+        }
+    }
+    Console.WriteLine($"Widened {widenedBranches} short branch(es) in {widenedMethods} method(s)");
+}
+
 Console.WriteLine($"Applied {patches} patches");
 var outPath = dllPath + ".patched";
 module.Write(outPath);
@@ -492,6 +566,10 @@ Console.WriteLine("Done!");
 CSHARP
 
 REPO_DIR="$(pwd)"
+# Keep the exact unpatched DLL this run patches: lib/sts2.dll.original is only a ONE-TIME backup (stale after
+# a game update), and the IL validity check at the end compares the patched DLL against the unpatched one.
+UNPATCHED_STS2="$(mktemp -t sts2_unpatched.XXXXXX)"
+cp "lib/sts2.dll" "$UNPATCHED_STS2"
 cd "$PATCH_DIR"
 $DOTNET run -- "$REPO_DIR/lib/sts2.dll" 2>&1
 cd "$REPO_DIR"
@@ -538,6 +616,24 @@ if (( SMOKE_EXIT != 0 )); then
     echo "⚠️  Smoke test exit code $SMOKE_EXIT — check $SMOKE_LOG"
 elif [[ -z "$STUB_GAPS" ]]; then
     echo "    ✓ smoke test passed (no stub gaps detected)"
+fi
+
+# The patches rewrite IL; the CLR only rejects bad IL when a method is first JIT-compiled, i.e. mid-game
+# (BUG-054: two methods of the patched dll threw InvalidProgramException for months). Ask it now:
+# JIT-compile every method of the patched and of the unpatched sts2.dll against the same GodotSharp.dll
+# and fail if the patches broke one. Exit 1 = patches broke a method, 2 = the check itself could not run.
+echo ""
+echo "🔬 IL validity check (every method the original JIT-compiles must still compile; BUG-054)..."
+IL_RC=0
+DOTNET="$DOTNET" STS2_GAME_DIR="$GAME_DIR" "$PYTHON_BIN" tools/check_il_patch.py --original "$UNPATCHED_STS2" || IL_RC=$?
+rm -f "$UNPATCHED_STS2"
+if (( IL_RC == 1 )); then
+    echo ""
+    echo "❌ The IL patches left methods that cannot be JIT-compiled (listed above)."
+    echo "   Fix the patcher in setup.sh; tools/check_il_patch.py --repatch re-checks it without touching lib/."
+    exit 1
+elif (( IL_RC != 0 )); then
+    echo "⚠️  IL validity check could not run (exit $IL_RC) — run it by hand: $PYTHON_BIN tools/check_il_patch.py"
 fi
 
 echo ""

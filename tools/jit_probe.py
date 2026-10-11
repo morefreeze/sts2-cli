@@ -4,10 +4,12 @@
 The second line of defence next to tools/audit_godot_stub_refs.py: the audit reads metadata, this
 asks the CLR itself (RuntimeHelpers.PrepareMethod, the exact step that throws MissingMethodException
 mid-game).  The pass criterion is "the stubs fail on exactly the methods the REAL GodotSharp.dll
-fails on" -- today that is 166 methods: 164 Delegate.BeginInvoke/EndInvoke (never supported on
-.NET Core) and 2 InvalidProgramException that come from the setup.sh IL patch of sts2.dll
-(NRollingBoulderVfx.<PlayAnim>d__22 and SandpitPower.<UpdateCreaturePositions>d__18; the unpatched
-sts2.dll.original compiles them).
+fails on" -- 164 methods: all Delegate.BeginInvoke/EndInvoke (never supported on .NET Core).  A lib/sts2.dll
+patched before the BUG-054 fix of setup.sh shows 166: 2 more InvalidProgramException
+(NRollingBoulderVfx.<PlayAnim>d__22 and SandpitPower.<UpdateCreaturePositions>d__18, whose short branches
+Cecil truncated; the unpatched sts2.dll.original compiles them).  tools/check_il_patch.py automates that
+comparison -- patched vs. unpatched sts2.dll, same GodotSharp.dll -- and `--repatch` checks what setup.sh
+WOULD produce without touching lib/.
 
     .venv/bin/python tools/jit_probe.py                      # stubs vs the real GodotSharp.dll (found via $STS2_GAME_DIR / Steam)
     .venv/bin/python tools/jit_probe.py --no-real            # stubs only: fail on anything but Begin/EndInvoke

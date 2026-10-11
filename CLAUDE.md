@@ -29,6 +29,8 @@ python3 python/play.py            # auto-setup on first run
 
 **Always use `.venv/bin/python`** for any Python invocation in this repo (training, eval, coordinator, scripts). The system `python3` lacks the project deps (`tensorboard`, `sb3-contrib`, etc.) and will fail with `ModuleNotFoundError`. Either `source .venv/bin/activate` once per shell or invoke as `.venv/bin/python ...` directly.
 
+**IL patcher** (the Cecil C# heredoc in `setup.sh`): the CLR rejects bad IL only when a method is first JIT-compiled, i.e. mid-game (BUG-054: Cecil truncated short branches that patch 4 pushed out of range -> `InvalidProgramException` in `SandpitPower.UpdateCreaturePositions`). After editing it run `.venv/bin/python tools/check_il_patch.py --repatch` (patches a COPY of `lib/sts2.dll.original`, JIT-compiles every method, fails on any the original compiles and the patched one does not; never touches `lib/`). `setup.sh` runs the same check at the end.
+
 ### Build
 ```bash
 dotnet build src/Sts2Headless/Sts2Headless.csproj
