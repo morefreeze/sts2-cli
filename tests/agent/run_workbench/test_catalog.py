@@ -4032,3 +4032,115 @@ def test_unarchived_cohorts_with_different_ascension_get_distinct_labels(
     # No two cohorts in the whole (real-shaped) fixture set share a label.
     all_labels = [cohort["label"] for cohort in cohorts]
     assert len(set(all_labels)) == len(all_labels), f"colliding labels: {all_labels}"
+
+
+# --- play_full_run batches ----------------------------------------------------
+
+
+def _play_full_run_replay(
+    seed: str, *, experiment: str = "run:ooc=greedy", run_id: str | None = None
+) -> list[dict]:
+    """The shape python/play_full_run.py logs: a complete run_meta header, then
+    start_run + state rows that carry no metadata of their own."""
+    return [
+        {
+            "type": "run_meta",
+            "ts": 100.0,
+            "run_id": run_id or f"pfr-{seed}",
+            "experiment": experiment,
+            "character": "Ironclad",
+            "seed": seed,
+            "ascension": 1,
+            "game_version": "v0.111.0",
+            "game_version_source": "release_info",
+            "evaluation_mode": "fixed",
+            "scenario": "full_run",
+            "is_multiplayer": False,
+        },
+        {
+            "step": 0,
+            "type": "action",
+            "ts": 101.0,
+            "data": {"cmd": "start_run", "character": "Ironclad", "seed": seed,
+                     "ascension": 1},
+        },
+        {
+            "step": 1,
+            "type": "state",
+            "ts": 102.0,
+            "data": {
+                "type": "decision",
+                "decision": "combat_play",
+                "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+                "player": {"hp": 70, "max_hp": 80},
+            },
+        },
+        {
+            "step": 2,
+            "type": "state",
+            "ts": 103.0,
+            "data": {
+                "type": "decision",
+                "decision": "game_over",
+                "victory": False,
+                "context": {"act": 1, "floor": 3, "room_type": "Monster"},
+                "player": {"hp": 0, "max_hp": 80},
+            },
+        },
+    ]
+
+
+@pytest.mark.parametrize("index_record_limit", [None, 2], ids=["small-file", "large-file"])
+def test_play_full_run_batch_is_filed_under_its_real_version_and_is_comparable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index_record_limit: int | None
+) -> None:
+    if index_record_limit is not None:
+        monkeypatch.setattr(catalog_module, "INDEX_RECORD_LIMIT", index_record_limit)
+    root = tmp_path / "runs"
+    root.mkdir()
+    for seed in ("run_1", "run_2"):
+        _write_jsonl(root / f"{seed}.jsonl", _play_full_run_replay(seed))
+
+    catalog = RunCatalog([root], replay_parser=parse_game_progress)
+    cohorts = catalog.list_cohorts()
+
+    assert len(cohorts) == 1
+    cohort = cohorts[0]
+    assert cohort["unarchived"] is False
+    assert cohort["run_count"] == 2
+    assert cohort["experiment"] == "run:ooc=greedy"
+    assert cohort["filters"]["game_version"] == "v0.111.0"
+    # The automatic source is display-only, like "cli"/"environment".
+    assert cohort["filters"]["game_version_source"] == "release_info"
+    assert cohort["filters"]["evaluation_mode"] == "fixed"
+    assert cohort["filters"]["scenario"] == "full_run"
+    assert cohort["filters"]["ascension"] == 1
+    readiness = cohort["comparison_readiness"]
+    assert readiness["ready"] is True, readiness
+    assert readiness["missing_axes"] == []
+
+    for record in catalog.get_cohort_records(cohort["cohort_id"]):
+        assert record.metadata.is_multiplayer is False
+        assert record.metadata.game_version_source == "release_info"
+
+
+def test_play_full_run_batches_with_different_names_stay_separate_cohorts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runs"
+    root.mkdir()
+    _write_jsonl(
+        root / "a.jsonl",
+        _play_full_run_replay("run_1", experiment="run:ooc=greedy", run_id="pfr-a"),
+    )
+    _write_jsonl(
+        root / "b.jsonl",
+        _play_full_run_replay("run_1", experiment="p3b:ooc=greedy", run_id="pfr-b"),
+    )
+
+    cohorts = RunCatalog([root], replay_parser=parse_game_progress).list_cohorts()
+
+    assert {cohort["experiment"] for cohort in cohorts} == {
+        "run:ooc=greedy",
+        "p3b:ooc=greedy",
+    }

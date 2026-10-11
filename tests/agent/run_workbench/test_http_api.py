@@ -3612,3 +3612,57 @@ def test_legacy_http_endpoints_remain_available(tmp_path: Path, monkeypatch: pyt
     assert latest["name"] == "legacy.jsonl"
     assert log["name"] == "legacy.jsonl"
     assert translations["translations"] == {"lang": "zh"}
+
+
+def test_play_full_run_replay_reaches_the_map_service_with_a_boolean_multiplayer_flag(
+    tmp_path: Path,
+) -> None:
+    """python/play_full_run.py logs only a replay (no native .run, no deck
+    history), so the run_meta header is the sole source of is_multiplayer. Without
+    it the map view said "Multiplayer flag must be a boolean" before it ever
+    looked at the seed or version."""
+    from agent.run_progress_viewer import parse_game_progress
+
+    run_id = "pfr-0123456789ab"
+    rows = [
+        {"type": "run_meta", "ts": 100.0, "run_id": run_id,
+         "experiment": "run:ooc=greedy", "character": "Ironclad", "seed": "run_7",
+         "ascension": 1, "game_version": "v0.111.0",
+         "game_version_source": "release_info", "evaluation_mode": "fixed",
+         "scenario": "full_run", "is_multiplayer": False},
+        {"step": 0, "type": "action", "ts": 101.0,
+         "data": {"cmd": "start_run", "character": "Ironclad", "seed": "run_7",
+                  "ascension": 1}},
+        {"step": 1, "type": "state", "ts": 102.0,
+         "data": {"type": "decision", "decision": "combat_play",
+                  "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+                  "player": {"hp": 70, "max_hp": 80}}},
+        {"step": 2, "type": "state", "ts": 103.0,
+         "data": {"type": "decision", "decision": "game_over", "victory": False,
+                  "context": {"act": 1, "floor": 3, "room_type": "Monster"},
+                  "player": {"hp": 0, "max_hp": 80}}},
+    ]
+    _write_jsonl(tmp_path / "pfr.jsonl", rows)
+
+    class CapturingMapService:
+        def __init__(self) -> None:
+            self.requests: list[MapRequest] = []
+
+        def generate(self, request: MapRequest):
+            self.requests.append(request)
+            return visited_route_map(request, reason="captured request")
+
+    service = CapturingMapService()
+    with _server(
+        RunCatalog([tmp_path], replay_parser=parse_game_progress),
+        map_service=service,
+    ) as base:
+        status, _ = _request(base, f"/api/run/map?id={run_id}&act=0")
+
+    assert status == 200
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.is_multiplayer is False
+    assert request.game_version == "v0.111.0"
+    assert request.seed == "run_7"
+    assert request.ascension == 1

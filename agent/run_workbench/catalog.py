@@ -2131,6 +2131,12 @@ def _update_compact_metadata(
         compact.comparison_conflicts.add("ascension")
     if compact.ascension is None:
         compact.ascension = ascension
+    _observe_compact_multiplayer(compact, record)
+
+
+def _observe_compact_multiplayer(
+    compact: _CompactRun, record: dict[str, Any]
+) -> None:
     multiplayer = record.get("is_multiplayer")
     if type(multiplayer) is bool and not compact.is_multiplayer_conflicted:
         if not compact.has_is_multiplayer_observation:
@@ -2186,6 +2192,9 @@ def _update_compact_replay_metadata(
         )
     if compact.ascension is None:
         compact.ascension = _replay_ascension(record, "ascension")
+    if record.get("type") == "run_meta":
+        # The header is the only replay row that knows (see _adapt_replay).
+        _observe_compact_multiplayer(compact, record)
     modifiers = _replay_modifiers(record)
     if modifiers is not None:
         compact.modifiers = modifiers

@@ -1923,3 +1923,80 @@ def test_replay_metadata_reads_experiment_from_run_meta_header() -> None:
     ).runs[0]
 
     assert run.metadata.experiment == "ckpt_defect"
+
+
+# --- play_full_run's run_meta header ------------------------------------------
+#
+# python/play_full_run.py logs one game per replay with only the run_meta header
+# for metadata (no deck-history sidecar to supply is_multiplayer, as eval_rl has).
+# The header's strict-bool is_multiplayer is what lets the run's map view get past
+# "Multiplayer flag must be a boolean"; its game_version_source may be the
+# automatic "release_info" -- the source is display-only, never a gate.
+
+
+def _play_full_run_records(**header_overrides) -> list[dict]:
+    header = {
+        "type": "run_meta",
+        "ts": 1788154087.9,
+        "run_id": "pfr-0123456789ab",
+        "experiment": "run:ooc=greedy",
+        "character": "Ironclad",
+        "seed": "run_7",
+        "ascension": 1,
+        "game_version": "v0.111.0",
+        "game_version_source": "release_info",
+        "evaluation_mode": "fixed",
+        "scenario": "full_run",
+        "is_multiplayer": False,
+    }
+    header.update(header_overrides)
+    return [
+        header,
+        {"type": "action", "ts": 1788154088.0,
+         "data": {"cmd": "start_run", "character": "Ironclad", "seed": "run_7",
+                  "ascension": 1}},
+        {"type": "state", "ts": 1788154089.0, "status": "dead",
+         "data": {"run_id": "pfr-0123456789ab"}},
+    ]
+
+
+def test_replay_metadata_reads_is_multiplayer_from_run_meta_header() -> None:
+    run = adapt_records(
+        "pfr.jsonl", _play_full_run_records(), replay_parser=parse_game_progress
+    ).runs[0]
+
+    assert run.metadata.is_multiplayer is False
+
+
+def test_replay_metadata_accepts_the_release_info_version_source() -> None:
+    run = adapt_records(
+        "pfr.jsonl", _play_full_run_records(), replay_parser=parse_game_progress
+    ).runs[0]
+
+    assert run.metadata.game_version == "v0.111.0"
+    assert run.metadata.game_version_source == "release_info"
+    assert run.metadata.evaluation_mode == "fixed"
+    assert run.metadata.scenario == "full_run"
+    assert run.metadata.experiment == "run:ooc=greedy"
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, [], "True"])
+def test_replay_metadata_ignores_a_non_boolean_is_multiplayer(value: object) -> None:
+    run = adapt_records(
+        "pfr.jsonl",
+        _play_full_run_records(is_multiplayer=value),
+        replay_parser=parse_game_progress,
+    ).runs[0]
+
+    assert run.metadata.is_multiplayer is None
+
+
+def test_replay_without_the_header_flag_keeps_is_multiplayer_unknown() -> None:
+    records = _play_full_run_records()
+    del records[0]["is_multiplayer"]
+
+    run = adapt_records(
+        "pfr.jsonl", records, replay_parser=parse_game_progress
+    ).runs[0]
+
+    assert run.metadata.is_multiplayer is None
