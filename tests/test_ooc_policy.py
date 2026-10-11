@@ -16,12 +16,12 @@ import play_full_run
 from tests.test_map_route_determinism import _FakeEngine
 
 
-def test_ooc_policy_defaults_to_naive():
-    assert play_full_run.ooc_policy({}) == "naive"
+def test_ooc_policy_defaults_to_greedy():
+    assert play_full_run.ooc_policy({}) == "greedy"
 
 
 def test_ooc_policy_blank_means_default():
-    assert play_full_run.ooc_policy({"STS2_OOC_POLICY": "  "}) == "naive"
+    assert play_full_run.ooc_policy({"STS2_OOC_POLICY": "  "}) == "greedy"
 
 
 @pytest.mark.parametrize("raw,expected", [("greedy", "greedy"), ("NAIVE", "naive"), (" Greedy ", "greedy")])
@@ -126,7 +126,7 @@ def _run(monkeypatch, script, seed="s1", **kwargs):
 
 
 def test_start_run_carries_the_requested_ascension(monkeypatch):
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     result, sent = _run(monkeypatch, [{"type": "ready"}, _game_over()], ascension=1)
     start = sent[0]
     assert start["cmd"] == "start_run" and start["ascension"] == 1
@@ -134,13 +134,13 @@ def test_start_run_carries_the_requested_ascension(monkeypatch):
 
 
 def test_ascension_defaults_to_zero(monkeypatch):
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     result, sent = _run(monkeypatch, [{"type": "ready"}, _game_over()])
     assert sent[0]["ascension"] == 0 and result["ascension"] == 0
 
 
 def test_result_carries_policy_and_zero_counters_under_naive(monkeypatch):
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     result, _ = _run(monkeypatch, [{"type": "ready"}, _game_over()])
     assert result["ooc_policy"] == "naive"
     assert result["ooc_greedy"] == 0 and result["ooc_fallbacks"] == 0
@@ -150,8 +150,17 @@ def test_result_carries_policy_and_zero_counters_under_naive(monkeypatch):
     assert result["game_log"] is None  # log=False writes no game log
 
 
-def test_keep_game_logs_copies_the_log_and_records_the_kept_path(monkeypatch, tmp_path):
+def test_unset_policy_runs_greedy_by_default(monkeypatch):
+    """No STS2_OOC_POLICY in the environment = the greedy arm (default since the
+    2026-10-12 a1 A/B); greedy_action is stubbed so the test skips the 3 s import."""
     monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setattr(play_full_run, "_load_greedy_action", lambda: (lambda state: None))
+    result, _ = _run(monkeypatch, [{"type": "ready"}, _game_over()])
+    assert result["ooc_policy"] == "greedy"
+
+
+def test_keep_game_logs_copies_the_log_and_records_the_kept_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     # game_log.LOG_DIR is read at call time by GameLogger and cleanup_old_logs,
     # so pointing it at tmp_path keeps the test out of the real logs/.
     logs_dir = tmp_path / "logs"
@@ -225,7 +234,7 @@ def test_greedy_policy_answers_card_reward(monkeypatch):
 
 
 def test_naive_policy_never_loads_greedy(monkeypatch):
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
 
     def boom():
         raise AssertionError("naive policy must not import greedy_action")
@@ -479,7 +488,7 @@ def test_naive_arm_sends_exactly_naive_ooc_command(monkeypatch, state, expected)
 # ---- log copy / log collision ----
 
 def test_unwritable_keep_dir_costs_no_result(monkeypatch, tmp_path, capsys):
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     monkeypatch.setattr("game_log.LOG_DIR", str(tmp_path / "logs"))
     blocker = tmp_path / "not_a_dir"
     blocker.write_text("x")  # makedirs on an existing regular file raises OSError

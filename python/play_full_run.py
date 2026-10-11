@@ -158,8 +158,15 @@ def solver_call_timeout_s(budget_s: int) -> float:
 # agent.combat_env.greedy_action, the tuned policy the RL harness uses.
 # map_select (seeded random route) and combat_play (solver) are never
 # delegated, so an A/B between the two isolates the out-of-combat policy.
+# The default is "greedy" since the 2026-10-12 a1 paired A/B (inferrer on,
+# 40 seeds x 5 characters, naive -> greedy): Ironclad +8.71 floors (p=0.0004,
+# win 13%->58%), Defect +5.13 (p=0.011, win 25%->57.5%), Necrobinder +8.09
+# (p=0.0005, win 9%->46%), Regent +0.25 (p=0.93, win 16%->28%), Silent +1.93
+# (p=0.38, win 5%->7.5%); no character significantly worse. Record:
+# ~/.sts2-train/ab3_20261009_064743/analysis_final.txt. "naive" stays as the
+# control arm (STS2_OOC_POLICY=naive).
 OOC_POLICIES = ("naive", "greedy")
-OOC_POLICY_DEFAULT = "naive"
+OOC_POLICY_DEFAULT = "greedy"
 OOC_GREEDY_DECISIONS = frozenset({"card_reward", "rest_site", "event_choice",
                                   "bundle_select", "card_select", "shop"})
 # A greedy shop visit normally ends in a few buys and a leave_room; this cap

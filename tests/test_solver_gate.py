@@ -371,9 +371,16 @@ def test_result_row_falls_back_to_the_env_inferrer_for_unstamped_results(monkeyp
     assert row["solver_inferrer"] == "off"
 
 
-def _run_main(monkeypatch, played, argv=("1", "Ironclad")):
+def _run_main(monkeypatch, played, argv=("1", "Ironclad"), policy="naive"):
+    """policy=None leaves STS2_OOC_POLICY unset (= the default)."""
     monkeypatch.setattr(sys, "argv", ["play_full_run.py", *argv])
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    if policy is None:
+        monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+        # the default is greedy, whose lazy import main() does up front
+        monkeypatch.setattr(play_full_run, "_load_greedy_action",
+                            lambda: (lambda state: None))
+    else:
+        monkeypatch.setenv("STS2_OOC_POLICY", policy)
 
     def fake_play_run(seed, character, verbose=True, **kw):
         played.append(seed)
@@ -389,6 +396,14 @@ def test_main_header_names_the_inferrer(monkeypatch, capsys):
     _run_main(monkeypatch, [])
     header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
     assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on)"]
+
+
+def test_main_header_names_the_default_greedy_policy(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    _run_main(monkeypatch, [], policy=None)
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy greedy, "
                       "solver inferrer on)"]
 
 
@@ -503,7 +518,7 @@ def _run_solver(monkeypatch, script, seed="s1"):
     monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
     monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
     monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     result = play_full_run.play_run(seed, character="Ironclad", verbose=False, log=False)
     return result, [json.loads(line) for line in created[0].sent]
 
