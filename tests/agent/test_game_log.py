@@ -44,6 +44,7 @@ def test_header_written_with_run_context():
         "game_version_source": "cli",
         "evaluation_mode": "fixed",
         "scenario": "full_run",
+        "is_multiplayer": False,
         "capture_map": True,  # must never leak into the header
     }
     logger = game_log.GameLogger(
@@ -67,6 +68,7 @@ def test_header_written_with_run_context():
     assert header["game_version_source"] == "cli"
     assert header["evaluation_mode"] == "fixed"
     assert header["scenario"] == "full_run"
+    assert header["is_multiplayer"] is False  # False is a value, not "omit me"
     assert header["character"] == "Ironclad"
     assert header["seed"] == "seed-1"
     assert "capture_map" not in header
@@ -107,6 +109,7 @@ def test_missing_run_context_keys_are_omitted_not_null():
         "evaluation_mode",
         "scenario",
         "ascension",
+        "is_multiplayer",
     ):
         assert absent_key not in header
     assert None not in header.values()

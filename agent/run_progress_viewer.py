@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import gc
 import json
 import mimetypes
 import posixpath
@@ -1048,14 +1049,22 @@ _COHORT_RUNS_LIMIT = 512
 def _tree_version_sort_key(
     version: str | None,
     cohorts_by_version: dict[str | None, list[dict[str, Any]]],
-) -> tuple[bool, bool, float]:
-    """Newest cohort first within a version; the null-version bucket last."""
+) -> tuple[bool, float, bool, str]:
+    """Order version groups by their newest cohort, newest group first.
+
+    The null-version bucket is an ordinary group: every `play_full_run.py` log
+    carries no game version, so pinning that bucket last hid the newest
+    batches below older archived ones.  A group with no dated cohort at all
+    sorts after every dated one.  Ties (same newest `latest_at`, or no
+    `latest_at` at all) go to a versioned group before the null bucket, then to
+    the version string, so the order never depends on dict insertion order.
+    """
     cohorts = cohorts_by_version[version]
     latest_values = [
         cohort["latest_at"] for cohort in cohorts if cohort["latest_at"] is not None
     ]
     newest = max(latest_values) if latest_values else None
-    return (version is None, newest is None, -(newest or 0.0))
+    return (newest is None, -(newest or 0.0), version is None, version or "")
 
 
 def _build_cohort_tree(cohorts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1092,6 +1101,7 @@ def _build_cohort_tree(cohorts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                             "avg_global_floor": cohort.get("avg_global_floor"),
                             "valid_n": cohort.get("valid_n"),
                             "technical_count": cohort["technical_count"],
+                            "in_progress_count": cohort.get("in_progress_count", 0),
                             "latest_at": cohort["latest_at"],
                             "unarchived": bool(cohort.get("unarchived", False)),
                         }
@@ -1134,12 +1144,46 @@ def _cohort_run_row(record: Any) -> dict[str, Any]:
     }
 
 
+def _in_progress_run_row(run: Any) -> dict[str, Any]:
+    """A cohort run-list row for a game that is still being played.
+
+    Same keys as a finished row (so the table needs no special case) plus where
+    the player currently is.  ``status`` is always ``in_progress``.
+    """
+    global_floor = run.global_floor
+    run_id = run.run_id or None
+    ref = (
+        {"kind": "run", "id": run_id}
+        if run_id
+        else {"kind": "source", "id": run.source_id or None}
+    )
+    return {
+        "run_id": run_id,
+        "source_id": run.source_id or None,
+        "seed": run.seed,
+        "status": "in_progress",
+        "global_floor": global_floor,
+        "act": run.act,
+        "floor": run.floor,
+        "hp": run.hp,
+        "max_hp": run.max_hp,
+        "started_at": run.started_at,
+        "updated_at": run.updated_at,
+        "has_map": run.has_map,
+        "ref": ref,
+    }
+
+
 def _cohort_runs_payload(catalog: RunCatalog, cohort_id: str) -> dict[str, Any]:
-    records = catalog.get_cohort_records(cohort_id)
+    records, playing = catalog.get_cohort_runs(cohort_id)
     runs_complete = len(records) <= _COHORT_RUNS_LIMIT
+    # Games still being played come first, newest first, and do not count
+    # against the row limit: the finished rows are exactly what they were
+    # before in-progress games were listed.
     return {
         "cohort_id": cohort_id,
-        "runs": [_cohort_run_row(record) for record in records[:_COHORT_RUNS_LIMIT]],
+        "runs": [_in_progress_run_row(run) for run in playing]
+        + [_cohort_run_row(record) for record in records[:_COHORT_RUNS_LIMIT]],
         "runs_complete": runs_complete,
     }
 
@@ -1494,8 +1538,9 @@ def serve(
     )
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Run progress viewer: {url}", flush=True)
-    # Warm the catalog off the request path. Measured on a real logs/ tree,
-    # /api/cohorts is ~163s cold and 0.32s warm, and the page keeps its
+    # Warm the catalog off the request path. Measured on the real logs/ + data/
+    # trees (a 6 GB deck history, ~400k runs), /api/cohorts is minutes cold and
+    # a few seconds warm while logs grow, and the page keeps its
     # controls (including the single-record loader) disabled until that first
     # request returns — so without this a user opens the workbench to a dead UI
     # for over two minutes. Daemon thread: warming must not hold up shutdown,
@@ -1517,7 +1562,14 @@ def _warm_catalog(catalog) -> None:
     try:
         catalog._build_cohorts()
     except Exception:
-        pass
+        return
+    # The catalog now holds a few hundred thousand long-lived run summaries.
+    # Without this, every request that allocates (any cohort rebuild does) can
+    # trigger a full collection that walks all of them again -- about half of a
+    # rebuild at that size.  Freezing parks the startup heap outside the
+    # collector; reference counting still frees it when a source is replaced.
+    gc.collect()
+    gc.freeze()
 
 
 def main(argv: list[str] | None = None) -> int:

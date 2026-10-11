@@ -16,7 +16,7 @@
 
 ## Background (read first)
 
-- Game log format (`python/game_log.py`): JSONL; first line may be `{"type": "run_meta", "seed", "character", "ascension", "experiment", ...}`; then `{"step", "ts", "type": "action", "data": <command>}` and `{"step", "ts", "type": "state", "data": <engine reply>}` in send order. Engine replies include decisions (`data.type == "decision"`), errors (`type == "error"`), combat plans (`type == "combat_plan"`), and — in value-arm logs — maps (`type == "map"`). Only `type == "decision"` states are game states. The value arm tags its `run_meta` experiment `ooc=<policy>,route=value` (the random arm keeps exactly `ooc=<policy>`), which is how a refit recognises and skips them.
+- Game log format (`python/game_log.py`): JSONL; first line may be `{"type": "run_meta", "seed", "character", "ascension", "experiment", ...}`; then `{"step", "ts", "type": "action", "data": <command>}` and `{"step", "ts", "type": "state", "data": <engine reply>}` in send order. Engine replies include decisions (`data.type == "decision"`), errors (`type == "error"`), combat plans (`type == "combat_plan"`), and — in value-arm logs — maps (`type == "map"`). Only `type == "decision"` states are game states. The value arm tags its `run_meta` experiment `<batch>:ooc=<policy>,route=value` (the random arm keeps exactly play_full_run's `<batch>:ooc=<policy>`; `play_full_run.experiment_label(batch, policy, route)`), which is how a refit recognises and skips them.
 - A `map_select` decision: `data.choices = [{"col", "row", "type"}]` with `type` in `Monster | Elite | Unknown | Shop | RestSite | Treasure | Ancient | Boss`; `data.context = {"act", "floor", "room_type", "boss": {"id", "name"}}` (floor is ACT-LOCAL); `data.player = {"hp", "max_hp", "gold", "deck": [card], "relics": [relic], "potions": [potion], ...}`. Card: `{"id", "name", "type", "cost", "upgraded", ...}`. Relic: `{"name", "description", "vars"}` (no id). Potion: `{"index", "id", "name", ...}`.
 - The command that picks a node is the action `{"cmd": "action", "action": "select_map_node", "args": {"col", "row"}}`.
 - `game_over` decision: `data.victory`, `data.act`, `data.floor` (act-local), `data.player`.
@@ -267,7 +267,7 @@ In `python/play_full_run.py`:
 - `_load_route_planner()` imports `agent.route_planner` lazily (it pulls in `agent.card_scoring`); `_route_choose(map_reply, state, character, model)` calls its `choose_node` (the seam tests patch).
 - `main()`: under `value`, load the model once before any game (fail fast), import the planner too (fail fast on missing card data), and print `Route policy: value (model <path>, n_games <meta.n_games>, value <chosen>)`.
 - `play_run` wrapper: stats gain `route_policy`, `route_plans` (real decisions: >= 2 choices, planner pick accepted), `route_fallbacks`, `route_forced` (single-choice map_selects) and `route_cell_fallbacks` (rooms on the chosen paths of planned decisions whose cell resolved below the "act" level, summed); stamped on results and in `result_to_eval_row`.
-- GameLogger `run_context["experiment"]`: `ooc=<policy>` under `random` (unchanged, so random logs stay identical), `ooc=<policy>,route=value` under `value`.
+- GameLogger `run_context["experiment"]`: `<batch>:ooc=<policy>` under `random` (`experiment_label`, unchanged, so random logs stay identical), `<batch>:ooc=<policy>,route=value` under `value`.
 - `_play_run` map_select branch: **under `random` the existing code runs unchanged** (the random arm must stay bit-identical). Under `value`, a map_select with exactly one choice is a forced move: take it, do NOT send `get_map`, count `route_forced` (not `route_plans`). Otherwise:
   ```
   reply = send({"cmd": "get_map"})           # do NOT assign to `state`
@@ -292,7 +292,7 @@ In `python/play_full_run.py`:
 4. Planner raises / returns a node not in `choices` / `get_map` reply not a map → rng fallback, `route_fallbacks` counts it, run continues.
 5. The map reply does not replace `state`: the next command after the map is `select_map_node` with the pick.
 6. Summary line (with forced and cell-fallback counts, tolerating results that lack them) and both banners.
-7. run_meta experiment tag: `ooc=<policy>` under random (unchanged), `ooc=<policy>,route=value` under value.
+7. run_meta experiment tag: `<batch>:ooc=<policy>` under random (unchanged), `<batch>:ooc=<policy>,route=value` under value.
 8. `main()` under value also imports the planner (a failing import aborts before any game); under random it never imports it.
 
 Commit: `feat(play_full_run): STS2_ROUTE_POLICY=value routes by the fitted route model`.

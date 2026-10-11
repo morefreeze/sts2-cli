@@ -1069,3 +1069,138 @@ def test_legacy_viewer_reexports_the_package_parser():
 
     assert legacy_format_room_label is format_room_label
     assert legacy_parse_game_progress is parse_game_progress
+
+
+# --------------------------------------------------------------------------
+# The parser only copies what it reads (a logged state carries piles, card
+# text and solver replies it never looks at).  These pin that this changes
+# nothing observable: same output, input never mutated or aliased.
+
+
+def _bulky_entries() -> list[dict]:
+    combat = _state(
+        1,
+        "combat_play",
+        1,
+        1,
+        "Monster",
+        70,
+        round=1,
+        energy=3,
+        hand=[
+            {"index": 0, "id": "STRIKE", "name": "Strike", "cost": 1, "type": "Attack",
+             "description": "Deal 6 damage.", "keywords": ["x"]},
+        ],
+        enemies=[
+            {
+                "index": 0,
+                "name": "Dummy",
+                "hp": 12,
+                "max_hp": 12,
+                "intents": [{"type": "Attack", "damage": 3, "hits": 1}],
+                "powers": [{"name": "Strength", "amount": 1}],
+            }
+        ],
+    )
+    combat["data"]["player"].update(
+        {
+            "relics": [{"id": "R", "name": "Relic", "description": "text " * 50}],
+            "potions": [{"index": 0, "id": "P", "name": "Potion", "description": "t"}],
+            "deck": [
+                {"id": f"C{i}", "name": f"Card {i}", "type": "Attack",
+                 "upgraded": i % 2 == 0, "description": "d" * 80, "cost": i, "index": i}
+                for i in range(100)
+            ],
+        }
+    )
+    return [
+        {"step": 0, "ts": "t0", "type": "action",
+         "data": {"cmd": "start_run", "character": "Ironclad", "args": {"x": 1}}},
+        combat,
+        _action(2, "play_card", card_index=0, target_index=0),
+    ]
+
+
+_UNREAD_STATE_KEYS = ("draw_pile", "discard_pile", "exhaust_pile", "intent_forecast",
+                      "search", "player_powers", "actions", "score", "anything_else")
+
+
+def test_parse_game_progress_ignores_unread_state_keys_whatever_they_hold():
+    clean = _bulky_entries()
+    noisy = deepcopy(clean)
+    junk = [object(), float("nan"), (1, 2), {1, 2}, {"a": [object()], 5: "int key"}, 10**30]
+    for index, key in enumerate(_UNREAD_STATE_KEYS):
+        noisy[1]["data"][key] = junk[index % len(junk)]
+    noisy[1]["data"]["player"]["powers"] = [junk[0]]
+
+    assert parse_game_progress(noisy) == parse_game_progress(clean)
+
+
+def test_parse_game_progress_never_mutates_or_aliases_its_input():
+    entries = _bulky_entries()
+    before = deepcopy(entries)
+
+    progress = parse_game_progress(entries)
+    assert entries == before
+
+    def scribble(value):
+        if isinstance(value, dict):
+            for key in list(value):
+                scribble(value[key])
+            value["scribble"] = True
+        elif isinstance(value, list):
+            for item in value:
+                scribble(item)
+            value.append("scribble")
+
+    scribble(progress)
+    assert entries == before
+
+
+def test_parse_game_progress_keeps_only_the_read_fields_of_player_lists():
+    room = parse_game_progress(_bulky_entries())["rooms"][0]
+
+    deck = room["end_player"]["deck"]
+    assert len(deck) == 80
+    assert set(deck[0]) == {"id", "name", "type", "upgraded"}
+    assert deck[2] == {"id": "C2", "name": "Card 2", "type": "Attack", "upgraded": True}
+    assert room["end_player"]["relic_items"] == [{"id": "R", "name": "Relic"}]
+    turn = room["combat"]["turns"][0]
+    assert turn["enemies"][0]["intents"] == [{"type": "Attack", "damage": 3, "hits": 1}]
+    assert turn["enemies"][0]["powers"] == [{"name": "Strength", "amount": 1}]
+    assert room["combat"]["rounds"][0]["actions"][0]["action"]["action"] == "play_card"
+
+
+def test_parse_game_progress_player_with_only_unread_keys_is_not_treated_as_empty():
+    entry = {
+        "type": "state",
+        "data": {
+            "decision": "combat_play",
+            "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+            "player": {"powers": [{"id": "UNREAD"}]},
+        },
+    }
+
+    room = parse_game_progress([entry])["rooms"][0]
+
+    assert room["start_player"] != {}
+    assert room["start_player"]["name"] is None
+    assert room["start_player"]["deck"] == []
+
+
+@pytest.mark.parametrize("field", ["context", "player"])
+def test_parse_game_progress_treats_non_json_values_as_absent(field):
+    data = {
+        "decision": "combat_play",
+        "context": {"act": 1, "floor": 1, "room_type": "Monster"},
+        "player": {"hp": 5},
+    }
+    data[field] = (1, 2)  # not JSON-safe: dropped, not an error
+
+    progress = parse_game_progress([{"type": "state", "data": data}])
+
+    assert progress["summary"]["has_state_records"] is True
+    if field == "context":
+        assert progress["rooms"] == []
+    else:
+        assert progress["rooms"][0]["start_player"] == {}

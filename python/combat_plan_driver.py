@@ -209,7 +209,24 @@ def _apply_action_choices(send, cur, action):
 CAN_PLAY_REFUSAL_PREFIX = "Cannot play card "
 
 
-def _send_and_apply_choices(send, cur, action, action_name, index_key, idx, stats=None):
+def _note_stale_plan(stats, key, progressed):
+    """Count one stale-plan return in `stats` (a no-op when stats is None):
+    bumps stats[key] -- "stale_refusals" (live CanPlay refusal, BUG-042) or
+    "stale_unresolved" (card_id/potion_id missing from the live hand/potions,
+    Run 15 fix, counted since BUG-051) -- and, when no action of the plan
+    took effect before it (`progressed` False), stats["stale_no_progress"]
+    too. A no-progress plan leaves the live state exactly as it was, so the
+    solver is likely to return the very same plan again; that is the shape
+    that looped until the STUCK detector killed the run (BUG-051)."""
+    if stats is None:
+        return
+    stats[key] = stats.get(key, 0) + 1
+    if not progressed:
+        stats["stale_no_progress"] = stats.get("stale_no_progress", 0) + 1
+
+
+def _send_and_apply_choices(send, cur, action, action_name, index_key, idx, stats=None,
+                            progressed=True):
     """Shared post-resolution part of a play_card/use_potion plan action, run
     once the primary index (card_index/potion_index) has already been
     resolved by the caller. Resolves target_combat_id to a live target_index
@@ -224,7 +241,11 @@ def _send_and_apply_choices(send, cur, action, action_name, index_key, idx, stat
     was refused by the live CanPlay check, a stale plan: BUG-042, see
     _execute_combat_plan_actions). done=False means the target was no
     longer alive (skipped) and the caller's for-loop should continue to the
-    next planned action."""
+    next planned action.
+
+    `progressed` says whether an earlier action of the same plan already took
+    effect; it only decides whether a stale refusal here also counts as a
+    stale_no_progress plan (see _note_stale_plan)."""
     args = {index_key: idx}
     if "target_combat_id" in action:
         t_idx = _resolve_enemy_target_index(cur.get("enemies", []), action["target_combat_id"])
@@ -253,8 +274,7 @@ def _send_and_apply_choices(send, cur, action, action_name, index_key, idx, stat
                   f"{message} -- the solver's predicted state diverged from the live "
                   f"one (agent/bug.md BUG-042); stopping this plan and re-planning "
                   f"from the live state")
-            if stats is not None:
-                stats["stale_refusals"] = stats.get("stale_refusals", 0) + 1
+            _note_stale_plan(stats, "stale_refusals", progressed)
             return good, True, True
         print(f"  !! plan_combat_turn: {action_name} failed: {cur.get('message')}")
         return cur, False, True
@@ -355,8 +375,31 @@ def _execute_combat_plan_actions(send, state, actions, stats=None):
     turn that keeps refusing. Only a planned play_card's "Cannot play card "
     reply is relaxed -- "Card could not be played (still in hand after
     action)", target/potion errors and every other error stay ok=False.
+
+    Unresolved ids are counted too (BUG-051). The guard above only counted
+    live refusals, but a plan whose FIRST card_id is simply not in the live
+    hand sends nothing at all: the state is untouched, the solver sees the
+    same position and plans the same hand again, and the caller looped until
+    the outer STUCK detector killed the run (2 of 5 runs in the BUG-048
+    regression). So with `stats` given, an unresolved card_id/potion_id
+    bumps stats["stale_unresolved"] -- the caller counts it toward the same
+    per-turn limit as stats["stale_refusals"]. Either kind of stale return
+    that happens before any action of the plan took effect (nothing was
+    sent, or the only command sent was refused) also bumps
+    stats["stale_no_progress"], so the caller can tell an empty re-plan from
+    one that changed the state first. `stats` keys are only ever created by
+    these events, never by a plan that ran cleanly.
     """
     cur = state
+    applied = 0  # commands the live engine accepted so far; 0 = no progress yet
+
+    def counting_send(cmd):
+        nonlocal applied
+        reply = send(cmd)
+        if reply.get("type") != "error":
+            applied += 1
+        return reply
+
     for action in actions:
         kind = action.get("action")
         if kind == "play_card":
@@ -370,9 +413,11 @@ def _execute_combat_plan_actions(send, state, actions, stats=None):
                       f"didn't actually happen live; see Run 15 fix note above). "
                       f"Stopping this plan early and letting the caller re-plan from "
                       f"the current live state.")
+                _note_stale_plan(stats, "stale_unresolved", applied > 0)
                 return cur, True
             cur, ok, done = _send_and_apply_choices(
-                send, cur, action, "play_card", "card_index", idx, stats=stats)
+                counting_send, cur, action, "play_card", "card_index", idx, stats=stats,
+                progressed=applied > 0)
             if done:
                 return cur, ok
         elif kind == "use_potion":
@@ -384,9 +429,10 @@ def _execute_combat_plan_actions(send, state, actions, stats=None):
                       f"live potions {[p.get('id') for p in potions]} -- the plan has gone "
                       f"stale (see Run 15 fix note above). Stopping this plan early and "
                       f"letting the caller re-plan from the current live state.")
+                _note_stale_plan(stats, "stale_unresolved", applied > 0)
                 return cur, True
             cur, ok, done = _send_and_apply_choices(
-                send, cur, action, "use_potion", "potion_index", idx)
+                counting_send, cur, action, "use_potion", "potion_index", idx)
             if done:
                 return cur, ok
         elif kind == "end_turn":

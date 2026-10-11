@@ -371,10 +371,17 @@ def test_result_row_falls_back_to_the_env_inferrer_for_unstamped_results(monkeyp
     assert row["solver_inferrer"] == "off"
 
 
-def _run_main(monkeypatch, played, argv=("1", "Ironclad")):
+def _run_main(monkeypatch, played, argv=("1", "Ironclad"), policy="naive"):
+    """policy=None leaves STS2_OOC_POLICY unset (= the default)."""
     monkeypatch.setattr(sys, "argv", ["play_full_run.py", *argv])
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
     monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
+    if policy is None:
+        monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+        # the default is greedy, whose lazy import main() does up front
+        monkeypatch.setattr(play_full_run, "_load_greedy_action",
+                            lambda: (lambda state: None))
+    else:
+        monkeypatch.setenv("STS2_OOC_POLICY", policy)
 
     def fake_play_run(seed, character, verbose=True, **kw):
         played.append(seed)
@@ -393,6 +400,14 @@ def test_main_header_names_the_inferrer(monkeypatch, capsys):
                       "solver inferrer on, route policy random)"]
 
 
+def test_main_header_names_the_default_greedy_policy(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    _run_main(monkeypatch, [], policy=None)
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy greedy, "
+                      "solver inferrer on, route policy random)"]
+
+
 def test_main_header_names_an_off_inferrer(monkeypatch, capsys):
     monkeypatch.setenv("STS2_SOLVER_INFERRER", "OFF")
     _run_main(monkeypatch, [])
@@ -406,6 +421,48 @@ def test_main_rejects_a_bad_inferrer_before_any_game(monkeypatch):
     with pytest.raises(ValueError, match="STS2_SOLVER_INFERRER"):
         _run_main(monkeypatch, played)
     assert played == []
+
+
+def test_main_default_seed_offset_plays_prefix_1_to_n_with_the_unchanged_header(
+        monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    played = []
+    _run_main(monkeypatch, played, argv=("3", "Ironclad", "--seed-prefix", "p_"))
+    assert played == ["p_1", "p_2", "p_3"]
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 3 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on, route policy random)"]
+
+
+def test_main_explicit_zero_seed_offset_is_the_default(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    played = []
+    _run_main(monkeypatch, played,
+              argv=("2", "Ironclad", "--seed-prefix", "p_", "--seed-offset", "0"))
+    assert played == ["p_1", "p_2"]
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 2 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on, route policy random)"]
+
+
+def test_main_seed_offset_shifts_the_seed_range(monkeypatch, capsys):
+    monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
+    played = []
+    _run_main(monkeypatch, played,
+              argv=("2", "Ironclad", "--seed-prefix", "p_", "--seed-offset", "20"))
+    assert played == ["p_21", "p_22"]
+    header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
+    assert header == ["Playing 2 runs as Ironclad (ascension 0, ooc policy naive, "
+                      "solver inferrer on, route policy random, seeds p_21..p_22)"]
+
+
+def test_main_rejects_a_negative_seed_offset_before_any_game(monkeypatch, capsys):
+    played = []
+    with pytest.raises(SystemExit):
+        _run_main(monkeypatch, played,
+                  argv=("2", "Ironclad", "--seed-offset", "-1"))
+    assert played == []
+    assert "--seed-offset must be >= 0" in capsys.readouterr().err
 
 
 def test_summarize_labels_a_hang_as_hang_and_not_completed():
@@ -462,7 +519,7 @@ def _run_solver(monkeypatch, script, seed="s1"):
     monkeypatch.delenv("STS2_SOLVER_CHARS", raising=False)
     monkeypatch.delenv("STS2_SOLVER_BUDGET", raising=False)
     monkeypatch.delenv("STS2_SOLVER_INFERRER", raising=False)
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     result = play_full_run.play_run(seed, character="Ironclad", verbose=False, log=False)
     return result, [json.loads(line) for line in created[0].sent]
 
@@ -557,6 +614,7 @@ def test_plan_execution_failure_reports_act_and_floor_from_the_last_decision(mon
 def test_results_stamp_the_new_counters_even_without_combat(monkeypatch):
     result, _ = _run_solver(monkeypatch, [{"type": "ready"}, GAME_OVER])
     assert result["solver_stale_refusals"] == 0 and result["solver_turn_fallbacks"] == 0
+    assert result["solver_stale_unresolved"] == 0
 
 
 def test_eval_row_carries_the_stale_refusal_counters():
@@ -574,3 +632,177 @@ def test_summarize_reports_stale_refusals_and_turn_fallbacks():
     # The start of the line is what tests and greps match; the new counts follow it.
     assert ("Solver engagement: 85/87 plan_combat_turn calls returned a usable plan, "
             "7 stale-plan refusals re-planned, 1 turns fell back to the heuristic") in out
+
+
+# --- BUG-051: unresolved-card stale plans count toward the same per-turn guard --
+
+def test_four_unresolved_card_plans_in_one_turn_hand_the_turn_to_the_heuristic(
+        monkeypatch, capsys):
+    # The regression_naive.log shape: the solver's hand never contains the card
+    # the live hand has, so every plan names a card that is not there. The
+    # driver sends NOTHING for such a plan (no replies are scripted for it) and
+    # the state never changes -- before BUG-051 this looped until the STUCK
+    # detector ended the run (timeout), because only live refusals were counted.
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand]
+    for _ in range(4):
+        script += [_plan(_play("STRIKE"), END)]   # STRIKE is not in the live hand
+    script += [
+        _combat([], energy=0),   # heuristic play_card (index 0) succeeds
+        GAME_OVER,               # heuristic end_turn: empty hand, nothing to play
+    ]
+    result, sent = _run_solver(monkeypatch, script)
+    acts = _actions(sent)
+    # The guard is "more than 3": the 4th stale return trips it, so exactly 4
+    # plans are requested and the 5th loop iteration goes to the heuristic.
+    assert acts.count("plan_combat_turn") == 4, "the 5th plan must not be requested"
+    assert acts[-2:] == ["play_card", "end_turn"]
+    assert "timeout" not in result and "error" not in result
+    assert (result["act"], result["floor"]) == (2, 6)
+    assert result["solver_stale_unresolved"] == 4
+    assert result["solver_stale_refusals"] == 0
+    assert result["solver_turn_fallbacks"] == 1   # one turn, however many heuristic steps
+    out = capsys.readouterr().out
+    assert out.count("plan_combat_turn refused 4 times this turn -- "
+                     "heuristic for the rest of the turn") == 1
+    assert "0 live refusals, 4 unresolved-card plans, 4 made no progress" in out
+
+
+def test_three_unresolved_card_plans_still_allow_another_plan(monkeypatch):
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand]
+    for _ in range(3):
+        script += [_plan(_play("STRIKE"), END)]
+    script += [_plan(END), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert _actions(sent).count("plan_combat_turn") == 4
+    assert result["solver_stale_unresolved"] == 3 and result["solver_turn_fallbacks"] == 0
+
+
+def test_live_refusals_and_unresolved_cards_share_one_per_turn_limit(monkeypatch):
+    # 2 live refusals + 2 unresolved ids = 4 stale returns > 3: the guard counts
+    # EVERY kind toward the same limit, not each kind against its own.
+    hand = _combat(["BODYGUARD"])
+    script = [{"type": "ready"}, hand,
+              _plan(_play("BODYGUARD"), END), REFUSAL,
+              _plan(_play("STRIKE"), END),
+              _plan(_play("BODYGUARD"), END), REFUSAL,
+              _plan(_play("STRIKE"), END),
+              _combat([], energy=0), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert _actions(sent).count("plan_combat_turn") == 4
+    assert result["solver_stale_refusals"] == 2
+    assert result["solver_stale_unresolved"] == 2
+    assert result["solver_turn_fallbacks"] == 1
+
+
+def test_the_unresolved_card_budget_resets_on_the_next_turn(monkeypatch):
+    turn1 = _combat(["BODYGUARD"], round_=1)
+    turn2 = _combat(["BODYGUARD"], round_=2)
+    script = [{"type": "ready"}, turn1]
+    for _ in range(3):
+        script += [_plan(_play("STRIKE"), END)]
+    script += [_plan(END), turn2]                     # turn 1 ends after 3 stale plans
+    for _ in range(3):
+        script += [_plan(_play("STRIKE"), END)]
+    script += [_plan(END), GAME_OVER]
+    result, sent = _run_solver(monkeypatch, script)
+    assert result["solver_stale_unresolved"] == 6 and result["solver_turn_fallbacks"] == 0
+    assert _actions(sent).count("plan_combat_turn") == 8
+
+
+def test_eval_row_carries_the_unresolved_card_counter():
+    row = play_full_run.result_to_eval_row(
+        {"victory": False, "seed": "s", "act": 1, "floor": 9,
+         "solver_stale_unresolved": 6}, "Ironclad")
+    assert row["solver_stale_unresolved"] == 6
+
+
+def test_summarize_reports_unresolved_card_replans():
+    results = [dict(_result("s1", 40, 0), solver_stale_refusals=3, solver_turn_fallbacks=1,
+                    solver_stale_unresolved=2),
+               dict(_result("s2", 35, 2), solver_stale_refusals=4, solver_stale_unresolved=5),
+               _result("s3", 10, 0)]   # a row from before the counter existed counts as 0
+    out = play_full_run.summarize(results, 3, character="Silent", solver_chars={"Silent"})
+    # The beginning of the line is unchanged (BUG-042 tests and greps match it);
+    # the new count is appended.
+    assert ("Solver engagement: 85/87 plan_combat_turn calls returned a usable plan, "
+            "7 stale-plan refusals re-planned, 1 turns fell back to the heuristic, "
+            "7 unresolved-card re-plans") in out
+
+
+# --- BUG-053: an engine-forced game_over is a technical failure, not a death ----
+#
+# The engine's "nuclear fallback" ends a run whose turn loop never resumed with
+# GameOverState(false) TAGGED technical_failure_kind, precisely so evaluations
+# can exclude it. play_full_run used to treat every game_over as a finished
+# game: Completed, status "dead", floor averaged in.
+
+MAP = {"type": "decision", "decision": "map_select", "choices": [{"col": 0, "row": 1}]}
+
+
+def _game_over(**extra):
+    state = {"type": "decision", "decision": "game_over", "victory": False, "act": 2, "floor": 6,
+             "player": {"hp": 31, "max_hp": 80, "gold": 12, "deck_size": 11}}
+    state.update(extra)
+    return state
+
+
+def _play_game_over(monkeypatch, state):
+    result, _ = _run_solver(monkeypatch, [{"type": "ready"}, MAP, state])
+    return result
+
+
+def test_forced_game_over_is_a_technical_result_not_a_defeat(monkeypatch):
+    result = _play_game_over(monkeypatch, _game_over(technical_failure_kind="stuck"))
+    assert result["victory"] is False
+    assert result["error"] == "engine_stuck: forced game_over"
+    assert result["technical_failure_kind"] == "stuck"
+    # where the run was when the engine gave up is kept (act/floor/hp/max_hp)
+    assert (result["act"], result["floor"], result["hp"], result["max_hp"]) == (2, 6, 31, 80)
+    assert not result.get("timeout") and not result.get("hang")
+
+
+def test_forced_game_over_maps_to_eval_status_stuck(monkeypatch):
+    row = play_full_run.result_to_eval_row(
+        _play_game_over(monkeypatch, _game_over(technical_failure_kind="stuck")), "Regent")
+    assert row["status"] == "stuck"          # in eval_rl's technical set: paired_eval drops the seed
+    assert row["floor"] == 17 + 6            # still the GLOBAL floor of where it stalled
+    assert row["character"] == "Regent"
+
+
+@pytest.mark.parametrize("kind, status", [("stuck", "stuck"), ("crash", "crash"), ("timeout", "timeout"),
+                                          ("invalid", "invalid"), ("never-heard-of-it", "invalid")])
+def test_forced_game_over_kinds_map_onto_technical_statuses(monkeypatch, kind, status):
+    row = play_full_run.result_to_eval_row(
+        _play_game_over(monkeypatch, _game_over(technical_failure_kind=kind)), "Silent")
+    assert row["status"] == status
+
+
+def test_summarize_labels_a_forced_game_over_and_does_not_count_it_completed(monkeypatch):
+    forced = _play_game_over(monkeypatch, _game_over(technical_failure_kind="stuck"))
+    ordinary = _play_game_over(monkeypatch, _game_over())
+    out = play_full_run.summarize([forced, ordinary], 2, character="Ironclad", solver_chars=set())
+    assert "Run 1: ENGINE-STUCK" in out
+    assert "error=engine_stuck: forced game_over" in out
+    assert "Run 2: LOSS" in out
+    assert "Completed: 1/2" in out           # only the ordinary defeat completed
+    assert "1 run(s) ended in an engine-forced game_over" in out and "NOT losses" in out
+    # a batch with no forced game_over prints no banner at all
+    clean = play_full_run.summarize([ordinary], 1, character="Ironclad", solver_chars=set())
+    assert "engine-forced" not in clean and "Completed: 1/1" in clean
+
+
+def test_an_ordinary_game_over_is_unaffected(monkeypatch):
+    result = _play_game_over(monkeypatch, _game_over())
+    assert "error" not in result and "technical_failure_kind" not in result
+    assert play_full_run.result_to_eval_row(result, "Ironclad")["status"] == "dead"
+    assert play_full_run.result_to_eval_row(
+        _play_game_over(monkeypatch, _game_over(victory=True, act=3, floor=17)), "Ironclad")["status"] == "win"
+
+
+@pytest.mark.parametrize("blank", ["", None])
+def test_an_empty_technical_failure_kind_is_an_ordinary_defeat(monkeypatch, blank):
+    result = _play_game_over(monkeypatch, _game_over(technical_failure_kind=blank))
+    assert "error" not in result
+    assert play_full_run.result_to_eval_row(result, "Ironclad")["status"] == "dead"

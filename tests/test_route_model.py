@@ -624,6 +624,24 @@ def test_cli_skips_value_policy_logs_unless_allowed(tmp_path, capsys, _fake_card
     assert "Skipped" not in capsys.readouterr().out
 
 
+def test_value_log_filter_follows_the_harness_experiment_label():
+    """play_full_run's experiment tag is `<batch>:ooc=<policy>`, plus `,route=value`
+    under the value route policy; the fit CLI must skip exactly those logs."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
+    import play_full_run
+    from agent.fit_route_model import is_value_log
+
+    for batch in ("run", "a1_val", None):
+        for policy in ("naive", "greedy"):
+            random_arm = play_full_run.experiment_label(batch, policy, "random")
+            value_arm = play_full_run.experiment_label(batch, policy, "value")
+            assert "route=value" not in random_arm
+            assert value_arm == random_arm + ",route=value"
+            assert not is_value_log({"experiment": random_arm})
+            assert is_value_log({"experiment": value_arm})
+
+
 def test_cli_dedupes_the_same_run_seen_through_two_log_specs(tmp_path, capsys, _fake_card_data):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()

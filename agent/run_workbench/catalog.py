@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+import gc
 from hashlib import sha256
 import json
 import math
+import operator
 from pathlib import Path
 import re
 import stat as stat_module
 from threading import RLock
-from typing import Any, Callable, Iterable
+import time
+from types import SimpleNamespace
+from typing import Any, Callable, Iterable, Sequence
 
 from agent.run_metadata import (
     MAX_RUN_ID_LENGTH,
@@ -21,8 +25,9 @@ from agent.run_metadata import (
 )
 
 from .adapters import AdaptedSource, adapt_records
-from .joiner import join_records
+from .joiner import _plausibly_overlap, join_records
 from .metrics import (
+    CohortSummary,
     compare_cohorts,
     describe_comparison_readiness,
     summarize_cohort,
@@ -42,6 +47,18 @@ from .sources import SourceDescriptor, SourceFormatError, classify_records, read
 
 
 SUPPORTED_SUFFIXES = frozenset({".run", ".json", ".jsonl"})
+# A single-run replay log that has no terminal state yet counts as an
+# in-progress game (not as an anonymous unfinished source) only while its file
+# is still being written: modified within this many seconds of "now".  An
+# unfinished log older than that keeps the classification it always had.
+IN_PROGRESS_STALE_SECONDS = 30 * 60
+# A replay log that was still unfinished when it was last indexed and has
+# changed since is re-indexed at most this often.  Indexing parses the whole
+# file, and a running experiment appends to every live log continuously, so
+# without a floor each request re-parses several tens of MB per log.  A
+# finished source that changes, and a source seen for the first time, are
+# always indexed straight away.
+REINDEX_MIN_INTERVAL_SECONDS = 60.0
 INDEX_RECORD_LIMIT = 512
 COHORT_ID_SAMPLE_LIMIT = 100
 SOURCE_REF_LIMIT = 32
@@ -107,6 +124,8 @@ class _IndexedSource:
     deck_outcomes: tuple["_CompactRun", ...]
     run_ids: tuple[str, ...]
     cache_key: tuple[Path, int, int]
+    # Catalog clock reading when indexing finished (see `_reindex_deferred`).
+    indexed_at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -171,6 +190,9 @@ class _CompactRun:
     observed_max_floor_label: str | None = None
     outcome_max_floor: int | None = None
     latest_timestamp: float | None = None
+    # (act, act-local floor, hp, max_hp) of the newest replay state row seen;
+    # only ever read for a game that is still being played.
+    live_state: tuple[int | None, int | None, int | None, int | None] | None = None
     has_outcome: bool = False
     has_floor: bool = False
     has_card_pick: bool = False
@@ -314,9 +336,99 @@ class _JsonlScan:
     deck_outcomes: tuple[_CompactRun, ...]
     errors: tuple[str, ...]
     error_count: int
+    # Every record of the file, in order, kept only while the file still looks
+    # like a replay (see `_scan_jsonl_index`); lets `_normalize_incomplete_replay`
+    # skip re-reading and re-parsing a file the scan has just parsed.
+    replay_records: list[dict[str, Any]] | None = None
 
 
 _CohortItem = RunRecord | _CompactRun
+
+
+@dataclass(frozen=True)
+class InProgressRun:
+    """What a cohort's run list shows for a game that is still being played."""
+
+    run_id: str
+    source_id: str
+    seed: str | None
+    started_at: float | None
+    # When its log was last written to.
+    updated_at: float | None
+    # Furthest global floor, and where the newest state row puts the player.
+    global_floor: int | None
+    act: int | None
+    floor: int | None
+    hp: int | None
+    max_hp: int | None
+    has_map: bool
+
+
+@dataclass(frozen=True)
+class _CohortMemo:
+    """The descriptor computed for one cohort, valid while its members are the
+    very same objects (compact runs and joined records are never mutated)."""
+
+    members: tuple[_CohortItem, ...]
+    ordered: tuple[_CohortItem, ...]
+    descriptor: dict[str, Any]
+    summary: CohortSummary
+
+
+class _IdentityMemo:
+    """Remember a pure function of a tuple of objects, keyed by object identity.
+
+    Entries hold their arguments, so an object cannot be collected and have its
+    id reused while its entry lives, and a hit is confirmed with ``is``.  A new
+    memo is built from the previous one on every cohort build and keeps only
+    the entries that build used, so it never grows past one build's worth.
+    """
+
+    def __init__(
+        self,
+        previous: dict[tuple[int, ...], tuple[tuple[Any, ...], Any]],
+        previous_joined: Sequence[RunRecord] = (),
+    ) -> None:
+        self._previous = previous
+        self._previous_joined = previous_joined
+        self.entries: dict[tuple[int, ...], tuple[tuple[Any, ...], Any]] = {}
+        self.joined: list[RunRecord] = []
+
+    def reuse_equal(self, records: Sequence[RunRecord]) -> list[RunRecord]:
+        """Swap each freshly joined record for an equal one from last build.
+
+        ``join_records`` returns new objects for everything it is given, so
+        when one run-id-less source grows every record it touches would look
+        changed.  Handing back the previous object for each record whose
+        content is unchanged keeps unaffected cohorts recognisable.
+        """
+        available: dict[tuple[str, str], list[RunRecord]] = {}
+        for old in self._previous_joined:
+            available.setdefault((old.run_id, old.source_id), []).append(old)
+        result: list[RunRecord] = []
+        for new in records:
+            candidates = available.get((new.run_id, new.source_id), [])
+            for index, old in enumerate(candidates):
+                # `==` skips the two derived fields marked compare=False, and
+                # metrics read `comparison_conflicts`.
+                if (
+                    old == new
+                    and old.comparison_conflicts == new.comparison_conflicts
+                    and old._node_provenance_index == new._node_provenance_index
+                ):
+                    del candidates[index]
+                    new = old
+                    break
+            result.append(new)
+        return result
+
+    def get(self, items: Sequence[Any], compute: Callable[[], Any]) -> Any:
+        key = tuple(map(id, items))
+        entry = self._previous.get(key)
+        if entry is None or not all(map(operator.is_, entry[0], items)):
+            entry = (tuple(items), compute())
+        self.entries[key] = entry
+        return entry[1]
 
 
 class RunCatalog:
@@ -328,18 +440,38 @@ class RunCatalog:
         replay_parser: Callable[[list[dict], str | None], dict] | None = None,
         *,
         include_policy: str = "all",
+        in_progress_window: float | None = IN_PROGRESS_STALE_SECONDS,
+        clock: Callable[[], float] = time.time,
+        reindex_min_interval: float | None = REINDEX_MIN_INTERVAL_SECONDS,
     ) -> None:
         if include_policy not in {"all", "workbench"}:
             raise ValueError("include_policy must be 'all' or 'workbench'")
         self.roots = tuple(sorted({Path(root).resolve() for root in roots}, key=str))
         self.replay_parser = replay_parser
         self.include_policy = include_policy
+        # `None` switches in-progress detection off altogether.
+        self.in_progress_window = in_progress_window
+        self._clock = clock
+        # `None` (or 0) re-indexes every changed source on every request.
+        self.reindex_min_interval = reindex_min_interval
         self._sources: dict[str, _IndexedSource] = {}
         self._run_sources: dict[str, tuple[str, ...]] = {}
         self._adapt_cache: dict[tuple[Path, int, int], AdaptedSource] = {}
+        # Per-source public records for cohort building, so an unchanged
+        # source hands `_build_cohorts` the very same objects every time (which
+        # is what lets `_cohort_memo` recognise an unchanged cohort).
+        self._cohort_source_records: dict[
+            tuple[Path, int, int], tuple[RunRecord, ...]
+        ] = {}
+        self._cohort_memo: dict[str, _CohortMemo] = {}
+        self._join_memo: dict[tuple[int, ...], tuple[tuple[Any, ...], Any]] = {}
+        self._joined_records: list[RunRecord] = []
         self._cohort_records: dict[str, tuple[_CohortItem, ...]] = {}
+        # Games still being played, per cohort: never part of `_cohort_records`
+        # (which feeds every statistic), only of the cohort's run list.
+        self._cohort_in_progress: dict[str, tuple[_CohortItem, ...]] = {}
         self._cohort_descriptors: list[dict[str, Any]] = []
-        self._cohort_cache_key: tuple[tuple[Path, int, int], ...] | None = None
+        self._cohort_cache_key: tuple[Any, ...] | None = None
         self._lock = RLock()
 
     def list_sources(self) -> list[dict[str, Any]]:
@@ -453,12 +585,16 @@ class RunCatalog:
             if len(merged) != 1:
                 raise CatalogError(f"ambiguous run id: {run_id}")
             payload = _scrub_paths(merged[0].to_dict(), path_ids)
-            return {
+            result = {
                 "view": "run",
                 "run": payload,
                 "sources": sorted(sources, key=lambda item: item["source_id"]),
                 "errors": _scrub_paths(list(dict.fromkeys(errors)), path_ids),
             }
+            self._mark_live(
+                result, merged[0], [self._sources[sid] for sid in candidate_ids]
+            )
+            return result
 
     def get_run_by_source(self, source_id: str) -> dict[str, Any]:
         """Resolve the one canonical run in a source that has no usable run
@@ -522,22 +658,115 @@ class RunCatalog:
                 )
             redactions = _source_redactions(source)
             payload = _scrub_paths(records[0].to_dict(), redactions)
-            return {
+            result = {
                 "view": "run",
                 "run": payload,
                 "sources": [deepcopy(source.entry)],
                 "errors": _scrub_paths(list(dict.fromkeys(errors)), redactions),
             }
+            self._mark_live(result, records[0], [source])
+            return result
+
+    def _mark_live(
+        self,
+        result: dict[str, Any],
+        record: RunRecord,
+        sources: Sequence[_IndexedSource],
+    ) -> None:
+        """Say whether a run with no end is still being written to.
+
+        Only an in-progress run gets the key, so the payload of a
+        finished run is exactly what it always was.  A viewer that polls an
+        unfinished run stops when ``live`` turns false: the log has not been
+        written to for longer than the in-progress window.
+        """
+
+        if record.outcome.status is RunStatus.IN_PROGRESS:
+            result["live"] = any(self._is_live_source(source) for source in sources)
 
     def list_cohorts(self) -> list[dict[str, Any]]:
         with self._lock:
-            descriptors = self._build_cohorts()
-            return deepcopy(descriptors)
+            # `_build_cohorts` already returns a private deep copy.
+            return self._build_cohorts()
 
     def get_cohort_records(self, cohort_id: str) -> tuple[RunRecord, ...]:
         with self._lock:
             self._build_cohorts()
             return tuple(self._iter_cohort_records(self._cohort_items_for_id(cohort_id)))
+
+    def get_cohort_runs(
+        self, cohort_id: str
+    ) -> tuple[tuple[RunRecord, ...], tuple[InProgressRun, ...]]:
+        """A cohort's finished runs and its games still being played.
+
+        One snapshot of the catalog for both.  The games under way are the
+        cohort's members but never part of its statistics: they are not in the
+        records (nor in `get_metrics`), and are listed most recently started
+        first.
+        """
+
+        with self._lock:
+            self._build_cohorts()
+            finished = tuple(
+                self._iter_cohort_records(self._cohort_items_for_id(cohort_id))
+            )
+            playing = [
+                self._in_progress_run(item)
+                for item in self._cohort_in_progress.get(cohort_id, ())
+            ]
+        playing.sort(
+            key=lambda row: (
+                row.started_at is None,
+                -(row.started_at or 0.0),
+                -(row.updated_at or 0.0),
+                row.source_id,
+            )
+        )
+        return finished, tuple(playing)
+
+    def get_cohort_in_progress(self, cohort_id: str) -> tuple[InProgressRun, ...]:
+        """Only the games still being played, most recently started first."""
+
+        return self.get_cohort_runs(cohort_id)[1]
+
+    def _in_progress_run(self, item: _CohortItem) -> InProgressRun:
+        if isinstance(item, _CompactRun):
+            compact = item
+            record = item.to_record()
+        else:
+            record = item
+            compact = None
+        source = self._sources.get(record.source_id)
+        if compact is None and source is not None and source.deck_outcomes:
+            # A small replay is adapted, but the index scan has already noted
+            # where its newest state row put the player.
+            compact = source.deck_outcomes[0]
+        live = compact.live_state if compact is not None else None
+        act, floor, hp, max_hp = live if live is not None else (None, None, None, None)
+        global_floor = record.outcome.max_global_floor
+        if global_floor is None and act is not None and floor is not None and act > 0:
+            global_floor = (act - 1) * 17 + floor
+        if (
+            isinstance(global_floor, int)
+            and not isinstance(global_floor, bool)
+            and global_floor > 0
+        ):
+            if act is None or floor is None:
+                act = (global_floor - 1) // 17 + 1
+                floor = (global_floor - 1) % 17 + 1
+        return InProgressRun(
+            run_id=_safe_run_id(record.run_id) or "",
+            source_id=record.source_id,
+            seed=record.metadata.seed,
+            started_at=record.metadata.started_at,
+            updated_at=source.entry["mtime"] if source is not None else None,
+            global_floor=global_floor,
+            act=act,
+            floor=floor,
+            hp=hp,
+            max_hp=max_hp,
+            has_map=bool(record.capabilities.visited_route),
+        )
 
     def get_metrics(
         self, current_id: str, baseline_id: str | None = None
@@ -549,19 +778,18 @@ class RunCatalog:
             baseline_summary = None
             if baseline_id is not None:
                 baseline = self._cohort_items_for_id(baseline_id)
-                baseline_summary = summarize_cohort(
-                    self._iter_cohort_records(baseline)
-                ).to_dict()
+                # `_build_cohorts` already summarized these exact members with
+                # this exact function; the summary is frozen, so reuse it
+                # instead of copying every run of the cohort again.
+                baseline_summary = self._cohort_memo[baseline_id].summary.to_dict()
                 comparison = compare_cohorts(
-                    self._iter_cohort_records(current),
-                    self._iter_cohort_records(baseline),
+                    self._iter_metric_records(current),
+                    self._iter_metric_records(baseline),
                 ).to_dict()
             return {
                 "current_cohort_id": current_id,
                 "baseline_cohort_id": baseline_id,
-                "current": summarize_cohort(
-                    self._iter_cohort_records(current)
-                ).to_dict(),
+                "current": self._cohort_memo[current_id].summary.to_dict(),
                 "baseline": baseline_summary,
                 "comparison": comparison,
             }
@@ -575,11 +803,24 @@ class RunCatalog:
     def _iter_cohort_records(
         self, items: Iterable[_CohortItem]
     ) -> Iterable[RunRecord]:
+        """Private copies, for callers that keep or modify what they get."""
         for item in items:
             if isinstance(item, _CompactRun):
                 yield item.to_record()
             else:
                 yield deepcopy(item)
+
+    def _iter_metric_records(
+        self, items: Iterable[_CohortItem]
+    ) -> Iterable[RunRecord]:
+        """The same records without copying the stored ones.
+
+        Only for the metrics helpers, which read a record's metadata, outcome
+        and conflicts and never write to it; copying every node and replay of
+        every run for them was most of a metrics call.
+        """
+        for item in items:
+            yield item.to_record() if isinstance(item, _CompactRun) else item
 
     def parse_upload(self, source_name: str, text: str) -> dict[str, Any]:
         with self._lock:
@@ -637,24 +878,41 @@ class RunCatalog:
     def _refresh(self) -> None:
         discovered = self._discover()
         indexed: dict[str, _IndexedSource] = {}
-        run_sources: dict[str, list[str]] = {}
-        for root, path in discovered:
-            try:
-                file_stat = path.stat()
-                if not stat_module.S_ISREG(file_stat.st_mode):
+        reindexed = False
+        # Indexing allocates millions of long-lived objects (a cold build holds
+        # ~1 GB of them).  Left on, the cyclic collector re-walks the growing
+        # heap a hundred times -- about a fifth of the build -- to free
+        # nothing, because none of it is garbage.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for root, path in discovered:
+                try:
+                    file_stat = path.stat()
+                    if not stat_module.S_ISREG(file_stat.st_mode):
+                        continue
+                    relative = path.relative_to(root).as_posix()
+                    source_id = _source_id(root, relative)
+                    cache_key = (path, file_stat.st_mtime_ns, file_stat.st_size)
+                    previous = self._sources.get(source_id)
+                    if previous is not None and (
+                        previous.cache_key == cache_key
+                        or self._reindex_deferred(previous)
+                    ):
+                        source = previous
+                    else:
+                        source = self._index_source(root, path, file_stat)
+                        reindexed = True
+                except OSError:
                     continue
-                relative = path.relative_to(root).as_posix()
-                source_id = _source_id(root, relative)
-                cache_key = (path, file_stat.st_mtime_ns, file_stat.st_size)
-                previous = self._sources.get(source_id)
-                source = (
-                    previous
-                    if previous is not None and previous.cache_key == cache_key
-                    else self._index_source(root, path, file_stat)
-                )
-            except OSError:
-                continue
-            indexed[source.source_id] = source
+                indexed[source.source_id] = source
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+        if not reindexed and indexed.keys() == self._sources.keys():
+            return  # every source is the one already indexed
+        run_sources: dict[str, list[str]] = {}
+        for source in indexed.values():
             if source.entry["open_mode"] == "run":
                 for run_id in source.run_ids:
                     run_sources.setdefault(run_id, []).append(source.source_id)
@@ -669,6 +927,35 @@ class RunCatalog:
             for key, adapted in self._adapt_cache.items()
             if key in live_cache_keys
         }
+        self._cohort_source_records = {
+            key: public
+            for key, public in self._cohort_source_records.items()
+            if key in live_cache_keys
+        }
+
+    def _reindex_deferred(self, previous: _IndexedSource) -> bool:
+        """Whether a changed source keeps its current index for now.
+
+        Only a replay log that looked unfinished when it was indexed -- a game
+        under way, whose file grows all the time -- waits; it is re-indexed once
+        that index is `reindex_min_interval` old, so a game that ends is shown
+        as finished within one interval.  Anything else that changed (a finished
+        log, any other kind of source) is re-indexed at once, and a source with
+        no previous index never reaches here.
+        """
+
+        interval = self.reindex_min_interval
+        if not interval or interval <= 0:
+            return False
+        if previous.descriptor.kind is not SourceKind.REPLAY_JSONL:
+            return False
+        if not all(
+            _item_status(compact) in _UNFINISHED_STATUSES
+            for compact in previous.deck_outcomes
+        ):
+            return False
+        # A clock that went backwards must not freeze the index.
+        return 0 <= self._clock() - previous.indexed_at < interval
 
     def _discover(self) -> list[tuple[Path, Path]]:
         discovered: list[tuple[Path, Path]] = []
@@ -731,6 +1018,7 @@ class RunCatalog:
                     path,
                     self.replay_parser,
                     path.name,
+                    scan.replay_records,
                 )
                 if parser_error is not None:
                     errors.append(parser_error)
@@ -792,6 +1080,14 @@ class RunCatalog:
             "errors_omitted": max(0, error_count - len(errors)),
             "metadata_completeness": metadata,
         }
+        if not records_complete and descriptor.kind is not SourceKind.SUMMARY:
+            # The retained prefix of a big replay/deck/eval source is never
+            # read again: `_adapt` ignores records of an incomplete source,
+            # `get_source` only shows them for SUMMARY, and run lookups
+            # re-scan the file.  Holding 512 full states for each of ~200
+            # logs was ~3 GB of dead objects the garbage collector kept
+            # walking.
+            records = None
         return _IndexedSource(
             source_id=source_id,
             root=root,
@@ -803,6 +1099,7 @@ class RunCatalog:
             deck_outcomes=deck_outcomes,
             run_ids=run_ids,
             cache_key=(path, file_stat.st_mtime_ns, file_stat.st_size),
+            indexed_at=self._clock(),
         )
 
     def _ordered_sources(self) -> list[_IndexedSource]:
@@ -870,35 +1167,89 @@ class RunCatalog:
             "errors": _scrub_paths(list(adapted.errors), redactions),
         }
 
+    def _fresh_replay_source_ids(self) -> frozenset[str]:
+        """Single-run replay sources written to within the in-progress window."""
+
+        window = self.in_progress_window
+        if window is None:
+            return frozenset()
+        now = self._clock()
+        return frozenset(
+            source.source_id
+            for source in self._sources.values()
+            if source.entry["open_mode"] == "run"
+            and source.descriptor.kind is SourceKind.REPLAY_JSONL
+            and now - source.entry["mtime"] <= window
+        )
+
+    def _is_live_source(self, source: _IndexedSource) -> bool:
+        window = self.in_progress_window
+        return (
+            window is not None
+            and source.descriptor.kind is SourceKind.REPLAY_JSONL
+            and self._clock() - source.entry["mtime"] <= window
+        )
+
     def _build_cohorts(self) -> list[dict[str, Any]]:
         self._refresh()
-        cache_key = tuple(
-            source.cache_key for source in self._ordered_sources()
+        # Whether a log is "still being played" depends on the clock as well as
+        # on the files, so the set of recently written replay sources is part of
+        # the cache key: a log that stops being written must leave the
+        # in-progress list even though no file changed.
+        fresh = self._fresh_replay_source_ids()
+        cache_key = (
+            tuple(source.cache_key for source in self._ordered_sources()),
+            fresh,
         )
         if self._cohort_cache_key == cache_key:
             return deepcopy(self._cohort_descriptors)
         records: list[RunRecord] = []
         compact_records: list[_CompactRun] = []
+        # Unfinished runs of recently written single-run replay logs.  They are
+        # held back from the join below, so nothing that is computed for the
+        # finished runs (joined records, cohort summaries, metrics) can see them.
+        unfinished: list[_CohortItem] = []
         for source in self._ordered_sources():
             if source.entry["open_mode"] != "run":
                 continue
+            live = source.source_id in fresh
             if not source.records_complete and source.deck_outcomes:
-                compact_records.extend(source.deck_outcomes)
+                for compact in source.deck_outcomes:
+                    if live and _item_status(compact) in _UNFINISHED_STATUSES:
+                        unfinished.append(compact)
+                    else:
+                        compact_records.append(compact)
             else:
-                records.extend(self._public_records(source, self._adapt(source)))
-        version_source_evidence_by_run_id: dict[
-            str, _GameVersionSourceEvidence
-        ] = {}
-        for candidates in (records, compact_records):
-            for record in candidates:
-                run_id = _safe_run_id(record.run_id)
-                if run_id is None:
-                    continue
-                evidence = version_source_evidence_by_run_id.setdefault(
-                    run_id, _GameVersionSourceEvidence()
-                )
-                evidence.observe(_item_metadata(record).game_version_source)
-        merged = _merge_compact_records(records, compact_records)
+                public = self._cohort_source_records.get(source.cache_key)
+                if public is None:
+                    public = self._public_records(source, self._adapt(source))
+                    self._cohort_source_records[source.cache_key] = public
+                for record in public:
+                    if live and _item_status(record) in _UNFINISHED_STATUSES:
+                        unfinished.append(record)
+                    else:
+                        records.append(record)
+        if unfinished:
+            # A run id that other items also carry belongs to a joined run; the
+            # join decides what it is, as it always did.
+            taken: dict[str, int] = {}
+            for item in (*records, *compact_records, *unfinished):
+                if item.run_id:
+                    taken[item.run_id] = taken.get(item.run_id, 0) + 1
+            in_progress: list[_CohortItem] = []
+            for item in unfinished:
+                if item.run_id and taken[item.run_id] > 1:
+                    if isinstance(item, _CompactRun):
+                        compact_records.append(item)
+                    else:
+                        records.append(item)
+                else:
+                    in_progress.append(item)
+        else:
+            in_progress = []
+        identified, historical = _group_by_run_id(records, compact_records)
+        join_memo = _IdentityMemo(self._join_memo, self._joined_records)
+        merged = _merge_identified(identified, historical, join_memo)
         eligible: list[_CohortItem] = [
             record
             for record in merged
@@ -907,163 +1258,55 @@ class RunCatalog:
         ]
         grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
         for record in eligible:
-            metadata = _item_metadata(record)
-            experiment = metadata.experiment
-            checkpoint = metadata.checkpoint
-            if checkpoint is None and experiment is None:
-                # No checkpoint and no experiment: this run cannot be
-                # attributed to any training/eval batch. Collapse all such
-                # runs into one cohort per (character, ascension) rather
-                # than exploding into one cohort per source file.
-                key = (
-                    None,
-                    None,
-                    metadata.character,
-                    None,
-                    None,
-                    None,
-                    metadata.ascension,
-                )
-            else:
-                key = (
-                    experiment,
-                    checkpoint,
-                    metadata.character,
-                    metadata.game_version,
-                    metadata.evaluation_mode,
-                    metadata.scenario,
-                    metadata.ascension,
-                )
-            grouped.setdefault(key, []).append(record)
+            grouped.setdefault(_cohort_key(record), []).append(record)
+        in_progress_grouped: dict[tuple[Any, ...], list[_CohortItem]] = {}
+        for record in in_progress:
+            in_progress_grouped.setdefault(_cohort_key(record), []).append(record)
 
         descriptors: list[dict[str, Any]] = []
         cohort_records: dict[str, tuple[_CohortItem, ...]] = {}
-        for key, group in sorted(
-            grouped.items(), key=lambda item: _sortable_key(item[0])
-        ):
-            (
-                experiment,
-                checkpoint,
-                character,
-                version,
-                mode,
-                scenario,
-                ascension,
-            ) = key
-            unarchived = experiment is None and checkpoint is None
+        cohort_in_progress: dict[str, tuple[_CohortItem, ...]] = {}
+        cohort_memo: dict[str, _CohortMemo] = {}
+        # Insertion order, then a stable sort: ties keep the order they always had.
+        cohort_keys = [
+            *grouped,
+            *(key for key in in_progress_grouped if key not in grouped),
+        ]
+        for key in sorted(cohort_keys, key=_sortable_key):
+            group = grouped.get(key, [])
             cohort_id = _cohort_id(key)
-            ordered = tuple(
-                sorted(group, key=lambda record: (record.run_id, record.source_id))
-            )
-            cohort_records[cohort_id] = ordered
-            all_source_refs = sorted(
-                {
-                    source_id
-                    for record in ordered
-                    for source_id in record.source_id.split(" | ")
-                    if source_id
-                }
-            )
-            source_refs = all_source_refs[:SOURCE_REF_LIMIT]
-            run_ids = sorted(
-                run_id
-                for record in ordered
-                if (run_id := _safe_run_id(record.run_id)) is not None
-            )
-            run_ids_complete = len(run_ids) <= COHORT_ID_SAMPLE_LIMIT
-            timestamps = [
-                timestamp
-                for record in ordered
-                if (timestamp := _item_timestamp(record)) is not None
-            ]
-            version_source_evidence = _GameVersionSourceEvidence()
-            for record in ordered:
-                run_id = _safe_run_id(record.run_id)
-                if run_id is not None:
-                    evidence = version_source_evidence_by_run_id.get(
-                        run_id
-                    )
-                    if evidence is not None:
-                        version_source_evidence.merge(evidence)
-                        continue
-                version_source_evidence.observe(
-                    _item_metadata(record).game_version_source
-                )
-            filters = {
-                "checkpoint": _safe_catalog_scalar(checkpoint),
-                "character": _safe_catalog_scalar(character),
-                "game_version": _safe_catalog_scalar(version),
-                "game_version_source": version_source_evidence.resolved(),
-                "evaluation_mode": _safe_catalog_scalar(mode),
-                "scenario": _safe_catalog_scalar(scenario),
-                "ascension": ascension,
-            }
-            # Materialize once: readiness and the summary below both consume
-            # the whole iterator, and re-deriving it would double the work.
-            # NOT `cohort_records`: that name is already the
-            # cohort_id -> records mapping built above for get_cohort_records.
-            summarized = list(self._iter_cohort_records(ordered))
-            readiness = describe_comparison_readiness(summarized)
-            # Same helper (and therefore the same valid-run / missing-floor
-            # rules) the metric cards use, so the number shown next to a batch
-            # in the tree always equals the 平均推进 card on its detail page.
-            summary = summarize_cohort(summarized)
-            safe_experiment = _safe_catalog_scalar(experiment)
-            safe_character = _safe_catalog_scalar(character)
-            # Project convention: A<act>F<floor>a<ascension>, e.g. A2F12a10 is
-            # act 2, floor 12, ascension 10. Case carries the meaning -- upper
-            # A is the act, lower a is the ascension -- so a cohort, which has
-            # an ascension but no act or floor, is labelled "a0" / "a?".
-            ascension_label = (
-                f"a{ascension}"
-                if type(ascension) is int and ascension >= 0
-                else "a?"
-            )
-            if unarchived:
-                # Ascension is the only axis still distinguishing otherwise
-                # metadata-less runs (e.g. "未归档 · Defect" for ascension=0
-                # vs. ascension unknown) -- without it two unarchived
-                # cohorts for the same character render as identical labels.
-                base = (
-                    f"未归档 · {safe_character}" if safe_character else "未归档"
-                )
-                label = f"{base} · {ascension_label}"
+            previous = self._cohort_memo.get(cohort_id)
+            if (
+                previous is not None
+                and len(previous.members) == len(group)
+                and all(map(operator.is_, previous.members, group))
+            ):
+                # Same member objects as last time: nothing the descriptor is
+                # derived from can have changed, so skip re-deriving it from
+                # (potentially hundreds of thousands of) runs.
+                memo = previous
             else:
-                label_parts = [
-                    safe_experiment,
-                    _safe_catalog_scalar(checkpoint),
-                    safe_character,
-                    _safe_catalog_scalar(version),
-                    _safe_catalog_scalar(mode),
-                    _safe_catalog_scalar(scenario),
-                    ascension_label,
+                memo = self._derive_cohort(key, cohort_id, group, identified)
+            cohort_memo[cohort_id] = memo
+            cohort_records[cohort_id] = memo.ordered
+            # The baseline link below is assigned per descriptor, so every
+            # build gets its own top-level dict (nested values are shared and
+            # read-only: they are deep-copied before leaving the catalog).
+            descriptor = dict(memo.descriptor)
+            playing = tuple(in_progress_grouped.get(key, ()))
+            cohort_in_progress[cohort_id] = playing
+            descriptor["in_progress_count"] = len(playing)
+            if playing and not group:
+                # Nothing finished yet: the only evidence of when this batch
+                # ran is the games under way, and without it the batch would
+                # sink below every dated one in the tree.
+                stamps = [
+                    stamp
+                    for item in playing
+                    if (stamp := _item_timestamp(item)) is not None
                 ]
-                label = " · ".join(str(value) for value in label_parts if value)
-            descriptors.append(
-                {
-                    "cohort_id": cohort_id,
-                    "label": label,
-                    "avg_global_floor": summary.avg_global_floor,
-                    "valid_n": summary.valid_n,
-                    "filters": filters,
-                    "experiment": safe_experiment,
-                    "unarchived": unarchived,
-                    "comparison_readiness": readiness.to_dict(),
-                    "default_baseline_cohort_id": None,
-                    "run_count": len(ordered),
-                    "run_id_count": len(run_ids),
-                    "run_ids": run_ids if run_ids_complete else [],
-                    "run_ids_complete": run_ids_complete,
-                    "representative_run_ids": run_ids[:COHORT_ID_SAMPLE_LIMIT],
-                    "source_refs": source_refs,
-                    "source_ref_count": len(all_source_refs),
-                    "source_refs_complete": len(all_source_refs) <= SOURCE_REF_LIMIT,
-                    "latest_at": max(timestamps) if timestamps else None,
-                    "technical_count": sum(
-                        _item_status(record).is_technical for record in ordered
-                    ),
-                }
-            )
+                descriptor["latest_at"] = max(stamps) if stamps else None
+            descriptors.append(descriptor)
         sorted_descriptors = sorted(
             descriptors,
             key=lambda item: (
@@ -1092,9 +1335,179 @@ class RunCatalog:
                 )
 
         self._cohort_records = cohort_records
+        self._cohort_in_progress = cohort_in_progress
+        self._cohort_memo = cohort_memo
+        self._join_memo = join_memo.entries
+        self._joined_records = join_memo.joined
         self._cohort_descriptors = sorted_descriptors
         self._cohort_cache_key = cache_key
         return deepcopy(self._cohort_descriptors)
+
+    def _derive_cohort(
+        self,
+        key: tuple[Any, ...],
+        cohort_id: str,
+        group: list[_CohortItem],
+        identified: dict[str, list[_CohortItem]],
+    ) -> _CohortMemo:
+        """Compute one cohort's ordered members, summary and descriptor."""
+        (
+            experiment,
+            checkpoint,
+            character,
+            version,
+            mode,
+            scenario,
+            ascension,
+        ) = key
+        unarchived = experiment is None and checkpoint is None
+        ordered = tuple(
+            sorted(group, key=lambda record: (record.run_id, record.source_id))
+        )
+        all_source_refs = sorted(
+            {
+                source_id
+                for record in ordered
+                for source_id in record.source_id.split(" | ")
+                if source_id
+            }
+        )
+        source_refs = all_source_refs[:SOURCE_REF_LIMIT]
+        run_ids = sorted(
+            run_id
+            for record in ordered
+            if (run_id := _safe_run_id(record.run_id)) is not None
+        )
+        run_ids_complete = len(run_ids) <= COHORT_ID_SAMPLE_LIMIT
+        timestamps = [
+            timestamp
+            for record in ordered
+            if (timestamp := _item_timestamp(record)) is not None
+        ]
+        version_source_evidence = _GameVersionSourceEvidence()
+        for record in ordered:
+            if not isinstance(record, _CompactRun):
+                # A merged record answers for every raw item that shares its
+                # run id.  (A compact run is only ever merged as a singleton,
+                # so its own source is all the evidence there is.)
+                raw_items = identified.get(_safe_run_id(record.run_id) or "")
+                if raw_items:
+                    run_evidence = _GameVersionSourceEvidence()
+                    for raw_item in raw_items:
+                        run_evidence.observe(
+                            _item_metadata(raw_item).game_version_source
+                        )
+                    version_source_evidence.merge(run_evidence)
+                    continue
+            version_source_evidence.observe(
+                _item_metadata(record).game_version_source
+            )
+        filters = {
+            "checkpoint": _safe_catalog_scalar(checkpoint),
+            "character": _safe_catalog_scalar(character),
+            "game_version": _safe_catalog_scalar(version),
+            "game_version_source": version_source_evidence.resolved(),
+            "evaluation_mode": _safe_catalog_scalar(mode),
+            "scenario": _safe_catalog_scalar(scenario),
+            "ascension": ascension,
+        }
+        # Materialize once: readiness and the summary below both consume
+        # the whole iterator, and re-deriving it would double the work.
+        summarized = list(self._iter_metric_records(ordered))
+        readiness = describe_comparison_readiness(summarized)
+        # Same helper (and therefore the same valid-run / missing-floor
+        # rules) the metric cards use, so the number shown next to a batch
+        # in the tree always equals the 平均推进 card on its detail page.
+        summary = summarize_cohort(summarized)
+        safe_experiment = _safe_catalog_scalar(experiment)
+        safe_character = _safe_catalog_scalar(character)
+        # Project convention: A<act>F<floor>a<ascension>, e.g. A2F12a10 is
+        # act 2, floor 12, ascension 10. Case carries the meaning -- upper
+        # A is the act, lower a is the ascension -- so a cohort, which has
+        # an ascension but no act or floor, is labelled "a0" / "a?".
+        ascension_label = (
+            f"a{ascension}"
+            if type(ascension) is int and ascension >= 0
+            else "a?"
+        )
+        if unarchived:
+            # Ascension is the only axis still distinguishing otherwise
+            # metadata-less runs (e.g. "未归档 · Defect" for ascension=0
+            # vs. ascension unknown) -- without it two unarchived
+            # cohorts for the same character render as identical labels.
+            base = (
+                f"未归档 · {safe_character}" if safe_character else "未归档"
+            )
+            label = f"{base} · {ascension_label}"
+        else:
+            label_parts = [
+                safe_experiment,
+                _safe_catalog_scalar(checkpoint),
+                safe_character,
+                _safe_catalog_scalar(version),
+                _safe_catalog_scalar(mode),
+                _safe_catalog_scalar(scenario),
+                ascension_label,
+            ]
+            label = " · ".join(str(value) for value in label_parts if value)
+        descriptor = {
+            "cohort_id": cohort_id,
+            "label": label,
+            "avg_global_floor": summary.avg_global_floor,
+            "valid_n": summary.valid_n,
+            "filters": filters,
+            "experiment": safe_experiment,
+            "unarchived": unarchived,
+            "comparison_readiness": readiness.to_dict(),
+            "default_baseline_cohort_id": None,
+            "run_count": len(ordered),
+            "run_id_count": len(run_ids),
+            "run_ids": run_ids if run_ids_complete else [],
+            "run_ids_complete": run_ids_complete,
+            "representative_run_ids": run_ids[:COHORT_ID_SAMPLE_LIMIT],
+            "source_refs": source_refs,
+            "source_ref_count": len(all_source_refs),
+            "source_refs_complete": len(all_source_refs) <= SOURCE_REF_LIMIT,
+            "latest_at": max(timestamps) if timestamps else None,
+            "technical_count": sum(
+                _item_status(record).is_technical for record in ordered
+            ),
+        }
+        return _CohortMemo(tuple(group), ordered, descriptor, summary)
+
+
+# A replay with neither of these has no terminal state.  Which of the two a log
+# gets depends on its size (see `_adapt_replay` and `_update_compact_replay`).
+_UNFINISHED_STATUSES = frozenset({RunStatus.UNKNOWN, RunStatus.IN_PROGRESS})
+
+
+def _cohort_key(record: _CohortItem) -> tuple[Any, ...]:
+    """The cohort a run belongs to; the same for a finished and a live run."""
+
+    (
+        experiment,
+        checkpoint,
+        character,
+        game_version,
+        evaluation_mode,
+        scenario,
+        ascension,
+    ) = _item_cohort_fields(record)
+    if checkpoint is None and experiment is None:
+        # No checkpoint and no experiment: this run cannot be
+        # attributed to any training/eval batch. Collapse all such
+        # runs into one cohort per (character, ascension) rather
+        # than exploding into one cohort per source file.
+        return (None, None, character, None, None, None, ascension)
+    return (
+        experiment,
+        checkpoint,
+        character,
+        game_version,
+        evaluation_mode,
+        scenario,
+        ascension,
+    )
 
 
 def _source_id(root: Path, relative: str) -> str:
@@ -1195,10 +1608,10 @@ def _join_catalog_group(items: Iterable[_CohortItem]) -> RunRecord:
     return joined[0]
 
 
-def _merge_compact_records(
+def _group_by_run_id(
     ordinary: list[RunRecord], compact: list[_CompactRun]
-) -> list[_CohortItem]:
-    """Merge exact IDs while retaining compact single-source records."""
+) -> tuple[dict[str, list[_CohortItem]], list[_CohortItem]]:
+    """Split raw items into per-run-id groups and run-id-less (historical) ones."""
 
     identified: dict[str, list[_CohortItem]] = {}
     historical: list[_CohortItem] = []
@@ -1207,27 +1620,86 @@ def _merge_compact_records(
             identified.setdefault(item.run_id, []).append(item)
         else:
             historical.append(item)
+    return identified, historical
+
+
+def _merge_compact_records(
+    ordinary: list[RunRecord], compact: list[_CompactRun]
+) -> list[_CohortItem]:
+    """Merge exact IDs while retaining compact single-source records."""
+
+    return _merge_identified(*_group_by_run_id(ordinary, compact))
+
+
+def _merge_identified(
+    identified: dict[str, list[_CohortItem]],
+    historical: list[_CohortItem],
+    memo: _IdentityMemo | None = None,
+) -> list[_CohortItem]:
+    """Join each run-id group; ``memo`` makes an unchanged join a lookup."""
 
     merged: list[_CohortItem] = []
     for run_id in sorted(identified):
         group = identified[run_id]
         if len(group) == 1 and isinstance(group[0], _CompactRun):
             merged.append(group[0])
-        else:
+        elif memo is None:
             merged.append(_join_catalog_group(group))
+        else:
+            merged.append(
+                memo.get(group, lambda group=group: _join_catalog_group(group))
+            )
     if not historical:
         return merged
-    return join_records(
-        [
-            *(
+    # `join_records` copies every record it is given and compares each
+    # run-id-less one with every identified one (`_plausibly_overlap`: equal
+    # seed and overlapping timestamps), adding an "ambiguous historical
+    # identity" warning to both only then.  An identified item that overlaps no
+    # run-id-less record is therefore never touched by it: for a compact run
+    # the join would hand back the same record as `to_record()`, and a merged
+    # record has already been through `_join_catalog_group`, so a second pass
+    # changes nothing.  Keep those as they are (copying ~20k of them on every
+    # request took seconds) and join only the overlapping ones and the
+    # run-id-less records themselves, in the final order `join_records` uses.
+    anonymous_by_seed: dict[str, list[Any]] = {}
+    for item in historical:
+        metadata = _item_metadata(item)
+        if isinstance(metadata.seed, str) and metadata.seed:
+            anonymous_by_seed.setdefault(metadata.seed, []).append(
+                SimpleNamespace(metadata=metadata)
+            )
+    untouched: list[_CohortItem] = []
+    to_join: list[_CohortItem] = []
+    for item in merged:
+        seed = item.seed if isinstance(item, _CompactRun) else item.metadata.seed
+        anonymous = anonymous_by_seed.get(seed) if isinstance(seed, str) else None
+        if not anonymous or not any(
+            _plausibly_overlap(
+                candidate, SimpleNamespace(metadata=_item_metadata(item))
+            )
+            for candidate in anonymous
+        ):
+            untouched.append(item)
+        else:
+            to_join.append(item)
+    to_join.extend(historical)
+
+    def join_all() -> list[RunRecord]:
+        return join_records(
+            [
                 item.to_record() if isinstance(item, _CompactRun) else item
-                for item in merged
-            ),
-            *(
-                item.to_record() if isinstance(item, _CompactRun) else item
-                for item in historical
-            ),
-        ]
+                for item in to_join
+            ]
+        )
+
+    if memo is None:
+        joined = join_all()
+    else:
+        joined = memo.get(to_join, lambda: memo.reuse_equal(join_all()))
+        memo.joined = list(joined)
+    return sorted(
+        [*untouched, *joined],
+        key=lambda item: (not bool(item.run_id), item.run_id, item.source_id),
     )
 
 
@@ -1251,6 +1723,31 @@ def _item_metadata(record: _CohortItem) -> RunMetadata:
         modifiers=record.modifiers,
         started_at=record.started_at,
         ended_at=record.ended_at,
+    )
+
+
+def _item_cohort_fields(record: _CohortItem) -> tuple[Any, ...]:
+    """The metadata fields cohorts are keyed on, without building RunMetadata."""
+
+    if isinstance(record, _CompactRun):
+        return (
+            record.experiment,
+            record.checkpoint,
+            record.character,
+            record.game_version,
+            record.evaluation_mode,
+            record.scenario,
+            record.ascension,
+        )
+    metadata = record.metadata
+    return (
+        metadata.experiment,
+        metadata.checkpoint,
+        metadata.character,
+        metadata.game_version,
+        metadata.evaluation_mode,
+        metadata.scenario,
+        metadata.ascension,
     )
 
 
@@ -1325,6 +1822,11 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     """Scan an entire JSONL source while retaining only bounded raw evidence."""
 
     records: list[dict[str, Any]] = []
+    # `retained` holds *every* parsed record, but only while the file could
+    # still be a replay (state/action rows seen, or still within the indexed
+    # prefix), so a multi-GB deck history never accumulates here.  Once dropped
+    # it stays dropped and the caller re-reads the file.
+    retained: list[dict[str, Any]] | None = []
     record_count = 0
     error_budget = _ErrorBudget([])
     run_ids: set[str] = set()
@@ -1380,6 +1882,11 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 )
                 if record_type in {"state", "action"}:
                     types.add(record_type)
+                if retained is not None:
+                    if record_count <= INDEX_RECORD_LIMIT or types:
+                        retained.append(record)
+                    else:
+                        retained = None
                 event = str(record.get("event", ""))
                 if event in {
                     "milestone",
@@ -1455,8 +1962,10 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 elif not is_replay_candidate:
                     run_ids.update(record_run_ids)
     except UnicodeDecodeError as error:
+        retained = None
         error_budget.add(f"{path.name}: invalid UTF-8 at byte {error.start}")
     except OSError as error:
+        retained = None
         detail = str(error.strerror or type(error).__name__).replace(
             str(path), path.name
         )
@@ -1509,6 +2018,12 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
         deck_outcomes=compact_runs,
         errors=tuple(error_budget.details),
         error_count=error_budget.count,
+        replay_records=(
+            retained
+            if descriptor.kind is SourceKind.REPLAY_JSONL
+            and record_count > INDEX_RECORD_LIMIT
+            else None
+        ),
     )
 
 
@@ -1616,6 +2131,12 @@ def _update_compact_metadata(
         compact.comparison_conflicts.add("ascension")
     if compact.ascension is None:
         compact.ascension = ascension
+    _observe_compact_multiplayer(compact, record)
+
+
+def _observe_compact_multiplayer(
+    compact: _CompactRun, record: dict[str, Any]
+) -> None:
     multiplayer = record.get("is_multiplayer")
     if type(multiplayer) is bool and not compact.is_multiplayer_conflicted:
         if not compact.has_is_multiplayer_observation:
@@ -1671,6 +2192,9 @@ def _update_compact_replay_metadata(
         )
     if compact.ascension is None:
         compact.ascension = _replay_ascension(record, "ascension")
+    if record.get("type") == "run_meta":
+        # The header is the only replay row that knows (see _adapt_replay).
+        _observe_compact_multiplayer(compact, record)
     modifiers = _replay_modifiers(record)
     if modifiers is not None:
         compact.modifiers = modifiers
@@ -1841,6 +2365,8 @@ def _update_compact_replay(
     if floor is None:
         floor = _first_integral_int(data, "global_floor", "floor")
     _update_observed_floor(compact, floor, floor_label)
+    if record_type == "state":
+        _update_compact_live_state(compact, data, context)
 
     nested_status, nested_victory, nested_technical_kind = _compact_status(data)
     if (
@@ -1855,6 +2381,32 @@ def _update_compact_replay(
         or nested_status is not RunStatus.UNKNOWN
     ):
         compact.has_outcome = True
+
+
+def _update_compact_live_state(
+    compact: _CompactRun, data: dict[str, Any], context: Any
+) -> None:
+    """Remember where a replay's newest state row put the player."""
+
+    act = floor = None
+    if isinstance(context, dict):
+        act = _first_integral_int(context, "act")
+        floor = _first_integral_int(context, "floor")
+    player = data.get("player")
+    hp = max_hp = None
+    if isinstance(player, dict):
+        hp = _first_integral_int(player, "hp")
+        max_hp = _first_integral_int(player, "max_hp")
+    previous = compact.live_state
+    if previous is not None:
+        # A state row without a player block (or without a context) must not
+        # erase what an earlier one said.
+        act = previous[0] if act is None else act
+        floor = previous[1] if floor is None else floor
+        hp = previous[2] if hp is None else hp
+        max_hp = previous[3] if max_hp is None else max_hp
+    if act is not None or floor is not None or hp is not None or max_hp is not None:
+        compact.live_state = (act, floor, hp, max_hp)
 
 
 def _finalize_compact(compact: _CompactRun) -> None:
@@ -1882,6 +2434,7 @@ def _normalize_incomplete_replay(
     path: Path,
     replay_parser: Callable[[list[dict], str | None], dict] | None,
     source_name: str,
+    scanned_records: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Normalize a replay with one transient whole-list parser invocation.
 
@@ -1889,27 +2442,36 @@ def _normalize_incomplete_replay(
     deliberately trusts transient memory here. Only the compact result and the
     scanner's bounded prefix survive this function; deck/eval sources never
     enter this path.
+
+    ``scanned_records`` is the record list the index scan already parsed from
+    this file (the same lines, filtered the same way); with it the file is not
+    read a second time.  It is only handed over for a scan that read the whole
+    file cleanly, so a read error still surfaces exactly as before: by not
+    running the parser.
     """
 
     if replay_parser is None:
         return None
     full_records: list[dict[str, Any]] = []
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(
-                        line, parse_constant=_reject_scan_constant
-                    )
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                full_records.append(record)
-    except (OSError, UnicodeDecodeError):
-        return None
+    if scanned_records is not None:
+        full_records = scanned_records
+    else:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(
+                            line, parse_constant=_reject_scan_constant
+                        )
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    full_records.append(record)
+        except (OSError, UnicodeDecodeError):
+            return None
     try:
         candidate = replay_parser(full_records, source_name)
     except Exception as error:

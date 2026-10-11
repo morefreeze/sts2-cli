@@ -332,3 +332,123 @@ class TestCombatEdgeCases:
                 break
         assert state["decision"] == "game_over"
         assert state["victory"] is False
+
+
+def _hand_card(state, card_id):
+    """First card in `state["hand"]` with this id (e.g. "CARD.ANGER"), or fail loudly."""
+    for card in state["hand"]:
+        if card["id"] == card_id:
+            return card
+    raise AssertionError(f"{card_id} not in hand: {[c['id'] for c in state['hand']]}")
+
+
+class TestReturnToHandCards:
+    """BUG-050: a card that returns itself to the hand after resolving was reported as
+    "Card could not be played (still in hand after action)". DoPlayCard's post-play check
+    read "same hand size, same card at the same index" as "the play did nothing" -- which is
+    exactly what such a card looks like once it has been played and put back."""
+
+    def test_particle_wall_returns_to_hand_without_error(self, game):
+        state = game.start(character="Regent", seed="bug050")
+        game.skip_neow(state)
+        # A 2-card deck puts both cards in the opening hand. Venerate (gain 2 stars) is played
+        # first so Particle Wall (0 energy, 2 stars) ends up as the ONLY card in hand: it is then
+        # re-added at the very index it was played from -- the shape that tripped the old check.
+        game.set_player(hp=80, max_hp=80, deck=["VENERATE", "PARTICLE_WALL"])
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+
+        state = game.act("play_card", card_index=_hand_card(state, "CARD.VENERATE")["index"])
+        assert state.get("type") != "error", state
+        assert state["decision"] == "combat_play"
+        assert [c["id"] for c in state["hand"]] == ["CARD.PARTICLE_WALL"]
+        stars_before = state["stars"]
+        assert stars_before >= 2, "Venerate should have paid for Particle Wall's 2 star cost"
+        block_before = state["player"]["block"]
+
+        state = game.act("play_card", card_index=state["hand"][0]["index"])
+
+        assert state.get("type") != "error", (
+            f"a card that returns itself to the hand was played; got: {state}")
+        assert state["decision"] == "combat_play"
+        assert state["player"]["block"] > block_before, "Particle Wall's Block was not gained"
+        assert state["stars"] == stars_before - 2, "the star cost was not paid"
+        assert "CARD.PARTICLE_WALL" in [c["id"] for c in state["hand"]], (
+            "Particle Wall must be back in the hand")
+
+
+class TestChainedCardSelection:
+    """BUG-049: resolving one card selection can run the game straight on into the NEXT
+    selection before select_cards returns (Burning Pact's draw reshuffling into Stratagem's
+    "choose a card from your draw pile"; Knowledge Demon's curse pick running into the next
+    turn's reshuffle). HeadlessCardSelector.ResolvePending used to clear the pending state AFTER
+    completing the TCS, wiping the newly opened selection: the reply was a combat_play the game
+    could never leave (every play_card "still in hand", plan_combat_turn "only in the play
+    phase", end_turn a no-op until the harness gave up STUCK)."""
+
+    def test_selection_opened_by_the_continuation_is_surfaced(self, game):
+        state = game.start(character="Ironclad", seed="bug049a")
+        game.skip_neow(state)
+        # 5-card deck = the whole deck in the opening hand, draw pile empty. Energy 3:
+        #   Stratagem (1) -> Anger (0, leaves 2 Angers in the discard) -> Burning Pact (1).
+        # Burning Pact asks which hand card to exhaust (selection #1); its draw then has to
+        # reshuffle the 2-card discard into the empty draw pile, which fires Stratagem's
+        # "choose a card from it" (selection #2) INSIDE the continuation of selection #1.
+        game.set_player(hp=80, max_hp=80,
+                        deck=["STRATAGEM", "BURNING_PACT", "ANGER", "ANGER", "STRIKE_IRONCLAD"])
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+
+        state = game.act("play_card", card_index=_hand_card(state, "CARD.STRATAGEM")["index"])
+        assert state.get("type") != "error", state
+        state = game.act("play_card", card_index=_hand_card(state, "CARD.ANGER")["index"],
+                         target_index=0)
+        assert state.get("type") != "error", state
+        assert state["discard_pile_count"] == 2, (
+            "test setup: Anger and its copy should both be in the discard pile")
+
+        # Selection #1: which card to exhaust.
+        state = game.act("play_card", card_index=_hand_card(state, "CARD.BURNING_PACT")["index"])
+        assert state.get("decision") == "card_select", state
+        assert len(state["cards"]) >= 2
+
+        # Resolving it opens selection #2 from within the continuation. It must come back as a
+        # card_select over the reshuffled draw pile -- not as a dead combat_play.
+        state = game.act("select_cards", indices="0")
+        assert state.get("type") != "error", state
+        assert state.get("decision") == "card_select", (
+            "the selection opened while resolving the previous one was lost (BUG-049); "
+            f"got {state.get('decision')!r}")
+        assert [c["id"] for c in state["cards"]] == ["CARD.ANGER", "CARD.ANGER"]
+        assert (state["min_select"], state["max_select"]) == (1, 1)
+
+        # Answering it lets the game proceed: back in the play phase, cards play again.
+        state = game.act("select_cards", indices="0")
+        assert state.get("type") != "error", state
+        assert state.get("decision") == "combat_play", state
+        assert "CARD.ANGER" in [c["id"] for c in state["hand"]]
+        state = game.act("play_card", card_index=_hand_card(state, "CARD.ANGER")["index"],
+                         target_index=0)
+        assert state.get("type") != "error", (
+            f"combat is still parked on the lost selection (BUG-049): {state}")
+
+    def test_turn_start_shuffle_selection_is_surfaced(self, game):
+        """The un-chained sibling: Stratagem's pick opened by the NEXT TURN's draw must come
+        back from end_turn as a card_select, and answering it must start the turn."""
+        state = game.start(character="Ironclad", seed="bug049b")
+        game.skip_neow(state)
+        game.set_player(hp=80, max_hp=80,
+                        deck=["STRATAGEM", "ANGER", "ANGER", "STRIKE_IRONCLAD", "STRIKE_IRONCLAD"])
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+        round_before = state["round"]
+
+        state = game.act("play_card", card_index=_hand_card(state, "CARD.STRATAGEM")["index"])
+        assert state.get("type") != "error", state
+
+        # Turn 2's draw finds an empty draw pile, reshuffles the 4 discarded cards -> Stratagem.
+        state = game.act("end_turn")
+        assert state.get("decision") == "card_select", state
+        assert len(state["cards"]) == 4
+
+        state = game.act("select_cards", indices="0")
+        assert state.get("type") != "error", state
+        assert state.get("decision") == "combat_play", state
+        assert state["round"] == round_before + 1

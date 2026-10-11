@@ -1,6 +1,6 @@
 namespace Godot;
 
-public struct Vector2
+public partial struct Vector2
 {
     public float X;
     public float Y;
@@ -43,7 +43,7 @@ public struct Vector2
     public override string ToString() => $"({X}, {Y})";
 }
 
-public struct Vector2I
+public partial struct Vector2I
 {
     public int X;
     public int Y;
@@ -52,14 +52,14 @@ public struct Vector2I
     public static implicit operator Vector2(Vector2I v) => new(v.X, v.Y);
 }
 
-public struct Vector3
+public partial struct Vector3
 {
     public float X, Y, Z;
     public static Vector3 Zero { get; } = new(0, 0, 0);
     public Vector3(float x, float y, float z) { X = x; Y = y; Z = z; }
 }
 
-public struct Color
+public partial struct Color
 {
     public float R, G, B, A;
     public static Color White { get; } = new(1, 1, 1, 1);
@@ -84,7 +84,7 @@ public struct Color
     public override int GetHashCode() => HashCode.Combine(R, G, B, A);
 }
 
-public struct Rect2
+public partial struct Rect2
 {
     private Vector2 _position;
     private Vector2 _size;
@@ -103,14 +103,14 @@ public struct Rect2
     public Rect2(Vector2 pos, Vector2 size) { _position = pos; _size = size; }
 }
 
-public struct Transform2D
+public partial struct Transform2D
 {
     public Vector2 X, Y, Origin;
     public static Transform2D Identity { get; } = new();
     public Transform2D SampleBakedWithRotation() => this;
 }
 
-public static class Mathf
+public static partial class Mathf
 {
     public const float Pi = MathF.PI;
     public const float Tau = MathF.Tau;
@@ -141,7 +141,7 @@ public static class Mathf
     public static float Lerp(float from, float to, float weight) => from + (to - from) * weight;
     public static float DegToRad(float deg) => deg * (Pi / 180f);
     public static float RadToDeg(float rad) => rad * (180f / Pi);
-    public static float Sign(float s) => MathF.Sign(s);
+    public static int Sign(float s) => MathF.Sign(s);
     public static float Remap(float value, float istart, float istop, float ostart, float ostop)
     {
         return ostart + (ostop - ostart) * ((value - istart) / (istop - istart));

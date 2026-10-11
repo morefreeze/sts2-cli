@@ -63,7 +63,7 @@ def _value_env(monkeypatch, choose, model=None):
     """STS2_ROUTE_POLICY=value with a stub model; `choose` replaces the planner
     and receives (map_reply, state, character, model)."""
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     model = model if model is not None else _StubModel()
     monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: model)
     calls = []
@@ -125,7 +125,7 @@ def test_load_route_model_loads_once_per_path(monkeypatch, tmp_path):
 
 def test_random_policy_never_asks_for_a_map_or_loads_a_model(monkeypatch):
     monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     monkeypatch.setattr(play_full_run, "_load_route_model",
                         lambda path: pytest.fail("random must not load a route model"))
     monkeypatch.setattr(play_full_run, "_route_choose",
@@ -140,7 +140,7 @@ def test_random_policy_never_asks_for_a_map_or_loads_a_model(monkeypatch):
 
 def test_random_policy_does_not_count_or_special_case_single_choice_map_selects(monkeypatch):
     monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     lone = [{"col": 2, "row": 1, "type": "Monster"}]
     result, sent = _run(monkeypatch, [{"type": "ready"}, _ms(1, lone), _game_over(2)])
     assert [c.get("action") or c.get("cmd") for c in sent] == ["start_run", "select_map_node"]
@@ -150,7 +150,7 @@ def test_random_policy_does_not_count_or_special_case_single_choice_map_selects(
 
 def test_random_route_is_the_seeded_rng_choice_sequence(monkeypatch):
     monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     script = [{"type": "ready"}, _ms(1), _ms(2), _ms(3), _ms(4), _game_over(5)]
     _, sent = _run(monkeypatch, script)
     picks = [(c["args"]["col"], c["args"]["row"]) for c in _cmds(sent, "select_map_node")]
@@ -321,10 +321,12 @@ class _RecordingLogger:
 
 
 @pytest.mark.parametrize("route_env,ooc_env,expected", [
-    (None, None, "ooc=naive"),                    # the random arm's tag is untouched
+    (None, None, "ooc=greedy"),                   # the random arm's tag is untouched
     ("random", "naive", "ooc=naive"),
+    (None, "naive", "ooc=naive"),
     (None, "greedy", "ooc=greedy"),
-    ("value", None, "ooc=naive,route=value"),
+    ("value", None, "ooc=greedy,route=value"),    # unset OOC policy = greedy since 2026-10-12
+    ("value", "naive", "ooc=naive,route=value"),
     ("value", "greedy", "ooc=greedy,route=value"),
 ])
 def test_run_meta_experiment_tag_marks_value_route_logs_only(monkeypatch, route_env, ooc_env,
@@ -342,9 +344,27 @@ def test_run_meta_experiment_tag_marks_value_route_logs_only(monkeypatch, route_
     assert _RecordingLogger.contexts[0]["experiment"] == expected
 
 
+@pytest.mark.parametrize("route_env,expected", [
+    (None, "run:ooc=naive"),                      # exactly play_full_run's `<batch>:ooc=<policy>`
+    ("random", "run:ooc=naive"),
+    ("value", "run:ooc=naive,route=value"),
+])
+def test_run_meta_experiment_tag_keeps_the_batch_prefix(monkeypatch, route_env, expected):
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
+    if route_env is None:
+        monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("STS2_ROUTE_POLICY", route_env)
+    monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: _StubModel())
+    monkeypatch.setattr(play_full_run, "GameLogger", _RecordingLogger)
+    _RecordingLogger.contexts = []
+    _run(monkeypatch, [{"type": "ready"}, _game_over(1)], batch="run")
+    assert _RecordingLogger.contexts[0]["experiment"] == expected
+
+
 def test_a_route_model_that_cannot_load_fails_the_game_as_an_error(monkeypatch):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
 
     def broken(path):
         raise FileNotFoundError("/no/such/model.json")
@@ -430,7 +450,7 @@ def _main(monkeypatch, argv, played):
 def test_main_announces_the_route_model_under_value(monkeypatch, capsys):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
     monkeypatch.setenv("STS2_ROUTE_MODEL", "/models/m.json")
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     loaded, planner_loads = [], []
     monkeypatch.setattr(play_full_run, "_load_route_model",
                         lambda path: loaded.append(path) or _StubModel())
@@ -448,7 +468,7 @@ def test_main_announces_the_route_model_under_value(monkeypatch, capsys):
 def test_main_aborts_before_any_game_when_the_route_model_cannot_load(monkeypatch):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
     monkeypatch.setenv("STS2_ROUTE_MODEL", "/nonexistent/model.json")
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     monkeypatch.setattr(play_full_run, "_ROUTE_MODEL_CACHE", {})
     played = []
     with pytest.raises(FileNotFoundError):
@@ -458,7 +478,7 @@ def test_main_aborts_before_any_game_when_the_route_model_cannot_load(monkeypatc
 
 def test_main_aborts_before_any_game_when_the_planner_cannot_be_imported(monkeypatch):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: _StubModel())
 
     def broken():
@@ -478,7 +498,7 @@ def test_the_real_planner_module_loads_through_the_seam():
 
 def test_main_rejects_an_unknown_route_policy_before_any_game(monkeypatch):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "smart")
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     played = []
     with pytest.raises(ValueError, match="STS2_ROUTE_POLICY"):
         _main(monkeypatch, ["1", "Ironclad"], played)
@@ -487,7 +507,7 @@ def test_main_rejects_an_unknown_route_policy_before_any_game(monkeypatch):
 
 def test_main_under_random_never_loads_a_route_model(monkeypatch, capsys):
     monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
-    monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
     monkeypatch.setattr(play_full_run, "_load_route_model",
                         lambda path: pytest.fail("random must not load a route model"))
     monkeypatch.setattr(play_full_run, "_load_route_planner",

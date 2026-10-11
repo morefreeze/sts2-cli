@@ -55,6 +55,7 @@
     requestToken: 0,
     abortController: null,
     positionedMapKey: '',
+    selectedNodeId: null,
   };
   let activeDecisionAnchor = null;
   let decisionClipSerial = 0;
@@ -1055,6 +1056,7 @@
   }
 
   function selectNode(node, sourceElement = null) {
+    mapState.selectedNodeId = node.id === undefined ? null : node.id;
     const container = byId('selectedNodeSummary');
     clear(container);
     container.append(element('h3', { text: `${roomLabel(node)} · 路线节点 ${Number(node.path_index) + 1}` }));
@@ -1183,8 +1185,12 @@
     return `${location.pathname}${location.search}${location.hash}`;
   }
 
+  // `refresh` re-reads the map of the run that is already open (a game that is
+  // still being played): nothing is cleared first, focus and the status line
+  // are left alone, the open node stays selected, and a failed read keeps what
+  // is on screen instead of replacing it with an error.
   async function loadAct(runRef, actIndex, {
-    historyMode = 'none', opener = null, focusActTab = false,
+    historyMode = 'none', opener = null, focusActTab = false, refresh = false,
   } = {}) {
     // Accepts either a bare run id string (kept for back-compat call
     // sites) or a {kind, id} ref -- real catalog data addresses most runs
@@ -1207,13 +1213,16 @@
     mapState.runId = runId;
     mapState.ref = { kind: refKind, id: runId };
     mapState.actIndex = actIndex;
-    showMapPage({ focusPage: !focusActTab });
-    byId('runMapTitle').textContent = `对局 ${runId}`;
-    byId('mapFallback').hidden = true;
-    renderEmpty(byId('actSummary'), '正在重建地图…', 'loading-state');
-    renderEmpty(byId('selectedNodeSummary'), '载入地图后，选择一个已访问节点查看收益。');
-    hideDecisionPopover();
-    clear(byId('mapSvg'));
+    if (!refresh) {
+      mapState.selectedNodeId = null;
+      showMapPage({ focusPage: !focusActTab });
+      byId('runMapTitle').textContent = `对局 ${runId}`;
+      byId('mapFallback').hidden = true;
+      renderEmpty(byId('actSummary'), '正在重建地图…', 'loading-state');
+      renderEmpty(byId('selectedNodeSummary'), '载入地图后，选择一个已访问节点查看收益。');
+      hideDecisionPopover();
+      clear(byId('mapSvg'));
+    }
     if (historyMode === 'push') {
       history.pushState({ view: 'run-map', runId, actIndex, fromDashboard: true }, '', mapLocation(runId, actIndex));
     } else if (historyMode === 'replace') {
@@ -1225,12 +1234,14 @@
     if (mapState.abortController) mapState.abortController.abort();
     const controller = new AbortController();
     mapState.abortController = controller;
-    setStatus(`正在读取 ${runId} 地图…`, 'busy');
+    if (!refresh) setStatus(`正在读取 ${runId} 地图…`, 'busy');
     try {
       const queryKey = refKind === 'source' ? 'source' : 'id';
       const payload = await getJSON(`/api/run/map?${queryKey}=${encodeURIComponent(runId)}&act=${actIndex}`, { signal: controller.signal });
       if (token !== mapState.requestToken) return;
       mapState.abortController = null;
+      // The nodes the popover was anchored to are about to be redrawn.
+      if (refresh) hideDecisionPopover();
       const selectedTab = renderActTabs(payload);
       if (focusActTab && selectedTab) selectedTab.focus();
       renderMap(payload, { autoPosition, preservePosition });
@@ -1240,11 +1251,23 @@
       fallback.hidden = payload.full_map || !payload.fallback_reason;
       fallback.textContent = payload.fallback_reason || '';
       const visited = payload.nodes.filter((node) => node.visited).sort((a, b) => a.path_index - b.path_index);
-      if (visited.length) selectNode(visited[0]);
+      const kept = refresh && mapState.selectedNodeId !== null
+        ? visited.find((node) => node.id === mapState.selectedNodeId)
+        : null;
+      if (kept) {
+        // renderMap() drew one .map-node group per payload node, in order.
+        selectNode(kept, byId('mapSvg').querySelectorAll('.map-node')[payload.nodes.indexOf(kept)] || null);
+      } else if (visited.length) {
+        selectNode(visited[0]);
+      }
       setStatus(payload.full_map ? '已载入完整地图' : '已载入记录路线');
     } catch (error) {
       if (token !== mapState.requestToken || error.name === 'AbortError') return;
       mapState.abortController = null;
+      if (refresh) {
+        setStatus(`地图刷新失败：${error.message}`, 'error');
+        return;
+      }
       renderEmpty(byId('actSummary'), `地图读取失败：${error.message}`, 'error-state');
       renderEmpty(byId('selectedNodeSummary'), '没有可查看的节点。', 'error-state');
       setStatus(`地图读取失败：${error.message}`, 'error');
@@ -1301,6 +1324,10 @@
     // any future standalone caller but is not exercised from here.
     openRun(ref, opener = null, { historyMode = 'none' } = {}) {
       loadAct(ref, 0, { historyMode, opener });
+    },
+    // Re-read the open run's current act in place (see loadAct's `refresh`).
+    refreshRun(ref) {
+      loadAct(ref, mapState.actIndex, { historyMode: 'none', refresh: true });
     },
     // The router calls this when leaving a run route. showMapPage() hides
     // workbenchBody wholesale, so without the matching close the batch view

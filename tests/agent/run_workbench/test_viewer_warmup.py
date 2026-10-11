@@ -35,3 +35,26 @@ def test_warm_catalog_swallows_errors():
     viewer._warm_catalog(cat)  # must not raise
 
     assert cat.calls == 1
+
+
+def test_warm_catalog_parks_the_built_heap_outside_the_collector(monkeypatch):
+    """After the cold build the catalog's long-lived objects are frozen, so a
+    later rebuild's allocations do not make the collector re-walk them all."""
+    events = []
+    monkeypatch.setattr(viewer.gc, "collect", lambda *a: events.append("collect"))
+    monkeypatch.setattr(viewer.gc, "freeze", lambda: events.append("freeze"))
+    cat = _Catalog()
+
+    viewer._warm_catalog(cat)
+
+    assert events == ["collect", "freeze"]
+
+
+def test_warm_catalog_does_not_freeze_after_a_failed_build(monkeypatch):
+    events = []
+    monkeypatch.setattr(viewer.gc, "collect", lambda *a: events.append("collect"))
+    monkeypatch.setattr(viewer.gc, "freeze", lambda: events.append("freeze"))
+
+    viewer._warm_catalog(_Catalog(boom=True))
+
+    assert events == []

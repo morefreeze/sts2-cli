@@ -42,6 +42,48 @@ with the inferrer on must be Completed 5/5 for every character, with no HANG.
   diff over characters is >= 0 and no character is significantly worse; otherwise report.
 - Then Phase 3b Task 6 (fit the route model on arm C's logs) and its own A/B.
 
-## Results
+## Change of plan (2026-10-09): arm A dropped
 
-(filled in after the run)
+The inferrer question was answered by data we already had, so arm A (a third of the compute, ~1
+day) was dropped and the batch runs B vs C only. The 9/30 BUG-040 regression (inferrer OFF, naive,
+a0, seeds run_1..5 x 5 characters, all 25 completed) and the 10/08 gate2 naive lane (inferrer ON,
+naive, a0, the same 25 seeds) pair seed-for-seed: global floor 17.5 -> 39.3, **+21.84 (se 2.16,
+t = 10.1)**, 24 of 25 pairs improved, every character +13.6..+27.8, wins 0 -> 2. The only other
+changes between the two runs (BUG-046/047/049/050/051) only alter games that hang, stall or crash,
+and the OFF run had none, so the difference is the inferrer. Evidence:
+`~/.sts2-train/bug040_fix_gate_20260930_100630/regression.log`,
+`~/.sts2-train/gate2_20261008_202822/regression_naive.log`.
+
+Gate (`~/.sts2-train/gate2_20261008_202822/`): naive and greedy, inferrer on, 5 x 5 each --
+Completed 5/5 for all 10 character/policy lanes, no HANG/TIMEOUT/ERROR, 6 wins in 50 games.
+
+## Results (2026-10-12)
+
+Batch `~/.sts2-train/ab3_20261009_064743/` (B = naive, C = greedy; inferrer on, a1, seeds
+p3x_1..40). Analysis `~/.sts2-train/ab3_analyze.py`, output `analysis_final.txt`. Engine-forced
+technical game_overs (BUG-052 GodotStubs `Connect` crash -> nuclear fallback, tagged
+`technical_failure_kind`) were reclassified from each game log as technical and excluded from
+pairing in both arms (Regent 4 + Necrobinder 1 in arm B; arm C was classified by the BUG-053 harness
+directly).
+
+| character | pairs | floor naive -> greedy | diff (se, p) | win naive -> greedy (p) |
+|---|---|---|---|---|
+| Ironclad | 38 | 36.50 -> 45.21 | **+8.71** (2.48, 0.0004) | 13% -> **58%** (<0.0001) |
+| Defect | 40 | 42.05 -> 47.18 | **+5.13** (2.01, 0.011) | 25% -> **57.5%** (0.0017) |
+| Necrobinder | 35 | 35.43 -> 43.51 | **+8.09** (2.32, 0.0005) | 9% -> **46%** (<0.0001) |
+| Regent | 32 | 38.94 -> 39.19 | +0.25 (2.79, 0.93) | 16% -> 28% (0.15) |
+| Silent | 40 | 35.10 -> 37.03 | +1.93 (2.20, 0.38) | 5% -> 7.5% (0.57) |
+
+Greedy-arm a1 Act 3 clear rates over all valid games: Ironclad 22/38 (58%), Defect 23/40 (57.5%),
+Necrobinder 16/37 (43%), Regent 12/36 (33%), Silent 3/40 (7.5%). **Decision: greedy is the default
+(6fbda17)** -- mean diff positive, no character significantly worse. Regent and Silent are the
+laggards to work on next.
+
+**Run-to-run nondeterminism (measured, important).** `ab3_split.py`'s SIGINT never stopped the
+original arm-C lanes (a non-interactive shell's background jobs ignore SIGINT and Python inherits
+SIG_IGN), so Silent/Regent/Necrobinder seeds p3x_21..40 were played TWICE by the same code. Only
+42/60 duplicates matched on (status, floor, steps); several flipped win <-> death at the same Act 3
+boss. The time-budgeted multi-threaded solver is not deterministic across runs (CPU timing/load), so
+a seed is not a reproducible game and each paired diff carries extra run-to-run noise. The second
+runs are kept as `<char>_C2.jsonl` and are not part of the analysis.
+

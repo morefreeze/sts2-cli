@@ -1,7 +1,7 @@
 namespace Godot;
 
 // Missing Godot node types
-public class Line2D : Node2D
+public partial class Line2D : Node2D
 {
     public Vector2[] Points { get; set; } = Array.Empty<Vector2>();
     public float Width { get; set; } = 1f;
@@ -10,45 +10,45 @@ public class Line2D : Node2D
     public void ClearPoints() { }
 }
 
-public class CpuParticles2D : Node2D
+public partial class CpuParticles2D : Node2D
 {
     public int Amount { get; set; }
     public bool Emitting { get; set; }
     public float Lifetime { get; set; }
     public bool OneShot { get; set; }
-    public float SpeedScale { get; set; }
+    public double SpeedScale { get; set; }
     public void Restart() { }
 }
 
-public class Marker2D : Node2D { }
-public class PathFollow2D : Node2D
+public partial class Marker2D : Node2D { }
+public partial class PathFollow2D : Node2D
 {
     public float Progress { get; set; }
     public float ProgressRatio { get; set; }
 }
-public class Path2D : Node2D { }
+public partial class Path2D : Node2D { }
 
-public class BackBufferCopy : Node2D { }
-public class CanvasGroup : Node2D { }
-public class CanvasItemMaterial : Material { }
+public partial class BackBufferCopy : Node2D { }
+public partial class CanvasGroup : Node2D { }
+public partial class CanvasItemMaterial : Material { }
 
-public class NinePatchRect : Control
+public partial class NinePatchRect : Control
 {
     public Texture2D? Texture { get; set; }
 }
 
-public class AspectRatioContainer : Container { }
-public class VFlowContainer : FlowContainer { }
+public partial class AspectRatioContainer : Container { }
+public partial class VFlowContainer : FlowContainer { }
 
-public class WorldEnvironment : Node { }
-public class FastNoiseLite : Resource { }
+public partial class WorldEnvironment : Node { }
+public partial class FastNoiseLite : Noise { }
 
-public class Font : Resource
+public partial class Font : Resource
 {
     public float GetStringSize(string text, int alignment = 0, float width = -1, int fontSize = 16) => text.Length * fontSize * 0.6f;
 }
 
-public class TextParagraph
+public partial class TextParagraph : GodotObject
 {
     public void Clear() { }
     public void AddString(string text, Font font, int fontSize) { }
@@ -56,62 +56,102 @@ public class TextParagraph
     public float GetWidth() => 0;
 }
 
-public class StyleBoxEmpty : Resource { }
+public partial class StyleBoxEmpty : StyleBox { }
 
-public class GradientTexture2D : Texture2D { }
-public class Gradient : Resource { }
+public partial class GradientTexture2D : Texture2D { }
+public partial class Gradient : Resource { }
 
-public class ParticleProcessMaterial : Material
+public partial class ParticleProcessMaterial : Material
 {
     public Vector3 EmissionBoxExtents { get; set; }
 }
 
-public class RenderingServer
+public partial class RenderingServer
 {
-    public enum ViewportMsaa { Disabled, Msaa2X, Msaa4X, Msaa8X }
+    public enum ViewportMsaa : long { Disabled = 0, Msaa2X = 1, Msaa4X = 2, Msaa8X = 3 }
     public static void GlobalShaderParameterSet(StringName name, Variant value) { }
 }
 
 // Input types
-public enum Key { None, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, Escape, Enter, Tab, Space, Left, Right, Up, Down, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12 }
-public enum MouseButton { None, Left, Right, Middle, WheelUp, WheelDown }
-public class InputEventJoypadMotion : InputEvent
+public enum Key : long { None = 0, A = 65, B = 66, C = 67, D = 68, E = 69, F = 70, G = 71, H = 72, I = 73, J = 74, K = 75, L = 76, M = 77, N = 78, O = 79, P = 80, Q = 81, R = 82, S = 83, T = 84, U = 85, V = 86, W = 87, X = 88, Y = 89, Z = 90, Escape = 4194305, Enter = 4194309, Tab = 4194306, Space = 32, Left = 4194319, Right = 4194321, Up = 4194320, Down = 4194322, F1 = 4194332, F2 = 4194333, F3 = 4194334, F4 = 4194335, F5 = 4194336, F6 = 4194337, F7 = 4194338, F8 = 4194339, F9 = 4194340, F10 = 4194341, F11 = 4194342, F12 = 4194343 }
+public enum MouseButton : long { None = 0, Left = 1, Right = 2, Middle = 3, WheelUp = 4, WheelDown = 5 }
+public partial class InputEventJoypadMotion : InputEvent
 {
-    public int Axis { get; set; }
+    public JoyAxis Axis { get; set; }
     public float AxisValue { get; set; }
 }
-public class InputEventAction : InputEvent
+public partial class InputEventAction : InputEvent
 {
     public StringName Action { get; set; } = "";
 }
 
 // Error enum
-public enum Error
+public enum Error : long
 {
-    Ok, Failed, Unavailable, Unconfigured, Unauthorized, ParameterRangeError,
-    OutOfMemory, FileNotFound, FileBadDrive, FileBadPath, FileNoPermission,
-    FileAlreadyInUse, FileCantOpen, FileCantWrite, FileCantRead, FileUnrecognized,
-    FileCorrupt, FileMissingDependencies, FileEof, CantOpen, CantCreate, QueryFailed,
-    AlreadyInUse, Locked, Timeout, CantConnect, CantResolve, ConnectionError, CantAcquireResource,
-    CantFork, InvalidData, InvalidParameter, AlreadyExists, DoesNotExist, DatabaseCantRead,
-    DatabaseCantWrite, CompilationFailed, MethodNotFound, LinkFailed, ScriptFailed,
-    CyclicLink, InvalidDeclaration, DuplicateSymbol, ParseError, Busy, Skip, Help, Bug
+    Ok = 0,
+    Failed = 1,
+    Unavailable = 2,
+    Unconfigured = 3,
+    Unauthorized = 4,
+    ParameterRangeError = 5,
+    OutOfMemory = 6,
+    FileNotFound = 7,
+    FileBadDrive = 8,
+    FileBadPath = 9,
+    FileNoPermission = 10,
+    FileAlreadyInUse = 11,
+    FileCantOpen = 12,
+    FileCantWrite = 13,
+    FileCantRead = 14,
+    FileUnrecognized = 15,
+    FileCorrupt = 16,
+    FileMissingDependencies = 17,
+    FileEof = 18,
+    CantOpen = 19,
+    CantCreate = 20,
+    QueryFailed = 21,
+    AlreadyInUse = 22,
+    Locked = 23,
+    Timeout = 24,
+    CantConnect = 25,
+    CantResolve = 26,
+    ConnectionError = 27,
+    CantAcquireResource = 28,
+    CantFork = 29,
+    InvalidData = 30,
+    InvalidParameter = 31,
+    AlreadyExists = 32,
+    DoesNotExist = 33,
+    DatabaseCantRead = 34,
+    DatabaseCantWrite = 35,
+    CompilationFailed = 36,
+    MethodNotFound = 37,
+    LinkFailed = 38,
+    ScriptFailed = 39,
+    CyclicLink = 40,
+    InvalidDeclaration = 41,
+    DuplicateSymbol = 42,
+    ParseError = 43,
+    Busy = 44,
+    Skip = 45,
+    Help = 46,
+    Bug = 47
 }
 
 // Tool attribute
 [AttributeUsage(AttributeTargets.Class)]
-public class ToolAttribute : Attribute { }
+public partial class ToolAttribute : Attribute { }
 
 // ExportToolButton attribute
 [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
-public class ExportToolButtonAttribute : Attribute
+public partial class ExportToolButtonAttribute : Attribute
 {
     public ExportToolButtonAttribute(string text, string icon = "") { }
 }
 
 // AssemblyHasScripts attribute
 [AttributeUsage(AttributeTargets.Assembly)]
-public class AssemblyHasScriptsAttribute : Attribute
+public partial class AssemblyHasScriptsAttribute : Attribute
 {
     public AssemblyHasScriptsAttribute() { }
     public AssemblyHasScriptsAttribute(string[] scripts) { }
@@ -122,7 +162,7 @@ public class AssemblyHasScriptsAttribute : Attribute
 // public class Signal { public Signal(GodotObject owner, StringName name) { } }
 
 // Colors - static color constants
-public static class Colors
+public static partial class Colors
 {
     public static Color White { get; } = Color.White;
     public static Color Black { get; } = Color.Black;
@@ -141,9 +181,9 @@ public static class Colors
 }
 
 // Range control
-public class Range : Control
+public partial class Range : Control
 {
-    public new class SignalName : Control.SignalName
+    public new partial class SignalName : Control.SignalName
     {
         public static readonly StringName ValueChanged = "ValueChanged";
     }

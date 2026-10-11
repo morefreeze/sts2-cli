@@ -2,7 +2,7 @@ namespace Godot.NativeInterop;
 
 using Godot;
 
-public static class VariantUtils
+public static partial class VariantUtils
 {
     public static T ConvertTo<T>(Variant v) => default!;
     public static Variant CreateFrom<T>(T value) => new Variant(value);
@@ -15,15 +15,15 @@ public static class VariantUtils
 }
 
 // Low-level native interop types used in generated bridge code
-public struct godot_string_name { }
-public struct godot_variant { }
-public struct godot_bool { }
-public struct NativeGodotVariant { }
-public struct NativeGodotString { }
-public struct NativeGodotStringName { }
+public partial struct godot_string_name { }
+public partial struct godot_variant { }
+public partial struct godot_bool { }
+public partial struct NativeGodotVariant { }
+public partial struct NativeGodotString { }
+public partial struct NativeGodotStringName { }
 
 // NativeVariantPtrArgs - used in signal dispatch bridge
-public readonly struct NativeVariantPtrArgs
+public readonly partial struct NativeVariantPtrArgs
 {
     public readonly ref godot_variant this[int index] => ref System.Runtime.CompilerServices.Unsafe.NullRef<godot_variant>();
     public int Count => 0;

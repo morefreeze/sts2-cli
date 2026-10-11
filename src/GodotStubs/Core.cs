@@ -2,12 +2,24 @@ using System.Runtime.CompilerServices;
 
 namespace Godot;
 
-public class GodotObject
+public partial class GodotObject
 {
-    public class SignalName { }
+    public partial class SignalName { }
 
     public static bool IsInstanceValid(GodotObject? obj) => obj != null;
     public virtual bool IsQueuedForDeletion() => false;
+
+    // Signals. There is no scene tree or signal dispatch in headless play, so connecting is a
+    // no-op that reports success (Error.Ok), nothing is ever "connected", and emitting delivers
+    // to nobody. These are the real Godot 4 signatures: sts2.dll binds to them by exact
+    // name + parameter types + return type, so a mismatch is a MissingMethodException at JIT
+    // time of the CALLER (BUG-052: CombatManager.SetReadyToEndTurn -> Connect(StringName,
+    // Callable, uint) killed the combat turn loop). They live on GodotObject, as in Godot, so
+    // every node/resource type inherits them; do not re-declare them on subclasses.
+    public Error Connect(StringName signal, Callable callable, uint flags = 0) => Error.Ok;
+    public void Disconnect(StringName signal, Callable callable) { }
+    public bool IsConnected(StringName signal, Callable callable) => false;
+    public Error EmitSignal(StringName signal, params Variant[] args) => Error.Ok;
 
     // ToSignal - must be on GodotObject (not Node) to match real Godot
     public SignalAwaiter ToSignal(GodotObject source, StringName signal)
@@ -26,14 +38,14 @@ public class GodotObject
     protected virtual bool HasGodotClassSignal(in NativeInterop.godot_string_name signal) => false;
 }
 
-public class Node : GodotObject
+public partial class Node : GodotObject
 {
-    public enum InternalMode { Disabled, Front, Back }
+    public enum InternalMode : long { Disabled = 0, Front = 1, Back = 2 }
 
     private Node? _parent;
     private readonly List<Node> _children = new();
 
-    public class MethodName
+    public partial class MethodName
     {
         public static readonly StringName AddChild = "AddChild";
         public static readonly StringName RemoveChild = "RemoveChild";
@@ -41,8 +53,8 @@ public class Node : GodotObject
         public static readonly StringName _Ready = "_Ready";
     }
 
-    public class PropertyName { }
-    public new class SignalName : GodotObject.SignalName
+    public partial class PropertyName { }
+    public new partial class SignalName : GodotObject.SignalName
     {
         public static readonly StringName ProcessFrame = "ProcessFrame";
     }
@@ -87,7 +99,7 @@ public class Node : GodotObject
         _children.Remove(child);
     }
 
-    public void Reparent(Node newParent)
+    public void Reparent(Node newParent, bool keepGlobalTransform = true)
     {
         _parent?.RemoveChild(this);
         newParent.AddChild(this);
@@ -116,9 +128,9 @@ public class Node : GodotObject
     public virtual void _UnhandledKeyInput(InputEvent @event) { }
 }
 
-public class SceneTree : MainLoop
+public partial class SceneTree : MainLoop
 {
-    public new class SignalName : Node.SignalName
+    public new partial class SignalName : Node.SignalName
     {
         public static new readonly StringName ProcessFrame = "process_frame";
     }
@@ -134,7 +146,7 @@ public class SceneTree : MainLoop
     public Window Root { get; } = new Window();
 }
 
-public class SceneTreeTimer : GodotObject
+public partial class SceneTreeTimer : GodotObject
 {
     public event Action? Timeout;
 
@@ -144,16 +156,16 @@ public class SceneTreeTimer : GodotObject
     }
 }
 
-public class MainLoop : GodotObject { }
+public partial class MainLoop : GodotObject { }
 
-public static class Engine
+public static partial class Engine
 {
     private static readonly SceneTree _mainLoop = new();
     public static MainLoop GetMainLoop() => _mainLoop;
     public static bool IsEditorHint() => false;
 }
 
-public static class GD
+public static partial class GD
 {
     public static void Print(params object[] args) => Console.Error.WriteLine(string.Join("", args));
     public static void Print(string msg) => Console.Error.WriteLine(msg);
@@ -175,9 +187,9 @@ public static class GD
     public static double Randfn(double mean, double deviation) => mean + deviation * (Math.Sqrt(-2.0 * Math.Log(_rng.NextDouble())) * Math.Cos(2.0 * Math.PI * _rng.NextDouble()));
 }
 
-public static class OS
+public static partial class OS
 {
-    public static void ShellOpen(string uri) { }
+    public static Error ShellOpen(string uri) => Error.Ok;
     public static string GetLocale() => "en";
     public static string GetName() => "headless";
     public static string GetVersion() => "0.0";
@@ -189,16 +201,16 @@ public static class OS
     public static string[] GetCmdlineArgs() => Array.Empty<string>();
 }
 
-public static class ProjectSettings
+public static partial class ProjectSettings
 {
     public static string GlobalizePath(string path) => path;
     public static Variant GetSetting(string name, Variant @default = default) => @default;
     public static bool LoadResourcePack(string path) => false;
 }
 
-public static class ResourceLoader
+public static partial class ResourceLoader
 {
-    public enum CacheMode { Reuse, Replace, Ignore }
+    public enum CacheMode : long { Reuse = 1, Replace = 2, Ignore = 0 }
     public static T? Load<T>(string path, string? typeHint = null, CacheMode cacheMode = CacheMode.Reuse) where T : class
     {
         // Return PackedScene stub — IS-A Resource, so (PackedScene)resource casts succeed
@@ -210,22 +222,22 @@ public static class ResourceLoader
     public static bool Exists(string path, string typeHint) => false;
 }
 
-public static class Time
+public static partial class Time
 {
     public static ulong GetTicksMsec() => (ulong)Environment.TickCount64;
 }
 
-public class Window : Node
+public partial class Window : Viewport
 {
-    public new class SignalName : Node.SignalName
+    public new partial class SignalName : Node.SignalName
     {
         public static readonly StringName SizeChanged = "SizeChanged";
     }
 }
 
-public class Viewport : Node
+public partial class Viewport : Node
 {
-    public new class SignalName : Node.SignalName
+    public new partial class SignalName : Node.SignalName
     {
         public static readonly StringName GuiFocusChanged = "GuiFocusChanged";
     }

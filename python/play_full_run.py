@@ -22,6 +22,7 @@ import random
 import os
 import shutil
 import traceback
+import uuid
 from game_log import GameLogger
 from engine_process import EngineHang, EngineProcess
 from combat_plan_driver import (
@@ -91,9 +92,12 @@ SOLVER_BUDGET_DEFAULT_S = 120
 SOLVER_WATCHDOG_MARGIN_S = 60
 # A plan whose next planned play_card the live engine refuses ("Cannot play
 # card ...") is a stale plan and the harness re-plans (agent/bug.md BUG-042).
-# A turn with MORE than this many refusals gets no further plan_combat_turn
-# call: a solver that keeps planning the same refused card would otherwise
-# loop until the STUCK detector ends the run. The heuristic plays the rest.
+# So is a plan naming a card_id/potion_id that is not in the live hand/potions
+# at all (the Run 15 recovery; it sends nothing, so it is the likelier loop --
+# agent/bug.md BUG-051). A turn with MORE than this many stale returns, of
+# either kind combined, gets no further plan_combat_turn call: a solver that
+# keeps planning the same stale plan would otherwise loop until the STUCK
+# detector ends the run. The heuristic plays the rest of the turn.
 SOLVER_STALE_REFUSALS_PER_TURN = 3
 # Every other engine reply arrives in well under a second; 120 s only fires on
 # a genuine stall.
@@ -155,8 +159,15 @@ def solver_call_timeout_s(budget_s: int) -> float:
 # agent.combat_env.greedy_action, the tuned policy the RL harness uses.
 # map_select (seeded random route) and combat_play (solver) are never
 # delegated, so an A/B between the two isolates the out-of-combat policy.
+# The default is "greedy" since the 2026-10-12 a1 paired A/B (inferrer on,
+# 40 seeds x 5 characters, naive -> greedy): Ironclad +8.71 floors (p=0.0004,
+# win 13%->58%), Defect +5.13 (p=0.011, win 25%->57.5%), Necrobinder +8.09
+# (p=0.0005, win 9%->46%), Regent +0.25 (p=0.93, win 16%->28%), Silent +1.93
+# (p=0.38, win 5%->7.5%); no character significantly worse. Record:
+# ~/.sts2-train/ab3_20261009_064743/analysis_final.txt. "naive" stays as the
+# control arm (STS2_OOC_POLICY=naive).
 OOC_POLICIES = ("naive", "greedy")
-OOC_POLICY_DEFAULT = "naive"
+OOC_POLICY_DEFAULT = "greedy"
 OOC_GREEDY_DECISIONS = frozenset({"card_reward", "rest_site", "event_choice",
                                   "bundle_select", "card_select", "shop"})
 # A greedy shop visit normally ends in a few buys and a leave_room; this cap
@@ -202,6 +213,72 @@ def _load_greedy_action():
         sys.path.insert(0, root)
     from agent.combat_env import greedy_action
     return greedy_action
+
+
+def _run_metadata():
+    """agent.run_metadata, imported lazily like _load_greedy_action (python/ is
+    this script's own directory; the repo root is not on sys.path)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import agent.run_metadata
+    return agent.run_metadata
+
+
+def resolve_run_game_version(cli_value=None, environment=None):
+    """Version of the game this batch plays, or None when nothing names one.
+
+    --game-version, then STS2_GAME_VERSION, then the install's own
+    release_info.json (one directory above STS2_GAME_DIR); the result's `.source`
+    is "cli" / "environment" / "release_info". The run workbench files a batch
+    under this version and refuses baseline comparison without it. An invalid
+    explicit value raises ValueError; an unresolvable one is None (the caller
+    warns once and plays on -- a log without a version beats a lost batch).
+    """
+    return _run_metadata().resolve_optional_game_version(cli_value, environment)
+
+
+def batch_name(experiment, seed_prefix):
+    """The batch part of the experiment label: --experiment, else the seed prefix
+    without its trailing underscore (`run_` -> `run`). None if neither names one."""
+    name = (experiment or "").strip() or (seed_prefix or "").strip().rstrip("_")
+    return name or None
+
+
+def experiment_label(batch, policy, route="random"):
+    """What the workbench's `experiment` axis shows: `<batch>:ooc=<policy>`.
+    The batch keeps two batches under the same policy from landing in one cohort.
+
+    Under the value route policy (Phase 3b) `,route=value` is appended;
+    agent/fit_route_model.py skips logs carrying it (it fits the route model from
+    random-route games only). The random arm's label is exactly the one above.
+    """
+    label = f"{batch}:ooc={policy}" if batch else f"ooc={policy}"
+    return f"{label},route=value" if route == "value" else label
+
+
+def new_run_id():
+    """A fresh per-game id, shared by the game log's run_meta header and the
+    results row so the two can be joined."""
+    return f"pfr-{uuid.uuid4().hex[:12]}"
+
+
+def build_run_context(seed, character, ascension, experiment, run_id, game_version=None):
+    """The run_meta header play_run hands GameLogger.
+
+    The workbench cohorts logs by (experiment, checkpoint, character,
+    game_version, evaluation_mode, scenario, ascension): every harness game is a
+    fixed-seed, single-player full run, and is_multiplayer must be a strict bool
+    or the run's map view degrades to "Multiplayer flag must be a boolean".
+    game_version is a ResolvedGameVersion or None (then simply omitted).
+    """
+    context = {"run_id": run_id, "seed": seed, "character": character,
+               "ascension": ascension, "experiment": experiment,
+               "evaluation_mode": "fixed", "scenario": "full_run",
+               "is_multiplayer": False}
+    if game_version is not None:
+        context.update(game_version.to_fields())
+    return context
 
 
 def greedy_knobs(env=None) -> dict:
@@ -372,8 +449,13 @@ def engine_argv() -> list:
 
 
 def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True,
-             ascension: int = 0, keep_log_dir: str | None = None):
+             ascension: int = 0, keep_log_dir: str | None = None,
+             game_version=None, batch: str | None = None):
     """Play a complete run and return the result.
+
+    `game_version` (a ResolvedGameVersion, or None) and `batch` (see
+    batch_name) go into the game log's run_meta header so the run workbench can
+    file the game; every result carries the game's `run_id`, which is the same id.
 
     Thin wrapper over _play_run() that stamps the fields every result needs
     regardless of which of _play_run's many return paths produced it:
@@ -406,11 +488,20 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              # exact act cell (a sparse model), summed over planned decisions
              "route_cell_fallbacks": 0,
              # BUG-042: planned play_cards the live engine refused (each one
-             # re-planned), and turns handed to the heuristic by the guard
+             # re-planned), and turns handed to the heuristic by the guard.
+             # BUG-051: plans whose card_id/potion_id was not in the live hand
+             # (also re-planned, and counted toward the same per-turn guard)
              "solver_stale_refusals": 0,
+             "solver_stale_unresolved": 0,
              "solver_turn_fallbacks": 0,
              "game_log": None}
-    result = _play_run(seed, character, verbose, log, ascension, stats)
+    stats["run_id"] = new_run_id()
+    run_context = build_run_context(
+        seed, character, ascension,
+        # the random arm's tag stays exactly `<batch>:ooc=<policy>`
+        experiment_label(batch, policy, stats["route_policy"]), stats["run_id"],
+        game_version)
+    result = _play_run(seed, character, verbose, log, ascension, stats, run_context)
     stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
     game_log = stats.pop("game_log")
     if keep_log_dir and game_log and os.path.exists(game_log):
@@ -432,13 +523,13 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
 
 
 def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: int,
-              stats: dict):
+              stats: dict, run_context: dict | None = None):
     """The run loop. `stats` is play_run()'s per-run dict: this function bumps
     stats["ooc_greedy"], stats["ooc_fallback_causes"][...],
     stats["ooc_event_stuck"], stats["route_plans"], stats["route_fallbacks"],
     stats["route_forced"], stats["route_cell_fallbacks"],
-    stats["solver_stale_refusals"] and stats["solver_turn_fallbacks"], and sets
-    stats["game_log"]."""
+    stats["solver_stale_refusals"], stats["solver_stale_unresolved"] and
+    stats["solver_turn_fallbacks"], and sets stats["game_log"]."""
     # Dedicated RNG for this harness's own decisions (map routing below), keyed
     # off the run seed -- NOT random.seed(), which would reseed the shared
     # global `random` module and silently change behavior for every other
@@ -462,13 +553,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
     solver_plans = 0
     solver_errors = 0
     solver_error_printed = False
-    logger = GameLogger(character, seed, enabled=log,
-                        run_context={"seed": seed, "character": character,
-                                     "ascension": ascension,
-                                     # the random arm's tag stays exactly as before
-                                     "experiment": f"ooc={stats['ooc_policy']}"
-                                     + (",route=value" if stats["route_policy"] == "value"
-                                        else "")})
+    logger = GameLogger(character, seed, enabled=log, run_context=run_context)
     # stderr: inherit when verbose, otherwise DEVNULL -- never an unread PIPE,
     # which fills up and blocks the engine's Console.Error.WriteLine (the stderr
     # deadlock described in RunSimulator.cs DoPlanCombatTurn's diagnostics note).
@@ -536,10 +621,15 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         # key it was collected under.
         refused_ids = set()
         refused_turn_key = None
-        # Live CanPlay refusals of planned cards this combat turn (BUG-042),
-        # keyed like refused_turn_key; see SOLVER_STALE_REFUSALS_PER_TURN.
+        # Stale plans this combat turn, keyed like refused_turn_key; see
+        # SOLVER_STALE_REFUSALS_PER_TURN. Live CanPlay refusals of planned
+        # cards (BUG-042) and plans naming a card/potion that is not in the
+        # live hand (BUG-051) are tallied apart but limited together;
+        # `no_progress` is how many of them executed nothing.
         stale_turn_key = None
         stale_turn_refusals = 0
+        stale_turn_unresolved = 0
+        stale_turn_no_progress = 0
         stale_turn_fallback_counted = False
         # Phase 3a: out-of-combat decisions go to agent.combat_env.greedy_action
         # when STS2_OOC_POLICY=greedy (see OOC_GREEDY_DECISIONS). None = naive.
@@ -626,6 +716,31 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
             if decision == "game_over":
                 victory = state.get("victory", False)
                 player = state.get("player", {})
+                kind = state.get("technical_failure_kind")
+                if kind:
+                    # BUG-053: the engine's "nuclear fallback" (RunSimulator.cs, a turn loop that
+                    # never reached the play phase again) terminates the run as GameOverState(false)
+                    # TAGGED technical_failure_kind precisely so evaluations can exclude it. Treating
+                    # it as a loss counted a stalled engine as a death: it was "Completed", status
+                    # "dead", and dragged every measured floor down (eval_rl already excludes it).
+                    # Same technical-result shape as the other engine failures: an "error", so
+                    # summarize() does not count it Completed, plus the kind for the status mapping.
+                    print(f"\nENGINE-{str(kind).upper()}: engine-forced game_over at act {state.get('act')}, "
+                          f"floor {state.get('floor')} (HP: {player.get('hp')}/{player.get('max_hp')}) "
+                          f"-- a technical failure, NOT a defeat (agent/bug.md BUG-053)")
+                    return {
+                        "victory": False,
+                        "seed": seed,
+                        "steps": step,
+                        "act": state.get("act"),
+                        "floor": state.get("floor"),
+                        "hp": player.get("hp"),
+                        "max_hp": player.get("max_hp"),
+                        "error": f"engine_{kind}: forced game_over",
+                        "technical_failure_kind": kind,
+                        "solver_plans": solver_plans,
+                        "solver_errors": solver_errors,
+                    }
                 print(f"\n{'VICTORY' if victory else 'DEFEAT'} at act {state.get('act')}, "
                       f"floor {state.get('floor')} "
                       f"(HP: {player.get('hp')}/{player.get('max_hp')}, "
@@ -729,14 +844,20 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if turn_key != stale_turn_key:
                     stale_turn_key = turn_key
                     stale_turn_refusals = 0
+                    stale_turn_unresolved = 0
+                    stale_turn_no_progress = 0
                     stale_turn_fallback_counted = False
+                stale_turn_total = stale_turn_refusals + stale_turn_unresolved
                 stale_guard = (character in solver_chars
-                               and stale_turn_refusals > SOLVER_STALE_REFUSALS_PER_TURN)
+                               and stale_turn_total > SOLVER_STALE_REFUSALS_PER_TURN)
                 if stale_guard and not stale_turn_fallback_counted:
                     stale_turn_fallback_counted = True
                     stats["solver_turn_fallbacks"] += 1
-                    print(f"  !! plan_combat_turn refused {stale_turn_refusals} times this "
-                          f"turn -- heuristic for the rest of the turn")
+                    print(f"  !! plan_combat_turn refused {stale_turn_total} times this "
+                          f"turn -- heuristic for the rest of the turn "
+                          f"({stale_turn_refusals} live refusals, "
+                          f"{stale_turn_unresolved} unresolved-card plans, "
+                          f"{stale_turn_no_progress} made no progress)")
                 if character in solver_chars and not stale_guard:
                     plan = send({"cmd": "action", "action": "plan_combat_turn"})
                     if plan.get("type") == "error":
@@ -794,8 +915,12 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                         state, plan_ok = _execute_combat_plan_actions(
                             send, state, plan_actions, stats=exec_stats)
                         refusals = exec_stats.get("stale_refusals", 0)
+                        unresolved = exec_stats.get("stale_unresolved", 0)
                         stats["solver_stale_refusals"] += refusals
+                        stats["solver_stale_unresolved"] += unresolved
                         stale_turn_refusals += refusals
+                        stale_turn_unresolved += unresolved
+                        stale_turn_no_progress += exec_stats.get("stale_no_progress", 0)
                         if not plan_ok:
                             print("  ERROR: plan_combat_turn's plan did not execute "
                                   "cleanly against the live engine")
@@ -1033,6 +1158,12 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         engine.close()
 
 
+# The technical_failure_kind values agent/eval_rl.py / combat_env.py's _terminal_status_for treat as
+# "the run did not really end" (paired_eval pairs only win/dead rows). Anything else the engine might
+# invent maps to "invalid" rather than being counted as a death.
+TECHNICAL_FAILURE_KINDS = frozenset({"crash", "timeout", "stuck", "invalid"})
+
+
 def global_floor(act, floor):
     """Absolute run floor from the engine's ACT-LOCAL floor.
 
@@ -1070,6 +1201,11 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         # "stuck" is in eval_rl's technical-status set, so paired_eval drops the
         # seed from pairing instead of averaging a killed run in as a death.
         status = "stuck"
+    elif result.get("technical_failure_kind"):
+        # BUG-053: an engine-forced game_over (nuclear fallback) is the engine telling us the
+        # turn loop stalled, in the same words eval_rl uses -- never an ordinary death.
+        kind = result["technical_failure_kind"]
+        status = kind if kind in TECHNICAL_FAILURE_KINDS else "invalid"
     elif result.get("timeout"):
         status = "timeout"
     elif result.get("error"):
@@ -1090,6 +1226,7 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "solver_plans": result.get("solver_plans"),
         "solver_errors": result.get("solver_errors"),
         "solver_stale_refusals": result.get("solver_stale_refusals"),
+        "solver_stale_unresolved": result.get("solver_stale_unresolved"),
         "solver_turn_fallbacks": result.get("solver_turn_fallbacks"),
         "solver": sorted(solver_characters()),
         "solver_budget_s": solver_budget_seconds(),
@@ -1110,6 +1247,8 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "route_cell_fallbacks": result.get("route_cell_fallbacks"),
         "game_log": result.get("game_log"),
         "game_log_error": result.get("game_log_error"),
+        # the game log's run_meta run_id, to join this row to that log
+        "run_id": result.get("run_id"),
     }
 
 
@@ -1138,6 +1277,11 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     action. Same class as the plan_combat_turn "问题 1" postmortem in
     docs/superpowers/plans/2026-09-17-combatsolver-port-phase1.md.
 
+    An engine-forced game_over (the engine's nuclear fallback after a turn loop
+    that never resumed, tagged technical_failure_kind) is the same kind of
+    non-result: it renders as ENGINE-<KIND> with a banner, carries an "error",
+    and is neither Completed nor a LOSS (BUG-053).
+
     Solver engagement ("solver=<plans>/<attempts>" per run, plus an aggregate
     line) is reported alongside -- but deliberately NOT folded into
     Completed/WIN/LOSS/TIMEOUT/ERROR above: a run that fell back to the
@@ -1162,6 +1306,8 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
                 status = "WIN"
             elif r.get("hang"):
                 status = "HANG"
+            elif r.get("technical_failure_kind"):
+                status = f"ENGINE-{str(r['technical_failure_kind']).upper()}"
             elif r.get("timeout"):
                 status = "TIMEOUT"
             elif r.get("error"):
@@ -1186,13 +1332,20 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
     avg_floor = round(sum(floors) / len(floors), 1) if floors else 0.0
     lines.append(f"\nWins: {wins}/{num_runs}, Completed: {completed}/{num_runs}, "
                  f"avg_floor={avg_floor}")
+    forced = [r for r in results if r and r.get("technical_failure_kind")]
+    if forced:
+        lines.append(f"!! {len(forced)} run(s) ended in an engine-forced game_over (technical_failure_kind: "
+                     f"{', '.join(sorted({str(r['technical_failure_kind']) for r in forced}))}) -- the engine's "
+                     f"turn loop stalled; they are NOT losses and NOT Completed (agent/bug.md BUG-053)")
     total_solver_attempts = total_solver_plans + total_solver_errors
     total_stale = sum(r.get("solver_stale_refusals") or 0 for r in results if r)
+    total_unresolved = sum(r.get("solver_stale_unresolved") or 0 for r in results if r)
     total_turn_fallbacks = sum(r.get("solver_turn_fallbacks") or 0 for r in results if r)
     lines.append(f"Solver engagement: {total_solver_plans}/{total_solver_attempts} "
                  f"plan_combat_turn calls returned a usable plan, "
                  f"{total_stale} stale-plan refusals re-planned, "
-                 f"{total_turn_fallbacks} turns fell back to the heuristic")
+                 f"{total_turn_fallbacks} turns fell back to the heuristic, "
+                 f"{total_unresolved} unresolved-card re-plans")
     policies = sorted({r.get("ooc_policy") for r in results if r and r.get("ooc_policy")})
     if policies:
         total_greedy = sum(r.get("ooc_greedy") or 0 for r in results if r)
@@ -1294,6 +1447,18 @@ def main():
                         help="Seeds are <prefix><i> for i = 1..num_runs (default run_). "
                              "Use a fresh prefix per experiment so a verdict never "
                              "runs on seeds an earlier phase tuned on.")
+    parser.add_argument("--seed-offset", type=int, default=0,
+                        help="Start seeds at <prefix><offset+1> (default 0) -- lets one "
+                             "experiment's seed range be split across several processes.")
+    parser.add_argument("--game-version", default=None, metavar="VERSION",
+                        help="Game version to record in every game log (e.g. v0.111.0). "
+                             "Default: $STS2_GAME_VERSION, else the install's "
+                             "release_info.json (one directory above $STS2_GAME_DIR). The "
+                             "run workbench files a batch under this version.")
+    parser.add_argument("--experiment", default=None, metavar="NAME",
+                        help="Batch name in the logs' experiment label "
+                             "(<NAME>:ooc=<policy>). Default: the seed prefix without its "
+                             "trailing underscore, so each --seed-prefix is its own cohort.")
     parser.add_argument("--keep-game-logs", default=None, metavar="DIR",
                         help="Copy each game's full state log to "
                              "DIR/<character>_<policy>_a<ascension>_<seed>.jsonl "
@@ -1305,6 +1470,16 @@ def main():
         parser.error(f"num_runs must be a positive integer, got {args.num_runs}")
     if args.ascension < 0:
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
+    if args.seed_offset < 0:
+        parser.error(f"--seed-offset must be >= 0, got {args.seed_offset}")
+    if args.experiment is not None and not args.experiment.strip():
+        parser.error("--experiment must not be blank")
+    if args.experiment is not None and len(args.experiment.strip()) > 100:
+        parser.error("--experiment must be at most 100 characters")
+    try:
+        game_version = resolve_run_game_version(args.game_version)
+    except ValueError as exc:  # a malformed explicit value: surface it before any game
+        parser.error(str(exc))
     policy = ooc_policy()  # fail on a bad STS2_OOC_POLICY before any game starts
     inferrer = solver_inferrer()  # ...and on a bad STS2_SOLVER_INFERRER
     if policy == "greedy":
@@ -1325,17 +1500,33 @@ def main():
     num_runs = args.num_runs
     character = args.character
 
+    # Only name the range when it is shifted, so the default header stays byte-identical.
+    seed_range = ""
+    if args.seed_offset:
+        seed_range = (f", seeds {args.seed_prefix}{args.seed_offset + 1}"
+                      f"..{args.seed_prefix}{args.seed_offset + num_runs}")
     print(f"Playing {num_runs} runs as {character} "
           f"(ascension {args.ascension}, ooc policy {policy}, "
-          f"solver inferrer {inferrer}, route policy {route})")
+          f"solver inferrer {inferrer}, route policy {route}{seed_range})")
+    batch = batch_name(args.experiment, args.seed_prefix)
+    if game_version is None:
+        print("!! game version unresolved (no --game-version, no STS2_GAME_VERSION, no "
+              f"release_info.json beside STS2_GAME_DIR={os.environ.get('STS2_GAME_DIR')}): "
+              "game logs carry no game_version, so the run workbench files this batch "
+              "under 未知版本（未归档） and cannot compare it")
+        version_note = "game version unknown"
+    else:
+        version_note = f"game version {game_version.value} ({game_version.source})"
+    print(f"Run metadata: {version_note}, experiment {experiment_label(batch, policy, route)}")
     print("=" * 60)
 
     results = []
     for i in range(num_runs):
-        seed = f"{args.seed_prefix}{i+1}"
+        seed = f"{args.seed_prefix}{args.seed_offset + i + 1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
         result = play_run(seed, character, verbose=True, ascension=args.ascension,
-                          keep_log_dir=args.keep_game_logs)
+                          keep_log_dir=args.keep_game_logs,
+                          game_version=game_version, batch=batch)
         results.append(result)
         if args.results_log:
             with open(args.results_log, "a") as fh:

@@ -2,8 +2,9 @@
 
 // Left navigation tree: fetches nothing itself -- app.js's bootstrap loads
 // /api/tree once and calls Tree.render(tree). Renders 游戏版本 › 角色 › 批次
-// exactly in server order (newest first, the null-version bucket last) and
-// never re-sorts client-side. Supports expand/collapse, a selected leaf
+// exactly in server order (version groups by their newest batch, newest first,
+// the null-version bucket ordered like any other) and never re-sorts
+// client-side. Supports expand/collapse, a selected leaf
 // marked with aria-current="true", and roving-tabindex arrow-key navigation.
 
 window.Tree = (() => {
@@ -63,13 +64,20 @@ window.Tree = (() => {
     // dash when no run in the batch recorded a floor -- never 0.
     const avgFloor = cohort.avg_global_floor;
     const hasAvg = typeof avgFloor === 'number' && Number.isFinite(avgFloor);
+    // Games still being played are listed in the batch but are not in 局 or
+    // 平均 -- the label says how many are on top of those.
+    const inProgress = Number(cohort.in_progress_count);
+    const inProgressText = Number.isFinite(inProgress) && inProgress > 0 ? ` · ${inProgress} 进行中` : '';
+    // The longer count may not fit beside the label: let it wrap below it
+    // rather than squeeze the label into a column of broken words.
+    if (inProgressText) leaf.className += ' tree-leaf-has-live';
     leaf.append(
       element('span', { className: 'tree-leaf-label', text: cohort.label }),
       element('span', {
         className: 'tree-leaf-count',
-        text: hasAvg
+        text: (hasAvg
           ? `${formatMissing(cohort.run_count, 0)} 局 · 平均 ${formatMissing(avgFloor)}`
-          : `${formatMissing(cohort.run_count, 0)} 局 · 平均 —`,
+          : `${formatMissing(cohort.run_count, 0)} 局 · 平均 —`) + inProgressText,
       }),
     );
     if (Number(cohort.technical_count) > 0) {

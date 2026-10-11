@@ -305,6 +305,13 @@ def _adapt_replay(
         or _first_text(run_meta, "scenario"),
         ascension=ascension,
         modifiers=modifiers or (),
+        # Only the harness knows this and only the header carries it; the map
+        # view refuses anything but a strict bool.
+        is_multiplayer=(
+            run_meta["is_multiplayer"]
+            if type(run_meta.get("is_multiplayer")) is bool
+            else None
+        ),
         started_at=min(timestamps) if timestamps else None,
         ended_at=max(timestamps) if timestamps else None,
     )
