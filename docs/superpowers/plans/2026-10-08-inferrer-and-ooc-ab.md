@@ -57,6 +57,33 @@ and the OFF run had none, so the difference is the inferrer. Evidence:
 Gate (`~/.sts2-train/gate2_20261008_202822/`): naive and greedy, inferrer on, 5 x 5 each --
 Completed 5/5 for all 10 character/policy lanes, no HANG/TIMEOUT/ERROR, 6 wins in 50 games.
 
-## Results
+## Results (2026-10-12)
 
-(filled in after the run)
+Batch `~/.sts2-train/ab3_20261009_064743/` (B = naive, C = greedy; inferrer on, a1, seeds
+p3x_1..40). Analysis `~/.sts2-train/ab3_analyze.py`, output `analysis_final.txt`. Engine-forced
+technical game_overs (BUG-052 GodotStubs `Connect` crash -> nuclear fallback, tagged
+`technical_failure_kind`) were reclassified from each game log as technical and excluded from
+pairing in both arms (Regent 4 + Necrobinder 1 in arm B; arm C was classified by the BUG-053 harness
+directly).
+
+| character | pairs | floor naive -> greedy | diff (se, p) | win naive -> greedy (p) |
+|---|---|---|---|---|
+| Ironclad | 38 | 36.50 -> 45.21 | **+8.71** (2.48, 0.0004) | 13% -> **58%** (<0.0001) |
+| Defect | 40 | 42.05 -> 47.18 | **+5.13** (2.01, 0.011) | 25% -> **57.5%** (0.0017) |
+| Necrobinder | 35 | 35.43 -> 43.51 | **+8.09** (2.32, 0.0005) | 9% -> **46%** (<0.0001) |
+| Regent | 32 | 38.94 -> 39.19 | +0.25 (2.79, 0.93) | 16% -> 28% (0.15) |
+| Silent | 40 | 35.10 -> 37.03 | +1.93 (2.20, 0.38) | 5% -> 7.5% (0.57) |
+
+Greedy-arm a1 Act 3 clear rates over all valid games: Ironclad 22/38 (58%), Defect 23/40 (57.5%),
+Necrobinder 16/37 (43%), Regent 12/36 (33%), Silent 3/40 (7.5%). **Decision: greedy is the default
+(6fbda17)** -- mean diff positive, no character significantly worse. Regent and Silent are the
+laggards to work on next.
+
+**Run-to-run nondeterminism (measured, important).** `ab3_split.py`'s SIGINT never stopped the
+original arm-C lanes (a non-interactive shell's background jobs ignore SIGINT and Python inherits
+SIG_IGN), so Silent/Regent/Necrobinder seeds p3x_21..40 were played TWICE by the same code. Only
+42/60 duplicates matched on (status, floor, steps); several flipped win <-> death at the same Act 3
+boss. The time-budgeted multi-threaded solver is not deterministic across runs (CPU timing/load), so
+a seed is not a reproducible game and each paired diff carries extra run-to-run noise. The second
+runs are kept as `<char>_C2.jsonl` and are not part of the analysis.
+
