@@ -624,6 +624,27 @@ def test_cli_skips_value_policy_logs_unless_allowed(tmp_path, capsys, _fake_card
     assert "Skipped" not in capsys.readouterr().out
 
 
+def test_cli_skips_run_batch_value_arm_logs_but_keeps_the_batched_random_arm(
+        tmp_path, capsys, _fake_card_data):
+    """run_batch.py stamps harness/batch_id/lane/game_index on every game; the value arm's
+    experiment is `<batch>:ooc=greedy,route=value`. Those extra header fields must not
+    change which logs the fit keeps."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name, lane, experiment in (("r1", "Defect/random", "p3b:ooc=greedy"),
+                                   ("r2", "Defect/random", "p3b:ooc=greedy"),
+                                   ("v1", "Defect/value", "p3b:ooc=greedy,route=value")):
+        path = logs / f"{name}.jsonl"
+        _write_log(path, "Defect", 1, f"s_{name}", [80, 70, 60], 4, experiment=experiment)
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[0].update({"harness": "play_full_run", "batch_id": "b1", "lane": lane,
+                        "game_index": 1, "games_total": 40})
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    out = _fit(tmp_path, [str(logs)])
+    assert RouteModel.load(str(out)).data["meta"]["n_games"] == 2
+    assert "Skipped 1 game(s) played under the value route policy" in capsys.readouterr().out
+
+
 def test_value_log_filter_follows_the_harness_experiment_label():
     """play_full_run's experiment tag is `<batch>:ooc=<policy>`, plus `,route=value`
     under the value route policy; the fit CLI must skip exactly those logs."""

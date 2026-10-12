@@ -362,6 +362,66 @@ def test_run_meta_experiment_tag_keeps_the_batch_prefix(monkeypatch, route_env, 
     assert _RecordingLogger.contexts[0]["experiment"] == expected
 
 
+# ---- the route arms inside a run_batch.py batch (both sides of the 3b/main merge) ----
+
+_BATCH = {"batch_id": "b1", "lane": "Ironclad/value", "game_index": 3, "games_total": 40}
+
+
+@pytest.mark.parametrize("route_env,expected", [
+    (None, "run:ooc=naive"),                      # the random arm stays byte-identical
+    ("random", "run:ooc=naive"),
+    ("value", "run:ooc=naive,route=value"),
+])
+def test_run_context_carries_the_batch_fields_and_only_the_value_arm_suffix(
+        monkeypatch, route_env, expected):
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
+    if route_env is None:
+        monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("STS2_ROUTE_POLICY", route_env)
+    monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: _StubModel())
+    monkeypatch.setattr(play_full_run, "GameLogger", _RecordingLogger)
+    _RecordingLogger.contexts = []
+    _run(monkeypatch, [{"type": "ready"}, _game_over(1)], batch="run", **_BATCH)
+    context = _RecordingLogger.contexts[0]
+    assert context["experiment"] == expected
+    assert context["harness"] == "play_full_run"
+    assert {k: context[k] for k in _BATCH} == _BATCH
+
+
+def test_value_arm_result_and_eval_row_carry_route_counters_and_batch_fields(monkeypatch):
+    _value_env(monkeypatch, lambda m, s, c, mo: _pick(1, 1))
+    result, _ = _run(monkeypatch, [{"type": "ready"}, _ms(1), MAP_REPLY, _game_over(2)],
+                     batch="run", **_BATCH)
+    row = play_full_run.result_to_eval_row(result, "Ironclad")
+    assert row["route_policy"] == "value" and row["route_plans"] == 1
+    # the eval row carries the batch identity (not games_total, which only the header does)
+    assert {k: row[k] for k in ("batch_id", "lane", "game_index")} == {
+        k: _BATCH[k] for k in ("batch_id", "lane", "game_index")}
+
+
+def test_main_names_the_route_and_the_batch_in_both_header_lines(monkeypatch, capsys):
+    monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
+    monkeypatch.setattr(play_full_run, "_load_route_model", lambda path: _StubModel())
+    monkeypatch.setattr(play_full_run, "_load_route_planner", lambda: None)
+    calls = []
+
+    def fake_play_run(seed, character, verbose=True, **kw):
+        calls.append(kw)
+        return {"victory": False, "seed": seed, "act": 1, "floor": 3, "steps": 1}
+
+    monkeypatch.setattr(play_full_run, "play_run", fake_play_run)
+    monkeypatch.setattr(sys, "argv", ["play_full_run.py", "2", "Ironclad", "--seed-prefix",
+                                      "p3b_", "--batch-id", "b1", "--lane", "Ironclad/value"])
+    play_full_run.main()
+    out = capsys.readouterr().out
+    assert "route policy value" in out
+    assert "experiment p3b:ooc=naive,route=value, batch b1 lane Ironclad/value" in out
+    assert [(c["batch_id"], c["lane"], c["game_index"], c["games_total"]) for c in calls] == [
+        ("b1", "Ironclad/value", 1, 2), ("b1", "Ironclad/value", 2, 2)]
+
+
 def test_a_route_model_that_cannot_load_fails_the_game_as_an_error(monkeypatch):
     monkeypatch.setenv("STS2_ROUTE_POLICY", "value")
     monkeypatch.setenv("STS2_OOC_POLICY", "naive")

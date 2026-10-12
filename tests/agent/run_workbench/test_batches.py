@@ -72,6 +72,13 @@ class _Clock:
         ({"experiment": "ooc=greedy"}, True),
         ({"experiment": "run:ooc=greedy"}, True),
         ({"experiment": "p3b:ooc=naive", "checkpoint": None}, True),
+        # Phase 3b's value route arm: `,route=value` is appended to the label. The legacy
+        # pattern is a prefix match, and run_batch games also carry the harness.
+        ({"experiment": "p3b:ooc=greedy,route=value"}, True),
+        ({"experiment": "ooc=greedy,route=value"}, True),
+        ({"experiment": "p3b:ooc=greedy,route=value", "harness": "play_full_run",
+          "batch_id": "b1", "lane": "Ironclad/value"}, True),
+        ({"experiment": "p3b:ooc=greedy,route=value", "checkpoint": "ckpt_1"}, False),
         # a training run: a checkpoint, however its experiment is spelled
         ({"experiment": "run:ooc=greedy", "checkpoint": "ckpt_1"}, False),
         ({"experiment": "train_a", "checkpoint": "ckpt_1"}, False),
@@ -92,6 +99,9 @@ def test_policy_comes_from_the_experiment_label() -> None:
     assert policy_from_experiment("regression:ooc=greedy") == "greedy"
     assert policy_from_experiment("ooc=naive") == "naive"
     assert policy_from_experiment("train_a") is None
+    # the value route arm's label keeps the OOC policy clean (no ",route=value" tail)
+    assert policy_from_experiment("p3b:ooc=greedy,route=value") == "greedy"
+    assert policy_from_experiment("ooc=naive,route=value") == "naive"
     assert policy_from_experiment(None) is None
 
 

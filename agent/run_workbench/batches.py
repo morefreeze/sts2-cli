@@ -42,7 +42,8 @@ LEGACY_BATCH_PREFIX = "legacy:"
 ACTIVITY_WINDOW_SECONDS = 30 * 60
 BATCH_STATES = ("queued", "running", "done", "failed", "stalled", "unknown")
 _RECORDED_LANE_STATES = frozenset({"queued", "running", "done", "failed"})
-_POLICY_PATTERN = re.compile(r"(?:^|:)ooc=([^:\s]+)")
+# The policy ends at a comma: the value route arm's label is `<batch>:ooc=greedy,route=value`.
+_POLICY_PATTERN = re.compile(r"(?:^|:)ooc=([^:,\s]+)")
 
 FINISHED = "finished"
 LIVE = "live"
@@ -69,7 +70,8 @@ def is_regression_run(meta: Mapping[str, Any] | None) -> bool:
 
 
 def policy_from_experiment(experiment: str | None) -> str | None:
-    """The out-of-combat policy named by an experiment label (``b:ooc=greedy``)."""
+    """The out-of-combat policy named by an experiment label (``b:ooc=greedy``;
+    ``b:ooc=greedy,route=value`` is still ``greedy``)."""
     if not isinstance(experiment, str):
         return None
     match = _POLICY_PATTERN.search(experiment)
