@@ -468,6 +468,17 @@ class _IdentityMemo:
         return entry[1]
 
 
+@dataclass(frozen=True, slots=True)
+class GameLogRef:
+    """A game log file the catalog knows: what the detail view reads."""
+
+    path: Path
+    source_id: str
+    regression: bool
+    size: int
+    mtime_ns: int
+
+
 class RunCatalog:
     """Discover and lazily normalize supported artifacts under explicit roots."""
 
@@ -709,6 +720,66 @@ class RunCatalog:
             }
             self._mark_live(result, records[0], [source])
             return result
+
+    def resolve_game_log(
+        self, *, source_id: str | None = None, run_id: str | None = None
+    ) -> "GameLogRef":
+        """Where the log of one game lives, addressed by source or by run id.
+
+        The per-game detail view reads the raw rows itself (it needs the engine
+        replies the normalized run drops), so the catalog only has to say which
+        file that is.  A run id found in two logs (`logs/` and the copy
+        `--keep-game-logs` made under `batches/<id>/games/`) resolves to the
+        same source the 回归/评测 lists open: the finished log over an unfinished
+        one is not decidable from the index, so the original under the root
+        wins, then the bigger, newer file.  Raises CatalogNotFoundError for an
+        unknown id and CatalogError when the source is not a single game log.
+        """
+        if (source_id is None) == (run_id is None):
+            raise CatalogError("provide either a source id or a run id")
+        with self._lock:
+            self._refresh()
+            if source_id is not None:
+                if not isinstance(source_id, str) or not source_id:
+                    raise CatalogError("source id must be a non-empty string")
+                source = self._sources.get(source_id)
+                if source is None:
+                    raise CatalogNotFoundError(f"unknown source id: {source_id}")
+            else:
+                if not isinstance(run_id, str) or not run_id:
+                    raise CatalogError("run id must be a non-empty string")
+                if _safe_run_id(run_id) is None:
+                    raise CatalogNotFoundError("unknown run id")
+                candidates = [
+                    self._sources[candidate]
+                    for candidate in self._run_sources.get(run_id, ())
+                    if candidate in self._sources
+                ]
+                if not candidates:
+                    raise CatalogNotFoundError(f"unknown run id: {run_id}")
+                candidates.sort(
+                    key=lambda item: (
+                        item.path.relative_to(item.root).parts[:1] == (_BATCH_DIR_NAME,),
+                        -item.entry["size"],
+                        -item.entry["mtime"],
+                        item.source_id,
+                    )
+                )
+                source = candidates[0]
+            if (
+                source.entry["open_mode"] != "run"
+                or source.descriptor.kind is not SourceKind.REPLAY_JSONL
+            ):
+                raise CatalogError(
+                    f"source {source.source_id!r} is not a single game log"
+                )
+            return GameLogRef(
+                path=source.path,
+                source_id=source.source_id,
+                regression=source.regression,
+                size=source.entry["size"],
+                mtime_ns=source.cache_key[1],
+            )
 
     def _mark_live(
         self,

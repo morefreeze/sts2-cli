@@ -32,8 +32,11 @@ if __package__ in {None, ""}:
 from agent.run_workbench.catalog import (
     CatalogError,
     CatalogNotFoundError,
+    GameLogRef,
     RunCatalog,
 )
+from agent.run_workbench.game_detail import build_game_detail, load_game_records
+from agent.run_workbench.localization import Localizer
 from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
 from agent.run_workbench.batches import (
     ACTIVITY_WINDOW_SECONDS,
@@ -1303,6 +1306,76 @@ def _lane_payload(catalog: RunCatalog, batch_id: str, lane: str) -> dict[str, An
     }
 
 
+# ---- 回归/评测: one game in detail ------------------------------------------
+
+_LOCALIZER = Localizer()
+_GAME_DETAIL_CACHE_SIZE = 6
+_game_detail_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+_game_detail_lock = threading.Lock()
+
+
+def _game_detail_base(ref: GameLogRef) -> dict[str, Any]:
+    """The detail of a game log, parsed once per version of the file (a log that
+    is still being written is re-read as it grows)."""
+    # Stat the file itself, not the catalog's (throttled) index of it: a log
+    # still being written must show its newest rows.
+    try:
+        stat = ref.path.stat()
+    except OSError as error:
+        raise CatalogNotFoundError(f"game log is gone: {type(error).__name__}") from error
+    key = (str(ref.path), stat.st_size, stat.st_mtime_ns)
+    with _game_detail_lock:
+        cached = _game_detail_cache.get(key)
+        if cached is not None:
+            _game_detail_cache[key] = _game_detail_cache.pop(key)  # most recent last
+            return cached
+    try:
+        records = load_game_records(ref.path)
+    except (OSError, UnicodeDecodeError) as error:
+        raise CatalogError(f"could not read the game log: {type(error).__name__}") from error
+    try:
+        detail = build_game_detail(records, source_name=ref.path.name, localizer=_LOCALIZER)
+    except ValueError as error:
+        raise CatalogError(f"not a readable game log: {error}") from error
+    with _game_detail_lock:
+        _game_detail_cache[key] = detail
+        while len(_game_detail_cache) > _GAME_DETAIL_CACHE_SIZE:
+            _game_detail_cache.pop(next(iter(_game_detail_cache)))
+    return detail
+
+
+def _game_detail_payload(
+    catalog: RunCatalog, *, source_id: str | None = None, run_id: str | None = None
+) -> dict[str, Any]:
+    ref = catalog.resolve_game_log(source_id=source_id, run_id=run_id)
+    base = _game_detail_base(ref)
+    # What only the catalog knows (is it still being played? how did it end?)
+    # is added per request, so the cached parse never goes stale on it.
+    run = next(
+        (item for item in catalog.regression_runs() if item.source_id == ref.source_id), None
+    )
+    summary = dict(base["summary"])
+    if run is not None:
+        summary["state"] = run.state
+        if run.state == "finished":
+            summary["outcome"] = run.status.value
+        elif run.state == LIVE:
+            summary["outcome"] = "in_progress"
+        else:
+            summary["outcome"] = "unknown"
+        for key in ("batch_id", "lane", "game_index", "games_total"):
+            if summary.get(key) is None:
+                summary[key] = getattr(run, key)
+        summary["duration_seconds"] = run.duration_seconds
+    return {
+        **base,
+        "source_id": ref.source_id,
+        "regression": ref.regression,
+        "live": run is not None and run.state == LIVE,
+        "summary": summary,
+    }
+
+
 def _single_query_value(query: dict[str, list[str]], name: str, label: str) -> str:
     values = query.get(name) or []
     if len(values) != 1 or not values[0]:
@@ -1435,6 +1508,33 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     else:
                         lane = _single_query_value(query, "lane", "lane")
                         self._send_json(_lane_payload(self.catalog, batch_id, lane))
+            elif parsed.path == "/api/game-detail":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                unexpected = sorted(set(query) - {"source", "run"})
+                if unexpected:
+                    self._send_error(
+                        f"unexpected game-detail query parameter: {unexpected[0]}"
+                    )
+                    return
+                source_values = query.get("source") or []
+                run_values = query.get("run") or []
+                if source_values and run_values:
+                    self._send_error("provide either source or run, not both")
+                    return
+                if source_values:
+                    if len(source_values) != 1 or not source_values[0]:
+                        self._send_error("missing source id")
+                        return
+                    self._send_json(
+                        _game_detail_payload(self.catalog, source_id=source_values[0])
+                    )
+                else:
+                    if len(run_values) != 1 or not run_values[0]:
+                        self._send_error("missing source or run id")
+                        return
+                    self._send_json(
+                        _game_detail_payload(self.catalog, run_id=run_values[0])
+                    )
             elif parsed.path == "/api/metrics":
                 query = parse_qs(parsed.query)
                 current = (query.get("current") or [""])[0]
