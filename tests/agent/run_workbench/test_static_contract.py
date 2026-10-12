@@ -4020,8 +4020,8 @@ _DONE_ROW = {
 }
 _LEGACY_ROW = {
     **_BATCH_ROW, "batch_id": "legacy:ooc=greedy", "name": "未登记批次 · ooc=greedy", "kind": None,
-    "registered": False, "planned": 14, "finished": 14, "live": 0, "technical": 3,
-    "eta_seconds": None, "eta_at": None, "status": "done", "done": True,
+    "registered": False, "planned_known": False, "planned": 14, "finished": 14, "live": 0,
+    "technical": 3, "eta_seconds": None, "eta_at": None, "status": "done", "done": True,
 }
 _LANE_ROWS = [
     {"lane": "Ironclad", "character": "Ironclad", "policy": "greedy", "planned": 5, "planned_known": True,
@@ -4144,8 +4144,11 @@ def test_batch_list_renders_progress_live_technical_and_eta_per_batch():
     assert legacy[0].startswith("未登记批次 · ooc=greedy")
     assert "无登记信息" in legacy[0]
     assert legacy[1] == "—"
-    assert "14 / 14（100%）" in legacy[3]
+    # no plan -> counts only: never "14 / 14 (100%)", which would claim a completion
+    assert legacy[3] == "完成 14 · 进行中 0"
+    assert "%" not in legacy[3] and "/" not in legacy[3]
     assert payload["meters"][0] == ["4", "10", "已完成 4 / 10 局"]
+    assert len(payload["meters"]) == 3  # the legacy batch draws no bar
     assert payload["rowAttrs"][0] == ["0", "link"]
     assert payload["navigateCalls"] == [
         "#/regression/batch/regression-20261012-100000",
@@ -4255,6 +4258,60 @@ def test_batch_page_shows_lane_table_with_policy_floor_wins_state_and_eta():
     assert any("python/run_batch.py --name regression" in text for text in payload["details"])
     assert any("STS2_SOLVER_THREADS=3" in text for text in payload["details"])
     assert payload["pending"] == [30000]
+
+
+def test_an_unplanned_batch_shows_counts_not_a_completion_bar():
+    """A legacy / unregistered batch has no plan: finished 17 + live 3 used to
+    read "17 / 20 (85%)" -- a completion nobody planned.  Counts only now."""
+    unplanned = {**_LEGACY_ROW, "planned": 20, "finished": 17, "live": 3, "done": False,
+                 "status": "running"}
+    unplanned_lanes = [
+        {**_LANE_ROWS[0], "planned": 4, "planned_known": False, "finished": 3, "live": 1,
+         "remaining": 0, "eta_applicable": False, "eta_seconds": None, "eta_at": None},
+        {**_LANE_ROWS[0], "lane": "Silent", "planned_known": True, "planned": 5, "finished": 2,
+         "live": 0},
+    ]
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__LIST__];
+              await BV.render({ view: 'regression' });
+              const list = collect(byId('regressionBody'), (n) => n.tag === 'tr').slice(1)
+                .map((tr) => allText(tr.children[3]));
+              const listMeters = collect(byId('regressionBody'), (n) => n.tag === 'progress').length;
+              responses = [__BATCH__];
+              await BV.render({ view: 'regression-batch', batchId: 'legacy:ooc=greedy' });
+              const body = byId('regressionBody');
+              const lanes = collect(body, (n) => n.tag === 'tr').slice(1)
+                .map((tr) => allText(tr.children[2]));
+              const cards = collect(body, (n) => n.className.startsWith('metric-card')).map(allText);
+              const batchMeters = collect(body, (n) => n.tag === 'progress').length;
+              responses = [__LANE__];
+              await BV.render({ view: 'regression-lane', batchId: 'legacy:ooc=greedy', lane: 'Ironclad' });
+              const facts = collect(byId('regressionBody'), (n) => n.className === 'batch-fact')
+                .map((n) => n.children.map((c) => c.textContent));
+              console.log(JSON.stringify({ list, listMeters, lanes, cards, batchMeters, facts }));
+            })();
+            """,
+            list={"batches": [unplanned], "problems": [], "now": 1_800_000_000},
+            batch={"batch": unplanned, "lanes": unplanned_lanes, "problems": [], "now": 1_800_000_000},
+            lane={"batch_id": "legacy:ooc=greedy", "batch_name": "x", "lane": "Ironclad",
+                  "lane_summary": unplanned_lanes[0], "runs": [], "runs_complete": True,
+                  "now": 1_800_000_000},
+        )
+    )
+
+    assert payload["list"] == ["完成 17 · 进行中 3"]
+    assert payload["listMeters"] == 0
+    # the lane without a plan: counts; the lane with one keeps its bar
+    assert payload["lanes"][0] == "完成 3 · 进行中 1"
+    assert "2 / 5（40%）" in payload["lanes"][1]
+    assert payload["batchMeters"] == 1
+    completed = next(card for card in payload["cards"] if card.startswith("已完成"))
+    assert "/" not in completed and "%" not in completed and "17" in completed
+    facts = dict(payload["facts"])
+    assert facts["进度"].startswith("完成 3") and "/" not in facts["进度"]
 
 
 def test_a_finished_batch_page_has_no_eta_and_does_not_refresh():

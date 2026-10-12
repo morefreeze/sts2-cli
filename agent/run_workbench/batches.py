@@ -418,6 +418,10 @@ def batch_progress(
         "argv": list(manifest.get("argv") or []),
         "env": dict(manifest.get("env") or {}),
         "lane_count": len(lanes),
+        # Whether `planned` is a real plan.  A batch no manifest registered (or
+        # with a lane only the logs know) has none: `planned` is then just what
+        # has been played, and a "finished / planned" bar would imply completion.
+        "planned_known": bool(lanes) and all(lane["planned_known"] for lane in lanes),
         "planned": sum(lane["planned"] for lane in lanes),
         "finished": sum(lane["finished"] for lane in lanes),
         "live": sum(lane["live"] for lane in lanes),

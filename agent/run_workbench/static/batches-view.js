@@ -106,8 +106,24 @@ window.BatchesView = (() => {
     return 'quiet';
   }
 
-  function progressMeter(finished, planned, live) {
+  // Whether `planned` is a real plan.  A batch (or lane) nobody registered has
+  // none: the server then reports planned = what has been played, so a
+  // "finished / planned (%)" bar would claim a completion nobody knows.
+  function planKnown(item) {
+    if (item && typeof item.planned_known === 'boolean') return item.planned_known;
+    return !(item && item.registered === false);
+  }
+
+  function progressMeter(finished, planned, live, plannedKnown = true) {
     const wrapper = element('div', { className: 'batch-progress' });
+    if (!plannedKnown) {
+      // No plan: counts only, no bar and no percentage.
+      wrapper.append(element('span', {
+        className: 'batch-progress-text batch-progress-unplanned',
+        text: `完成 ${Number.isFinite(finished) ? finished : 0} · 进行中 ${Number.isFinite(live) ? live : 0}`,
+      }));
+      return wrapper;
+    }
     const meter = element('progress', {
       className: 'batch-progress-bar',
       attrs: {
@@ -237,7 +253,10 @@ window.BatchesView = (() => {
       if (batch.kind) kind.append(badge(KIND_LABELS[batch.kind] || batch.kind, 'kind'));
       else kind.textContent = '—';
       const progress = element('td');
-      progress.append(progressMeter(batch.finished, batch.planned, 0));
+      // The 进行中 column already says how many are live; the no-plan text has
+      // no bar to lean on, so it carries the count itself.
+      const batchPlanned = planKnown(batch);
+      progress.append(progressMeter(batch.finished, batch.planned, batchPlanned ? 0 : batch.live, batchPlanned));
       const status = element('td');
       status.append(badge(BATCH_STATUS_LABELS[batch.status] || cell(batch.status), statusTone(batch.status)));
       tr.append(
@@ -308,7 +327,9 @@ window.BatchesView = (() => {
 
     const cards = element('div', { className: 'metric-grid batch-cards' });
     cards.append(
-      metricCard('已完成', `${cell(batch.finished)} / ${cell(batch.planned)}`, `${percent(batch.finished, batch.planned)}%`, 'metric-card-primary'),
+      planKnown(batch)
+        ? metricCard('已完成', `${cell(batch.finished)} / ${cell(batch.planned)}`, `${percent(batch.finished, batch.planned)}%`, 'metric-card-primary')
+        : metricCard('已完成', cell(batch.finished), '没有计划局数，不显示完成比例', 'metric-card-primary'),
       metricCard('进行中', cell(batch.live), '正在打的对局'),
       metricCard('胜场', cell(batch.wins), '仅统计已完成'),
       metricCard('技术失败', cell(batch.technical), '崩溃 / 超时 / 卡死等', 'metric-card-alert'),
@@ -331,7 +352,7 @@ window.BatchesView = (() => {
         name.append(element('strong', { text: cell(lane.lane) }));
         if (lane.character && lane.character !== lane.lane) name.append(element('small', { text: lane.character }));
         const progress = element('td');
-        progress.append(progressMeter(lane.finished, lane.planned, lane.live));
+        progress.append(progressMeter(lane.finished, lane.planned, lane.live, planKnown(lane)));
         tr.append(
           name,
           element('td', { text: cell(lane.policy) }),
@@ -390,7 +411,7 @@ window.BatchesView = (() => {
     ));
     body.append(factList([
       ['策略', lane.policy],
-      ['进度', `${cell(lane.finished)} / ${cell(lane.planned)}`],
+      ['进度', planKnown(lane) ? `${cell(lane.finished)} / ${cell(lane.planned)}` : `完成 ${cell(lane.finished)}（没有计划局数）`],
       ['进行中', lane.live],
       ['平均推进层数', formatMissing(lane.avg_global_floor)],
       ['胜场（胜率）', winsText(lane)],

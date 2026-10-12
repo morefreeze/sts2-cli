@@ -527,6 +527,9 @@ def test_legacy_runs_without_a_batch_id_group_by_experiment() -> None:
     assert greedy.summary["planned"] == greedy.summary["finished"] == 2
     assert greedy.summary["eta_seconds"] is None
     assert greedy.summary["registered"] is False
+    # ...and with no plan there is no "N of M": the bar must not imply completion
+    assert greedy.summary["planned_known"] is False
+    assert all(lane["planned_known"] is False for lane in greedy.lanes)
     assert greedy.summary["created_at"] == NOW - 500
     assert greedy.summary["status"] == "done"
     assert sorted(lane["lane"] for lane in greedy.lanes) == ["Ironclad", "Silent"]
@@ -543,6 +546,23 @@ def test_unregistered_batch_that_stamped_games_total_gets_a_plan_and_eta() -> No
     assert (lane["planned"], lane["remaining"]) == (4, 2)
     assert lane["eta_seconds"] == 200.0
     assert lane["state"] == "running"
+    assert lane["planned_known"] is True and view.summary["planned_known"] is True
+
+
+def test_a_registered_batch_knows_its_plan_unless_a_lane_is_missing_from_the_manifest() -> None:
+    manifest = {
+        "batch_id": "b1", "name": "n", "created_at": NOW, "registered": True,
+        "lanes": [{"lane": "Ironclad", "character": "Ironclad", "planned_games": 5}],
+        "lanes_status": {},
+    }
+    (planned,) = build_batch_views([manifest], [_run(duration=10.0, lane="Ironclad")], NOW)
+    assert planned.summary["planned_known"] is True
+    # a lane only the logs know about has no plan: the batch total is no plan either
+    (partial,) = build_batch_views(
+        [manifest], [_run(duration=10.0, lane="Ironclad"), _run(duration=10.0, lane="Defect")], NOW
+    )
+    assert partial.summary["planned_known"] is False
+    assert [lane["planned_known"] for lane in partial.lanes] == [True, False]
 
 
 def test_batches_are_listed_newest_first_with_unregistered_ones_by_first_game() -> None:
@@ -978,8 +998,10 @@ def test_batches_endpoint_lists_batches_with_progress(tmp_path: Path, log_size: 
     assert batch["eta_seconds"] == pytest.approx(2700.0, abs=1e-3)
     assert batch["status"] == "running" and batch["done"] is False
     assert batch["git_commit"] == "abc1234"
+    assert batch["planned_known"] is True
     legacy = payload["batches"][1]
     assert legacy["registered"] is False
+    assert legacy["planned_known"] is False
     assert legacy["eta_seconds"] is None
     assert legacy["done"] is True
 
