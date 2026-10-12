@@ -13,6 +13,8 @@ Any code change MUST pass a full regression test before claiming completion:
 
 Everything lands in `logs/batches/<name>-<YYYYmmdd-HHMMSS>/` (`manifest.json`, `lanes_status.json`, `<lane>.log`, `<lane>.jsonl`, `games/`), which the run workbench's 回归/评测 tab reads. **`logs/batches/` is kept** — `game_log.cleanup_old_logs()` only purges top-level `logs/*.jsonl` after 7 days, and the launcher copies every game's log into the batch's `games/` (`--keep-game-logs`), so nothing needs saving by hand. Don't start a second batch while one runs from this checkout (`pgrep -f play_full_run`): the lanes compete for CPU and a starved time-budgeted solver plays worse.
 
+**A/B as one batch**: `--arm NAME:KEY=VAL[,KEY=VAL...]` (repeatable) makes the lanes characters x arms (`<Character>/<arm>`, queued Ironclad/a, Ironclad/b, Silent/a, ... so the arms progress together under `--max-lanes`); each lane's env is the base env plus its arm's KEY=VALs, every arm plays the same seeds, kind defaults to `ab`, and per-lane files use `__` for the slash (`Ironclad__value.jsonl`, `games/Ironclad__value/`): `.venv/bin/python python/run_batch.py --name route-ab --games 40 --chars all --ascension 1 --seed-prefix p3b_ --max-lanes 6 --threads 3 --arm random:STS2_ROUTE_POLICY=random --arm value:STS2_ROUTE_POLICY=value`.
+
 `play_full_run.py` runs the **greedy** out-of-combat policy by default since 2026-10-12 (`STS2_OOC_POLICY=greedy`; see Protocol notes), so this regression exercises `agent.combat_env.greedy_action` for card rewards, rest sites, events, bundles, card selects and shops. Set `STS2_OOC_POLICY=naive` to regress the old placeholder policy as well when a change touches it.
 
 ## Setup

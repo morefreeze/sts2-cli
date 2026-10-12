@@ -35,16 +35,18 @@ def opt(name):
 
 n = int(args[0])
 lane = opt("--lane")
+fname = lane.replace("/", "__")      # an --arm lane is "<Character>/<arm>"
 dump = os.environ["FAKE_DUMP_DIR"]
 batch_dir = os.path.dirname(opt("--results-log"))
-with open(os.path.join(dump, lane + ".start.json"), "w") as fh:
+with open(os.path.join(dump, fname + ".start.json"), "w") as fh:
     json.dump({
         "argv": args, "pid": os.getpid(), "pgid": os.getpgid(0), "cwd": os.getcwd(),
         "manifest_seen": os.path.exists(os.path.join(batch_dir, "manifest.json")),
         "env": {k: os.environ.get(k)
-                for k in ("STS2_GAME_DIR", "STS2_SOLVER_THREADS", "FAKE_MARK")},
+                for k in ("STS2_GAME_DIR", "STS2_SOLVER_THREADS", "FAKE_MARK",
+                          "STS2_ROUTE_POLICY")},
     }, fh)
-lane_release = os.path.join(dump, "release_" + lane)
+lane_release = os.path.join(dump, "release_" + fname)
 all_release = os.path.join(dump, "release_all")
 deadline = time.time() + 120          # never outlive a broken test
 while not (os.path.exists(lane_release) or os.path.exists(all_release)):
@@ -89,11 +91,11 @@ def env(tmp_path, monkeypatch):
 
         @staticmethod
         def release(lane="all", code=0):
-            (dump / f"release_{lane}").write_text(str(code))
+            (dump / f"release_{lane.replace('/', '__')}").write_text(str(code))
 
         @staticmethod
         def started(lane):
-            return json.loads((dump / f"{lane}.start.json").read_text())
+            return json.loads((dump / f"{lane.replace('/', '__')}.start.json").read_text())
 
         @staticmethod
         def batch_dir():
@@ -482,6 +484,223 @@ def test_a_non_zero_lane_makes_the_launcher_exit_non_zero_after_all_lanes_finish
 def test_all_lanes_clean_exits_zero(env):
     env.release("all")
     assert run_batch.main(env.argv()) == 0
+
+
+# --- --arm: an A/B as one batch ---------------------------------------------------------------
+
+ROUTE_ARMS = ("--arm", "random:STS2_ROUTE_POLICY=random", "--arm", "value:STS2_ROUTE_POLICY=value")
+
+
+def _arm_args(*extra, chars="Ironclad,Silent", games="2"):
+    return run_batch.parse_args(["--name", "ab", "--games", games, "--chars", chars,
+                                 *extra])
+
+
+def test_arms_make_lanes_of_characters_times_arms_in_interleaved_queue_order():
+    args = _arm_args(*ROUTE_ARMS)
+    assert [lane["lane"] for lane in args.lanes] == [
+        "Ironclad/random", "Ironclad/value", "Silent/random", "Silent/value"]
+    assert [lane["character"] for lane in args.lanes] == ["Ironclad"] * 2 + ["Silent"] * 2
+    assert [lane["arm"] for lane in args.lanes] == ["random", "value"] * 2
+    assert args.lanes[1]["arm_env"] == {"STS2_ROUTE_POLICY": "value"}
+    assert args.chars == ["Ironclad", "Silent"]          # still the characters
+
+
+def test_without_arms_the_lanes_are_the_characters_and_nothing_else_changes():
+    args = _arm_args()
+    assert args.arms == []
+    assert args.lanes == [{"lane": "Ironclad", "character": "Ironclad", "arm": None,
+                           "arm_env": {}},
+                          {"lane": "Silent", "character": "Silent", "arm": None,
+                           "arm_env": {}}]
+    assert args.kind == "regression"
+
+
+def test_kind_defaults_to_ab_with_arms_and_an_explicit_kind_wins():
+    assert _arm_args(*ROUTE_ARMS).kind == "ab"
+    assert _arm_args(*ROUTE_ARMS, "--kind", "smoke").kind == "smoke"
+    assert _arm_args("--kind", "ab").kind == "ab"
+
+
+def test_an_arm_may_set_several_variables_and_a_value_may_contain_equals_or_be_empty():
+    args = _arm_args("--arm", "x:A=1,B=two=2,C=", "--arm", "y.v-2:STS2_OOC_POLICY=naive")
+    assert [arm["name"] for arm in args.arms] == ["x", "y.v-2"]
+    assert args.arms[0]["env"] == {"A": "1", "B": "two=2", "C": ""}
+
+
+@pytest.mark.parametrize("bad", [
+    "novalue",                       # no colon
+    "x",                             # a name alone
+    "x:",                            # no KEY=VAL
+    "x:NOEQUALS",
+    ":A=1",                          # blank name
+    "a/b:A=1",                       # '/' would split the lane name
+    "a b:A=1",
+    "x:A=1,,B=2",                    # empty pair
+    "x:=1",                          # empty key
+    "x:1BAD=1",                      # not an environment variable name
+    "x:A=1,A=2",                     # the same key twice
+    "-x:A=1",
+    "n" * 33 + ":A=1",
+])
+def test_malformed_arms_are_rejected_naming_the_flag(bad, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _arm_args("--arm", bad)
+    assert exc.value.code == 2
+    assert "--arm" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("second", ["a:B=2", "A:B=2"])
+def test_duplicate_arm_names_are_rejected_even_when_only_the_case_differs(second, capsys):
+    with pytest.raises(SystemExit):
+        _arm_args("--arm", "a:A=1", "--arm", second)       # APFS: a.jsonl == A.jsonl
+    assert "duplicates" in capsys.readouterr().err
+
+
+def test_each_lane_env_is_the_base_env_plus_its_arms_and_the_arm_wins(monkeypatch):
+    monkeypatch.setenv("STS2_GAME_DIR", "/elsewhere/data")
+    monkeypatch.setenv("FROM_PARENT", "yes")
+    monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
+    args = _arm_args(*ROUTE_ARMS, "--arm", "slow:STS2_SOLVER_THREADS=9,FAKE_MARK=arm",
+                     "--threads", "4", "--env", "FAKE_MARK=base", "--env", "KEEP=1")
+    rand = run_batch.build_lane_env(args, "Ironclad/random")
+    value = run_batch.build_lane_env(args, "Silent/value")
+    slow = run_batch.build_lane_env(args, "Silent/slow")
+    assert rand["STS2_ROUTE_POLICY"] == "random" and value["STS2_ROUTE_POLICY"] == "value"
+    assert "STS2_ROUTE_POLICY" not in slow            # an arm's variables stay in its lane
+    for lane_env in (rand, value):
+        assert lane_env["STS2_SOLVER_THREADS"] == "4" and lane_env["FAKE_MARK"] == "base"
+        assert lane_env["KEEP"] == "1" and lane_env["FROM_PARENT"] == "yes"
+        assert lane_env["STS2_GAME_DIR"] == "/elsewhere/data"
+    assert slow["STS2_SOLVER_THREADS"] == "9" and slow["FAKE_MARK"] == "arm"  # arm > base
+    # no lane -> just the base environment, exactly as before --arm existed
+    assert "STS2_ROUTE_POLICY" not in run_batch.build_lane_env(args)
+    assert run_batch.lane_env_overrides(args) == {
+        "STS2_SOLVER_THREADS": "4", "FAKE_MARK": "base", "KEEP": "1"}
+
+
+def test_arm_lane_commands_share_seeds_and_differ_in_lane_results_and_game_logs(tmp_path):
+    args = _arm_args(*ROUTE_ARMS, "--ascension", "1", "--seed-prefix", "p3b_",
+                     "--seed-offset", "5", "--", "--game-version", "v0.111.0")
+    rand = _lane_args(run_batch.build_lane_command(args, "ab-1", tmp_path, "Ironclad/random"))
+    value = _lane_args(run_batch.build_lane_command(args, "ab-1", tmp_path, "Ironclad/value"))
+    assert rand == [
+        "2", "Ironclad", "--ascension", "1", "--seed-prefix", "p3b_", "--seed-offset", "5",
+        "--batch-id", "ab-1", "--lane", "Ironclad/random",
+        "--keep-game-logs", str(tmp_path / "games" / "Ironclad__random"),
+        "--results-log", str(tmp_path / "Ironclad__random.jsonl"),
+        "--game-version", "v0.111.0"]
+    # the arms differ only in the lane name and its two paths: same character, same seeds
+    differing = [(a, b) for a, b in zip(rand, value) if a != b]
+    assert differing == [("Ironclad/random", "Ironclad/value"),
+                         (str(tmp_path / "games" / "Ironclad__random"),
+                          str(tmp_path / "games" / "Ironclad__value")),
+                         (str(tmp_path / "Ironclad__random.jsonl"),
+                          str(tmp_path / "Ironclad__value.jsonl"))]
+
+
+def test_safe_lane_name_keeps_plain_lanes_and_flattens_the_slash():
+    assert run_batch.safe_lane_name("Silent") == "Silent"
+    assert run_batch.safe_lane_name("Necrobinder/value") == "Necrobinder__value"
+    assert run_batch.safe_lane_name("Defect/v1.2-b_3") == "Defect__v1.2-b_3"
+    names = {run_batch.safe_lane_name(f"{c}/{a}")
+             for c in run_batch.CHARACTERS for a in ("a", "b", "a_b", "_a")}
+    assert len(names) == len(run_batch.CHARACTERS) * 4        # no two lanes share a file
+
+
+def test_manifest_lists_arm_lanes_with_their_arm_and_arm_env(env):
+    env.release("all")
+    assert run_batch.main(env.argv(*ROUTE_ARMS, "--env", "FAKE_MARK=m", games="3",
+                                   name="route-ab", chars="Silent,Defect")) == 0
+    manifest = json.loads((env.batch_dir() / "manifest.json").read_text())
+    assert manifest["kind"] == "ab"
+    assert manifest["env"] == {"FAKE_MARK": "m", "STS2_SOLVER_THREADS": "3"}   # base only
+    assert [(lane["lane"], lane["character"], lane["arm"], lane["arm_env"])
+            for lane in manifest["lanes"]] == [
+        ("Silent/random", "Silent", "random", {"STS2_ROUTE_POLICY": "random"}),
+        ("Silent/value", "Silent", "value", {"STS2_ROUTE_POLICY": "value"}),
+        ("Defect/random", "Defect", "random", {"STS2_ROUTE_POLICY": "random"}),
+        ("Defect/value", "Defect", "value", {"STS2_ROUTE_POLICY": "value"})]
+    assert {(lane["planned_games"], lane["seed_prefix"], lane["seed_offset"])
+            for lane in manifest["lanes"]} == {(3, "run_", 0)}    # one seed range for all
+    assert manifest["argv"].count("--arm") == 2
+
+
+def test_manifest_without_arms_has_no_arm_keys(env):
+    run_batch.main(env.argv("--dry-run"))
+    manifest = json.loads((env.batch_dir() / "manifest.json").read_text())
+    assert all("arm" not in lane and "arm_env" not in lane for lane in manifest["lanes"])
+
+
+def test_dry_run_with_arms_prints_each_lane_and_its_arm_env(env, capsys):
+    assert run_batch.main(env.argv(*ROUTE_ARMS, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert out.count(env.prefix) == 4
+    assert "--lane Ironclad/value" in out and "--lane Silent/random" in out
+    assert "Ironclad/value env: STS2_ROUTE_POLICY=value" in out
+    assert not list(env.dump_dir.iterdir())                   # nothing started
+
+
+def _arm_runner(env, max_lanes, chars="Ironclad,Silent,Defect"):
+    args = run_batch.parse_args(env.argv(*ROUTE_ARMS, "--max-lanes", str(max_lanes),
+                                         chars=chars, games="1"))
+    batch_dir = env.batches / "b-1"
+    batch_dir.mkdir(parents=True)
+    runner = run_batch.LaneRunner(
+        batch_dir, [lane["lane"] for lane in args.lanes], args.max_lanes,
+        lambda lane: run_batch.build_lane_command(args, "b-1", batch_dir, lane),
+        lambda lane: run_batch.build_lane_env(args, lane))
+    return runner, batch_dir
+
+
+def test_queue_order_starts_both_arms_of_a_character_together(env):
+    runner, batch_dir = _arm_runner(env, max_lanes=3)
+    runner.write_status()
+    runner.step()
+    status = _status(batch_dir)
+    assert [lane for lane, entry in status.items() if entry["state"] == "running"] == [
+        "Ironclad/random", "Ironclad/value", "Silent/random"]
+    assert [lane for lane, entry in status.items() if entry["state"] == "queued"] == [
+        "Silent/value", "Defect/random", "Defect/value"]
+    env.release("Ironclad/random")                   # one lane exits: the next in order starts
+    _wait_for(lambda: (runner.step(), _status(batch_dir)["Ironclad/random"]["state"]
+                       == "done")[1], what="Ironclad/random to finish")
+    _wait_for(lambda: (env.dump_dir / "Silent__value.start.json").exists(),
+              what="Silent/value to start")
+    assert _status(batch_dir)["Defect/random"]["state"] == "queued"
+    env.release("all")
+    _wait_for(lambda: not runner.step(), what="all lanes done")
+
+
+def test_an_arm_batch_runs_each_lane_with_its_arms_env_and_per_lane_files(env, capsys):
+    env.release("all")
+    assert run_batch.main(env.argv(*ROUTE_ARMS, "--max-lanes", "4", games="2")) == 0
+    batch_dir = env.batch_dir()
+    assert env.started("Ironclad/random")["env"]["STS2_ROUTE_POLICY"] == "random"
+    assert env.started("Ironclad/value")["env"]["STS2_ROUTE_POLICY"] == "value"
+    assert env.started("Silent/value")["env"]["STS2_ROUTE_POLICY"] == "value"
+    value_argv = env.started("Silent/value")["argv"]
+    assert value_argv[:2] == ["2", "Silent"]
+    assert value_argv[value_argv.index("--lane") + 1] == "Silent/value"
+    # per-lane files, safe names, nothing nested by the slash
+    assert {p.name for p in batch_dir.glob("*.jsonl")} == {
+        "Ironclad__random.jsonl", "Ironclad__value.jsonl", "Silent__random.jsonl",
+        "Silent__value.jsonl"}
+    assert {p.name for p in batch_dir.glob("*.log")} == {
+        "Ironclad__random.log", "Ironclad__value.log", "Silent__random.log",
+        "Silent__value.log"}
+    assert "chatter on stdout" in (batch_dir / "Silent__value.log").read_text()
+    rows = [json.loads(line) for line in (batch_dir / "Silent__value.jsonl").read_text()
+            .splitlines()]
+    assert [row["lane"] for row in rows] == ["Silent/value"] * 2
+    # lanes_status.json is keyed by the lane name the manifest and the game logs carry
+    status = json.loads((batch_dir / "lanes_status.json").read_text())
+    assert list(status) == ["Ironclad/random", "Ironclad/value", "Silent/random",
+                            "Silent/value"]
+    assert {entry["state"] for entry in status.values()} == {"done"}
+    out = capsys.readouterr().out
+    assert out.count("Wins: 0/2, Completed: 2/2") == 4 and out.count("rows 2/2") == 4
+    assert "Ironclad/value" in out and "All lanes exited 0" in out
 
 
 # --- signals --------------------------------------------------------------------------------
