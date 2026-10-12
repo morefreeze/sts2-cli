@@ -344,17 +344,24 @@ window.BatchesView = (() => {
     } else {
       const wrapper = element('div', { className: 'table-scroll' });
       const table = element('table', { className: 'runs-table batch-table' });
-      table.append(headRow(['通道', '策略', '进度', '平均推进层数', '胜场（胜率）', '技术失败', '状态', '预计完成']));
+      // run_batch.py --arm: an A/B batch gets a 分组 (arm) column; any other batch looks as before.
+      const hasArms = lanes.some((lane) => lane.arm);
+      table.append(headRow([
+        '通道', ...(hasArms ? ['分组'] : []),
+        '策略', '进度', '平均推进层数', '胜场（胜率）', '技术失败', '状态', '预计完成',
+      ]));
       const tbody = element('tbody');
       lanes.forEach((lane) => {
         const tr = element('tr', { className: 'runs-table-row batch-row' });
         const name = element('td', { className: 'batch-name' });
         name.append(element('strong', { text: cell(lane.lane) }));
-        if (lane.character && lane.character !== lane.lane) name.append(element('small', { text: lane.character }));
+        // an arm lane's name is already <character>/<arm>
+        if (lane.character && lane.character !== lane.lane && !lane.arm) name.append(element('small', { text: lane.character }));
         const progress = element('td');
         progress.append(progressMeter(lane.finished, lane.planned, lane.live, planKnown(lane)));
         tr.append(
           name,
+          ...(hasArms ? [element('td', { className: 'batch-arm', text: cell(lane.arm) })] : []),
           element('td', { text: cell(lane.policy) }),
           progress,
           element('td', { text: formatMissing(lane.avg_global_floor) }),
@@ -409,7 +416,10 @@ window.BatchesView = (() => {
       null,
       [badge(LANE_STATE_LABELS[lane.state] || cell(lane.state), statusTone(lane.state))],
     ));
+    const armEnv = lane.arm_env && typeof lane.arm_env === 'object' ? Object.entries(lane.arm_env) : [];
     body.append(factList([
+      ...(lane.arm ? [['分组', lane.arm]] : []),
+      ...(armEnv.length ? [['分组环境', armEnv.map(([key, value]) => `${key}=${value}`).join(' ')]] : []),
       ['策略', lane.policy],
       ['进度', planKnown(lane) ? `${cell(lane.finished)} / ${cell(lane.planned)}` : `完成 ${cell(lane.finished)}（没有计划局数）`],
       ['进行中', lane.live],

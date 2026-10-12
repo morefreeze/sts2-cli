@@ -3828,6 +3828,8 @@ def test_hash_router_parses_regression_routes_and_keeps_training_ones():
           lane: parseRoute('#/regression/batch/b1/lane/Ironclad'),
           oddBatch: parseRoute(batchRoute(odd)),
           oddLane: parseRoute(laneRoute(odd, 'lane/1')),
+          armLane: parseRoute(laneRoute('route-ab-1', 'Ironclad/value')),
+          armHash: laneRoute('route-ab-1', 'Ironclad/value'),
           training: parseRoute('#/training'),
           root: parseRoute('#/'),
           trainingBatch: parseRoute('#/batch/coh-1'),
@@ -3848,6 +3850,11 @@ def test_hash_router_parses_regression_routes_and_keeps_training_ones():
     assert payload["oddBatch"] == {"view": "regression-batch", "batchId": "legacy:run:ooc=greedy"}
     assert payload["oddLane"] == {
         "view": "regression-lane", "batchId": "legacy:run:ooc=greedy", "lane": "lane/1",
+    }
+    # run_batch.py --arm lanes are named <Character>/<arm>
+    assert payload["armHash"] == "#/regression/batch/route-ab-1/lane/Ironclad%2Fvalue"
+    assert payload["armLane"] == {
+        "view": "regression-lane", "batchId": "route-ab-1", "lane": "Ironclad/value",
     }
     assert payload["training"] == {"view": "root", "tab": "training"}
     assert payload["root"] == {"view": "root"}
@@ -4258,6 +4265,91 @@ def test_batch_page_shows_lane_table_with_policy_floor_wins_state_and_eta():
     assert any("python/run_batch.py --name regression" in text for text in payload["details"])
     assert any("STS2_SOLVER_THREADS=3" in text for text in payload["details"])
     assert payload["pending"] == [30000]
+
+
+_ARM_LANES = [
+    {**_LANE_ROWS[0], "lane": "Ironclad/random", "arm": "random",
+     "arm_env": {"STS2_ROUTE_POLICY": "random"}},
+    {**_LANE_ROWS[0], "lane": "Ironclad/value", "arm": "value",
+     "arm_env": {"STS2_ROUTE_POLICY": "value"}, "finished": 2},
+    {**_LANE_ROWS[1], "lane": "Silent/random", "arm": "random",
+     "arm_env": {"STS2_ROUTE_POLICY": "random"}},
+]
+
+
+def test_batch_page_adds_an_arm_column_only_when_a_lane_has_an_arm():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              const out = {};
+              const draw = async (payload) => {
+                responses = [payload];
+                await BV.render({ view: 'regression-batch', batchId: 'route-ab-1' });
+                const body = byId('regressionBody');
+                return {
+                  head: collect(body, (n) => n.tag === 'th').map((n) => n.textContent),
+                  rows: collect(body, (n) => n.tag === 'tr').slice(1).map((tr) => tr.children.map(allText)),
+                };
+              };
+              out.arms = await draw(__ARMS__);
+              const body = byId('regressionBody');
+              collect(body, (n) => n.tag === 'tr').slice(1)[1].click();
+              out.navigateCalls = navigateCalls.splice(0);
+              out.plain = await draw(__PLAIN__);
+              console.log(JSON.stringify(out));
+            })();
+            """,
+            arms={"batch": {**_BATCH_ROW, "kind": "ab"}, "lanes": _ARM_LANES, "problems": [], "now": 1_800_000_000},
+            plain={"batch": _BATCH_ROW, "lanes": _LANE_ROWS, "problems": [], "now": 1_800_000_000},
+        )
+    )
+
+    assert payload["arms"]["head"] == [
+        "通道", "分组", "策略", "进度", "平均推进层数", "胜场（胜率）", "技术失败", "状态", "预计完成"]
+    assert [row[:2] for row in payload["arms"]["rows"]] == [
+        ["Ironclad/random", "random"], ["Ironclad/value", "value"], ["Silent/random", "random"]]
+    # the columns after 分组 keep their order (policy, progress, ..., state)
+    assert payload["arms"]["rows"][0][2] == "greedy"
+    assert "3 / 5（60%） · 1 进行中" in payload["arms"]["rows"][0][3]
+    assert payload["arms"]["rows"][0][7] == "运行中"
+    # the slash in a lane name travels as %2F, so the hash router's lane segment stays whole
+    assert payload["navigateCalls"] == [
+        f"#/regression/batch/{_BATCH_ROW['batch_id']}/lane/Ironclad%2Fvalue"]
+    # a batch without arms is unchanged
+    assert payload["plain"]["head"] == [
+        "通道", "策略", "进度", "平均推进层数", "胜场（胜率）", "技术失败", "状态", "预计完成"]
+    assert len(payload["plain"]["rows"][0]) == 8
+
+
+def test_lane_page_names_the_arm_and_its_environment():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              const meta = async (lane) => {
+                responses = [{ batch_id: 'route-ab-1', batch_name: 'route-ab', lane: lane.lane,
+                               lane_summary: lane, runs: [], runs_complete: true, now: 1_800_000_000 }];
+                await BV.render({ view: 'regression-lane', batchId: 'route-ab-1', lane: lane.lane });
+                return collect(byId('regressionBody'), (n) => n.className === 'batch-fact')
+                  .map((n) => n.children.map((c) => c.textContent));
+              };
+              console.log(JSON.stringify({
+                arm: await meta(__ARM__),
+                plain: await meta(__PLAIN__),
+                fetches,
+              }));
+            })();
+            """,
+            arm=_ARM_LANES[1],
+            plain=_LANE_ROWS[0],
+        )
+    )
+
+    arm = dict(payload["arm"])
+    assert arm["分组"] == "value" and arm["分组环境"] == "STS2_ROUTE_POLICY=value"
+    assert "分组" not in dict(payload["plain"]) and "分组环境" not in dict(payload["plain"])
+    assert payload["fetches"][0] == "/api/batch/lane?id=route-ab-1&lane=Ironclad%2Fvalue"
 
 
 def test_an_unplanned_batch_shows_counts_not_a_completion_bar():

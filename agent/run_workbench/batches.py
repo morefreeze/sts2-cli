@@ -155,6 +155,16 @@ def _clean_number(value: Any) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
+def _clean_env(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: str(item)
+        for key, item in value.items()
+        if isinstance(key, str) and isinstance(item, (str, int, float))
+    }
+
+
 def _normalize_manifest(
     raw: dict[str, Any], dir_name: str, lanes_status: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -169,6 +179,10 @@ def _normalize_manifest(
                 "planned_games": _clean_int(entry.get("planned_games")),
                 "seed_prefix": _clean_text(entry.get("seed_prefix")),
                 "seed_offset": _clean_int(entry.get("seed_offset")),
+                # run_batch.py --arm: the A/B arm this lane plays and the environment
+                # it adds to the batch's (absent on a batch without arms)
+                "arm": _clean_text(entry.get("arm")),
+                "arm_env": _clean_env(entry.get("arm_env")),
             }
         )
     status: dict[str, dict[str, Any]] = {}
@@ -345,6 +359,8 @@ def lane_progress(
         "character": _clean_text(manifest_lane.get("character"))
         or (characters.most_common(1)[0][0] if characters else None),
         "policy": policies.most_common(1)[0][0] if policies else None,
+        "arm": _clean_text(manifest_lane.get("arm")),
+        "arm_env": _clean_env(manifest_lane.get("arm_env")),
         "planned": planned,
         "planned_known": planned_known,
         "finished": finished,

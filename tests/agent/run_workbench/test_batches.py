@@ -1091,6 +1091,95 @@ def test_lane_endpoint_lists_live_first_then_finished_newest_first(
     assert no_lane_status == 400
 
 
+def _arm_batch_on_disk(root: Path, batch_id: str = "route-ab-20261012-100000") -> None:
+    """run_batch.py --arm: Ironclad x {random, value}, one finished game per Ironclad
+    lane (the value arm's experiment label carries `,route=value`), Silent not started."""
+    lanes = []
+    for character in ("Ironclad", "Silent"):
+        for arm in ("random", "value"):
+            lanes.append({"lane": f"{character}/{arm}", "character": character,
+                          "planned_games": 2, "seed_prefix": "p3b_", "seed_offset": 0,
+                          "extra_args": [], "arm": arm,
+                          "arm_env": {"STS2_ROUTE_POLICY": arm}})
+    directory = _write_manifest(root, batch_id, name="route-ab", kind="ab", lanes=lanes)
+    (directory / "lanes_status.json").write_text(
+        json.dumps({"Ironclad/random": {"state": "running", "pid": 7, "started_at": NOW - 900},
+                    "Ironclad/value": {"state": "running", "pid": 8, "started_at": NOW - 900},
+                    "Silent/random": {"state": "queued"}, "Silent/value": {"state": "queued"}}),
+        encoding="utf-8")
+    for arm in ("random", "value"):
+        experiment = "p3b:ooc=greedy" + (",route=value" if arm == "value" else "")
+        rows = _game_rows("p3b_1", run_id=f"pfr-{arm}", batch_id=batch_id,
+                          lane=f"Ironclad/{arm}", game_index=1, games_total=2,
+                          started=NOW - 800, duration=600.0, floor=10 if arm == "random" else 14,
+                          experiment=experiment)
+        _write(root, f"batches/{batch_id}/games/Ironclad__{arm}/Ironclad_greedy_a1_p3b_1.jsonl",
+               rows, mtime=NOW - 100)
+
+
+def test_arm_batch_lanes_carry_their_arm_and_keep_the_manifest_order(
+    tmp_path: Path, log_size: str
+) -> None:
+    _arm_batch_on_disk(tmp_path)
+    catalog = _catalog(tmp_path)
+    (manifest,) = load_manifests(tmp_path)
+    assert [(lane["lane"], lane["arm"], lane["arm_env"]) for lane in manifest["lanes"]] == [
+        ("Ironclad/random", "random", {"STS2_ROUTE_POLICY": "random"}),
+        ("Ironclad/value", "value", {"STS2_ROUTE_POLICY": "value"}),
+        ("Silent/random", "random", {"STS2_ROUTE_POLICY": "random"}),
+        ("Silent/value", "value", {"STS2_ROUTE_POLICY": "value"})]
+
+    (view,) = build_batch_views([manifest], catalog.regression_runs(), catalog.now())
+
+    assert [lane["lane"] for lane in view.lanes] == [
+        "Ironclad/random", "Ironclad/value", "Silent/random", "Silent/value"]
+    by_lane = {lane["lane"]: lane for lane in view.lanes}
+    assert [by_lane[name]["arm"] for name in by_lane] == ["random", "value"] * 2
+    assert by_lane["Ironclad/value"]["arm_env"] == {"STS2_ROUTE_POLICY": "value"}
+    assert by_lane["Ironclad/random"]["character"] == "Ironclad"
+    # the value arm's `,route=value` label is not part of the out-of-combat policy
+    assert by_lane["Ironclad/value"]["policy"] == "greedy"
+    assert by_lane["Ironclad/random"]["policy"] == "greedy"
+    # each lane owns its game: the two arms played the same seed without merging
+    assert (by_lane["Ironclad/random"]["finished"], by_lane["Ironclad/value"]["finished"]) == (1, 1)
+    assert by_lane["Ironclad/random"]["avg_global_floor"] == 10.0
+    assert by_lane["Ironclad/value"]["avg_global_floor"] == 14.0
+    assert by_lane["Silent/value"]["state"] == "queued"
+    assert {run.lane_name for run in catalog.regression_runs()} == {
+        "Ironclad/random", "Ironclad/value"}
+    assert len(catalog.regression_runs()) == 2
+
+
+def test_a_batch_without_arms_reports_no_arm(tmp_path: Path, log_size: str) -> None:
+    _batch_on_disk(tmp_path)
+    catalog = _catalog(tmp_path)
+    (manifest,) = load_manifests(tmp_path)
+    (view,) = build_batch_views([manifest], catalog.regression_runs(), catalog.now())
+    assert all(lane["arm"] is None and lane["arm_env"] == {} for lane in view.lanes)
+
+
+def test_endpoints_serve_a_lane_whose_name_has_a_slash(tmp_path: Path, log_size: str) -> None:
+    _arm_batch_on_disk(tmp_path)
+    with _server(_catalog(tmp_path)) as base:
+        batch_status, batch = _get(base, "/api/batch?id=route-ab-20261012-100000")
+        status, payload = _get(
+            base, "/api/batch/lane?id=route-ab-20261012-100000&lane=Ironclad%2Fvalue")
+        other_status, other = _get(
+            base, "/api/batch/lane?id=route-ab-20261012-100000&lane=Silent%2Fvalue")
+        raw_status, _ = _get(base, "/api/batch/lane?id=route-ab-20261012-100000&lane=Ironclad")
+
+    assert batch_status == 200 and batch["batch"]["kind"] == "ab"
+    assert [lane["lane"] for lane in batch["lanes"]] == [
+        "Ironclad/random", "Ironclad/value", "Silent/random", "Silent/value"]
+    assert [lane["arm"] for lane in batch["lanes"]] == ["random", "value", "random", "value"]
+    assert status == 200 and payload["lane"] == "Ironclad/value"
+    assert payload["lane_summary"]["arm"] == "value"
+    assert [row["seed"] for row in payload["runs"]] == ["p3b_1"]
+    assert payload["runs"][0]["global_floor"] == 14
+    assert other_status == 200 and other["runs"] == []
+    assert raw_status == 404                                  # the bare character is no lane
+
+
 def test_lane_endpoint_shows_an_abandoned_game_as_unknown(tmp_path: Path, log_size: str) -> None:
     _batch_on_disk(tmp_path)
     clock = _Clock(NOW + 2 * HOUR)  # the live log has been quiet for hours
