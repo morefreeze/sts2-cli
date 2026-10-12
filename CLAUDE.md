@@ -5,13 +5,13 @@
 Any code change MUST pass a full regression test before claiming completion:
 
 ```bash
-# Run 5 games per character, ALL must complete (0 crashes/stuck)
-for char in Ironclad Silent Defect Regent Necrobinder; do
-    STS2_GAME_DIR="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64" python3 python/play_full_run.py 5 "$char" 2>&1 | grep -E "Wins|Completed"
-do
+# 5 games per character, ALL must complete (0 crashes/stuck); the five lanes run in parallel
+.venv/bin/python python/run_batch.py --name regression --kind regression --games 5 --chars all
 ```
 
-Expected: `Completed: 5/5` for every character.
+`run_batch.py` starts one `play_full_run.py` lane per character (3 solver threads each, `STS2_GAME_DIR` defaulted to the Steam install) and stays in the foreground until every lane has exited. Read the verdict from its closing summary: one line per lane with the results-row count and that lane's `Wins: …, Completed: N/N, …` line. Expected: `Completed: 5/5` for every lane (an incomplete lane is flagged `INCOMPLETE`; the launcher exits non-zero only if a lane process itself failed). `--chars Silent,Defect` runs a subset, `--dry-run` prints the lane commands without starting anything, and arguments after a bare `--` go to every lane (e.g. `-- --game-version v0.111.0`). SIGTERM/SIGINT on the launcher stops every lane.
+
+Everything lands in `logs/batches/<name>-<YYYYmmdd-HHMMSS>/` (`manifest.json`, `lanes_status.json`, `<lane>.log`, `<lane>.jsonl`, `games/`), which the run workbench's 回归/评测 tab reads. **`logs/batches/` is kept** — `game_log.cleanup_old_logs()` only purges top-level `logs/*.jsonl` after 7 days, and the launcher copies every game's log into the batch's `games/` (`--keep-game-logs`), so nothing needs saving by hand. Don't start a second batch while one runs from this checkout (`pgrep -f play_full_run`): the lanes compete for CPU and a starved time-budgeted solver plays worse.
 
 `play_full_run.py` runs the **greedy** out-of-combat policy by default since 2026-10-12 (`STS2_OOC_POLICY=greedy`; see Protocol notes), so this regression exercises `agent.combat_env.greedy_action` for card rewards, rest sites, events, bundles, card selects and shops. Set `STS2_OOC_POLICY=naive` to regress the old placeholder policy as well when a change touches it.
 
