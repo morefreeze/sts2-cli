@@ -4189,6 +4189,7 @@ public class RunSimulator
         // moves (e.g. BygoneEffigy.WakeMove) NRE in headless and break the enemy turn.
         PatchTalkCmd();
         PatchSoulNexusAfterDeath();
+        PatchKaiserCrabArmsBeforeDeath();
         PatchSandpitPower();
         PatchTurnEndCardsDiagnostic();
 
@@ -4488,6 +4489,52 @@ public class RunSimulator
         }
     }
 
+    /// <summary>
+    /// Crusher.BeforeDeath / Rocket.BeforeDeath (the two Kaiser Crab arms) call
+    /// NAudioManager.Instance.PlayOneShot(DeathSfx) UNGUARDED -- every other game audio call goes
+    /// through SfxCmd, which NonInteractiveMode guards, but these two do not. NAudioManager.Instance
+    /// is NGame.Instance?.AudioManager, null headless, so every death of an arm threw a
+    /// NullReferenceException inside CreatureCmd.KillWithoutCheckingWinCondition, after the HP was
+    /// zeroed but before Died / Hook.AfterDeath / removal ran. On the enemy's turn (Thorns
+    /// retaliating against the arm's own attack, poison) it propagated through the arm's move into
+    /// the combat turn loop, which died: the EndTurn nuclear fallback forced a game_over tagged
+    /// technical_failure_kind=stuck (agent/bug.md BUG-055). On the player's turn it only aborted the
+    /// card's action, leaving the kill half-done -- Crab Rage (AfterDeath: the other arm gains
+    /// Strength + 99 Block) never fired. The rest of both methods is a Background animation and a
+    /// music parameter, all null-guarded and purely presentational, so skipping them loses nothing.
+    /// </summary>
+    private static void PatchKaiserCrabArmsBeforeDeath()
+    {
+        var harmony = new Harmony("sts2headless.kaisercrabarmspatch");
+        foreach (var armName in new[] { "Crusher", "Rocket" })
+        {
+            try
+            {
+                var armType = typeof(CombatManager).Assembly.GetType(
+                    "MegaCrit.Sts2.Core.Models.Monsters." + armName);
+                var beforeDeath = armType?.GetMethod("BeforeDeath",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+                if (beforeDeath == null)
+                {
+                    Console.Error.WriteLine($"[WARN] Could not find {armName}.BeforeDeath to patch");
+                    continue;
+                }
+                var prefix = typeof(YieldPatches).GetMethod(nameof(YieldPatches.KaiserCrabArmBeforeDeathPrefix),
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                if (prefix != null)
+                {
+                    harmony.Patch(beforeDeath, new HarmonyMethod(prefix));
+                    Console.Error.WriteLine($"[INFO] Patched {armName}.BeforeDeath() to no-op (NAudioManager.Instance is null headless; prevents turn-loop death)");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[WARN] Failed to patch {armName}.BeforeDeath: {ex.Message}");
+            }
+        }
+    }
+
     private static void PatchTaskYield()
     {
         try
@@ -4694,6 +4741,18 @@ public class RunSimulator
         public static bool SoulNexusAfterDeathPrefix()
         {
             return false; // Skip original method -- VFX only, no gameplay effect
+        }
+
+        /// <summary>
+        /// Harmony prefix: no-op Crusher.BeforeDeath / Rocket.BeforeDeath. Both open with an
+        /// unguarded NAudioManager.Instance.PlayOneShot(DeathSfx) (null headless), so every arm
+        /// death threw out of CreatureCmd.Kill; the rest of the body is a null-guarded
+        /// Background animation and a music parameter. See PatchKaiserCrabArmsBeforeDeath.
+        /// </summary>
+        public static bool KaiserCrabArmBeforeDeathPrefix(ref Task __result)
+        {
+            __result = Task.CompletedTask;
+            return false; // Skip original method -- audio/animation only, no gameplay effect
         }
 
         public static bool TalkCmdPlayPrefix(ref MegaCrit.Sts2.Core.Nodes.Vfx.NSpeechBubbleVfx? __result)

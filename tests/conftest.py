@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 import pytest
 
 DOTNET = os.path.expanduser("~/.dotnet-arm64/dotnet")
@@ -27,8 +29,27 @@ class Game:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, env=env,
         )
+        # Drain the engine's stderr continuously. It is a pipe nobody else reads: a long
+        # fight (hundreds of actions plus exception traces) would fill the OS pipe buffer
+        # and block the engine mid-write. Keeping the lines also lets a test assert on the
+        # engine log (e.g. "no turn loop died") -- see stderr_text().
+        self.stderr_lines = []
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
         ready = self._read()
         assert ready.get("type") == "ready", f"Expected ready, got: {ready}"
+
+    def _drain_stderr(self):
+        try:
+            for line in self.proc.stderr:
+                self.stderr_lines.append(line)
+        except (ValueError, OSError):  # pipe closed on teardown
+            pass
+
+    def stderr_text(self):
+        """Everything the engine has written to stderr so far."""
+        time.sleep(0.2)  # let the drain thread catch up with what the engine just wrote
+        return "".join(self.stderr_lines)
 
     def _read(self):
         while True:
