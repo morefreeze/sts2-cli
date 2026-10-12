@@ -21,6 +21,7 @@ import sys
 import random
 import os
 import shutil
+import signal
 import traceback
 import uuid
 from game_log import GameLogger
@@ -1427,4 +1428,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # run_batch.py stops a lane with SIGTERM. Exit through SystemExit so play_run's
+    # `finally` runs engine.close(): the engine is its own session (engine_process.py)
+    # and would otherwise outlive this process's group.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     main()
