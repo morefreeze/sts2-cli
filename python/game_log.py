@@ -21,7 +21,13 @@ LOG_RETENTION_DAYS = 7
 # cohorts instead of degenerating to one cohort per file.
 _RUN_META_KEYS = (
     "run_id",
+    # play_full_run / run_batch.py: which harness played the game, and where it sits in
+    # a launcher batch (the workbench's 回归/评测 tab groups on these).
+    "harness",
     "batch_id",
+    "lane",
+    "game_index",
+    "games_total",
     "experiment",
     "checkpoint",
     "character",
@@ -38,7 +44,12 @@ _RUN_META_KEYS = (
 
 
 def cleanup_old_logs(max_age_days=LOG_RETENTION_DAYS):
-    """Remove log files older than max_age_days."""
+    """Remove top-level logs/*.jsonl files older than max_age_days.
+
+    Deliberately NOT recursive: logs/batches/<batch_id>/ (run_batch.py's manifest,
+    lane logs, results and kept game copies) is long-lived data the workbench reads,
+    and must survive this purge.
+    """
     if not os.path.isdir(LOG_DIR):
         return
     cutoff = time.time() - max_age_days * 86400
@@ -47,6 +58,8 @@ def cleanup_old_logs(max_age_days=LOG_RETENTION_DAYS):
         if not fname.endswith(".jsonl"):
             continue
         fpath = os.path.join(LOG_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
         if os.path.getmtime(fpath) < cutoff:
             os.remove(fpath)
             removed += 1

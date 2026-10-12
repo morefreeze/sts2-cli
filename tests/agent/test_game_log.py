@@ -203,3 +203,64 @@ def test_header_write_failure_never_breaks_construction(monkeypatch):
     lines = _read_lines(Path(logger.path))
     assert lines[0]["type"] == "state"
     assert lines[0]["step"] == 1
+
+
+def test_header_carries_the_harness_and_batch_lane_keys():
+    run_context = {
+        "run_id": "pfr-1",
+        "harness": "play_full_run",
+        "batch_id": "regression-20261012-101500",
+        "lane": "Silent",
+        "game_index": 2,
+        "games_total": 5,
+    }
+    logger = game_log.GameLogger("Silent", "seed-9", enabled=True, run_context=run_context)
+    logger.close()
+
+    header = _read_lines(Path(logger.path))[0]
+    assert header["harness"] == "play_full_run"
+    assert header["batch_id"] == "regression-20261012-101500"
+    assert header["lane"] == "Silent"
+    assert header["game_index"] == 2 and header["games_total"] == 5
+
+
+def test_game_index_zero_is_a_value_not_omitted():
+    # `is None` filtering, not truthiness: a falsy index must survive.
+    logger = game_log.GameLogger("Silent", "seed-10", enabled=True,
+                                 run_context={"run_id": "r", "game_index": 0})
+    logger.close()
+    assert _read_lines(Path(logger.path))[0]["game_index"] == 0
+
+
+def test_cleanup_removes_old_top_level_logs_but_never_touches_logs_batches(_isolated_log_dir):
+    """logs/batches/** holds the regression launcher's manifests, lane logs and
+    kept game copies; the 7-day purge of logs/*.jsonl must not eat them."""
+    import os
+
+    old = time.time() - 30 * 86400
+    stale = _isolated_log_dir / "20260901_000000_Ironclad_x.jsonl"
+    stale.write_text("{}\n")
+    fresh = _isolated_log_dir / "20261012_000000_Ironclad_y.jsonl"
+    fresh.write_text("{}\n")
+
+    batch = _isolated_log_dir / "batches" / "regression-20260901-000000"
+    kept = batch / "games" / "Ironclad_greedy_a0_run_1.jsonl"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("{}\n")
+    results = batch / "Ironclad.jsonl"
+    results.write_text("{}\n")
+    manifest = batch / "manifest.json"
+    manifest.write_text("{}")
+    # a stray directory whose name ends in .jsonl must not crash the purge either
+    weird = _isolated_log_dir / "weird.jsonl"
+    weird.mkdir()
+
+    for path in (stale, kept, results, manifest, weird):
+        os.utime(path, (old, old))
+    os.utime(batch, (old, old))
+
+    game_log.cleanup_old_logs()
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert kept.exists() and results.exists() and manifest.exists()

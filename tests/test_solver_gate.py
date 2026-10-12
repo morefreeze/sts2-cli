@@ -805,3 +805,128 @@ def test_an_empty_technical_failure_kind_is_an_ordinary_defeat(monkeypatch, blan
     result = _play_game_over(monkeypatch, _game_over(technical_failure_kind=blank))
     assert "error" not in result
     assert play_full_run.result_to_eval_row(result, "Ironclad")["status"] == "dead"
+
+
+# --- batch fields in the run_meta header (workbench regression view) ----------
+# play_run() against a scripted engine with logging into tmp_path; main() with
+# play_run stubbed. The header is what the workbench groups regression batches by.
+
+def _batch_play(monkeypatch, tmp_path, **kwargs):
+    """play_run() with logging on; returns (result, run_meta header)."""
+    import game_log
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
+    monkeypatch.setattr(game_log, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(
+        play_full_run, "EngineProcess",
+        lambda argv, **kw: _FakeEngine([{"type": "ready"}, _game_over()]))
+    result = play_full_run.play_run("run_3", character="Ironclad", verbose=False,
+                                    log=True, **kwargs)
+    with open(result["game_log"], encoding="utf-8") as fh:
+        header = json.loads(fh.readline())
+    assert header["type"] == "run_meta"
+    return result, header
+
+
+def test_every_game_header_carries_the_harness_even_without_a_batch(monkeypatch, tmp_path):
+    result, header = _batch_play(monkeypatch, tmp_path)
+    assert header["harness"] == "play_full_run"
+    for key in ("batch_id", "lane", "game_index", "games_total"):
+        assert key not in header
+    # ...and the result/row carry the batch columns as None, not missing
+    row = play_full_run.result_to_eval_row(result, "Ironclad")
+    assert row["batch_id"] is None and row["lane"] is None and row["game_index"] is None
+
+
+def test_header_carries_the_batch_fields_when_a_batch_is_named(monkeypatch, tmp_path):
+    _, header = _batch_play(monkeypatch, tmp_path, batch_id="regression-20261012-101500",
+                            lane="Silent", game_index=2, games_total=5)
+    assert header["harness"] == "play_full_run"
+    assert header["batch_id"] == "regression-20261012-101500"
+    assert header["lane"] == "Silent"
+    assert header["game_index"] == 2 and header["games_total"] == 5
+
+
+def test_lane_defaults_to_the_character_when_a_batch_is_named(monkeypatch, tmp_path):
+    _, header = _batch_play(monkeypatch, tmp_path, batch_id="b-1", game_index=1, games_total=1)
+    assert header["lane"] == "Ironclad"
+
+
+def test_results_row_carries_batch_id_lane_and_game_index(monkeypatch, tmp_path):
+    result, header = _batch_play(monkeypatch, tmp_path, batch_id="b-1", lane="Silent",
+                                 game_index=3, games_total=4)
+    row = play_full_run.result_to_eval_row(result, "Ironclad")
+    assert (row["batch_id"], row["lane"], row["game_index"]) == ("b-1", "Silent", 3)
+    assert row["run_id"] == header["run_id"]
+
+
+def _main_calls(monkeypatch, argv, **env):
+    """main() with play_run stubbed; returns (kwargs of every play_run call, rows)."""
+    calls = []
+
+    def fake_play_run(seed, character, verbose=True, **kw):
+        calls.append({"seed": seed, "character": character, **kw})
+        return {"victory": False, "seed": seed, "act": 1, "floor": 3, "steps": 1,
+                "solver_plans": 1, "solver_errors": 0, "batch_id": kw.get("batch_id"),
+                "lane": kw.get("lane"), "game_index": kw.get("game_index")}
+
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
+    for key in ("STS2_BATCH_ID", "STS2_BATCH_LANE"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(play_full_run, "play_run", fake_play_run)
+    monkeypatch.setattr(sys, "argv", ["play_full_run.py", *argv])
+    play_full_run.main()
+    return calls
+
+
+def test_main_passes_batch_id_lane_index_and_total_to_every_game(monkeypatch):
+    calls = _main_calls(monkeypatch, ["3", "Defect", "--batch-id", "b-9", "--lane", "L1"])
+    assert [(c["batch_id"], c["lane"], c["game_index"], c["games_total"]) for c in calls] == [
+        ("b-9", "L1", 1, 3), ("b-9", "L1", 2, 3), ("b-9", "L1", 3, 3)]
+
+
+def test_main_lane_defaults_to_the_character(monkeypatch):
+    calls = _main_calls(monkeypatch, ["1", "Regent", "--batch-id", "b-9"])
+    assert calls[0]["lane"] == "Regent"
+
+
+def test_main_falls_back_to_the_environment_for_batch_id_and_lane(monkeypatch):
+    calls = _main_calls(monkeypatch, ["2", "Silent"],
+                        STS2_BATCH_ID="env-batch", STS2_BATCH_LANE="env-lane")
+    assert [(c["batch_id"], c["lane"]) for c in calls] == [("env-batch", "env-lane")] * 2
+
+
+def test_main_cli_flags_beat_the_environment(monkeypatch):
+    calls = _main_calls(monkeypatch, ["1", "Silent", "--batch-id", "cli", "--lane", "cli-lane"],
+                        STS2_BATCH_ID="env-batch", STS2_BATCH_LANE="env-lane")
+    assert (calls[0]["batch_id"], calls[0]["lane"]) == ("cli", "cli-lane")
+
+
+def test_main_without_a_batch_passes_no_batch_fields(monkeypatch):
+    calls = _main_calls(monkeypatch, ["2", "Silent"])
+    for call in calls:
+        assert call.get("batch_id") is None
+        assert call.get("lane") is None
+        assert call.get("game_index") is None and call.get("games_total") is None
+
+
+def test_main_blank_batch_env_means_no_batch(monkeypatch):
+    # an empty exported variable is how a shell "unsets" it
+    calls = _main_calls(monkeypatch, ["1", "Silent"], STS2_BATCH_ID="  ", STS2_BATCH_LANE="")
+    assert calls[0].get("batch_id") is None and calls[0].get("lane") is None
+
+
+def test_main_results_log_rows_carry_batch_id_lane_and_game_index(monkeypatch, tmp_path):
+    log = tmp_path / "rows.jsonl"
+    _main_calls(monkeypatch, ["2", "Silent", "--batch-id", "b-1", "--lane", "L",
+                              "--results-log", str(log)])
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [(r["batch_id"], r["lane"], r["game_index"]) for r in rows] == [
+        ("b-1", "L", 1), ("b-1", "L", 2)]
+
+
+def test_main_rejects_a_blank_batch_id_before_any_game(monkeypatch, capsys):
+    with pytest.raises(SystemExit):
+        _main_calls(monkeypatch, ["1", "Silent", "--batch-id", "   "])
+    assert "--batch-id" in capsys.readouterr().err

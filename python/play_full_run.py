@@ -238,6 +238,10 @@ def resolve_run_game_version(cli_value=None, environment=None):
     return _run_metadata().resolve_optional_game_version(cli_value, environment)
 
 
+# run_meta `harness` value for every game this script plays.
+HARNESS_NAME = "play_full_run"
+
+
 def batch_name(experiment, seed_prefix):
     """The batch part of the experiment label: --experiment, else the seed prefix
     without its trailing underscore (`run_` -> `run`). None if neither names one."""
@@ -257,7 +261,8 @@ def new_run_id():
     return f"pfr-{uuid.uuid4().hex[:12]}"
 
 
-def build_run_context(seed, character, ascension, experiment, run_id, game_version=None):
+def build_run_context(seed, character, ascension, experiment, run_id, game_version=None,
+                      batch_id=None, lane=None, game_index=None, games_total=None):
     """The run_meta header play_run hands GameLogger.
 
     The workbench cohorts logs by (experiment, checkpoint, character,
@@ -265,14 +270,38 @@ def build_run_context(seed, character, ascension, experiment, run_id, game_versi
     fixed-seed, single-player full run, and is_multiplayer must be a strict bool
     or the run's map view degrades to "Multiplayer flag must be a boolean".
     game_version is a ResolvedGameVersion or None (then simply omitted).
+
+    `harness` marks every play_full_run game (the workbench's regression/eval tab
+    files on it). The batch fields -- batch_id, lane, game_index, games_total --
+    are stamped only when a batch id is known (run_batch.py / --batch-id).
     """
-    context = {"run_id": run_id, "seed": seed, "character": character,
-               "ascension": ascension, "experiment": experiment,
+    context = {"run_id": run_id, "harness": HARNESS_NAME, "seed": seed,
+               "character": character, "ascension": ascension, "experiment": experiment,
                "evaluation_mode": "fixed", "scenario": "full_run",
                "is_multiplayer": False}
+    if batch_id:
+        context["batch_id"] = batch_id
+        context["lane"] = lane or character
+        if game_index is not None:
+            context["game_index"] = game_index
+        if games_total is not None:
+            context["games_total"] = games_total
     if game_version is not None:
         context.update(game_version.to_fields())
     return context
+
+
+def resolve_batch_args(batch_id, lane, character, env=None):
+    """(batch_id, lane) for this process: the CLI flag, else $STS2_BATCH_ID /
+    $STS2_BATCH_LANE (run_batch.py sets flags; the env is for ad-hoc wrappers).
+    A blank value is "not set" (an exported-empty variable). Without a batch id
+    there is no lane; with one, the lane defaults to the character."""
+    env = os.environ if env is None else env
+    batch_id = (batch_id or "").strip() or (env.get("STS2_BATCH_ID") or "").strip()
+    if not batch_id:
+        return None, None
+    lane = (lane or "").strip() or (env.get("STS2_BATCH_LANE") or "").strip() or character
+    return batch_id, lane
 
 
 def greedy_knobs(env=None) -> dict:
@@ -376,12 +405,17 @@ def engine_argv() -> list:
 
 def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: bool = True,
              ascension: int = 0, keep_log_dir: str | None = None,
-             game_version=None, batch: str | None = None):
+             game_version=None, batch: str | None = None,
+             batch_id: str | None = None, lane: str | None = None,
+             game_index: int | None = None, games_total: int | None = None):
     """Play a complete run and return the result.
 
     `game_version` (a ResolvedGameVersion, or None) and `batch` (see
     batch_name) go into the game log's run_meta header so the run workbench can
     file the game; every result carries the game's `run_id`, which is the same id.
+    `batch_id`/`lane`/`game_index`/`games_total` (run_batch.py's batch registry,
+    not to be confused with the experiment-label `batch`) are stamped into the
+    header and the result too; `lane` defaults to the character.
 
     Thin wrapper over _play_run() that stamps the fields every result needs
     regardless of which of _play_run's many return paths produced it:
@@ -412,9 +446,13 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
              "solver_turn_fallbacks": 0,
              "game_log": None}
     stats["run_id"] = new_run_id()
+    stats["batch_id"] = batch_id or None
+    stats["lane"] = (lane or character) if batch_id else None
+    stats["game_index"] = game_index if batch_id else None
     run_context = build_run_context(seed, character, ascension,
                                     experiment_label(batch, policy), stats["run_id"],
-                                    game_version)
+                                    game_version, batch_id=batch_id, lane=lane,
+                                    game_index=game_index, games_total=games_total)
     result = _play_run(seed, character, verbose, log, ascension, stats, run_context)
     stats["ooc_fallbacks"] = sum(stats["ooc_fallback_causes"].values())
     game_log = stats.pop("game_log")
@@ -1109,6 +1147,10 @@ def result_to_eval_row(result: dict, character: str) -> dict:
         "game_log_error": result.get("game_log_error"),
         # the game log's run_meta run_id, to join this row to that log
         "run_id": result.get("run_id"),
+        # run_batch.py's batch registry (None for a stand-alone play_full_run)
+        "batch_id": result.get("batch_id"),
+        "lane": result.get("lane"),
+        "game_index": result.get("game_index"),
     }
 
 
@@ -1307,6 +1349,13 @@ def main():
                              "DIR/<character>_<policy>_a<ascension>_<seed>.jsonl "
                              "(logs/ is purged after 7 days) and record that path in the "
                              "results row.")
+    parser.add_argument("--batch-id", default=None, metavar="ID",
+                        help="Stamp every game log's run_meta (and the results rows) with "
+                             "this launcher batch id (run_batch.py sets it). Fallback: "
+                             "$STS2_BATCH_ID.")
+    parser.add_argument("--lane", default=None, metavar="NAME",
+                        help="Lane name within the batch (default: the character). "
+                             "Fallback: $STS2_BATCH_LANE. Only meaningful with a batch id.")
     args = parser.parse_args()
 
     if args.num_runs <= 0:
@@ -1319,6 +1368,9 @@ def main():
         parser.error("--experiment must not be blank")
     if args.experiment is not None and len(args.experiment.strip()) > 100:
         parser.error("--experiment must be at most 100 characters")
+    if args.batch_id is not None and not args.batch_id.strip():
+        parser.error("--batch-id must not be blank")
+    batch_id, lane = resolve_batch_args(args.batch_id, args.lane, args.character)
     try:
         game_version = resolve_run_game_version(args.game_version)
     except ValueError as exc:  # a malformed explicit value: surface it before any game
@@ -1350,16 +1402,21 @@ def main():
         version_note = "game version unknown"
     else:
         version_note = f"game version {game_version.value} ({game_version.source})"
-    print(f"Run metadata: {version_note}, experiment {experiment_label(batch, policy)}")
+    batch_note = f", batch {batch_id} lane {lane}" if batch_id else ""
+    print(f"Run metadata: {version_note}, experiment {experiment_label(batch, policy)}"
+          f"{batch_note}")
     print("=" * 60)
 
     results = []
     for i in range(num_runs):
         seed = f"{args.seed_prefix}{args.seed_offset + i + 1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
+        batch_kwargs = ({"batch_id": batch_id, "lane": lane,
+                         "game_index": i + 1, "games_total": num_runs}
+                        if batch_id else {})
         result = play_run(seed, character, verbose=True, ascension=args.ascension,
                           keep_log_dir=args.keep_game_logs,
-                          game_version=game_version, batch=batch)
+                          game_version=game_version, batch=batch, **batch_kwargs)
         results.append(result)
         if args.results_log:
             with open(args.results_log, "a") as fh:
