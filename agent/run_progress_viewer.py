@@ -35,6 +35,14 @@ from agent.run_workbench.catalog import (
     RunCatalog,
 )
 from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
+from agent.run_workbench.batches import (
+    ACTIVITY_WINDOW_SECONDS,
+    LIVE,
+    BatchView,
+    RegressionRun,
+    build_batch_views,
+    load_manifests,
+)
 from agent.run_workbench.map_service import (
     MAX_ALIGNMENT_REASON_CHARS,
     MAX_MAP_EDGES,
@@ -1188,6 +1196,118 @@ def _cohort_runs_payload(catalog: RunCatalog, cohort_id: str) -> dict[str, Any]:
     }
 
 
+# ---- 回归/评测 (play_full_run batches) ------------------------------------
+
+
+def _batch_views(catalog: RunCatalog) -> tuple[list[BatchView], list[str], float]:
+    """Every batch, read fresh: manifests from each catalog root's batches/
+    directory, the games from the catalog's regression runs."""
+    problems: list[str] = []
+    manifests: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in catalog.roots:
+        for manifest in load_manifests(root, problems):
+            if manifest["batch_id"] not in seen:
+                seen.add(manifest["batch_id"])
+                manifests.append(manifest)
+    now = catalog.now()
+    window = catalog.in_progress_window or ACTIVITY_WINDOW_SECONDS
+    views = build_batch_views(manifests, catalog.regression_runs(), now, window=window)
+    return views, problems, now
+
+
+def _find_batch(views: list[BatchView], batch_id: str) -> BatchView:
+    for view in views:
+        if view.summary["batch_id"] == batch_id:
+            return view
+    raise CatalogNotFoundError(f"unknown batch id: {batch_id}")
+
+
+def _batches_payload(catalog: RunCatalog) -> dict[str, Any]:
+    views, problems, now = _batch_views(catalog)
+    return {
+        "batches": [view.summary for view in views],
+        "problems": problems,
+        "now": now,
+    }
+
+
+def _batch_payload(catalog: RunCatalog, batch_id: str) -> dict[str, Any]:
+    views, problems, now = _batch_views(catalog)
+    view = _find_batch(views, batch_id)
+    return {
+        "batch": view.summary,
+        "lanes": view.lanes,
+        "problems": problems,
+        "now": now,
+    }
+
+
+def _regression_run_row(run: RegressionRun) -> dict[str, Any]:
+    """A lane run-list row: the keys of a cohort run row (so the runs table
+    renders it unchanged) plus the lane-specific ones.  Always addressed by
+    source: a game found in two logs (`logs/` and the kept copy) is one run, and
+    its detail must open one log, not the join of both."""
+    global_floor = run.global_floor
+    act = run.act
+    if act is None and isinstance(global_floor, int) and global_floor > 0:
+        act = (global_floor - 1) // 17 + 1
+    return {
+        "run_id": run.run_id or None,
+        "source_id": run.source_id,
+        "seed": run.seed,
+        "status": "in_progress"
+        if run.state == LIVE
+        else run.status.value
+        if run.state == "finished"
+        else "unknown",
+        "state": run.state,
+        "global_floor": global_floor,
+        "act": act,
+        "floor": run.floor,
+        "hp": run.hp,
+        "max_hp": run.max_hp,
+        "started_at": run.started_at,
+        "updated_at": run.updated_at,
+        "duration_seconds": run.duration_seconds,
+        "game_index": run.game_index,
+        "has_map": run.has_map,
+        "ref": {"kind": "source", "id": run.source_id},
+    }
+
+
+def _lane_payload(catalog: RunCatalog, batch_id: str, lane: str) -> dict[str, Any]:
+    views, _problems, now = _batch_views(catalog)
+    view = _find_batch(views, batch_id)
+    summary = next((item for item in view.lanes if item["lane"] == lane), None)
+    if summary is None:
+        raise CatalogNotFoundError(f"unknown lane: {lane}")
+    members = sorted(
+        view.lane_runs.get(lane, []),
+        key=lambda run: (
+            run.state != LIVE,
+            run.started_at is None,
+            -(run.started_at or 0.0),
+            run.source_id,
+        ),
+    )
+    return {
+        "batch_id": batch_id,
+        "lane": lane,
+        "lane_summary": summary,
+        "runs": [_regression_run_row(run) for run in members[:_COHORT_RUNS_LIMIT]],
+        "runs_complete": len(members) <= _COHORT_RUNS_LIMIT,
+        "now": now,
+    }
+
+
+def _single_query_value(query: dict[str, list[str]], name: str, label: str) -> str:
+    values = query.get(name) or []
+    if len(values) != 1 or not values[0]:
+        raise CatalogError(f"missing {label}")
+    return values[0]
+
+
 def _safe_log_path(name: str) -> Path:
     decoded = unquote(name)
     basename = posixpath.basename(decoded)
@@ -1291,6 +1411,28 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     self._send_error("missing cohort id")
                     return
                 self._send_json(_cohort_runs_payload(self.catalog, id_values[0]))
+            elif parsed.path in {"/api/batches", "/api/batch", "/api/batch/lane"}:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                allowed = {
+                    "/api/batches": set(),
+                    "/api/batch": {"id"},
+                    "/api/batch/lane": {"id", "lane"},
+                }[parsed.path]
+                unexpected = sorted(set(query) - allowed)
+                if unexpected:
+                    self._send_error(
+                        f"unexpected batch query parameter: {unexpected[0]}"
+                    )
+                    return
+                if parsed.path == "/api/batches":
+                    self._send_json(_batches_payload(self.catalog))
+                else:
+                    batch_id = _single_query_value(query, "id", "batch id")
+                    if parsed.path == "/api/batch":
+                        self._send_json(_batch_payload(self.catalog, batch_id))
+                    else:
+                        lane = _single_query_value(query, "lane", "lane")
+                        self._send_json(_lane_payload(self.catalog, batch_id, lane))
             elif parsed.path == "/api/metrics":
                 query = parse_qs(parsed.query)
                 current = (query.get("current") or [""])[0]

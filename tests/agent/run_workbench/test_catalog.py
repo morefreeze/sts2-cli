@@ -4038,7 +4038,7 @@ def test_unarchived_cohorts_with_different_ascension_get_distinct_labels(
 
 
 def _play_full_run_replay(
-    seed: str, *, experiment: str = "run:ooc=greedy", run_id: str | None = None
+    seed: str, *, experiment: str = "run:exp=greedy", run_id: str | None = None
 ) -> list[dict]:
     """The shape python/play_full_run.py logs: a complete run_meta header, then
     start_run + state rows that carry no metadata of their own."""
@@ -4108,7 +4108,7 @@ def test_play_full_run_batch_is_filed_under_its_real_version_and_is_comparable(
     cohort = cohorts[0]
     assert cohort["unarchived"] is False
     assert cohort["run_count"] == 2
-    assert cohort["experiment"] == "run:ooc=greedy"
+    assert cohort["experiment"] == "run:exp=greedy"
     assert cohort["filters"]["game_version"] == "v0.111.0"
     # The automatic source is display-only, like "cli"/"environment".
     assert cohort["filters"]["game_version_source"] == "release_info"
@@ -4131,16 +4131,16 @@ def test_play_full_run_batches_with_different_names_stay_separate_cohorts(
     root.mkdir()
     _write_jsonl(
         root / "a.jsonl",
-        _play_full_run_replay("run_1", experiment="run:ooc=greedy", run_id="pfr-a"),
+        _play_full_run_replay("run_1", experiment="run:exp=greedy", run_id="pfr-a"),
     )
     _write_jsonl(
         root / "b.jsonl",
-        _play_full_run_replay("run_1", experiment="p3b:ooc=greedy", run_id="pfr-b"),
+        _play_full_run_replay("run_1", experiment="p3b:exp=greedy", run_id="pfr-b"),
     )
 
     cohorts = RunCatalog([root], replay_parser=parse_game_progress).list_cohorts()
 
     assert {cohort["experiment"] for cohort in cohorts} == {
-        "run:ooc=greedy",
-        "p3b:ooc=greedy",
+        "run:exp=greedy",
+        "p3b:exp=greedy",
     }

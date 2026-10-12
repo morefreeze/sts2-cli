@@ -71,7 +71,7 @@ def _state(
 def _game_log(
     *,
     seed: str,
-    experiment: str = "ooc=greedy",
+    experiment: str = "exp=greedy",
     character: str = "Ironclad",
     ascension: int = 1,
     started: float = STARTED,
@@ -207,7 +207,7 @@ def test_unfinished_log_is_in_progress_only_while_its_file_is_fresh(
     catalog = _catalog(tmp_path, clock)
 
     (cohort,) = catalog.list_cohorts()
-    assert cohort["label"] == "ooc=greedy · Ironclad · a1"
+    assert cohort["label"] == "exp=greedy · Ironclad · a1"
     assert cohort["in_progress_count"] == 1
     assert cohort["run_count"] == 0
 
@@ -333,7 +333,7 @@ def test_in_progress_run_changes_no_statistic_of_its_cohort(
 ) -> None:
     _finished_batch(tmp_path)
     catalog = _catalog(tmp_path)
-    label = "ooc=greedy · Ironclad · a1"
+    label = "exp=greedy · Ironclad · a1"
     before = _everything_about(catalog, label)
     assert _cohort(catalog, label)["run_count"] == 3
     assert _cohort(catalog, label)["in_progress_count"] == 0
@@ -403,7 +403,7 @@ def test_cohort_with_only_in_progress_runs_still_appears(
     catalog = _catalog(tmp_path)
 
     (cohort,) = catalog.list_cohorts()
-    assert cohort["label"] == "ooc=greedy · Ironclad · a1"
+    assert cohort["label"] == "exp=greedy · Ironclad · a1"
     assert cohort["in_progress_count"] == 2
     assert cohort["run_count"] == 0
     assert cohort["valid_n"] == 0
@@ -427,9 +427,9 @@ def test_cohort_gets_no_latest_at_from_live_games_when_it_has_finished_ones(
 ) -> None:
     _finished_batch(tmp_path)
     catalog = _catalog(tmp_path)
-    latest = _cohort(catalog, "ooc=greedy · Ironclad · a1")["latest_at"]
+    latest = _cohort(catalog, "exp=greedy · Ironclad · a1")["latest_at"]
     _write_log(tmp_path, "live.jsonl", _game_log(seed="p9", started=STARTED + 500))
-    assert _cohort(catalog, "ooc=greedy · Ironclad · a1")["latest_at"] == latest
+    assert _cohort(catalog, "exp=greedy · Ironclad · a1")["latest_at"] == latest
 
 
 def test_in_progress_run_joins_the_same_cohort_a_finished_one_would(
@@ -438,16 +438,16 @@ def test_in_progress_run_joins_the_same_cohort_a_finished_one_would(
     """Same key from the run_meta header: experiment, character, ascension."""
     _write_log(tmp_path, "g_a1.jsonl", _game_log(seed="1", ascension=1))
     _write_log(tmp_path, "g_a0.jsonl", _game_log(seed="2", ascension=0))
-    _write_log(tmp_path, "n_a1.jsonl", _game_log(seed="3", experiment="ooc=naive"))
+    _write_log(tmp_path, "n_a1.jsonl", _game_log(seed="3", experiment="exp=naive"))
     _write_log(tmp_path, "s_a1.jsonl", _game_log(seed="4", character="Silent"))
     labels = {
         c["label"]: c["in_progress_count"] for c in _catalog(tmp_path).list_cohorts()
     }
     assert labels == {
-        "ooc=greedy · Ironclad · a1": 1,
-        "ooc=greedy · Ironclad · a0": 1,
-        "ooc=naive · Ironclad · a1": 1,
-        "ooc=greedy · Silent · a1": 1,
+        "exp=greedy · Ironclad · a1": 1,
+        "exp=greedy · Ironclad · a0": 1,
+        "exp=naive · Ironclad · a1": 1,
+        "exp=greedy · Silent · a1": 1,
     }
 
 
@@ -471,7 +471,7 @@ def test_cohort_runs_list_in_progress_runs_first_newest_first(
         _game_log(seed="new", started=STARTED + 300, final_floor=6, hp=61, max_hp=80, padding=5),
     )
     catalog = _catalog(tmp_path)
-    cohort = _cohort(catalog, "ooc=greedy · Ironclad · a1")
+    cohort = _cohort(catalog, "exp=greedy · Ironclad · a1")
     finished_only = viewer._cohort_runs_payload(
         _catalog(_without(tmp_path, "live_old.jsonl", "live_new.jsonl")),
         cohort["cohort_id"],
@@ -527,7 +527,7 @@ def test_in_progress_rows_do_not_count_against_the_row_limit(
     _finished_batch(tmp_path)  # three finished runs
     _write_log(tmp_path, "live.jsonl", _game_log(seed="p9"))
     catalog = _catalog(tmp_path)
-    cohort = _cohort(catalog, "ooc=greedy · Ironclad · a1")
+    cohort = _cohort(catalog, "exp=greedy · Ironclad · a1")
 
     payload = viewer._cohort_runs_payload(catalog, cohort["cohort_id"])
 
@@ -560,13 +560,13 @@ def test_a_run_that_ends_moves_from_the_live_list_into_the_statistics(
     path = _write_log(tmp_path, "game.jsonl", _game_log(seed="p9", final_floor=40))
     clock = _Clock()
     catalog = _catalog(tmp_path, clock)
-    cohort = _cohort(catalog, "ooc=greedy · Ironclad · a1")
+    cohort = _cohort(catalog, "exp=greedy · Ironclad · a1")
     assert (cohort["run_count"], cohort["in_progress_count"]) == (3, 1)
 
     _write_log(tmp_path, path.name, _game_log(seed="p9", final_floor=40, ended="dead"))
     # An unfinished log is re-indexed at most once per interval.
     clock.now += REINDEX_MIN_INTERVAL_SECONDS
-    cohort = _cohort(catalog, "ooc=greedy · Ironclad · a1")
+    cohort = _cohort(catalog, "exp=greedy · Ironclad · a1")
     assert (cohort["run_count"], cohort["in_progress_count"]) == (4, 0)
     assert cohort["avg_global_floor"] == pytest.approx((10 + 20 + 30 + 40) / 4)
 
@@ -599,7 +599,7 @@ def test_run_detail_works_on_a_partial_log(tmp_path: Path, log_size: str) -> Non
     assert detail["outcome"]["max_global_floor"] == 20
     assert detail["outcome"]["max_floor_label"] == "A2F3"
     assert detail["metadata"]["seed"] == "p1"
-    assert detail["metadata"]["experiment"] == "ooc=greedy"
+    assert detail["metadata"]["experiment"] == "exp=greedy"
     assert detail["coverage"]["complete_run"] is False
     assert detail["capabilities"]["visited_route"] is True
     # The route so far: one node per room reached, no more.
@@ -683,7 +683,7 @@ def test_http_surfaces_in_progress_runs_everywhere_the_page_reads_them(
 # Re-index throttle: a growing, unfinished log is not re-parsed on every request
 # ---------------------------------------------------------------------------
 
-LABEL = "ooc=greedy · Ironclad · a1"
+LABEL = "exp=greedy · Ironclad · a1"
 
 
 @pytest.fixture

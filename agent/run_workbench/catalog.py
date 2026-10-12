@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 import gc
 from hashlib import sha256
 import json
@@ -25,6 +26,7 @@ from agent.run_metadata import (
 )
 
 from .adapters import AdaptedSource, adapt_records
+from .batches import ABANDONED, FINISHED, LIVE, RegressionRun, is_regression_run
 from .joiner import _plausibly_overlap, join_records
 from .metrics import (
     CohortSummary,
@@ -93,6 +95,22 @@ _WORKBENCH_FILENAME_TOKENS = frozenset(
         "training",
     }
 )
+_HARNESS_META_KEYS = (
+    "harness",
+    "batch_id",
+    "lane",
+    "game_index",
+    "games_total",
+    "experiment",
+    "checkpoint",
+)
+# Under `<root>/batches/<batch_id>/`, run_batch.py keeps a manifest, a lane
+# status file and one results log per lane next to the `games/` directory of
+# kept game logs.  Only `games/` holds sources; the rest is read by
+# `agent.run_workbench.batches`, and as sources would be "unknown format" noise.
+_BATCH_DIR_NAME = "batches"
+_BATCH_GAMES_DIR = "games"
+_BATCH_MANIFEST = "manifest.json"
 _METADATA_FIELDS = (
     "character",
     "seed",
@@ -113,6 +131,20 @@ class CatalogNotFoundError(CatalogError):
 
 
 @dataclass(frozen=True)
+class _HarnessInfo:
+    """What a replay log's `run_meta` header says about who played it.
+
+    Only the keys the regression view reads (see `_HARNESS_META_KEYS`), plus
+    the two timestamps durations come from: the header's own epoch `ts` and the
+    last `ts` of a state/action row (an ISO string in GameLogger logs).
+    """
+
+    meta: dict[str, Any]
+    started_at: float | None = None
+    last_ts: float | None = None
+
+
+@dataclass(frozen=True)
 class _IndexedSource:
     source_id: str
     root: Path
@@ -126,6 +158,10 @@ class _IndexedSource:
     cache_key: tuple[Path, int, int]
     # Catalog clock reading when indexing finished (see `_reindex_deferred`).
     indexed_at: float = 0.0
+    harness: _HarnessInfo | None = None
+    # A play_full_run (regression/eval) game: shown in the 回归/评测 tab and in
+    # no training cohort.
+    regression: bool = False
 
 
 @dataclass(slots=True)
@@ -340,6 +376,7 @@ class _JsonlScan:
     # like a replay (see `_scan_jsonl_index`); lets `_normalize_incomplete_replay`
     # skip re-reading and re-parsing a file the scan has just parsed.
     replay_records: list[dict[str, Any]] | None = None
+    harness: _HarnessInfo | None = None
 
 
 _CohortItem = RunRecord | _CompactRun
@@ -472,7 +509,13 @@ class RunCatalog:
         self._cohort_in_progress: dict[str, tuple[_CohortItem, ...]] = {}
         self._cohort_descriptors: list[dict[str, Any]] = []
         self._cohort_cache_key: tuple[Any, ...] | None = None
+        self._regression_key: tuple[Any, ...] | None = None
+        self._regression_runs: tuple[RegressionRun, ...] = ()
         self._lock = RLock()
+
+    def now(self) -> float:
+        """The catalog's clock reading (injectable; what freshness is judged by)."""
+        return self._clock()
 
     def list_sources(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -729,6 +772,157 @@ class RunCatalog:
 
         return self.get_cohort_runs(cohort_id)[1]
 
+    def regression_runs(self) -> tuple[RegressionRun, ...]:
+        """Every play_full_run game, one entry per game.
+
+        The 回归/评测 tab's data: finished games, games still being played
+        (their log was written to within the in-progress window) and abandoned
+        ones.  Training cohorts never see these sources.  The same game found
+        in two logs -- `logs/` and the copy `--keep-game-logs` made under
+        `batches/<id>/games/` -- is one run (same ``run_id``), represented by one
+        source.  Cached until a regression log changes or the clock moves a log
+        in or out of the in-progress window.
+        """
+
+        with self._lock:
+            self._refresh()
+            sources = [
+                source
+                for source in self._ordered_sources()
+                if source.regression and source.entry["open_mode"] == "run"
+            ]
+            fresh = self._fresh_replay_source_ids() & {
+                source.source_id for source in sources
+            }
+            key = (tuple(source.cache_key for source in sources), fresh)
+            if self._regression_key != key:
+                self._regression_runs = self._build_regression_runs(sources, fresh)
+                self._regression_key = key
+            return self._regression_runs
+
+    def _build_regression_runs(
+        self, sources: Sequence[_IndexedSource], fresh: frozenset[str]
+    ) -> tuple[RegressionRun, ...]:
+        candidates: list[tuple[_IndexedSource, _CohortItem]] = []
+        for source in sources:
+            if not source.records_complete and source.deck_outcomes:
+                items: Sequence[_CohortItem] = source.deck_outcomes
+            else:
+                public = self._cohort_source_records.get(source.cache_key)
+                if public is None:
+                    public = self._public_records(source, self._adapt(source))
+                    self._cohort_source_records[source.cache_key] = public
+                items = public
+            candidates.extend((source, item) for item in items)
+
+        # One game, one run: copies of a run id collapse to the best source.
+        groups: dict[str, list[tuple[_IndexedSource, _CohortItem]]] = {}
+        loose: list[list[tuple[_IndexedSource, _CohortItem]]] = []
+        for pair in candidates:
+            run_id = _safe_run_id(pair[1].run_id) or ""
+            if run_id:
+                groups.setdefault(run_id, []).append(pair)
+            else:
+                loose.append([pair])
+
+        runs: list[RegressionRun] = []
+        for members in [*groups.values(), *loose]:
+            ranked = sorted(members, key=self._regression_source_rank)
+            source, item = ranked[0]
+            runs.append(
+                self._regression_run(
+                    source,
+                    item,
+                    tuple(sorted({other.source_id for other, _ in members})),
+                    live=source.source_id in fresh,
+                )
+            )
+        runs.sort(
+            key=lambda run: (
+                run.started_at is None,
+                -(run.started_at or 0.0),
+                run.source_id,
+            )
+        )
+        return tuple(runs)
+
+    @staticmethod
+    def _regression_source_rank(pair: tuple[_IndexedSource, _CohortItem]) -> tuple:
+        """Best source first: a finished log over an unfinished one, the original
+        in `logs/` over the kept copy (its refs stay valid while a game is
+        under way, and /replay can open it), then the bigger, newer file."""
+        source, item = pair
+        relative_parts = source.path.relative_to(source.root).parts
+        return (
+            _item_status(item) in _UNFINISHED_STATUSES,
+            relative_parts[:1] == (_BATCH_DIR_NAME,),
+            -source.entry["size"],
+            -source.entry["mtime"],
+            source.source_id,
+        )
+
+    def _regression_run(
+        self,
+        source: _IndexedSource,
+        item: _CohortItem,
+        source_ids: tuple[str, ...],
+        *,
+        live: bool,
+    ) -> RegressionRun:
+        status = _item_status(item)
+        meta = source.harness.meta if source.harness is not None else {}
+        header_start = source.harness.started_at if source.harness is not None else None
+        finished = status not in _UNFINISHED_STATUSES
+        progress = self._in_progress_run(item)
+        record = None
+        if finished:
+            # Only the outcome and metadata are read (by `summarize_cohort`):
+            # keep a light record rather than a whole adapted run's nodes.
+            full = item.to_record() if isinstance(item, _CompactRun) else item
+            record = RunRecord(
+                run_id=full.run_id,
+                source_id=full.source_id,
+                source_kind=full.source_kind,
+                metadata=full.metadata,
+                outcome=full.outcome,
+            )
+        metadata = _item_metadata(item)
+        started_at = header_start if header_start is not None else metadata.started_at
+        ended_at: float | None = None
+        duration: float | None = None
+        if finished:
+            last = source.harness.last_ts if source.harness is not None else None
+            ended_at = last if last is not None else source.entry["mtime"]
+            if started_at is not None and ended_at >= started_at:
+                duration = ended_at - started_at
+        return RegressionRun(
+            run_id=_safe_run_id(item.run_id) or "",
+            source_id=source.source_id,
+            source_ids=source_ids,
+            state=FINISHED if finished else (LIVE if live else ABANDONED),
+            status=status,
+            seed=metadata.seed,
+            character=metadata.character,
+            experiment=metadata.experiment,
+            ascension=metadata.ascension,
+            harness=_meta_text(meta.get("harness")),
+            batch_id=_meta_text(meta.get("batch_id")),
+            lane=_meta_text(meta.get("lane")),
+            game_index=_meta_count(meta.get("game_index")),
+            games_total=_meta_count(meta.get("games_total")),
+            global_floor=progress.global_floor,
+            act=progress.act,
+            floor=progress.floor,
+            hp=progress.hp,
+            max_hp=progress.max_hp,
+            started_at=started_at,
+            ended_at=ended_at,
+            updated_at=source.entry["mtime"],
+            duration_seconds=duration,
+            has_map=progress.has_map,
+            record=record,
+        )
+
     def _in_progress_run(self, item: _CohortItem) -> InProgressRun:
         if isinstance(item, _CompactRun):
             compact = item
@@ -963,6 +1157,7 @@ class RunCatalog:
         for root in self.roots:
             if not root.is_dir():
                 continue
+            batch_dirs: dict[str, bool] = {}
             for candidate in sorted(root.rglob("*"), key=lambda path: path.as_posix()):
                 if candidate.suffix.lower() not in SUPPORTED_SUFFIXES:
                     continue
@@ -974,6 +1169,8 @@ class RunCatalog:
                 except (OSError, ValueError):
                     continue
                 if not resolved.is_file() or resolved in seen:
+                    continue
+                if _is_batch_bookkeeping(root, resolved, batch_dirs):
                     continue
                 if (
                     self.include_policy == "workbench"
@@ -998,6 +1195,7 @@ class RunCatalog:
         records: tuple[dict[str, Any], ...] | None
         records_complete = True
         deck_outcomes: tuple[_CompactRun, ...] = ()
+        harness: _HarnessInfo | None = None
         if path.suffix.lower() == ".jsonl":
             scan = _scan_jsonl_index(path)
             records = scan.records
@@ -1008,6 +1206,7 @@ class RunCatalog:
             run_ids = scan.run_ids
             metadata = scan.metadata_completeness
             deck_outcomes = scan.deck_outcomes
+            harness = scan.harness
             if (
                 descriptor.kind is SourceKind.REPLAY_JSONL
                 and not records_complete
@@ -1100,6 +1299,12 @@ class RunCatalog:
             run_ids=run_ids,
             cache_key=(path, file_stat.st_mtime_ns, file_stat.st_size),
             indexed_at=self._clock(),
+            harness=harness,
+            regression=bool(
+                harness is not None
+                and descriptor.kind is SourceKind.REPLAY_JSONL
+                and is_regression_run(harness.meta)
+            ),
         )
 
     def _ordered_sources(self) -> list[_IndexedSource]:
@@ -1196,11 +1401,14 @@ class RunCatalog:
         # on the files, so the set of recently written replay sources is part of
         # the cache key: a log that stops being written must leave the
         # in-progress list even though no file changed.
+        # play_full_run games belong to the 回归/评测 tab (`regression_runs`),
+        # not to a training cohort: they are neither listed here nor part of the
+        # cache key, so a batch writing logs does not invalidate training state.
+        training = [
+            source for source in self._ordered_sources() if not source.regression
+        ]
         fresh = self._fresh_replay_source_ids()
-        cache_key = (
-            tuple(source.cache_key for source in self._ordered_sources()),
-            fresh,
-        )
+        cache_key = (tuple(source.cache_key for source in training), fresh)
         if self._cohort_cache_key == cache_key:
             return deepcopy(self._cohort_descriptors)
         records: list[RunRecord] = []
@@ -1209,7 +1417,7 @@ class RunCatalog:
         # held back from the join below, so nothing that is computed for the
         # finished runs (joined records, cohort summaries, metrics) can see them.
         unfinished: list[_CohortItem] = []
-        for source in self._ordered_sources():
+        for source in training:
             if source.entry["open_mode"] != "run":
                 continue
             live = source.source_id in fresh
@@ -1508,6 +1716,35 @@ def _cohort_key(record: _CohortItem) -> tuple[Any, ...]:
         scenario,
         ascension,
     )
+
+
+def _is_batch_bookkeeping(
+    root: Path, path: Path, batch_dirs: dict[str, bool]
+) -> bool:
+    """A run_batch.py batch directory's manifest / lane status / results log.
+
+    Those live in ``<root>/batches/<batch_id>/`` beside ``games/``; only what is
+    under ``games/`` is a game log.  A ``batches/`` directory without a
+    ``manifest.json`` is not ours and is scanned like any other.
+    """
+
+    parts = path.relative_to(root).parts
+    if len(parts) < 3 or parts[0] != _BATCH_DIR_NAME or parts[2] == _BATCH_GAMES_DIR:
+        return False
+    batch_id = parts[1]
+    if batch_id not in batch_dirs:
+        batch_dirs[batch_id] = (
+            root / _BATCH_DIR_NAME / batch_id / _BATCH_MANIFEST
+        ).is_file()
+    return batch_dirs[batch_id]
+
+
+def _meta_text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _meta_count(value: Any) -> int | None:
+    return value if type(value) is int and value >= 0 else None
 
 
 def _source_id(root: Path, relative: str) -> str:
@@ -1843,6 +2080,9 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     events: set[str] = set()
     has_action_command = False
     looks_like_boss_deck = False
+    run_meta: dict[str, Any] | None = None
+    run_meta_ts: float | None = None
+    last_row_ts: Any = None
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -1882,6 +2122,14 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
                 )
                 if record_type in {"state", "action"}:
                     types.add(record_type)
+                    last_row_ts = record.get("ts", last_row_ts)
+                elif record_type == "run_meta" and run_meta is None:
+                    run_meta = {
+                        key: record[key]
+                        for key in _HARNESS_META_KEYS
+                        if key in record
+                    }
+                    run_meta_ts = _first_finite_number(record, "ts")
                 if retained is not None:
                     if record_count <= INDEX_RECORD_LIMIT or types:
                         retained.append(record)
@@ -2009,6 +2257,11 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
     for compact in compact_runs:
         compact.source_kind = descriptor.kind
         _finalize_compact(compact)
+    harness = (
+        _HarnessInfo(run_meta, run_meta_ts, _epoch_seconds(last_row_ts))
+        if descriptor.kind is SourceKind.REPLAY_JSONL and run_meta is not None
+        else None
+    )
     return _JsonlScan(
         records=tuple(records),
         records_complete=record_count <= INDEX_RECORD_LIMIT,
@@ -2024,6 +2277,7 @@ def _scan_jsonl_index(path: Path) -> _JsonlScan:
             and record_count > INDEX_RECORD_LIMIT
             else None
         ),
+        harness=harness,
     )
 
 
@@ -2700,6 +2954,22 @@ def _first_integral_int(record: dict[str, Any], *keys: str) -> int | None:
             and value.is_integer()
         ):
             return int(value)
+    return None
+
+
+def _epoch_seconds(value: Any) -> float | None:
+    """A row timestamp as epoch seconds: a number, or an ISO-8601 string
+    (GameLogger stamps state/action rows with naive local time)."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return None
     return None
 
 
