@@ -1038,6 +1038,7 @@ def test_lane_endpoint_lists_live_first_then_finished_newest_first(
 
     assert status == 200
     assert payload["lane"] == "Ironclad" and payload["runs_complete"] is True
+    assert payload["batch_name"] == "regression"
     rows = payload["runs"]
     assert [row["seed"] for row in rows] == ["run_3", "run_2", "run_1"]
     live, newest, oldest = rows

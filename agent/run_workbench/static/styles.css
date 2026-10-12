@@ -1575,3 +1575,218 @@ pre {
 .combat-enemies li, .combat-actions li { margin: .1rem 0; }
 .combat-hand, .combat-orbs { margin: 0 0 .35rem; }
 .combat-actions { font-family: var(--mono, ui-monospace, monospace); font-size: .78rem; }
+
+/* --- 回归/评测 tab (play_full_run batches) -------------------------------- */
+
+.workbench-tabs {
+  display: flex;
+  gap: 6px;
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: 14px clamp(14px, 3vw, 42px) 0;
+}
+
+.workbench-tab {
+  min-height: 38px;
+  padding: 6px 18px;
+  border-radius: 99px;
+  font-weight: 700;
+}
+
+.workbench-tab[aria-selected="true"] {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+}
+
+/* Without the tree the 回归/评测 pages get the whole row. */
+.workbench-body[data-tab="regression"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cohort-tree[hidden] {
+  display: none;
+}
+
+.regression-view > * + * {
+  margin-top: 18px;
+}
+
+.regression-view[hidden] {
+  display: none;
+}
+
+.regression-body > * + * {
+  margin-top: 18px;
+}
+
+.batch-page-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.batch-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.batch-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.batch-badge-kind {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.batch-badge-running {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.batch-badge-done {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.batch-badge-alert {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.batch-badge-quiet {
+  background: var(--line);
+  color: var(--slate-650);
+}
+
+.batch-table {
+  min-width: 860px;
+}
+
+.batch-name strong,
+.batch-name small {
+  display: block;
+}
+
+.batch-name small {
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+.batch-technical {
+  color: var(--red);
+  font-weight: 750;
+}
+
+.batch-lane-error {
+  display: block;
+  max-width: 240px;
+  color: var(--red);
+  font-size: 10px;
+  white-space: normal;
+}
+
+.batch-progress {
+  display: flex;
+  min-width: 170px;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.batch-progress-bar {
+  width: 100%;
+  height: 8px;
+  min-height: 0;
+  border: none;
+  border-radius: 99px;
+  background: var(--line);
+  overflow: hidden;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.batch-progress-bar::-webkit-progress-bar {
+  border-radius: 99px;
+  background: var(--line);
+}
+
+.batch-progress-bar::-webkit-progress-value {
+  border-radius: 99px;
+  background: var(--teal);
+}
+
+.batch-progress-bar::-moz-progress-bar {
+  border-radius: 99px;
+  background: var(--teal);
+}
+
+.batch-progress-text {
+  color: var(--slate-650);
+  font-size: 11px;
+}
+
+.metric-card-text strong {
+  font-size: 19px;
+  line-height: 1.35;
+}
+
+.batch-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+}
+
+.batch-fact {
+  display: flex;
+  min-width: 110px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.batch-fact small {
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+.batch-fact strong {
+  font-size: 13px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.batch-problems {
+  margin: 0;
+  color: var(--amber);
+}
+
+.batch-command pre {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: rgba(23, 32, 38, 0.05);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.batch-command summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .workbench-tabs {
+    padding-top: 10px;
+  }
+}

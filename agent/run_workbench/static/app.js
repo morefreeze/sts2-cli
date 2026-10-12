@@ -12,6 +12,10 @@ const state = {
   tree: [],
   cohorts: [],
   sources: [],
+  batches: [],              // /api/batches rows; decides the default tab
+  batchesNow: null,
+  tab: 'training',          // 'training' | 'regression'
+  tabResolved: false,       // the default tab is picked once, on the first `#/`
   selectedCohortId: '',
   currentMetrics: null,
   busy: false,
@@ -24,11 +28,33 @@ const state = {
 };
 
 // ---------------------------------------------------------------------
-// Hash router: #/  |  #/batch/<cohort_id>  |  #/batch/<cohort_id>/run/<kind>:<id>
+// Hash router.  Training tab:
+//   #/  |  #/training  |  #/batch/<cohort_id>  |  #/batch/<cohort_id>/run/<kind>:<id>
+// 回归/评测 tab:
+//   #/regression  |  #/regression/batch/<batch_id>
+//   #/regression/batch/<batch_id>/lane/<lane>
+// A game opened from a lane uses the training run route with the placeholder
+// cohort `-` (`runRoute('', ref)`): it belongs to no training cohort.
 // ---------------------------------------------------------------------
 
 function cohortRoute(cohortId) {
   return `#/batch/${encodeURIComponent(cohortId)}`;
+}
+
+function regressionRoute() {
+  return '#/regression';
+}
+
+function batchRoute(batchId) {
+  return `#/regression/batch/${encodeURIComponent(batchId)}`;
+}
+
+function laneRoute(batchId, lane) {
+  return `${batchRoute(batchId)}/lane/${encodeURIComponent(lane)}`;
+}
+
+function isRegressionView(view) {
+  return typeof view === 'string' && view.startsWith('regression');
 }
 
 function runRoute(cohortId, ref) {
@@ -40,6 +66,15 @@ function runRoute(cohortId, ref) {
 function parseRoute(hash) {
   const raw = typeof hash === 'string' ? hash.replace(/^#/, '') : '';
   if (!raw || raw === '/') return { view: 'root' };
+  // `#/training` is `#/` that must not bounce to the 回归/评测 tab.
+  if (raw === '/training') return { view: 'root', tab: 'training' };
+  const regression = raw.match(/^\/regression(?:\/batch\/([^/]+)(?:\/lane\/([^/]+))?)?$/);
+  if (regression) {
+    if (regression[1] === undefined) return { view: 'regression' };
+    const batchId = decodeURIComponent(regression[1]);
+    if (regression[2] === undefined) return { view: 'regression-batch', batchId };
+    return { view: 'regression-lane', batchId, lane: decodeURIComponent(regression[2]) };
+  }
   const match = raw.match(/^\/batch\/([^/]+)(?:\/run\/([a-zA-Z0-9_-]+):(.+))?$/);
   if (!match) return { view: 'root' };
   const cohortId = decodeURIComponent(match[1]);
@@ -76,6 +111,15 @@ function showBatchView() {
   byId('catalogToggle').setAttribute('aria-pressed', 'false');
   byId('batchView').hidden = false;
   byId('catalogView').hidden = true;
+  byId('regressionView').hidden = true;
+}
+
+function showRegressionView() {
+  state.catalogOpen = false;
+  byId('catalogToggle').setAttribute('aria-pressed', 'false');
+  byId('batchView').hidden = true;
+  byId('catalogView').hidden = true;
+  byId('regressionView').hidden = false;
 }
 
 function showCatalogView() {
@@ -83,6 +127,36 @@ function showCatalogView() {
   byId('catalogToggle').setAttribute('aria-pressed', 'true');
   byId('batchView').hidden = true;
   byId('catalogView').hidden = false;
+  byId('regressionView').hidden = true;
+}
+
+// The two tabs share one content pane.  Training keeps the left tree; the
+// 回归/评测 pages use the full width.
+function setActiveTab(tab) {
+  state.tab = tab === 'regression' ? 'regression' : 'training';
+  const training = state.tab === 'training';
+  const trainingTab = byId('tabTraining');
+  const regressionTab = byId('tabRegression');
+  trainingTab.setAttribute('aria-selected', String(training));
+  trainingTab.setAttribute('tabindex', training ? '0' : '-1');
+  regressionTab.setAttribute('aria-selected', String(!training));
+  regressionTab.setAttribute('tabindex', training ? '-1' : '0');
+  byId('cohortTree').hidden = !training;
+  byId('workbenchBody').dataset.tab = state.tab;
+}
+
+// Open on 回归/评测 when a batch is running or was active in the last 24 h.
+const REGRESSION_DEFAULT_WINDOW_SECONDS = 24 * 60 * 60;
+
+function shouldDefaultToRegression(batches, nowSeconds) {
+  if (!Array.isArray(batches)) return false;
+  return batches.some((batch) => {
+    if (!batch || typeof batch !== 'object') return false;
+    if (batch.done === false) return true;
+    const last = Number.isFinite(batch.updated_at) ? batch.updated_at : batch.created_at;
+    return Number.isFinite(last) && Number.isFinite(nowSeconds)
+      && nowSeconds - last <= REGRESSION_DEFAULT_WINDOW_SECONDS;
+  });
 }
 
 async function applyRoute(route) {
@@ -98,7 +172,25 @@ async function applyRoute(route) {
   if (route.view !== 'run' && window.RunView && typeof window.RunView.stop === 'function') {
     window.RunView.stop();
   }
+  // The 回归/评测 pages poll while a batch runs; any other route ends that.
+  if (!isRegressionView(route.view) && window.BatchesView && typeof window.BatchesView.stop === 'function') {
+    window.BatchesView.stop();
+  }
+  if (isRegressionView(route.view)) {
+    state.tabResolved = true;
+    setActiveTab('regression');
+    showRegressionView();
+    await BatchesView.render(route);
+    return;
+  }
   if (route.view === 'root') {
+    if (!route.tab && !state.tabResolved && shouldDefaultToRegression(state.batches, state.batchesNow)) {
+      state.tabResolved = true;
+      navigate(regressionRoute(), { replace: true });
+      return;
+    }
+    state.tabResolved = true;
+    setActiveTab('training');
     const firstId = firstCohortIdInTree(state.tree);
     if (firstId) {
       navigate(cohortRoute(firstId), { replace: true });
@@ -111,6 +203,8 @@ async function applyRoute(route) {
     return;
   }
   if (route.view === 'batch') {
+    state.tabResolved = true;
+    setActiveTab('training');
     showBatchView();
     state.selectedCohortId = route.cohortId;
     Tree.setSelected(route.cohortId);
@@ -490,14 +584,18 @@ async function bootstrap() {
   setStatus('正在读取训练记录…', 'busy');
   renderEmpty(byId('sourceCatalog'), '正在分类训练记录…', 'loading-state');
   try {
-    const [{ tree }, { cohorts }, { sources }] = await Promise.all([
+    const [{ tree }, { cohorts }, { sources }, batchList] = await Promise.all([
       getJSON('/api/tree'),
       getJSON('/api/cohorts'),
       getJSON('/api/catalog'),
+      // Only picks the default tab: a failure here must not stop the workbench.
+      getJSON('/api/batches').catch(() => ({ batches: [], now: null })),
     ]);
     state.tree = Array.isArray(tree) ? tree : [];
     state.cohorts = Array.isArray(cohorts) ? cohorts : [];
     state.sources = Array.isArray(sources) ? sources : [];
+    state.batches = Array.isArray(batchList.batches) ? batchList.batches : [];
+    state.batchesNow = Number.isFinite(batchList.now) ? batchList.now : Date.now() / 1000;
     Tree.render(state.tree);
     renderCatalog();
     setBusy(false);
@@ -522,12 +620,24 @@ async function reloadAll() {
 
 byId('catalogToggle').addEventListener('click', () => {
   if (state.catalogOpen) {
-    showBatchView();
+    if (state.tab === 'regression') showRegressionView();
+    else showBatchView();
     setStatus('已返回批次视图');
   } else {
     showCatalogView();
     setStatus('已显示来源目录');
   }
+});
+byId('tabTraining').addEventListener('click', () => {
+  navigate(state.selectedCohortId ? cohortRoute(state.selectedCohortId) : '#/training');
+});
+byId('tabRegression').addEventListener('click', () => navigate(regressionRoute()));
+byId('workbenchTabs').addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  const next = state.tab === 'training' ? byId('tabRegression') : byId('tabTraining');
+  next.focus();
+  next.click();
 });
 byId('baselineCohort').addEventListener('change', () => {
   CohortView.baselineChanged();

@@ -84,6 +84,7 @@ STATIC_ASSETS = {
     "/static/cohort-view.js": ("cohort-view.js", "text/javascript; charset=utf-8"),
     "/static/runs-table.js": ("runs-table.js", "text/javascript; charset=utf-8"),
     "/static/run-view.js": ("run-view.js", "text/javascript; charset=utf-8"),
+    "/static/batches-view.js": ("batches-view.js", "text/javascript; charset=utf-8"),
     "/static/map.js": ("map.js", "text/javascript; charset=utf-8"),
     # Single-run replay, loaded by URL: /replay?log=<file>.jsonl
     # The workbench index is a cohort/metrics view with no way to address one run.
@@ -1293,6 +1294,7 @@ def _lane_payload(catalog: RunCatalog, batch_id: str, lane: str) -> dict[str, An
     )
     return {
         "batch_id": batch_id,
+        "batch_name": view.summary["name"],
         "lane": lane,
         "lane_summary": summary,
         "runs": [_regression_run_row(run) for run in members[:_COHORT_RUNS_LIMIT]],

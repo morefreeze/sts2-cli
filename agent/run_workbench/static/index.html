@@ -12,6 +12,7 @@
   <script src="/static/cohort-view.js" defer></script>
   <script src="/static/runs-table.js" defer></script>
   <script src="/static/run-view.js" defer></script>
+  <script src="/static/batches-view.js" defer></script>
   <script src="/static/map.js" defer></script>
 </head>
 <body>
@@ -33,7 +34,12 @@
     </div>
   </header>
 
-  <div id="workbenchBody" class="workbench-body">
+  <nav id="workbenchTabs" class="workbench-tabs" role="tablist" aria-label="工作台分区">
+    <button id="tabTraining" class="workbench-tab" type="button" role="tab" aria-selected="true" aria-controls="contentPane" data-tab="training">训练</button>
+    <button id="tabRegression" class="workbench-tab" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="contentPane" data-tab="regression">回归/评测</button>
+  </nav>
+
+  <div id="workbenchBody" class="workbench-body" data-tab="training">
     <nav id="cohortTree" class="cohort-tree" aria-label="训练批次导航" tabindex="0">
       <p class="empty-state">正在读取训练批次…</p>
     </nav>
@@ -132,6 +138,11 @@
           </div>
           <div id="runsTable" class="table-scroll" aria-live="polite"></div>
         </section>
+      </section>
+
+      <section id="regressionView" class="regression-view" hidden aria-label="回归/评测批次">
+        <p id="regressionNotice" class="run-live-notice" role="status" aria-live="polite" hidden></p>
+        <div id="regressionBody" class="regression-body" aria-live="polite"></div>
       </section>
 
       <section id="catalogView" class="catalog-view panel" hidden aria-labelledby="catalogTitle">

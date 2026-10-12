@@ -102,7 +102,7 @@ window.RunsTable = (() => {
     return [...pinned, ...withIndex.map((item) => item.row)];
   }
 
-  function headerCell(label, key) {
+  function headerCell(label, key, rerender) {
     const th = element('th', { attrs: { scope: 'col' } });
     if (!key) {
       th.textContent = label;
@@ -122,14 +122,21 @@ window.RunsTable = (() => {
     button.addEventListener('click', () => {
       if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
       else { sortKey = key; sortDir = 'desc'; }
-      renderTable(currentRows);
+      rerender();
     });
     th.append(button);
     return th;
   }
 
-  function renderTable(rows) {
-    const container = byId('runsTable');
+  // `options` (all optional) lets another page reuse this table: `container`
+  // is where it draws (default: the training batch's #runsTable), `routeFor(ref)`
+  // the hash a row opens (default: the run route under the selected cohort) and
+  // `extraColumns` [{ label, value(row) }] extra cells after 时间.
+  function renderTable(rows, options = {}) {
+    const container = options.container || byId('runsTable');
+    const rerender = () => renderTable(rows, options);
+    const routeFor = options.routeFor || ((ref) => runRoute(state.selectedCohortId, ref));
+    const extraColumns = Array.isArray(options.extraColumns) ? options.extraColumns : [];
     clear(container);
     if (!rows.length) {
       renderEmpty(container, '该批次没有可展示的对局。');
@@ -139,12 +146,13 @@ window.RunsTable = (() => {
     const thead = element('thead');
     const headRow = element('tr');
     headRow.append(
-      headerCell('序号', null),
-      headerCell('种子', null),
-      headerCell('状态', 'status'),
-      headerCell('推进层数', 'global_floor'),
-      headerCell('幕', null),
-      headerCell('时间', null),
+      headerCell('序号', null, rerender),
+      headerCell('种子', null, rerender),
+      headerCell('状态', 'status', rerender),
+      headerCell('推进层数', 'global_floor', rerender),
+      headerCell('幕', null, rerender),
+      headerCell('时间', null, rerender),
+      ...extraColumns.map((column) => headerCell(column.label, null, rerender)),
     );
     thead.append(headRow);
     table.append(thead);
@@ -182,6 +190,7 @@ window.RunsTable = (() => {
         element('td', { text: missingCell(row.global_floor) }),
         element('td', { text: missingCell(row.act) }),
         element('td', { text: Number.isFinite(row.started_at) ? formatTime(row.started_at) : '—' }),
+        ...extraColumns.map((column) => element('td', { text: missingCell(column.value(row)) })),
       );
       if (row.has_map === false) {
         tr.append(element('td', { className: 'runs-table-no-map-note', text: '无地图' }));
@@ -189,7 +198,7 @@ window.RunsTable = (() => {
         tr.append(element('td', { text: '' }));
       }
       if (ref) {
-        const activate = () => navigate(runRoute(state.selectedCohortId, ref));
+        const activate = () => navigate(routeFor(ref));
         tr.addEventListener('click', activate);
         tr.addEventListener('keydown', (event) => {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -236,5 +245,12 @@ window.RunsTable = (() => {
     renderEmpty(byId('topRunsList'), '选择左侧批次后查看对局列表。');
   }
 
-  return { render, renderEmpty: renderEmptyTable };
+  // Another page's game list in the same table, with its own sort state.
+  function renderRows(container, rows, options = {}) {
+    sortKey = null;
+    sortDir = 'desc';
+    renderTable(rows, { ...options, container });
+  }
+
+  return { render, renderEmpty: renderEmptyTable, renderRows };
 })();

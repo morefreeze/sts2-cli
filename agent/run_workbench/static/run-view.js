@@ -30,7 +30,8 @@ window.RunView = (() => {
       ['幕', actForFloor(floor)],
       ['角色', metadata.character],
       ['训练检查点', metadata.checkpoint],
-      ['实验', cohort ? cohort.experiment : null],
+      // A game opened from the 回归/评测 tab has no cohort: its own header names the experiment.
+      ['实验', cohort ? cohort.experiment : metadata.experiment],
       ['游戏版本', metadata.game_version],
     ];
     entries.forEach(([label, value]) => {

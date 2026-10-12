@@ -3022,7 +3022,7 @@ def test_app_does_not_reparse_sources_or_inject_untrusted_html():
         name: (STATIC_DIR / name).read_text(encoding="utf-8")
         for name in (
             "util.js", "app.js", "tree.js",
-            "cohort-view.js", "runs-table.js", "run-view.js",
+            "cohort-view.js", "runs-table.js", "run-view.js", "batches-view.js",
         )
     }
     script = "".join(modules.values())
@@ -3123,7 +3123,7 @@ def test_view_modules_never_shadow_a_shared_util_helper():
     assert "renderEmpty" in shared, "guard is only meaningful if util.js still exports it"
 
     offenders = []
-    for name in ("app.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js"):
+    for name in ("app.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js", "batches-view.js"):
         script = (STATIC_DIR / name).read_text(encoding="utf-8")
         declared = set(re.findall(r"^\s+function (\w+)", script, re.MULTILINE))
         declared |= set(re.findall(r"^\s+(?:const|let|var) (\w+)\s*=", script, re.MULTILINE))
@@ -3177,7 +3177,8 @@ def test_bootstrap_waits_for_every_deferred_view_module():
     order = re.findall(r'<script src="/static/([\w.-]+)"', html)
     assert order.index("app.js") < order.index("tree.js")
     assert order.index("app.js") < order.index("map.js")
-    for module in ("util.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js", "map.js"):
+    for module in ("util.js", "tree.js", "cohort-view.js", "runs-table.js", "run-view.js",
+                   "batches-view.js", "map.js"):
         assert module in order, module
 
 
@@ -3757,3 +3758,1043 @@ def test_map_namespace_exposes_refresh_run_for_the_run_view():
     namespace = _javascript_section(map_script, "window.STS2Map = Object.freeze", "})();")
     assert "refreshRun(ref)" in namespace
     assert "window.STS2Map.refreshRun(ref)" in view_script
+
+
+# ---------------------------------------------------------------------------
+# 回归/评测 tab: shell, router, default tab, batches-view.js, runs-table reuse
+# ---------------------------------------------------------------------------
+
+
+def test_shell_has_tab_bar_above_the_tree_and_a_regression_pane():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    parser = _ShellParser()
+    parser.feed(html)
+
+    for item in ("workbenchTabs", "tabTraining", "tabRegression", "regressionView",
+                 "regressionBody", "regressionNotice"):
+        assert item in parser.ids, item
+    # tab bar, then the tree, then the content pane that holds the regression view
+    order = ["workbenchTabs", "cohortTree", "contentPane", "regressionView", "regressionBody"]
+    assert [parser.ids.index(item) for item in order] == sorted(parser.ids.index(item) for item in order)
+    assert '<nav id="workbenchTabs" class="workbench-tabs" role="tablist"' in html
+    assert html.count('role="tab"') == 2
+    assert "回归/评测" in html and ">训练<" in html
+    # the training tab is the shipped default until the router decides otherwise
+    assert re.search(r'id="tabTraining"[^>]*aria-selected="true"', html)
+    assert re.search(r'id="tabRegression"[^>]*aria-selected="false"', html)
+    scripts = re.findall(r'<script src="/static/([\w.-]+)"', html)
+    assert scripts.index("batches-view.js") > scripts.index("runs-table.js")
+    assert scripts[-1] == "map.js"
+    assert "<style" not in html.lower()
+
+
+def test_batches_view_is_a_served_utf8_asset(tmp_path: Path):
+    viewer_source = Path(viewer.__file__).read_text(encoding="utf-8")
+    assert (
+        '"/static/batches-view.js": ("batches-view.js", "text/javascript; charset=utf-8")'
+        in viewer_source
+    )
+    assert "/static/batches-view.js" not in viewer.QUERY_ALLOWED_ASSETS
+    with _server(tmp_path) as base:
+        status, content_type, body = _get(base, "/static/batches-view.js")
+        query_status, _, _ = _get(base, "/static/batches-view.js?x=1")
+    assert status == 200
+    assert content_type == "text/javascript; charset=utf-8"
+    assert body == (STATIC_DIR / "batches-view.js").read_bytes()
+    assert query_status == 404
+
+
+def test_regression_pane_css_keeps_tree_hidden_layout_and_progress_styles():
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    assert re.search(r'\.workbench-body\[data-tab="regression"\]\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);', css, re.DOTALL)
+    assert re.search(r"\.cohort-tree\[hidden\]\s*\{\s*display:\s*none;", css)
+    assert re.search(r"\.regression-view\[hidden\]\s*\{\s*display:\s*none;", css)
+    for selector in (".workbench-tab[aria-selected=\"true\"]", ".batch-progress-bar", ".batch-badge-running",
+                     ".batch-badge-alert", ".batch-badge-done"):
+        assert selector in css, selector
+
+
+def test_hash_router_parses_regression_routes_and_keeps_training_ones():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    routing = _javascript_section(script, "function cohortRoute", "function navigate")
+
+    payload = _run_node_json(
+        f"""
+        {routing}
+        const odd = 'legacy:run:ooc=greedy';
+        console.log(JSON.stringify({{
+          list: parseRoute('#/regression'),
+          batch: parseRoute('#/regression/batch/regression-20261012-100000'),
+          lane: parseRoute('#/regression/batch/b1/lane/Ironclad'),
+          oddBatch: parseRoute(batchRoute(odd)),
+          oddLane: parseRoute(laneRoute(odd, 'lane/1')),
+          training: parseRoute('#/training'),
+          root: parseRoute('#/'),
+          trainingBatch: parseRoute('#/batch/coh-1'),
+          trainingRun: parseRoute('#/batch/-/run/source:src1'),
+          junk: parseRoute('#/regression/nope'),
+          junkLane: parseRoute('#/regression/batch/b1/lane'),
+          hashes: [regressionRoute(), batchRoute(odd), laneRoute('b1', 'Iron clad')],
+          laneRunRoute: runRoute('', {{ kind: 'source', id: 'src_1' }}),
+          views: [isRegressionView('regression'), isRegressionView('regression-lane'),
+                  isRegressionView('batch'), isRegressionView(undefined)],
+        }}));
+        """
+    )
+
+    assert payload["list"] == {"view": "regression"}
+    assert payload["batch"] == {"view": "regression-batch", "batchId": "regression-20261012-100000"}
+    assert payload["lane"] == {"view": "regression-lane", "batchId": "b1", "lane": "Ironclad"}
+    assert payload["oddBatch"] == {"view": "regression-batch", "batchId": "legacy:run:ooc=greedy"}
+    assert payload["oddLane"] == {
+        "view": "regression-lane", "batchId": "legacy:run:ooc=greedy", "lane": "lane/1",
+    }
+    assert payload["training"] == {"view": "root", "tab": "training"}
+    assert payload["root"] == {"view": "root"}
+    assert payload["trainingBatch"] == {"view": "batch", "cohortId": "coh-1"}
+    assert payload["trainingRun"] == {
+        "view": "run", "cohortId": "-", "ref": {"kind": "source", "id": "src1"},
+    }
+    assert payload["junk"] == {"view": "root"}
+    assert payload["junkLane"] == {"view": "root"}
+    assert payload["hashes"] == [
+        "#/regression",
+        "#/regression/batch/legacy%3Arun%3Aooc%3Dgreedy",
+        "#/regression/batch/b1/lane/Iron%20clad",
+    ]
+    assert payload["laneRunRoute"] == "#/batch/-/run/source:src_1"
+    assert payload["views"] == [True, True, False, False]
+
+
+def test_default_tab_is_regression_only_when_a_batch_runs_or_ended_within_a_day():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    helper = _javascript_section(script, "const REGRESSION_DEFAULT_WINDOW_SECONDS", "async function applyRoute")
+
+    payload = _run_node_json(
+        f"""
+        {helper}
+        const NOW = 1_800_000_000;
+        const H = 3600;
+        console.log(JSON.stringify({{
+          running: shouldDefaultToRegression([{{ done: false, created_at: NOW - 90 * H }}], NOW),
+          justFinished: shouldDefaultToRegression([{{ done: true, created_at: NOW - 30 * H, updated_at: NOW - 2 * H }}], NOW),
+          createdRecently: shouldDefaultToRegression([{{ done: true, created_at: NOW - 3 * H }}], NOW),
+          exactlyADay: shouldDefaultToRegression([{{ done: true, updated_at: NOW - 24 * H }}], NOW),
+          old: shouldDefaultToRegression([{{ done: true, created_at: NOW - 5 * H * 24, updated_at: NOW - 30 * H }}], NOW),
+          updatedWinsOverCreated: shouldDefaultToRegression([{{ done: true, created_at: NOW - H, updated_at: NOW - 40 * H }}], NOW),
+          oneOfMany: shouldDefaultToRegression([{{ done: true, updated_at: NOW - 99 * H }}, {{ done: false }}], NOW),
+          none: shouldDefaultToRegression([], NOW),
+          malformed: [shouldDefaultToRegression(null, NOW), shouldDefaultToRegression([null, 3, {{}}], NOW),
+                      shouldDefaultToRegression([{{ done: true, updated_at: 'x' }}], NOW),
+                      shouldDefaultToRegression([{{ done: true, updated_at: NOW }}], null)],
+        }}));
+        """
+    )
+
+    assert payload["running"] is True
+    assert payload["justFinished"] is True
+    assert payload["createdRecently"] is True
+    assert payload["exactlyADay"] is True
+    assert payload["old"] is False
+    # last activity beats the creation time: an old batch that just wrote a log is "recent"
+    assert payload["updatedWinsOverCreated"] is False
+    assert payload["oneOfMany"] is True
+    assert payload["none"] is False
+    assert payload["malformed"] == [False, False, False, False]
+
+
+_FAKE_VIEW_DOM = """
+function makeNode(tag) {
+  const node = {
+    tag, className: '', textContent: '', hidden: false, dataset: {},
+    _attrs: {}, children: [], parentElement: null, _listeners: {},
+    setAttribute(name, value) { this._attrs[name] = String(value); },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null;
+    },
+    removeAttribute(name) { delete this._attrs[name]; },
+    append(...items) {
+      items.forEach((item) => {
+        if (item === null || item === undefined) return;
+        if (typeof item !== 'object') { this.textContent += String(item); return; }
+        item.parentElement = this;
+        this.children.push(item);
+      });
+    },
+    replaceChildren(...items) { this.children = []; this.textContent = ''; this.append(...items); },
+    addEventListener(type, handler) { (this._listeners[type] = this._listeners[type] || []).push(handler); },
+    dispatch(type, event = {}) {
+      (this._listeners[type] || []).forEach((handler) => handler({ preventDefault() {}, ...event }));
+    },
+    click() { this.dispatch('click'); },
+    focus() { this.focused = true; },
+    querySelectorAll(selector) {
+      const out = [];
+      const walkChildren = (parent) => parent.children.forEach((child) => {
+        if (selector === '*' || child.tag === selector) out.push(child);
+        walkChildren(child);
+      });
+      walkChildren(this);
+      return out;
+    },
+  };
+  return node;
+}
+const document = { createElement: (tag) => makeNode(tag) };
+const nodes = {};
+function byId(id) { return nodes[id] || (nodes[id] = makeNode('div')); }
+function collect(node, test, out = []) {
+  if (test(node)) out.push(node);
+  node.children.forEach((child) => collect(child, test, out));
+  return out;
+}
+function allText(node) {
+  return [node.textContent, ...node.children.map(allText)].filter(Boolean).join(' ');
+}
+"""
+
+
+def _batches_view_harness() -> str:
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    view_script = (STATIC_DIR / "batches-view.js").read_text(encoding="utf-8")
+    return "\n".join(
+        [
+            _FAKE_VIEW_DOM,
+            _javascript_section(util_script, "function element(tag", "function svgElement"),
+            _javascript_section(util_script, "function clear(node)", "function setStatus"),
+            _javascript_section(util_script, "function formatMissing", "function formatBytes"),
+            _javascript_section(util_script, "function renderEmpty", "function setSelectOptions"),
+            _javascript_section(app_script, "function cohortRoute", "function navigate"),
+            """
+            function formatTime(value) { return `T${value}`; }
+            const state = { batches: [], batchesNow: null };
+            const statuses = [];
+            function setStatus(message, tone) { statuses.push([message, tone]); }
+            const navigateCalls = [];
+            function navigate(hash) { navigateCalls.push(hash); }
+            const timers = [];
+            let nextTimer = 1;
+            function setTimeout(fn, ms) {
+              const timer = { id: nextTimer++, fn, ms, cleared: false, fired: false };
+              timers.push(timer);
+              return timer.id;
+            }
+            function clearTimeout(id) {
+              const timer = timers.find((candidate) => candidate.id === id);
+              if (timer) timer.cleared = true;
+            }
+            const pending = () => timers.filter((timer) => !timer.cleared && !timer.fired);
+            async function fire(timer) { timer.fired = true; await timer.fn(); }
+            const fetches = [];
+            let responses = [];
+            async function getJSON(url) {
+              fetches.push(url);
+              const next = responses.shift();
+              if (next instanceof Error) throw next;
+              return next;   // a Promise is awaited by the caller: tests resolve it late
+            }
+            const runsTableCalls = [];
+            const RunsTable = { renderRows(container, rows, options) { runsTableCalls.push({ container, rows, options }); } };
+            const window = {};
+            """,
+            view_script,
+            "const BV = window.BatchesView;",
+        ]
+    )
+
+
+_BATCH_ROW = {
+    "batch_id": "regression-20261012-100000", "name": "regression", "kind": "regression",
+    "registered": True, "created_at": 1_800_000_000 - 7200, "git_commit": "abc1234",
+    "argv": ["python/run_batch.py", "--name", "regression"], "env": {"STS2_SOLVER_THREADS": "3"},
+    "lane_count": 2, "planned": 10, "finished": 4, "live": 1, "abandoned": 0, "wins": 0,
+    "technical": 1, "failed_lanes": 0, "stalled_lanes": 0, "eta_seconds": 5400.0,
+    "eta_at": 1_800_000_000 + 5400, "status": "running", "done": False,
+    "updated_at": 1_800_000_000 - 10, "median_duration_seconds": 900.0,
+}
+_DONE_ROW = {
+    **_BATCH_ROW, "batch_id": "smoke-1", "name": "smoke", "kind": "smoke", "planned": 2,
+    "finished": 2, "live": 0, "technical": 0, "eta_seconds": None, "eta_at": None,
+    "status": "done", "done": True,
+}
+_LEGACY_ROW = {
+    **_BATCH_ROW, "batch_id": "legacy:ooc=greedy", "name": "未登记批次 · ooc=greedy", "kind": None,
+    "registered": False, "planned": 14, "finished": 14, "live": 0, "technical": 3,
+    "eta_seconds": None, "eta_at": None, "status": "done", "done": True,
+}
+_LANE_ROWS = [
+    {"lane": "Ironclad", "character": "Ironclad", "policy": "greedy", "planned": 5, "planned_known": True,
+     "finished": 3, "live": 1, "abandoned": 0, "remaining": 2, "wins": 1, "win_rate": 1 / 3,
+     "technical": 0, "valid_n": 3, "avg_global_floor": 31.5, "median_duration_seconds": 900.0,
+     "eta_applicable": True, "eta_seconds": 1800.0, "eta_at": 1_800_000_000 + 1800, "state": "running",
+     "pid": 7, "returncode": None, "error": None},
+    {"lane": "Silent", "character": "Silent", "policy": None, "planned": 5, "planned_known": True,
+     "finished": 0, "live": 0, "abandoned": 0, "remaining": 5, "wins": 0, "win_rate": None,
+     "technical": 0, "valid_n": 0, "avg_global_floor": None, "median_duration_seconds": None,
+     "eta_applicable": True, "eta_seconds": None, "eta_at": None, "state": "queued",
+     "pid": None, "returncode": None, "error": None},
+    {"lane": "Defect", "character": "Defect", "policy": "greedy", "planned": 5, "planned_known": True,
+     "finished": 1, "live": 0, "abandoned": 0, "remaining": 4, "wins": 0, "win_rate": 0.0,
+     "technical": 1, "valid_n": 0, "avg_global_floor": None, "median_duration_seconds": 600.0,
+     "eta_applicable": False, "eta_seconds": None, "eta_at": None, "state": "failed",
+     "pid": None, "returncode": None, "error": "FileNotFoundError: run_caffeinated.sh"},
+]
+
+
+def _view_script(body: str, **payloads) -> str:
+    script = _batches_view_harness() + "\n" + body
+    for name, value in payloads.items():
+        script = script.replace(f"__{name.upper()}__", json.dumps(value))
+    return script
+
+
+def test_eta_and_clock_formatting():
+    payload = _run_node_json(
+        _view_script(
+            """
+            const local = (y, mo, d, h, mi) => new Date(y, mo, d, h, mi).getTime() / 1000;
+            const now = local(2026, 9, 12, 12, 0);
+            console.log(JSON.stringify({
+              hours: [BV.formatSpan(5400), BV.formatSpan(7200), BV.formatSpan(3600), BV.formatSpan(9 * 3600 + 600)],
+              minutes: [BV.formatSpan(1800), BV.formatSpan(90), BV.formatSpan(60)],
+              short: [BV.formatSpan(20), BV.formatSpan(0)],
+              missing: [BV.formatSpan(null), BV.formatSpan(undefined), BV.formatSpan(NaN), BV.formatSpan(-5)],
+              sameDay: BV.formatClock(local(2026, 9, 12, 18, 5), now),
+              otherDay: BV.formatClock(local(2026, 9, 13, 3, 7), now),
+              noNow: BV.formatClock(local(2026, 9, 12, 18, 5), null),
+              badClock: [BV.formatClock(null, now), BV.formatClock(NaN, now)],
+              eta: BV.formatEta(5400, local(2026, 9, 12, 13, 30), now),
+              etaNextDay: BV.formatEta(16 * 3600, local(2026, 9, 13, 4, 0), now),
+              etaNoClock: BV.formatEta(1800, null, now),
+              etaNone: [BV.formatEta(null, 5, now), BV.formatEta(undefined, null, now)],
+              durations: [BV.formatDuration(45), BV.formatDuration(600), BV.formatDuration(5400), BV.formatDuration(null)],
+            }));
+            """
+        )
+    )
+
+    assert payload["hours"] == ["约 1.5 小时", "约 2 小时", "约 1 小时", "约 9.2 小时"]
+    assert payload["minutes"] == ["约 30 分钟", "约 2 分钟", "约 1 分钟"]
+    assert payload["short"] == ["不到 1 分钟", "不到 1 分钟"]
+    assert payload["missing"] == ["—", "—", "—", "—"]
+    assert payload["sameDay"] == "18:05"
+    assert payload["otherDay"] == "10/13 03:07"
+    assert payload["noNow"] == "10/12 18:05"
+    assert payload["badClock"] == ["—", "—"]
+    assert payload["eta"] == "约 1.5 小时 · 13:30"
+    assert payload["etaNextDay"] == "约 16 小时 · 10/13 04:00"
+    assert payload["etaNoClock"] == "约 30 分钟"
+    assert payload["etaNone"] == ["—", "—"]
+    assert payload["durations"] == ["45 秒", "10 分钟", "1.5 小时", "—"]
+
+
+def test_batch_list_renders_progress_live_technical_and_eta_per_batch():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__LIST__];
+              await BV.render({ view: 'regression' });
+              const body = byId('regressionBody');
+              const rows = collect(body, (n) => n.tag === 'tr').slice(1);
+              const cellsOf = (tr) => tr.children.map((td) => allText(td));
+              const meters = collect(body, (n) => n.tag === 'progress');
+              rows[0].click();
+              rows[1].dispatch('keydown', { key: 'Enter' });
+              rows[2].dispatch('keydown', { key: ' ' });
+              rows[2].dispatch('keydown', { key: 'a' });
+              console.log(JSON.stringify({
+                fetches,
+                head: collect(body, (n) => n.tag === 'th').map((n) => n.textContent),
+                cells: rows.map(cellsOf),
+                meters: meters.map((m) => [m.getAttribute('value'), m.getAttribute('max'), m.getAttribute('aria-label')]),
+                rowAttrs: rows.map((tr) => [tr.getAttribute('tabindex'), tr.getAttribute('role')]),
+                navigateCalls,
+                pending: pending().map((t) => t.ms),
+                state: { batches: state.batches.length, now: state.batchesNow },
+                statuses,
+                technicalClass: collect(body, (n) => n.className === 'batch-technical').length,
+                heading: allText(collect(body, (n) => n.tag === 'h2')[0]),
+              }));
+            })();
+            """,
+            list={
+                "batches": [_BATCH_ROW, _DONE_ROW, _LEGACY_ROW,
+                            {**_DONE_ROW, "batch_id": "stalled-1", "name": "stalled", "status": "stalled",
+                             "eta_seconds": 3600.0, "eta_at": 1_800_000_000 + 3600}],
+                "problems": [], "now": 1_800_000_000,
+            },
+        )
+    )
+
+    assert payload["fetches"] == ["/api/batches"]
+    assert payload["head"] == ["批次", "类型", "开始时间", "进度", "进行中", "技术失败", "状态", "预计完成"]
+    running, done, legacy, stalled = payload["cells"]
+    assert running[0] == "regression regression-20261012-100000"
+    assert running[1] == "回归"
+    assert running[2] == "T1799992800"
+    assert "4 / 10（40%）" in running[3]
+    assert running[4] == "1" and running[5] == "1"
+    assert running[6] == "运行中"
+    assert running[7].startswith("约 1.5 小时 · ")
+    # finished batch: a kind badge, no ETA
+    assert done[1] == "冒烟" and done[6] == "已完成" and done[7] == "—"
+    # unregistered: no kind, said so, still shown with what was played
+    assert legacy[0].startswith("未登记批次 · ooc=greedy")
+    assert "无登记信息" in legacy[0]
+    assert legacy[1] == "—"
+    assert "14 / 14（100%）" in legacy[3]
+    assert payload["meters"][0] == ["4", "10", "已完成 4 / 10 局"]
+    assert payload["rowAttrs"][0] == ["0", "link"]
+    assert payload["navigateCalls"] == [
+        "#/regression/batch/regression-20261012-100000",
+        "#/regression/batch/smoke-1",
+        "#/regression/batch/legacy%3Aooc%3Dgreedy",
+    ]
+    # a batch that is not running shows no ETA even if the payload carried one
+    assert stalled[6] == "已停滞" and stalled[7] == "—"
+    # one running batch -> the list refreshes itself every 30 s
+    assert payload["pending"] == [30000]
+    assert payload["state"] == {"batches": 4, "now": 1_800_000_000}
+    assert payload["statuses"][-1][0] == "已载入批次"
+    assert payload["technicalClass"] == 2  # the running batch (1) and the legacy one (3)
+    assert "回归 / 评测批次" in payload["heading"]
+
+
+def test_batch_list_empty_and_problem_states():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__EMPTY__];
+              await BV.render({ view: 'regression' });
+              const empty = allText(byId('regressionBody'));
+              const emptyPending = pending().length;
+              responses = [__PROBLEMS__];
+              await BV.render({ view: 'regression' });
+              console.log(JSON.stringify({
+                empty, emptyPending,
+                withProblems: allText(byId('regressionBody')),
+                tables: collect(byId('regressionBody'), (n) => n.tag === 'table').length,
+              }));
+            })();
+            """,
+            empty={"batches": [], "problems": [], "now": 5},
+            problems={"batches": [_DONE_ROW], "problems": ["broken/manifest.json: ValueError"], "now": 5},
+        )
+    )
+
+    assert "还没有回归/评测批次" in payload["empty"]
+    assert payload["emptyPending"] == 0
+    assert "1 个批次文件无法读取" in payload["withProblems"]
+    assert "broken/manifest.json" in payload["withProblems"]
+    assert payload["tables"] == 1
+
+
+def test_batch_page_shows_lane_table_with_policy_floor_wins_state_and_eta():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__BATCH__];
+              await BV.render({ view: 'regression-batch', batchId: 'regression-20261012-100000' });
+              const body = byId('regressionBody');
+              const lanes = collect(body, (n) => n.tag === 'tr').slice(1);
+              lanes[0].click();
+              lanes[2].dispatch('keydown', { key: 'Enter' });
+              const back = collect(body, (n) => n.tag === 'button');
+              back[0].click();
+              const cards = collect(body, (n) => n.className.startsWith('metric-card')).map(allText);
+              console.log(JSON.stringify({
+                fetches,
+                head: collect(body, (n) => n.tag === 'th').map((n) => n.textContent),
+                lanes: lanes.map((tr) => tr.children.map(allText)),
+                navigateCalls,
+                cards,
+                title: allText(collect(body, (n) => n.className === 'section-heading')[0]),
+                meta: collect(body, (n) => n.className === 'batch-fact').map((n) => n.children.map((c) => c.textContent)),
+                details: collect(body, (n) => n.tag === 'pre').map((n) => n.textContent),
+                pending: pending().map((t) => t.ms),
+              }));
+            })();
+            """,
+            batch={"batch": _BATCH_ROW, "lanes": _LANE_ROWS, "problems": [], "now": 1_800_000_000},
+        )
+    )
+
+    assert payload["fetches"] == ["/api/batch?id=regression-20261012-100000"]
+    assert payload["head"] == ["通道", "策略", "进度", "平均推进层数", "胜场（胜率）", "技术失败", "状态", "预计完成"]
+    ironclad, silent, defect = payload["lanes"]
+    assert ironclad[0] == "Ironclad"
+    assert ironclad[1] == "greedy"
+    assert "3 / 5（60%） · 1 进行中" in ironclad[2]
+    assert ironclad[3] == "31.5"
+    assert ironclad[4] == "1（33.3%）"
+    assert ironclad[6] == "运行中"
+    assert ironclad[7].startswith("约 30 分钟 · ")
+    # queued, nothing played: dashes, never zeros
+    assert silent[1] == "—" and silent[3] == "—" and silent[4] == "—"
+    assert silent[6] == "排队中" and silent[7] == "—"
+    # failed lane: why, and no ETA
+    assert defect[5] == "1"
+    assert "失败" in defect[6] and "run_caffeinated.sh" in defect[6]
+    assert defect[7] == "—"
+    assert payload["navigateCalls"] == [
+        "#/regression/batch/regression-20261012-100000/lane/Ironclad",
+        "#/regression/batch/regression-20261012-100000/lane/Defect",
+        "#/regression",
+    ]
+    assert any(card.startswith("已完成 4 / 10") for card in payload["cards"])
+    assert any(card.startswith("预计完成 约 1.5 小时") for card in payload["cards"])
+    assert "regression" in payload["title"] and "运行中" in payload["title"] and "回归" in payload["title"]
+    meta = dict(payload["meta"])
+    assert meta["代码版本"] == "abc1234"
+    assert meta["批次 ID"] == "regression-20261012-100000"
+    assert meta["中位单局耗时"] == "15 分钟"
+    assert any("python/run_batch.py --name regression" in text for text in payload["details"])
+    assert any("STS2_SOLVER_THREADS=3" in text for text in payload["details"])
+    assert payload["pending"] == [30000]
+
+
+def test_a_finished_batch_page_has_no_eta_and_does_not_refresh():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__BATCH__];
+              await BV.render({ view: 'regression-batch', batchId: 'smoke-1' });
+              const cards = collect(byId('regressionBody'), (n) => n.className.startsWith('metric-card')).map(allText);
+              console.log(JSON.stringify({ cards, pending: pending().length }));
+            })();
+            """,
+            batch={"batch": _DONE_ROW, "lanes": [], "problems": [], "now": 1_800_000_000},
+        )
+    )
+    assert any(card.startswith("预计完成 —") and "批次已结束" in card for card in payload["cards"])
+    assert payload["pending"] == 0
+
+
+_LANE_RUNS = [
+    {"run_id": "pfr-3", "source_id": "src_3", "seed": "run_3", "status": "in_progress", "state": "live",
+     "global_floor": 4, "act": 1, "floor": 4, "hp": 76, "max_hp": 80, "started_at": 300, "updated_at": 310,
+     "duration_seconds": None, "game_index": 3, "has_map": True, "ref": {"kind": "source", "id": "src_3"}},
+    {"run_id": "pfr-2", "source_id": "src_2", "seed": "run_2", "status": "dead", "state": "finished",
+     "global_floor": 20, "act": 2, "floor": 3, "hp": None, "max_hp": None, "started_at": 200, "updated_at": 290,
+     "duration_seconds": 1200.0, "game_index": 2, "has_map": True, "ref": {"kind": "source", "id": "src_2"}},
+]
+
+
+def test_lane_page_reuses_the_runs_table_with_source_routes_and_extra_columns():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__LANE__];
+              await BV.render({ view: 'regression-lane', batchId: 'b1', lane: 'Ironclad' });
+              const body = byId('regressionBody');
+              const call = runsTableCalls[0];
+              const options = call.options;
+              console.log(JSON.stringify({
+                fetches,
+                calls: runsTableCalls.length,
+                rows: call.rows.map((r) => r.seed),
+                containerIsTableScroll: call.container.className,
+                routeFor: options.routeFor({ kind: 'source', id: 'src_3' }),
+                extra: options.extraColumns.map((c) => [c.label, c.value(call.rows[0]), c.value(call.rows[1])]),
+                extraMissing: options.extraColumns.map((c) => c.value({ game_index: null, duration_seconds: null })),
+                title: allText(collect(body, (n) => n.className === 'section-heading')[0]),
+                buttons: collect(body, (n) => n.tag === 'button').map((n) => n.textContent),
+                meta: collect(body, (n) => n.className === 'batch-fact').map((n) => n.children.map((c) => c.textContent)),
+                note: collect(body, (n) => n.className.includes('batch-problems')).map(allText),
+                pending: pending().map((t) => t.ms),
+              }));
+            })();
+            """,
+            lane={
+                "batch_id": "b1", "batch_name": "regression", "lane": "Ironclad",
+                "lane_summary": {**_LANE_ROWS[0], "abandoned": 2}, "runs": _LANE_RUNS,
+                "runs_complete": True, "now": 1_800_000_000,
+            },
+        )
+    )
+
+    assert payload["fetches"] == ["/api/batch/lane?id=b1&lane=Ironclad"]
+    assert payload["calls"] == 1
+    assert payload["rows"] == ["run_3", "run_2"]
+    assert payload["containerIsTableScroll"] == "table-scroll"
+    # a regression game belongs to no cohort: the placeholder cohort id keeps the run route valid
+    assert payload["routeFor"] == "#/batch/-/run/source:src_3"
+    assert payload["extra"] == [["局号", 3, 2], ["耗时", "—", "20 分钟"]]
+    assert payload["extraMissing"] == ["—", "—"]
+    assert "Ironclad" in payload["title"] and "regression" in payload["title"] and "运行中" in payload["title"]
+    assert payload["buttons"] == ["← 全部批次", "← 返回批次"]
+    meta = dict(payload["meta"])
+    assert meta["进度"] == "3 / 5" and meta["进行中"] == "1"
+    assert meta["平均推进层数"] == "31.5" and meta["胜场（胜率）"] == "1（33.3%）"
+    assert meta["策略"] == "greedy" and meta["中位单局耗时"] == "15 分钟"
+    assert meta["预计完成"].startswith("约 30 分钟")
+    assert any("2 局日志已长时间未更新" in note for note in payload["note"])
+    assert payload["pending"] == [30000]
+
+
+def test_lane_page_navigation_buttons_and_empty_lane():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__LANE__];
+              await BV.render({ view: 'regression-lane', batchId: 'legacy:ooc=x', lane: 'Silent' });
+              const buttons = collect(byId('regressionBody'), (n) => n.tag === 'button');
+              buttons[0].click();
+              buttons[1].click();
+              console.log(JSON.stringify({
+                navigateCalls,
+                runsTableCalls: runsTableCalls.length,
+                text: allText(byId('regressionBody')),
+                pending: pending().length,
+              }));
+            })();
+            """,
+            lane={"batch_id": "legacy:ooc=x", "batch_name": "x", "lane": "Silent",
+                  "lane_summary": {**_LANE_ROWS[1], "state": "done", "live": 0},
+                  "runs": [], "runs_complete": True, "now": 1},
+        )
+    )
+    assert payload["navigateCalls"] == ["#/regression", "#/regression/batch/legacy%3Aooc%3Dx"]
+    assert payload["runsTableCalls"] == 0
+    assert "该通道还没有对局记录" in payload["text"]
+    assert payload["pending"] == 0
+
+
+def test_running_batches_refresh_every_30_seconds_until_they_end_or_the_user_leaves():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              const running = __RUNNING__;
+              const changed = JSON.parse(JSON.stringify(running));
+              changed.batches[0].finished = 5;
+              const samePlusNow = JSON.parse(JSON.stringify(running));
+              samePlusNow.now += 30;
+              const ended = JSON.parse(JSON.stringify(running));
+              ended.batches[0].done = true;
+              ended.batches[0].status = 'done';
+              const out = {};
+
+              responses = [running];
+              await BV.render({ view: 'regression' });
+              const firstBody = byId('regressionBody').children.slice();
+              out.first = pending().map((t) => t.ms);
+
+              // nothing but the clock changed: the DOM is not rebuilt
+              responses = [samePlusNow];
+              await fire(pending()[0]);
+              out.unchangedKeptDom = firstBody.every((node, i) => byId('regressionBody').children[i] === node);
+              out.afterUnchanged = pending().length;
+
+              // a real change redraws
+              responses = [changed];
+              await fire(pending()[0]);
+              out.changedRedrawn = byId('regressionBody').children.some((node, i) => node !== firstBody[i]);
+              out.fetchCount = fetches.length;
+
+              // a failing refresh keeps what is shown, says so, and tries again
+              responses = [new Error('server down')];
+              await fire(pending()[0]);
+              out.notice = byId('regressionNotice').textContent;
+              out.noticeHidden = byId('regressionNotice').hidden;
+              out.afterFailure = pending().length;
+
+              // the batch ends: the notice clears and polling stops
+              responses = [ended];
+              await fire(pending()[0]);
+              out.noticeAfter = byId('regressionNotice').hidden;
+              out.afterEnd = pending().length;
+              console.log(JSON.stringify(out));
+            })();
+            """,
+            running={"batches": [_BATCH_ROW], "problems": [], "now": 1_800_000_000},
+        )
+    )
+
+    assert payload["first"] == [30000]
+    assert payload["unchangedKeptDom"] is True
+    assert payload["afterUnchanged"] == 1
+    assert payload["changedRedrawn"] is True
+    assert payload["fetchCount"] == 3
+    assert "自动刷新失败：server down" in payload["notice"]
+    assert payload["noticeHidden"] is False
+    assert payload["afterFailure"] == 1
+    assert payload["noticeAfter"] is True
+    assert payload["afterEnd"] == 0
+
+
+def test_leaving_the_regression_tab_stops_polling_and_ignores_late_responses():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              const running = __RUNNING__;
+              responses = [running];
+              await BV.render({ view: 'regression' });
+              const timer = pending()[0];
+              BV.stop();
+              const out = { cleared: timer.cleared, pendingAfterStop: pending().length };
+              // a refresh already past its timer when the user left must not draw or re-arm
+              const before = byId('regressionBody').children.slice();
+              responses = [{ batches: [], problems: [], now: 1 }];
+              await fire(timer);
+              out.drewAfterStop = byId('regressionBody').children.some((n, i) => n !== before[i]) ||
+                                  byId('regressionBody').children.length !== before.length;
+              out.rearmed = pending().length;
+              console.log(JSON.stringify(out));
+            })();
+            """,
+            running={"batches": [_BATCH_ROW], "problems": [], "now": 1_800_000_000},
+        )
+    )
+    assert payload == {"cleared": True, "pendingAfterStop": 0, "drewAfterStop": False, "rearmed": 0}
+
+
+def test_a_response_that_arrives_after_the_user_left_is_dropped():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              let resolveLate;
+              responses = [new Promise((resolve) => { resolveLate = resolve; })];
+              const inFlight = BV.render({ view: 'regression' });
+              BV.stop();                         // the user went to another route
+              resolveLate(__RUNNING__);
+              await inFlight;
+              console.log(JSON.stringify({
+                text: allText(byId('regressionBody')),
+                pending: pending().length,
+                stateBatches: state.batches.length,
+                lastStatus: statuses[statuses.length - 1][0],
+              }));
+            })();
+            """,
+            running={"batches": [_BATCH_ROW], "problems": [], "now": 1_800_000_000},
+        )
+    )
+    assert "正在读取回归/评测批次" in payload["text"]  # nothing was drawn over the new page
+    assert payload["pending"] == 0
+    assert payload["stateBatches"] == 0
+    assert payload["lastStatus"] == "正在读取批次…"
+
+
+def test_a_batch_that_cannot_be_read_says_so_and_offers_the_way_back():
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [new Error('unknown batch id: nope')];
+              await BV.render({ view: 'regression-batch', batchId: 'nope' });
+              const body = byId('regressionBody');
+              const buttons = collect(body, (n) => n.tag === 'button');
+              buttons[0].click();
+              console.log(JSON.stringify({
+                text: allText(body),
+                buttons: buttons.map((b) => b.textContent),
+                navigateCalls,
+                status: statuses[statuses.length - 1],
+                pending: pending().length,
+              }));
+            })();
+            """
+        )
+    )
+    assert "批次读取失败：unknown batch id: nope" in payload["text"]
+    assert payload["buttons"] == ["← 全部批次"]
+    assert payload["navigateCalls"] == ["#/regression"]
+    assert payload["status"] == ["批次读取失败：unknown batch id: nope", "error"]
+    assert payload["pending"] == 0
+
+
+def test_needs_refresh_follows_what_is_still_being_played():
+    payload = _run_node_json(
+        _view_script(
+            """
+            const lane = (extra) => ({ lane_summary: { state: 'done', live: 0, ...extra } });
+            console.log(JSON.stringify({
+              list: [BV.needsRefresh({ view: 'regression' }, { batches: [{ done: true }, { done: false }] }),
+                     BV.needsRefresh({ view: 'regression' }, { batches: [{ done: true }] }),
+                     BV.needsRefresh({ view: 'regression' }, {})],
+              batch: [BV.needsRefresh({ view: 'regression-batch' }, { batch: { done: false } }),
+                      BV.needsRefresh({ view: 'regression-batch' }, { batch: { done: true } }),
+                      BV.needsRefresh({ view: 'regression-batch' }, {})],
+              lane: [BV.needsRefresh({ view: 'regression-lane' }, lane({ state: 'running' })),
+                     BV.needsRefresh({ view: 'regression-lane' }, lane({ state: 'queued' })),
+                     BV.needsRefresh({ view: 'regression-lane' }, lane({ live: 1 })),
+                     BV.needsRefresh({ view: 'regression-lane' }, lane({}))],
+            }));
+            """
+        )
+    )
+    assert payload == {
+        "list": [True, False, False],
+        "batch": [True, False, False],
+        "lane": [True, True, True, False],
+    }
+
+
+def test_batches_view_never_injects_html_or_shadows_a_shared_helper():
+    script = (STATIC_DIR / "batches-view.js").read_text(encoding="utf-8")
+    assert ".innerhtml" not in script.lower()
+    assert "eval(" not in script.lower()
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    shared = set(re.findall(r"^function (\w+)", util_script, re.MULTILINE))
+    shared |= set(re.findall(r"^const ([A-Z][A-Z0-9_]*)\s*=", util_script, re.MULTILINE))
+    declared = set(re.findall(r"^\s+function (\w+)", script, re.MULTILINE))
+    declared |= set(re.findall(r"^\s+(?:const|let|var) (\w+)\s*=", script, re.MULTILINE))
+    assert sorted(declared & shared) == []
+
+
+def test_runs_table_can_draw_another_pages_games_with_extra_columns_and_its_own_routes():
+    setup, script = _table_harness()
+    render_rows = _javascript_section(script, "function renderRows", "return { render, renderEmpty")
+    payload = _run_node_json(
+        f"""
+        {setup}
+        {render_rows}
+        const other = makeNode('div');
+        const rows = [
+          {{ seed: 'live', status: 'in_progress', global_floor: 4, act: 1, floor: 4, hp: 70, max_hp: 80,
+             started_at: 900, has_map: true, game_index: 3, duration_seconds: null,
+             ref: {{ kind: 'source', id: 'src-live' }} }},
+          {{ seed: 'a', status: 'dead', global_floor: 10, started_at: 100, has_map: true, game_index: 1,
+             duration_seconds: 1200, ref: {{ kind: 'source', id: 'src-a' }} }},
+          {{ seed: 'b', status: 'win', global_floor: 40, started_at: 200, has_map: false, game_index: 2,
+             duration_seconds: 600, ref: {{ kind: 'source', id: 'src-b' }} }},
+        ];
+        const options = {{
+          routeFor: (ref) => `#/batch/-/run/${{ref.kind}}:${{ref.id}}`,
+          extraColumns: [
+            {{ label: '局号', value: (row) => row.game_index }},
+            {{ label: '耗时', value: (row) => (row.duration_seconds === null ? null : `${{row.duration_seconds}}s`) }},
+          ],
+        }};
+        renderRows(other, rows, options);
+        const headers = other.querySelectorAll('th').map((th) => th.textContent || th.children.map((c) => c.children.map((s) => s.textContent).join('')).join(''));
+        const body = other.querySelectorAll('tr').slice(1);
+        body[1].dispatchClick();
+        body[0].dispatchClick();
+        // sorting re-renders into the SAME container with the same options
+        const floorButton = other.querySelectorAll('button')[1];
+        floorButton.dispatchClick();
+        const sorted = other.querySelectorAll('tr').slice(1);
+        sorted[2].dispatchClick();
+        console.log(JSON.stringify({{
+          headers,
+          cells: body.map((tr) => tr.children.map((td) => td.textContent)),
+          navigateCalls,
+          sortedSeeds: sorted.map((tr) => tr.children[1].textContent),
+          trainingContainerUntouched: tableContainer.children.length,
+        }}));
+        """
+    )
+
+    assert payload["headers"][:3] == ["序号", "种子", "状态"]
+    assert payload["headers"][-2:] == ["局号", "耗时"]
+    live, dead, win = payload["cells"]
+    # 序号 seed 状态 推进层数 幕 时间 + the two extra columns + the (header-less) map note cell
+    assert live[1] == "live" and live[6] == "3" and live[7] == "—"
+    assert dead[6] == "1" and dead[7] == "1200s"
+    assert win[6] == "2" and win[8] == "无地图"
+    assert payload["navigateCalls"] == [
+        "#/batch/-/run/source:src-a",
+        "#/batch/-/run/source:src-live",
+        "#/batch/-/run/source:src-a",
+    ]
+    # live row pinned first, then floor descending: b (40), a (10)
+    assert payload["sortedSeeds"] == ["live", "b", "a"]
+    assert payload["trainingContainerUntouched"] == 0
+
+
+def test_runs_table_exports_render_rows_that_resets_its_sort_and_targets_a_container():
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    assert "return { render, renderEmpty: renderEmptyTable, renderRows };" in script
+    section = _javascript_section(script, "function renderRows", "return { render")
+    assert "sortKey = null" in section and "sortDir = 'desc'" in section
+    assert "container" in section
+    # the training batch table still draws into #runsTable by default
+    assert "options.container || byId('runsTable')" in script
+    assert "runRoute(state.selectedCohortId, ref)" in script
+
+
+def _router_harness(batches: list, now: float | None) -> str:
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    return "\n".join(
+        [
+            _FAKE_VIEW_DOM,
+            """
+            const calls = [];
+            const state = { tree: [], batches: __BATCHES__, batchesNow: __NOW__, tab: 'training',
+                            tabResolved: false, catalogOpen: false, selectedCohortId: '' };
+            const Tree = { setSelected(id) { calls.push(`tree:${id}`); } };
+            const CohortView = {
+              async render(id) { calls.push(`cohort:${id}`); },
+              renderNoCohort() { calls.push('no-cohort'); },
+            };
+            const RunView = { stop() { calls.push('run-stop'); }, async render() { calls.push('run-render'); } };
+            const BatchesView = {
+              stop() { calls.push('batches-stop'); },
+              async render(route) { calls.push(`batches:${route.view}:${route.batchId || ''}:${route.lane || ''}`); },
+            };
+            const window = { STS2Map: { showDashboardPage() { calls.push('dashboard'); } }, BatchesView, RunView };
+            const history = {
+              replaceState(s, t, hash) { calls.push(`replace:${hash}`); },
+              pushState(s, t, hash) { calls.push(`push:${hash}`); },
+            };
+            """.replace("__BATCHES__", json.dumps(batches)).replace("__NOW__", json.dumps(now)),
+            _javascript_section(app_script, "function cohortRoute", "function navigate"),
+            # navigate() itself (pushState + applyRoute), then the show/tab helpers and the router
+            _javascript_section(app_script, "function navigate", "function firstCohortIdInTree"),
+            _javascript_section(app_script, "function firstCohortIdInTree", "async function applyRoute"),
+            _javascript_section(app_script, "async function applyRoute", "window.addEventListener('popstate'"),
+            """
+            function visibility() {
+              return {
+                tree: byId('cohortTree').hidden, batchView: byId('batchView').hidden,
+                catalogView: byId('catalogView').hidden, regressionView: byId('regressionView').hidden,
+                bodyTab: byId('workbenchBody').dataset.tab,
+                trainingTab: byId('tabTraining').getAttribute('aria-selected'),
+                regressionTab: byId('tabRegression').getAttribute('aria-selected'),
+                trainingTabIndex: byId('tabTraining').getAttribute('tabindex'),
+                regressionTabIndex: byId('tabRegression').getAttribute('tabindex'),
+              };
+            }
+            function take() { return calls.splice(0); }
+            """,
+        ]
+    )
+
+
+def test_router_opens_the_regression_tab_by_default_only_when_batches_are_active():
+    now = 1_800_000_000
+    script = """
+        (async () => {
+          const out = {};
+          await applyRoute(parseRoute(''));
+          out.firstVisit = take();
+          await applyRoute(parseRoute(''));
+          out.secondVisit = take();
+          console.log(JSON.stringify(out));
+        })();
+    """
+    running = [{"done": False, "created_at": now - 1000}]
+    idle = [{"done": True, "created_at": now - 90 * 3600, "updated_at": now - 80 * 3600}]
+
+    with_batch = _run_node_json(_router_harness(running, now) + script)
+    without = _run_node_json(_router_harness(idle, now) + script)
+    explicit_training = _run_node_json(
+        _router_harness(running, now)
+        + """
+        (async () => {
+          await applyRoute(parseRoute('#/training'));
+          const out = { calls: take(), tab: state.tab, resolved: state.tabResolved };
+          console.log(JSON.stringify(out));
+        })();
+        """
+    )
+
+    # active batch: the first `#/` is replaced by the regression list, training is not rendered
+    first = with_batch["firstVisit"]
+    assert "replace:#/regression" in first
+    assert not any(item.startswith("cohort:") for item in first)
+    assert first[-1] == "batches:regression::"
+    # later visits to `#/` are the training root (the choice is made once)
+    assert "no-cohort" in with_batch["secondVisit"]
+    # nothing active: straight to training
+    assert "no-cohort" in without["firstVisit"]
+    assert not any(item.startswith("replace:") for item in without["firstVisit"])
+    # `#/training` never bounces, even with a running batch
+    assert "no-cohort" in explicit_training["calls"]
+    assert explicit_training["tab"] == "training" and explicit_training["resolved"] is True
+
+
+def test_router_swaps_tabs_panes_and_stops_polling_when_leaving_regression():
+    payload = _run_node_json(
+        _router_harness([], None)
+        + """
+        (async () => {
+          const out = {};
+          await applyRoute(parseRoute('#/regression/batch/b1/lane/Ironclad'));
+          out.lane = { calls: take(), ...visibility(), tab: state.tab };
+          await applyRoute(parseRoute('#/regression'));
+          out.list = { calls: take(), ...visibility() };
+          state.tree = [{ characters: [{ cohorts: [{ cohort_id: 'c1' }] }] }];
+          await applyRoute(parseRoute('#/batch/c1'));
+          out.training = { calls: take(), ...visibility(), selected: state.selectedCohortId };
+          await applyRoute(parseRoute('#/regression/batch/b1'));
+          take();
+          await applyRoute(parseRoute('#/batch/-/run/source:src1'));
+          out.run = { calls: take(), regressionTabStays: state.tab };
+          console.log(JSON.stringify(out));
+        })();
+        """
+    )
+
+    lane = payload["lane"]
+    assert "batches:regression-lane:b1:Ironclad" in lane["calls"]
+    assert "batches-stop" not in lane["calls"]
+    assert lane["tab"] == "regression"
+    assert (lane["tree"], lane["batchView"], lane["catalogView"], lane["regressionView"]) == (True, True, True, False)
+    assert (lane["bodyTab"], lane["trainingTab"], lane["regressionTab"]) == ("regression", "false", "true")
+    assert (lane["trainingTabIndex"], lane["regressionTabIndex"]) == ("-1", "0")
+    assert payload["list"]["calls"][-1] == "batches:regression::"
+
+    training = payload["training"]
+    assert "batches-stop" in training["calls"]
+    assert "cohort:c1" in training["calls"] and "tree:c1" in training["calls"]
+    assert (training["tree"], training["batchView"], training["regressionView"]) == (False, False, True)
+    assert (training["bodyTab"], training["trainingTab"], training["regressionTab"]) == ("training", "true", "false")
+    assert training["selected"] == "c1"
+
+    # opening a game from a lane keeps whichever tab you were on and stops the batch polling
+    assert "batches-stop" in payload["run"]["calls"] and "run-render" in payload["run"]["calls"]
+    assert payload["run"]["regressionTabStays"] == "regression"
+
+
+def test_tab_buttons_and_keyboard_navigate_between_the_two_tabs():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    handlers = _javascript_section(script, "byId('tabTraining').addEventListener", "byId('baselineCohort')")
+    payload = _run_node_json(
+        _FAKE_VIEW_DOM
+        + """
+        const state = { tab: 'training', selectedCohortId: '' };
+        const navigateCalls = [];
+        function navigate(hash) { navigateCalls.push(hash); }
+        function cohortRoute(id) { return `#/batch/${id}`; }
+        function regressionRoute() { return '#/regression'; }
+        """
+        + handlers
+        + """
+        byId('tabRegression').click();
+        state.tab = 'regression';
+        byId('tabTraining').click();
+        state.selectedCohortId = 'c9';
+        byId('tabTraining').click();
+        state.tab = 'training';
+        byId('workbenchTabs').dispatch('keydown', { key: 'ArrowRight' });
+        state.tab = 'regression';
+        byId('workbenchTabs').dispatch('keydown', { key: 'ArrowLeft' });
+        byId('workbenchTabs').dispatch('keydown', { key: 'Tab' });
+        console.log(JSON.stringify({ navigateCalls }));
+        """
+    )
+    assert payload["navigateCalls"] == [
+        "#/regression", "#/training", "#/batch/c9", "#/regression", "#/batch/c9",
+    ]
+
+
+def test_bootstrap_loads_the_batch_list_without_letting_it_block_the_workbench():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    bootstrap = _javascript_section(script, "async function bootstrap", "async function reloadAll")
+    assert "getJSON('/api/batches').catch(" in bootstrap
+    assert "state.batches" in bootstrap
+    # the existing three reads are untouched
+    for endpoint in ("/api/tree", "/api/cohorts", "/api/catalog"):
+        assert f"getJSON('{endpoint}')" in bootstrap
