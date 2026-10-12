@@ -13,6 +13,7 @@
   <script src="/static/runs-table.js" defer></script>
   <script src="/static/run-view.js" defer></script>
   <script src="/static/batches-view.js" defer></script>
+  <script src="/static/game-detail.js" defer></script>
   <script src="/static/map.js" defer></script>
 </head>
 <body>
@@ -161,7 +162,10 @@
         <p class="section-kicker">单局详情</p>
         <h2 id="runMapTitle">对局路线与节点收益</h2>
       </div>
-      <button id="mapBackButton" class="quiet-button" type="button">返回批次</button>
+      <div class="map-page-actions">
+        <button id="runGameLink" class="quiet-button" type="button" hidden>对局详情（路线 / 牌组 / 战斗）</button>
+        <button id="mapBackButton" class="quiet-button" type="button">返回批次</button>
+      </div>
     </div>
     <dl id="runMeta" class="key-values run-meta"></dl>
     <p id="runLiveNotice" class="run-live-notice" role="status" aria-live="polite" hidden></p>

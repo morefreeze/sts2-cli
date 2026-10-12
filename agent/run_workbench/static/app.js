@@ -33,8 +33,11 @@ const state = {
 // 回归/评测 tab:
 //   #/regression  |  #/regression/batch/<batch_id>
 //   #/regression/batch/<batch_id>/lane/<lane>
-// A game opened from a lane uses the training run route with the placeholder
-// cohort `-` (`runRoute('', ref)`): it belongs to no training cohort.
+//   #/regression/game/<source id>          one game in detail (game-detail.js);
+//                                          `run:<run id>` addresses it by run id
+// The map view of a game opened from a lane uses the training run route with
+// the placeholder cohort `-` (`runRoute('', ref)`): it belongs to no training
+// cohort.
 // ---------------------------------------------------------------------
 
 function cohortRoute(cohortId) {
@@ -53,6 +56,11 @@ function laneRoute(batchId, lane) {
   return `${batchRoute(batchId)}/lane/${encodeURIComponent(lane)}`;
 }
 
+// `source` is a source id, or `run:<run id>` for a game known only by its run id.
+function gameRoute(source) {
+  return `#/regression/game/${encodeURIComponent(source)}`;
+}
+
 function isRegressionView(view) {
   return typeof view === 'string' && view.startsWith('regression');
 }
@@ -68,6 +76,8 @@ function parseRoute(hash) {
   if (!raw || raw === '/') return { view: 'root' };
   // `#/training` is `#/` that must not bounce to the 回归/评测 tab.
   if (raw === '/training') return { view: 'root', tab: 'training' };
+  const game = raw.match(/^\/regression\/game\/([^/]+)$/);
+  if (game) return { view: 'regression-game', source: decodeURIComponent(game[1]) };
   const regression = raw.match(/^\/regression(?:\/batch\/([^/]+)(?:\/lane\/([^/]+))?)?$/);
   if (regression) {
     if (regression[1] === undefined) return { view: 'regression' };
@@ -172,9 +182,20 @@ async function applyRoute(route) {
   if (route.view !== 'run' && window.RunView && typeof window.RunView.stop === 'function') {
     window.RunView.stop();
   }
-  // The 回归/评测 pages poll while a batch runs; any other route ends that.
-  if (!isRegressionView(route.view) && window.BatchesView && typeof window.BatchesView.stop === 'function') {
+  // The 回归/评测 pages poll while a batch (or a game) runs; any other route ends that.
+  if ((!isRegressionView(route.view) || route.view === 'regression-game')
+    && window.BatchesView && typeof window.BatchesView.stop === 'function') {
     window.BatchesView.stop();
+  }
+  if (route.view !== 'regression-game' && window.GameDetail && typeof window.GameDetail.stop === 'function') {
+    window.GameDetail.stop();
+  }
+  if (route.view === 'regression-game') {
+    state.tabResolved = true;
+    setActiveTab('regression');
+    showRegressionView();
+    await GameDetail.render(route);
+    return;
   }
   if (isRegressionView(route.view)) {
     state.tabResolved = true;

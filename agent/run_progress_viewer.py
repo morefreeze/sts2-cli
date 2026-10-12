@@ -88,6 +88,7 @@ STATIC_ASSETS = {
     "/static/runs-table.js": ("runs-table.js", "text/javascript; charset=utf-8"),
     "/static/run-view.js": ("run-view.js", "text/javascript; charset=utf-8"),
     "/static/batches-view.js": ("batches-view.js", "text/javascript; charset=utf-8"),
+    "/static/game-detail.js": ("game-detail.js", "text/javascript; charset=utf-8"),
     "/static/map.js": ("map.js", "text/javascript; charset=utf-8"),
     # Single-run replay, loaded by URL: /replay?log=<file>.jsonl
     # The workbench index is a cohort/metrics view with no way to address one run.

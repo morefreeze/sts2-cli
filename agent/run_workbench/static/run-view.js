@@ -161,8 +161,21 @@ window.RunView = (() => {
     }
   }
 
+  // A game opened from the 回归/评测 tab (placeholder cohort `-`) can open its
+  // per-game detail: route choices, the whole deck, every combat turn.
+  function setGameLink(cohortId, ref) {
+    const node = byId('runGameLink');
+    if (!node) return;
+    const show = cohortId === '-' && Boolean(ref) && typeof ref.id === 'string' && ref.id !== '';
+    node.hidden = !show;
+    node.onclick = show
+      ? () => navigate(gameRoute(ref.kind === 'run' ? `run:${ref.id}` : ref.id))
+      : null;
+  }
+
   async function render(cohortId, ref) {
     stop();
+    setGameLink(cohortId, ref);
     const generation = liveGeneration;
     mapOpened = false;
     wasLive = false;

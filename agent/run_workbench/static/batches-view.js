@@ -438,15 +438,39 @@ window.BatchesView = (() => {
       renderEmpty(container, '该通道还没有对局记录。');
       return;
     }
+    // The row opens the per-game detail (route, deck, combats); a second link
+    // keeps the old map view of the same game one click away.
     RunsTable.renderRows(container, rows, {
-      // Rows carry a source ref; a regression game belongs to no training
-      // cohort, so the run route gets the placeholder cohort id.
-      routeFor: (ref) => runRoute('', ref),
+      routeFor: (ref) => gameRoute(ref.kind === 'run' ? `run:${ref.id}` : ref.id),
       extraColumns: [
         { label: '局号', value: (row) => (Number.isFinite(row.game_index) ? row.game_index : '—') },
         { label: '耗时', value: (row) => formatDuration(row.duration_seconds) },
+        { label: '地图视图', render: (row) => mapViewLink(row) },
       ],
     });
+  }
+
+  // "地图视图": the pre-existing run page (act map + node rewards) of a game.
+  // It sits inside a clickable row, so it must not also trigger the row.
+  function mapViewLink(row) {
+    const ref = row.ref && typeof row.ref === 'object' && typeof row.ref.id === 'string' && row.ref.id
+      ? row.ref
+      : null;
+    if (!ref) return null;
+    const link = element('button', {
+      className: 'quiet-button runs-table-map-link',
+      text: '地图视图',
+      attrs: { type: 'button', 'aria-label': '在地图视图中打开这局' },
+    });
+    const stopRow = (event) => {
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+    };
+    link.addEventListener('click', (event) => {
+      stopRow(event);
+      navigate(runRoute('', ref));
+    });
+    link.addEventListener('keydown', stopRow);
+    return link;
   }
 
   // ---- loading, refreshing ---------------------------------------------
@@ -546,5 +570,5 @@ window.BatchesView = (() => {
     await load(route, token, false);
   }
 
-  return { render, stop, formatSpan, formatClock, formatEta, formatDuration, needsRefresh };
+  return { render, stop, formatSpan, formatClock, formatEta, formatDuration, needsRefresh, mapViewLink };
 })();

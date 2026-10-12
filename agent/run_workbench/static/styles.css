@@ -1790,3 +1790,362 @@ pre {
     padding-top: 10px;
   }
 }
+
+/* --- 回归/评测: one game in detail (game-detail.js) --------------------- */
+
+.map-page-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.map-page-actions [hidden] {
+  display: none;
+}
+
+#regressionBody > .panel {
+  margin-top: 14px;
+}
+
+.gd-subheading {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: var(--slate-800);
+}
+
+.gd-line {
+  margin: 6px 0;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.gd-dim {
+  color: var(--slate-500);
+  font-size: 12px;
+}
+
+.gd-body {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.gd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.gd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.gd-chip-alt {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--slate-500);
+}
+
+.gd-chip-dim {
+  border-style: dashed;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--slate-500);
+}
+
+.gd-chip-taken {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+  font-weight: 700;
+}
+
+.gd-chip-upgraded {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.gd-chip-bad {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.gd-targets {
+  display: inline-flex;
+  gap: 3px;
+  padding-left: 5px;
+  border-left: 1px solid var(--line-strong);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.gd-target {
+  color: var(--slate-500);
+}
+
+.gd-target-taken {
+  color: var(--teal-dark);
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.gd-unplayable {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  color: var(--slate-500);
+}
+
+.gd-deck-type {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 6px 10px;
+  margin: 8px 0;
+  font-size: 12.5px;
+}
+
+.gd-delta-list,
+.gd-options,
+.gd-divergence,
+.gd-plan-actions {
+  margin: 6px 0;
+  padding-left: 20px;
+  font-size: 12.5px;
+}
+
+.gd-deck-timeline > summary,
+.gd-room > summary,
+.gd-turn > summary {
+  cursor: pointer;
+}
+
+.gd-route-act {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.gd-route-act-title {
+  padding-top: 20px;
+  font-size: 12px;
+}
+
+.gd-route-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.gd-route-cell {
+  display: flex;
+  min-width: 64px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.gd-route-cell > small {
+  color: var(--slate-500);
+  font-size: 10px;
+}
+
+.gd-route-nodes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gd-node {
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  text-align: center;
+}
+
+.gd-node-taken {
+  background: var(--teal);
+  color: #fff;
+  font-weight: 700;
+}
+
+.gd-node-alt {
+  background: rgba(23, 32, 38, 0.05);
+  color: var(--slate-500);
+}
+
+.gd-route-enter {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--teal-dark);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.gd-route-pending {
+  color: var(--amber);
+}
+
+.gd-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+
+.gd-filter[aria-pressed="true"] {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+}
+
+.gd-act-header {
+  margin: 16px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--slate-800);
+}
+
+.gd-act-header[hidden],
+.gd-room[hidden] {
+  display: none;
+}
+
+.gd-room,
+.gd-turn {
+  margin: 5px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.gd-turn {
+  margin-left: 12px;
+  background: var(--surface-strong);
+}
+
+.gd-summary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: 12.5px;
+  vertical-align: middle;
+}
+
+.gd-summary-main {
+  min-width: 58px;
+}
+
+.gd-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.gd-choice {
+  margin: 8px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.gd-option-taken {
+  color: var(--teal-dark);
+}
+
+.gd-option-locked {
+  color: var(--slate-500);
+}
+
+.gd-plan {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--teal);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.gd-plan-error {
+  border-left-color: var(--red);
+}
+
+.gd-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gd-plan-action {
+  padding: 1px 0;
+}
+
+.gd-plan-action .batch-badge {
+  margin-left: 8px;
+}
+
+.gd-plan-skipped,
+.gd-plan-not_executed {
+  color: var(--slate-500);
+}
+
+.gd-rejected {
+  color: var(--red);
+  font-size: 12px;
+}
+
+.gd-divergence li {
+  padding: 1px 0;
+}
+
+.gd-divergence-truncated,
+.gd-divergence-exhausted,
+.gd-divergence-mismatch,
+.gd-divergence-refused,
+.gd-divergence-plan_error {
+  color: var(--red);
+}
+
+.gd-steps td,
+.gd-enemies td {
+  vertical-align: top;
+  font-size: 12px;
+}
+
+.gd-step-off_plan td:first-child,
+.gd-step-rejected td:first-child {
+  box-shadow: inset 3px 0 var(--red);
+}
+
+.gd-step-heuristic td:first-child {
+  box-shadow: inset 3px 0 var(--amber);
+}
+
+.gd-actual {
+  min-width: 150px;
+}
+
+.gd-actual .gd-rejected {
+  display: block;
+}

@@ -1245,3 +1245,15 @@ def test_resolve_game_log_argument_errors(tmp_path: Path):
         catalog.resolve_game_log(source_id="nope")
     with pytest.raises(CatalogNotFoundError):
         catalog.resolve_game_log(run_id="pfr-nope")
+
+
+def test_game_detail_script_is_a_served_utf8_asset(tmp_path: Path):
+    from agent.run_workbench.catalog import RunCatalog as _Catalog
+
+    assert viewer.STATIC_ASSETS["/static/game-detail.js"] == (
+        "game-detail.js", "text/javascript; charset=utf-8")
+    assert "/static/game-detail.js" not in viewer.QUERY_ALLOWED_ASSETS
+    with _server(_Catalog([tmp_path], replay_parser=parse_game_progress)) as base:
+        with urlopen(base + "/static/game-detail.js", timeout=5) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "text/javascript; charset=utf-8"

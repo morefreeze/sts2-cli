@@ -4358,8 +4358,19 @@ def test_lane_page_reuses_the_runs_table_with_source_routes_and_extra_columns():
                 rows: call.rows.map((r) => r.seed),
                 containerIsTableScroll: call.container.className,
                 routeFor: options.routeFor({ kind: 'source', id: 'src_3' }),
-                extra: options.extraColumns.map((c) => [c.label, c.value(call.rows[0]), c.value(call.rows[1])]),
-                extraMissing: options.extraColumns.map((c) => c.value({ game_index: null, duration_seconds: null })),
+                routeForRun: options.routeFor({ kind: 'run', id: 'pfr-1' }),
+                extra: options.extraColumns.slice(0, 2).map((c) => [c.label, c.value(call.rows[0]), c.value(call.rows[1])]),
+                extraMissing: options.extraColumns.slice(0, 2).map((c) => c.value({ game_index: null, duration_seconds: null })),
+                columns: options.extraColumns.map((c) => c.label),
+                mapLink: (() => {
+                  const link = options.extraColumns[2].render({ ref: { kind: 'source', id: 'src_3' } });
+                  let stopped = 0;
+                  link.click();
+                  link.dispatch('click', { stopPropagation() { stopped += 1; } });
+                  link.dispatch('keydown', { key: 'Enter', stopPropagation() { stopped += 1; } });
+                  return { tag: link.tag, text: link.textContent, stopped, calls: navigateCalls.splice(0),
+                           noRef: options.extraColumns[2].render({ ref: null }) };
+                })(),
                 title: allText(collect(body, (n) => n.className === 'section-heading')[0]),
                 buttons: collect(body, (n) => n.tag === 'button').map((n) => n.textContent),
                 meta: collect(body, (n) => n.className === 'batch-fact').map((n) => n.children.map((c) => c.textContent)),
@@ -4380,8 +4391,17 @@ def test_lane_page_reuses_the_runs_table_with_source_routes_and_extra_columns():
     assert payload["calls"] == 1
     assert payload["rows"] == ["run_3", "run_2"]
     assert payload["containerIsTableScroll"] == "table-scroll"
+    # a lane row opens the per-game detail; the old map view stays one click away
+    assert payload["routeFor"] == "#/regression/game/src_3"
+    assert payload["routeForRun"] == "#/regression/game/run%3Apfr-1"
+    assert payload["columns"] == ["局号", "耗时", "地图视图"]
+    link = payload["mapLink"]
+    assert (link["tag"], link["text"]) == ("button", "地图视图")
+    # inside a clickable row: it never lets the row's own click through
+    assert link["stopped"] == 2
     # a regression game belongs to no cohort: the placeholder cohort id keeps the run route valid
-    assert payload["routeFor"] == "#/batch/-/run/source:src_3"
+    assert link["calls"] == ["#/batch/-/run/source:src_3", "#/batch/-/run/source:src_3"]
+    assert link["noRef"] is None
     assert payload["extra"] == [["局号", 3, 2], ["耗时", "—", "20 分钟"]]
     assert payload["extraMissing"] == ["—", "—"]
     assert "Ironclad" in payload["title"] and "regression" in payload["title"] and "运行中" in payload["title"]
@@ -4855,3 +4875,626 @@ def test_bootstrap_loads_the_batch_list_without_letting_it_block_the_workbench()
     # the existing three reads are untouched
     for endpoint in ("/api/tree", "/api/cohorts", "/api/catalog"):
         assert f"getJSON('{endpoint}')" in bootstrap
+
+
+# ---------------------------------------------------------------------------
+# 回归/评测 tab: the per-game detail page (game-detail.js)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "run_workbench"
+
+
+def _game_payload(name: str, **summary) -> dict:
+    """A real per-game payload: what /api/game-detail answers for a trimmed log."""
+    from agent.run_workbench.game_detail import build_game_detail, load_game_records
+    from agent.run_workbench.localization import Localizer
+
+    detail = build_game_detail(
+        load_game_records(_FIXTURE_DIR / f"game_detail_{name}.jsonl"),
+        source_name=f"{name}.jsonl", localizer=Localizer(),
+    )
+    detail["source_id"] = "src_abc"
+    detail["regression"] = True
+    detail["live"] = False
+    detail["summary"] = {**detail["summary"], **summary}
+    return detail
+
+
+def _game_detail_harness() -> str:
+    util_script = (STATIC_DIR / "util.js").read_text(encoding="utf-8")
+    app_script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    view_script = (STATIC_DIR / "game-detail.js").read_text(encoding="utf-8")
+    return "\n".join(
+        [
+            _FAKE_VIEW_DOM,
+            _javascript_section(util_script, "function element(tag", "function svgElement"),
+            _javascript_section(util_script, "function clear(node)", "function setStatus"),
+            _javascript_section(util_script, "function formatMissing", "function formatBytes"),
+            _javascript_section(util_script, "function renderEmpty", "function setSelectOptions"),
+            _javascript_section(app_script, "function cohortRoute", "function navigate"),
+            """
+            function formatTime(value) { return `T${value}`; }
+            const statuses = [];
+            function setStatus(message, tone) { statuses.push([message, tone]); }
+            const navigateCalls = [];
+            function navigate(hash) { navigateCalls.push(hash); }
+            const timers = [];
+            let nextTimer = 1;
+            function setTimeout(fn, ms) {
+              const timer = { id: nextTimer++, fn, ms, cleared: false, fired: false };
+              timers.push(timer);
+              return timer.id;
+            }
+            function clearTimeout(id) {
+              const timer = timers.find((candidate) => candidate.id === id);
+              if (timer) timer.cleared = true;
+            }
+            const pending = () => timers.filter((timer) => !timer.cleared && !timer.fired);
+            async function fire(timer) { timer.fired = true; await timer.fn(); }
+            const fetches = [];
+            let responses = [];
+            async function getJSON(url) {
+              fetches.push(url);
+              const next = responses.shift();
+              if (next instanceof Error) throw next;
+              return next;
+            }
+            const window = {};
+            // open a <details> the way the browser does: set `open`, fire `toggle`
+            function openDetails(node) { node.open = true; node.dispatch('toggle'); }
+            const GD_ROUTE = { view: 'regression-game', source: 'src_abc' };
+            """,
+            view_script,
+            "const GD = window.GameDetail;",
+        ]
+    )
+
+
+def _gd_script(body: str, **payloads) -> str:
+    script = _game_detail_harness() + "\n" + body
+    for name, value in payloads.items():
+        script = script.replace(f"__{name.upper()}__", json.dumps(value))
+    return script
+
+
+def test_shell_loads_game_detail_after_the_batches_view_and_has_the_run_page_link():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    scripts = re.findall(r'<script src="/static/([\w.-]+)"', html)
+    assert scripts.index("game-detail.js") > scripts.index("batches-view.js")
+    assert scripts.index("game-detail.js") < scripts.index("map.js") and scripts[-1] == "map.js"
+    parser = _ShellParser()
+    parser.feed(html)
+    assert "runGameLink" in parser.ids
+    # the link sits with the run page's own actions, hidden until a regression game opens
+    assert re.search(r'id="runGameLink"[^>]*\bhidden\b', html)
+    assert parser.ids.index("runGameLink") < parser.ids.index("mapBackButton")
+
+
+def test_game_detail_script_never_injects_html_or_shadows_a_shared_helper():
+    script = (STATIC_DIR / "game-detail.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in script and "insertAdjacentHTML" not in script and "outerHTML" not in script
+    shared = ("function element(", "function clear(", "function getJSON(", "function setStatus(",
+              "function byId(", "function formatTime(", "function renderEmpty(")
+    for declaration in shared:
+        assert declaration not in script, declaration
+    assert script.startswith("'use strict';")
+    assert "window.GameDetail = (() => {" in script
+
+
+def test_hash_router_parses_and_builds_game_routes():
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    routing = _javascript_section(script, "function cohortRoute", "function navigate")
+    payload = _run_node_json(
+        f"""
+        {routing}
+        console.log(JSON.stringify({{
+          game: parseRoute('#/regression/game/src_abc123'),
+          byRun: parseRoute(gameRoute('run:pfr-1')),
+          built: [gameRoute('src_abc'), gameRoute('run:pfr-1')],
+          list: parseRoute('#/regression'),
+          lane: parseRoute('#/regression/batch/b1/lane/Ironclad'),
+          missing: parseRoute('#/regression/game/'),
+          region: isRegressionView('regression-game'),
+        }}));
+        """
+    )
+    assert payload["game"] == {"view": "regression-game", "source": "src_abc123"}
+    assert payload["byRun"] == {"view": "regression-game", "source": "run:pfr-1"}
+    assert payload["built"] == ["#/regression/game/src_abc", "#/regression/game/run%3Apfr-1"]
+    assert payload["list"] == {"view": "regression"}
+    assert payload["lane"] == {"view": "regression-lane", "batchId": "b1", "lane": "Ironclad"}
+    assert payload["missing"] == {"view": "root"}
+    assert payload["region"] is True
+
+
+def test_router_renders_the_game_page_in_the_regression_tab_and_stops_polling_elsewhere():
+    harness = _router_harness([], None).replace(
+        "const window = { STS2Map: { showDashboardPage() { calls.push('dashboard'); } }, BatchesView, RunView };",
+        """const GameDetail = {
+              stop() { calls.push('game-stop'); },
+              async render(route) { calls.push(`game:${route.view}:${route.source}`); },
+            };
+            const window = { STS2Map: { showDashboardPage() { calls.push('dashboard'); } }, BatchesView, RunView, GameDetail };""",
+    )
+    payload = _run_node_json(
+        harness
+        + """
+        (async () => {
+          const out = {};
+          await applyRoute(parseRoute('#/regression/game/src_abc'));
+          out.game = { calls: take(), tab: state.tab, regressionView: byId('regressionView').hidden,
+                       cohortTree: byId('cohortTree').hidden };
+          await applyRoute(parseRoute('#/regression/batch/b1'));
+          out.batch = take();
+          await applyRoute(parseRoute('#/batch/c1'));
+          out.training = take();
+          console.log(JSON.stringify(out));
+        })();
+        """
+    )
+    game = payload["game"]
+    # the game page polls like a batch page: the batch polling is stopped, the game's own is not
+    assert "batches-stop" in game["calls"] and "game:regression-game:src_abc" in game["calls"]
+    assert "game-stop" not in game["calls"]
+    assert (game["tab"], game["regressionView"], game["cohortTree"]) == ("regression", False, True)
+    assert "game-stop" in payload["batch"] and "batches:regression-batch:b1:" in payload["batch"]
+    assert "game-stop" in payload["training"]
+
+
+def test_game_page_header_route_strip_and_deck():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const buttons = collect(body, (n) => n.tag === 'button' && n.className === 'quiet-button');
+              buttons[0].click();
+              buttons[1].click();
+              const strips = collect(body, (n) => n.className === 'gd-route-act');
+              const taken = collect(body, (n) => n.className.includes('gd-node-taken'));
+              const alt = collect(body, (n) => n.className.includes('gd-node-alt'));
+              console.log(JSON.stringify({
+                fetches,
+                statuses,
+                head: allText(collect(body, (n) => n.className === 'section-heading')[0]),
+                facts: collect(body, (n) => n.className === 'batch-fact').map((n) => n.children.map((c) => c.textContent)),
+                solver: allText(collect(body, (n) => n.className === 'gd-line')[0]),
+                navigateCalls,
+                actTitles: strips.map((s) => allText(s.children[0])),
+                cells: strips.map((s) => collect(s, (n) => n.className === 'gd-route-cell').length),
+                taken: taken.length, alt: alt.length,
+                firstCell: allText(collect(body, (n) => n.className === 'gd-route-cell')[0]),
+                deckHead: allText(collect(body, (n) => n.className === 'section-heading').find((n) => allText(n).includes('最终牌组'))),
+                deckRows: collect(body, (n) => n.className === 'gd-deck-type').map(allText),
+                upgraded: collect(body, (n) => n.className.includes('gd-chip-upgraded')).map(allText),
+                timeline: allText(collect(body, (n) => n.className === 'gd-delta-list')[0]),
+              }));
+            })();
+            """,
+            detail=_game_payload("full_run", batch_id="reg-1", lane="Ironclad", game_index=2,
+                                 games_total=5, duration_seconds=900),
+        )
+    )
+
+    assert payload["fetches"] == ["/api/game-detail?source=src_abc"]
+    assert payload["statuses"][-1][0] == "已载入对局详情"
+    facts = dict(payload["facts"])
+    assert facts["批次"] == "reg-1" and facts["通道"] == "Ironclad" and facts["局号"] == "2 / 5"
+    assert facts["最远"].startswith("A1F17") and facts["生命"] == "80 → 0"
+    assert facts["耗时"] == "15 分钟" and facts["牌组 / 遗物"] == "13 / 4"
+    assert "Ironclad" in payload["head"] and "run_5" in payload["head"]
+    assert payload["solver"].startswith("求解器") and "计划 10 次" in payload["solver"]
+    # back goes to the lane list (no browser history here), the map view to the old run page
+    assert payload["navigateCalls"] == ["#/regression/batch/reg-1/lane/Ironclad", "#/batch/-/run/source:src_abc"]
+    assert payload["actTitles"] == ["第 1 幕"]
+    assert payload["cells"] == [7]
+    assert payload["taken"] == 7 and payload["alt"] >= 2   # offered-but-not-taken nodes are greyed
+    assert "F1" in payload["firstCell"] and "战斗" in payload["firstCell"]
+    assert "13 张" in payload["deckHead"]
+    rows = payload["deckRows"]
+    assert any(row.startswith("攻击（4）") for row in rows)
+    assert any(row.startswith("技能（7）") and "防御 ×4" in row for row in rows)
+    assert any(row.startswith("遗物（4）") and "燃烧之血" in row for row in rows)
+    assert any(row.startswith("药水（1）") and "流动铜液" in row for row in rows)
+    assert "巨像+" in payload["timeline"] and "移除 打击×3" in payload["timeline"]
+
+
+def test_game_page_rooms_are_collapsed_until_opened_and_group_by_act():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const rooms = collect(body, (n) => n.tag === 'details' && n.className === 'gd-room');
+              const acts = collect(body, (n) => n.className === 'gd-act-header').map(allText);
+              const before = rooms.map((r) => collect(r, (n) => n.className.includes('gd-body')).length);
+              const summaries = rooms.map((r) => allText(r.children[0]));
+              openDetails(rooms[1]);   // A1F2: a fight with a card reward
+              const afterOpen = collect(rooms[1], (n) => n.className.includes('gd-body')).length;
+              const roomBody = allText(rooms[1].children[1]);
+              const turns = collect(rooms[1], (n) => n.tag === 'details' && n.className === 'gd-turn');
+              const turnBodiesBefore = collect(rooms[1], (n) => n.className.includes('gd-turn-body')).length;
+              openDetails(rooms[1]);   // a second toggle never builds the body twice
+              console.log(JSON.stringify({
+                n: rooms.length, acts, before, afterOpen, summaries, roomBody,
+                turns: turns.length, turnBodiesBefore,
+                opened: collect(rooms[1], (n) => n.className.includes('gd-body') && n.className.includes('gd-room-body')).length,
+              }));
+            })();
+            """,
+            detail=_game_payload("full_run"),
+        )
+    )
+
+    assert payload["n"] == 7
+    assert payload["acts"] == ["第 1 幕 · Overgrowth · Boss：仪式兽"]
+    assert payload["before"] == [0] * 7                   # nothing is built until a room is opened
+    assert payload["afterOpen"] >= 1 and payload["opened"] == 1
+    assert "A1F1" in payload["summaries"][0] and "事件" in payload["summaries"][0]
+    assert "A1F2" in payload["summaries"][1] and "普通战斗" in payload["summaries"][1]
+    assert "4 回合 · 计划 4" in payload["summaries"][1]
+    assert "阵亡" in payload["summaries"][6] and "−64" in payload["summaries"][6]
+    # an opened fight lists its turns, each collapsed too
+    assert payload["turns"] == 4 and payload["turnBodiesBefore"] == 0
+    assert "卡牌奖励" in payload["roomBody"] and "选择了" in payload["roomBody"]
+
+
+def test_game_page_out_of_combat_rooms_show_offered_versus_chosen():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const rooms = collect(body, (n) => n.tag === 'details' && n.className === 'gd-room');
+              const byLabel = (label) => rooms.find((r) => allText(r.children[0]).includes(label));
+              ['A1F2', 'A1F7', 'A1F8', 'A1F9'].forEach((label) => openDetails(byLabel(label)));
+              const chips = (room, tone) => collect(room.children[1], (n) => n.className.includes(`gd-chip-${tone}`)).map(allText);
+              console.log(JSON.stringify({
+                reward: { taken: chips(byLabel('A1F2'), 'taken'), alt: chips(byLabel('A1F2'), 'alt'),
+                          text: allText(byLabel('A1F2').children[1]) },
+                event: allText(byLabel('A1F7').children[1]),
+                eventTaken: collect(byLabel('A1F7'), (n) => n.className.includes('gd-option-taken')).length,
+                rest: { taken: chips(byLabel('A1F8'), 'taken'), alt: chips(byLabel('A1F8'), 'alt'),
+                        text: allText(byLabel('A1F8').children[1]) },
+                shop: { taken: chips(byLabel('A1F9'), 'taken'), alt: chips(byLabel('A1F9'), 'alt').length,
+                        text: allText(byLabel('A1F9').children[1]) },
+              }));
+            })();
+            """,
+            detail=_game_payload("full_run"),
+        )
+    )
+
+    reward = payload["reward"]
+    assert len(reward["taken"]) == 1 and reward["taken"][0].startswith("残酷")
+    assert len(reward["alt"]) == 2
+    assert "选择了 残酷" in reward["text"]
+    assert "事件：木雕" in payload["event"] and "事件中的选牌" in payload["event"]
+    assert payload["eventTaken"] == 2          # chosen on both pages of the event
+    rest = payload["rest"]
+    assert rest["taken"] == ["锻造"] and rest["alt"] == ["休息"]
+    assert "升级了 巨像" in rest["text"]
+    shop = payload["shop"]
+    assert [c.split(" ·")[0] for c in shop["taken"] if "·" in c] == ["被遗忘的仪式"]
+    assert [c for c in shop["taken"] if c.startswith("移除")] == ["移除 打击"] * 3
+    assert shop["alt"] > 5                      # the stock that was not bought
+    assert "金币 266 → 4" in shop["text"] and "移除卡牌价格 75 金" in shop["text"]
+
+
+def test_game_page_combat_turn_lists_candidates_taken_actions_and_the_plan():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const room = collect(body, (n) => n.tag === 'details' && n.className === 'gd-room')
+                .find((r) => allText(r.children[0]).includes('A2F8'));
+              openDetails(room);
+              const turns = collect(room, (n) => n.tag === 'details' && n.className === 'gd-turn');
+              const first = turns[0];
+              const fifth = turns.find((t) => allText(t.children[0]).includes('第 5 回合'));
+              openDetails(first);
+              openDetails(fifth);
+              const rows = (turn) => collect(turn, (n) => n.tag === 'tr' && n.className.startsWith('gd-step'));
+              const stepRow = (row) => {
+                const cells = row.children;
+                return {
+                  n: allText(cells[0]), state: allText(cells[1]),
+                  chips: collect(cells[2], (n) => n.className.startsWith('gd-chip')).map((n) => [allText(n), n.className]),
+                  taken: collect(cells[2], (n) => n.className.includes('gd-chip-taken')).map(allText),
+                  targetTaken: collect(cells[2], (n) => n.className.includes('gd-target-taken')).map(allText),
+                  actual: allText(cells[3]), source: allText(cells[4]), result: allText(cells[5]),
+                };
+              };
+              console.log(JSON.stringify({
+                summaries: turns.map((t) => allText(t.children[0])),
+                firstSteps: rows(first).map(stepRow),
+                firstPlan: collect(first, (n) => /^gd-plan( |$)/.test(n.className)).map(allText),
+                fifthDivergence: collect(fifth, (n) => n.className.startsWith('gd-divergence-')).map(allText),
+                fifthPlans: collect(fifth, (n) => /^gd-plan( |$)/.test(n.className)).map(allText),
+                fifthPlanActions: collect(fifth, (n) => n.className.startsWith('gd-plan-action ')).map(allText),
+                fifthSources: rows(fifth).map((r) => allText(r.children[4])),
+                enemies: collect(first, (n) => n.tag === 'table' && n.className.includes('gd-enemies')).map(allText),
+              }));
+            })();
+            """,
+            detail=_game_payload("replan"),
+        )
+    )
+
+    first_steps = payload["firstSteps"]
+    assert [s["actual"] for s in first_steps][:3] == ["打出 防御", "打出 挑衅 → 蜂群术士", "打出 剑柄打击 → 蜂群术士"]
+    assert len(first_steps) == 8
+    # every step highlights exactly the one chip that was taken
+    for step in first_steps:
+        assert len(step["taken"]) == 1, step
+    potion_step = first_steps[3]
+    assert potion_step["actual"].startswith("使用药水") and "攻击药水" in potion_step["actual"]
+    assert first_steps[4]["actual"].startswith("选牌") and first_steps[4]["source"] == "选牌"
+    # candidate chips: more than the one taken, unplayable cards marked as such
+    play = first_steps[0]
+    assert len(play["chips"]) > 3 and play["state"].startswith("能量 5")
+    assert "结束回合" in [text for text, _cls in play["chips"]]
+    assert [text for text, cls in play["chips"] if "gd-chip-dim" in cls] == ["星界脉冲"]   # the 0-cost card the engine will not play
+    assert first_steps[-1]["actual"] == "结束回合"
+    assert any(row["targetTaken"] for row in first_steps if "→" in row["actual"])
+    assert all(row["source"] == "计划 #1" for row in first_steps if row["actual"] != first_steps[4]["actual"])
+    # the plan: projected HP, search stats, each planned action tagged executed
+    plan = payload["firstPlan"][0]
+    assert "求解器计划 #1" in plan and "预计结束生命 67" in plan and "已执行 7 / 7" in plan
+    assert "用时 20.1 秒" in plan and "累计节点 21439" in plan and "边界 None" in plan
+    assert plan.count("已执行 #") == 7
+    # the diverged turn: markers, both plans, and which plan drove which step
+    assert "第 5 回合" in payload["summaries"][4] and "重新规划" in payload["summaries"][4] \
+        and "打完未结束" in payload["summaries"][4]
+    assert any("5 个动作都打完了" in text for text in payload["fifthDivergence"])
+    assert len(payload["fifthPlans"]) == 2
+    assert "打完但回合未结束" in payload["fifthPlans"][0] and "计划完成" in payload["fifthPlans"][1]
+    assert payload["fifthSources"] == ["计划 #1"] * 5 + ["计划 #2"]
+    assert len(payload["fifthPlanActions"]) == 6
+    assert "蜂群术士" in payload["enemies"][0] and "攻击" in payload["enemies"][0]
+
+
+def test_game_page_shows_plan_errors_heuristic_steps_and_filters_rooms():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const room = collect(body, (n) => n.tag === 'details' && n.className === 'gd-room')[0];
+              openDetails(room);
+              const turn = collect(room, (n) => n.tag === 'details' && n.className === 'gd-turn')
+                .find((t) => allText(t.children[0]).includes('第 6 回合'));
+              openDetails(turn);
+              const filters = collect(body, (n) => n.className === 'quiet-button gd-filter');
+              const visible = () => collect(body, (n) => n.tag === 'details' && n.className === 'gd-room')
+                .filter((r) => !r.hidden).length;
+              const out = { all: visible(), buttons: filters.map((f) => f.textContent) };
+              filters[4].click();       // 偏离计划
+              out.diverged = visible();
+              out.pressed = filters.map((f) => f.getAttribute('aria-pressed'));
+              filters[2].click();       // 精英/首领
+              out.elite = visible();
+              filters[3].click();       // 事件/商店/篝火
+              out.other = visible();
+              out.headerHidden = collect(body, (n) => n.className === 'gd-act-header').map((h) => h.hidden);
+              console.log(JSON.stringify({
+                ...out,
+                summary: allText(turn.children[0]),
+                divergence: collect(turn, (n) => n.className.startsWith('gd-divergence-')).map(allText),
+                plans: collect(turn, (n) => /^gd-plan( |$)/.test(n.className)).map(allText),
+                rejected: collect(turn, (n) => n.className === 'gd-rejected').map(allText),
+                sources: collect(turn, (n) => n.tag === 'tr' && n.className.startsWith('gd-step'))
+                  .map((r) => [allText(r.children[4]), r.className]),
+              }));
+            })();
+            """,
+            detail=_game_payload("plan_error"),
+        )
+    )
+
+    assert payload["buttons"] == ["全部", "战斗", "精英/首领", "事件/商店/篝火", "偏离计划"]
+    assert payload["all"] == 1 and payload["diverged"] == 1 and payload["elite"] == 1 and payload["other"] == 0
+    assert payload["pressed"] == ["false", "false", "false", "false", "true"]
+    assert payload["headerHidden"] == [True]       # a filter that hides every room hides its act header too
+    assert "求解器出错" in payload["summary"] and "重新规划" in payload["summary"]
+    assert any("求解器出错，改用启发式" in text and "Cannot fork with pending Power" in text
+               for text in payload["divergence"])
+    assert any(text.startswith("求解器计划 #1 求解器出错") for text in payload["plans"])
+    assert any("Cannot fork with pending Power" in text for text in payload["rejected"])
+    assert [s[0] for s in payload["sources"]][:2] == ["启发式", "计划 #2"]
+    assert "gd-step-heuristic" in payload["sources"][0][1]
+
+
+def test_game_page_route_strip_opens_the_room_it_led_to():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const enter = collect(body, (n) => n.className === 'gd-route-enter');
+              const rooms = collect(body, (n) => n.tag === 'details' && n.className === 'gd-room');
+              const before = rooms.map((r) => !!r.open);
+              enter[0].click();         // the first choice led to A1F2
+              console.log(JSON.stringify({
+                n: enter.length, labels: enter.map((n) => n.textContent),
+                before, after: rooms.map((r) => !!r.open),
+                built: collect(rooms[1], (n) => n.className.includes('gd-room-body')).length,
+              }));
+            })();
+            """,
+            detail=_game_payload("full_run"),
+        )
+    )
+    assert payload["before"] == [False] * 7
+    assert payload["after"][1] is True and sum(payload["after"]) == 1
+    assert payload["built"] == 1            # opened from the strip without waiting for the toggle event
+    assert payload["n"] >= 5
+    assert "→ 事件" in payload["labels"]    # a "?" node shows what it turned into
+
+
+def test_game_page_refreshes_a_live_game_and_leaves_an_unchanged_page_alone():
+    live = {**_game_payload("replan"), "live": True}
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__LIVE__];
+              await GD.render(GD_ROUTE);
+              const out = { armed: pending().map((t) => t.ms) };
+              const room = collect(byId('regressionBody'), (n) => n.tag === 'details' && n.className === 'gd-room')[0];
+              openDetails(room);
+              responses = [__LIVE__];
+              await fire(pending()[0]);
+              // nothing changed: the open room is still the same open node
+              out.sameRoom = collect(byId('regressionBody'), (n) => n.tag === 'details' && n.className === 'gd-room')[0] === room;
+              out.fetchesAfterRefresh = fetches.length;
+              out.armedAgain = pending().map((t) => t.ms);
+              responses = [new Error('boom')];
+              await fire(pending()[0]);
+              out.notice = byId('regressionNotice').textContent;
+              out.stillArmed = pending().map((t) => t.ms);
+              GD.stop();
+              out.afterStop = pending().length;
+              out.noticeAfterStop = [byId('regressionNotice').hidden, byId('regressionNotice').textContent];
+              console.log(JSON.stringify(out));
+            })();
+            """,
+            live=live,
+        )
+    )
+    assert payload["armed"] == [30000]
+    assert payload["sameRoom"] is True and payload["fetchesAfterRefresh"] == 2
+    assert payload["armedAgain"] == [30000]
+    assert "自动刷新失败：boom" in payload["notice"] and payload["stillArmed"] == [30000]
+    assert payload["afterStop"] == 0 and payload["noticeAfterStop"] == [True, ""]
+
+
+def test_game_page_does_not_poll_a_finished_game_and_addresses_runs_by_id():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [__DETAIL__];
+              await GD.render({ view: 'regression-game', source: 'run:pfr-1 x' });
+              console.log(JSON.stringify({ fetches, pending: pending().length,
+                endpoint: GD.endpointFor({ source: 'src_a/b' }) }));
+            })();
+            """,
+            detail=_game_payload("plan_error"),
+        )
+    )
+    assert payload["fetches"] == ["/api/game-detail?run=pfr-1%20x"]
+    assert payload["pending"] == 0
+    assert payload["endpoint"] == "/api/game-detail?source=src_a%2Fb"
+
+
+def test_game_page_unreadable_game_says_so_and_offers_the_way_back():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            (async () => {
+              responses = [new Error('unknown source id: src_abc')];
+              await GD.render(GD_ROUTE);
+              const body = byId('regressionBody');
+              const buttons = collect(body, (n) => n.tag === 'button');
+              buttons[0].click();
+              console.log(JSON.stringify({
+                text: allText(body), navigateCalls, statuses: statuses.slice(-1), pending: pending().length,
+              }));
+            })();
+            """
+        )
+    )
+    assert "对局详情读取失败：unknown source id: src_abc" in payload["text"]
+    assert payload["navigateCalls"] == ["#/regression"]
+    assert payload["statuses"][-1][1] == "error" and payload["pending"] == 0
+
+
+def test_game_page_name_and_effect_formatting():
+    payload = _run_node_json(
+        _gd_script(
+            """
+            const loc = { card_id: { BASH: '痛击' }, card: { Strike: '打击' }, monster: { Louse: '虱虫' } };
+            console.log(JSON.stringify({
+              card: [GD.cardName(loc, { id: 'CARD.BASH', name: 'Bash' }),
+                     GD.cardName(loc, { id: 'CARD.BASH', name: 'Bash', upgraded: true }),
+                     GD.cardName(loc, { name: 'Strike' }), GD.cardName(loc, { name: 'Odd Card' }),
+                     GD.cardName(null, { id: 'CARD.X', name: 'X' }), GD.cardName(loc, null)],
+              effects: GD.formatEffects(loc, {
+                enemy_hp: [{ name: 'Louse', delta: -8 }], block: { delta: 5 }, hp: { delta: -3 },
+                spans_enemy_turn: true }),
+              noEffects: GD.formatEffects(loc, null),
+              search: [GD.formatSearchTime(400), GD.formatSearchTime(2500), GD.formatSearchTime(120000), GD.formatSearchTime(null)],
+              div: [
+                GD.divergenceText({ kind: 'truncated', plan: 0, executed: 1, planned: 3, reason: 'card_missing' }),
+                GD.divergenceText({ kind: 'mismatch', step_n: 0, expected: { card_name: 'Strike' }, actual: { card_name: 'Defend' } }),
+                GD.divergenceText({ kind: 'refused', step_n: 1, message: 'nope' }),
+                GD.divergenceText({ kind: 'heuristic', steps: 2 }),
+                GD.divergenceText({ kind: 'weird' }),
+              ],
+            }));
+            """
+        )
+    )
+    assert payload["card"] == ["痛击", "痛击+", "打击", "Odd Card", "X", "？"]
+    assert payload["effects"] == "虱虫 -8 · 格挡 +5 · 生命 -3 · （含敌方回合）"
+    assert payload["noEffects"] == ""
+    assert payload["search"] == ["400 毫秒", "2.5 秒", "2.0 分钟", "—"]
+    truncated, mismatch, refused, heuristic, weird = payload["div"]
+    assert "计划 #1 中断" in truncated and "1/3" in truncated and "手牌里没有计划要打的牌" in truncated
+    assert "步骤 1 偏离计划" in mismatch and "Strike" in mismatch and "Defend" in mismatch
+    assert "被引擎拒绝：nope" in refused and "2 步由启发式出牌" in heuristic and weird == "weird"
+
+
+def test_run_page_links_to_the_game_detail_only_for_a_game_opened_from_the_regression_tab():
+    payload = _run_node_json(
+        f"""
+        {_run_view_harness()}
+        const navigateCalls = [];
+        function navigate(hash) {{ navigateCalls.push(hash); }}
+        {_javascript_section((STATIC_DIR / "app.js").read_text(encoding="utf-8"), "function gameRoute", "function isRegressionView")}
+        (async () => {{
+          const out = {{}};
+          const link = () => byId('runGameLink');
+          reset();
+          responses = [endedPayload];
+          await window.RunView.render('-', {{ kind: 'source', id: 'src1' }});
+          out.fromLane = {{ hidden: link().hidden }};
+          link().onclick();
+          responses = [endedPayload];
+          await window.RunView.render('-', {{ kind: 'run', id: 'pfr-9' }});
+          link().onclick();
+          responses = [endedPayload];
+          await window.RunView.render('c1', {{ kind: 'source', id: 'src1' }});
+          out.fromCohort = {{ hidden: link().hidden, onclick: link().onclick }};
+          responses = [endedPayload];
+          await window.RunView.render('-', {{ kind: 'source', id: '' }});
+          out.noRef = {{ hidden: link().hidden }};
+          out.navigateCalls = navigateCalls;
+          console.log(JSON.stringify(out));
+        }})();
+        """
+    )
+    assert payload["fromLane"] == {"hidden": False}
+    assert payload["fromCohort"] == {"hidden": True, "onclick": None}
+    assert payload["noRef"] == {"hidden": True}
+    assert payload["navigateCalls"] == ["#/regression/game/src1", "#/regression/game/run%3Apfr-9"]
+
+
+def test_runs_table_extra_columns_may_render_a_node_instead_of_text():
+    script = (STATIC_DIR / "runs-table.js").read_text(encoding="utf-8")
+    assert "typeof column.render !== 'function'" in script
+    assert "column.value(row)" in script    # the text form keeps working

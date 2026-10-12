@@ -131,7 +131,8 @@ window.RunsTable = (() => {
   // `options` (all optional) lets another page reuse this table: `container`
   // is where it draws (default: the training batch's #runsTable), `routeFor(ref)`
   // the hash a row opens (default: the run route under the selected cohort) and
-  // `extraColumns` [{ label, value(row) }] extra cells after 时间.
+  // `extraColumns` [{ label, value(row) }] extra cells after 时间; a column that
+  // has `render(row)` returns a DOM node for its cell instead of text.
   function renderTable(rows, options = {}) {
     const container = options.container || byId('runsTable');
     const rerender = () => renderTable(rows, options);
@@ -190,7 +191,14 @@ window.RunsTable = (() => {
         element('td', { text: missingCell(row.global_floor) }),
         element('td', { text: missingCell(row.act) }),
         element('td', { text: Number.isFinite(row.started_at) ? formatTime(row.started_at) : '—' }),
-        ...extraColumns.map((column) => element('td', { text: missingCell(column.value(row)) })),
+        ...extraColumns.map((column) => {
+          if (typeof column.render !== 'function') return element('td', { text: missingCell(column.value(row)) });
+          const td = element('td');
+          const node = column.render(row);
+          if (node) td.append(node);
+          else td.textContent = '—';
+          return td;
+        }),
       );
       if (row.has_map === false) {
         tr.append(element('td', { className: 'runs-table-no-map-note', text: '无地图' }));
