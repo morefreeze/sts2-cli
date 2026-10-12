@@ -1,0 +1,92 @@
+200 log file(s), 191 complete game(s) (9 excluded: no game_over or unreadable)
+Dropped 0 game(s) with ascension != 1
+Skipped 0 game(s) played under the value route policy (pass --allow-value-logs to train on them)
+Dropped 0 duplicate game(s) (same character, seed, ascension)
+Games per character: Defect 40, Ironclad 38, Necrobinder 37, Regent 36, Silent 40
+Value model: 191 games, 7552 snapshots, 5-fold CV grouped by seed (40 seeds)
+  CV MAE full     5.183 +/- 0.202 floors
+  CV MAE hp_only  5.204 +/- 0.163 floors
+  chosen: full
+Coefficients (floors per 1 SD), intercept 22.632:
+  hp                 -2.096
+  max_hp             +0.845
+  hp_frac            +3.363
+  gold               +0.657
+  deck_burst         +0.429
+  deck_top8          -1.245
+  deck_size          -0.648
+  n_upgraded         +1.025
+  n_relics           +0.863
+  n_potions          +0.723
+  floor              -3.678
+  act2               -7.443
+  act3              -13.196
+  char_Ironclad      +0.268
+  char_Silent        -1.488
+  char_Defect        +1.203
+  char_Regent        -0.465
+  char_Necrobinder   +0.339
+Transition cells (Act 1-2; Monster/Elite split at deck_burst 0.410, min_n 20):
+  cell                       n  died    d_hp  d_relics  d_burst  d_top8
+  1|Elite|hi               185     1    -5.6     +1.00   +0.014  +0.170
+  1|Elite|lo               180     2    -7.0     +1.00   +0.019  +0.220
+  1|Monster|hi             416     0    -1.1     +0.00   +0.022  +0.278
+  1|Monster|lo             735     0    -1.7     +0.00   +0.019  +0.497
+  1|RestSite|hi            416     0    +6.0     +0.00   +0.006  +0.002
+  1|RestSite|lo             35     0   +22.1     +0.00   +0.000  +0.001
+  1|Shop|all               154     0    +1.1     +0.00   -0.022  +0.160
+  1|Treasure|all           188     0    +0.0     +1.00   +0.001  +0.006
+  1|Unknown|all            530     0    -0.1     +0.10   +0.004  +0.110
+  2|Ancient|all             32     0    +0.0     +1.00   -0.026  +0.035
+  2|Elite|hi               186     7   -12.0     +1.00   +0.009  +0.069
+  2|Elite|lo               140     9   -11.6     +1.00   +0.004  +0.053
+  2|Monster|hi             565     2    -3.0     +0.00   +0.003  +0.125
+  2|Monster|lo             398     5    -3.6     +0.00   +0.007  +0.122
+  2|RestSite|hi            304     0    +5.9     +0.00   +0.005  +0.001
+  2|RestSite|lo             78     0   +22.3     +0.00   +0.001  +0.000
+  2|Shop|all               140     0    +2.1     +0.45   -0.021  +0.087
+  2|Treasure|all           176     0    +0.1     +1.00   +0.001  +0.000
+  2|Unknown|all            488     0    +1.3     +0.16   +0.000  +0.041
+Sparse cells (n < min_n 20): 0
+Calibration, Act 1-2 Monster/Elite cells (death rate vs mean model q, by pre-room HP):
+  cell                       hp     n  died    rate  model_q
+  1|Elite|hi              25-35     1     0   0.000    0.027
+  1|Elite|hi              35-50    20     0   0.000    0.008
+  1|Elite|hi              50-65    58     1   0.017    0.005
+  1|Elite|hi               >=65   106     0   0.000    0.000
+  1|Elite|lo                <25     1     0   0.000    0.067
+  1|Elite|lo              25-35     5     0   0.000    0.041
+  1|Elite|lo              35-50    28     0   0.000    0.019
+  1|Elite|lo              50-65    87     1   0.011    0.012
+  1|Elite|lo               >=65    59     1   0.017    0.009
+  1|Monster|hi              <25     2     0   0.000    0.145
+  1|Monster|hi            25-35     4     0   0.000    0.000
+  1|Monster|hi            35-50    40     0   0.000    0.000
+  1|Monster|hi            50-65   100     0   0.000    0.000
+  1|Monster|hi             >=65   270     0   0.000    0.000
+  1|Monster|lo              <25     6     0   0.000    0.084
+  1|Monster|lo            25-35     7     0   0.000    0.001
+  1|Monster|lo            35-50    40     0   0.000    0.000
+  1|Monster|lo            50-65   160     0   0.000    0.000
+  1|Monster|lo             >=65   522     0   0.000    0.000
+  2|Elite|hi                <25     8     3   0.375    0.357
+  2|Elite|hi              25-35     9     2   0.222    0.109
+  2|Elite|hi              35-50    22     2   0.091    0.024
+  2|Elite|hi              50-65    56     0   0.000    0.013
+  2|Elite|hi               >=65    91     0   0.000    0.000
+  2|Elite|lo                <25     9     4   0.444    0.376
+  2|Elite|lo              25-35     7     0   0.000    0.165
+  2|Elite|lo              35-50    27     3   0.111    0.086
+  2|Elite|lo              50-65    45     1   0.022    0.025
+  2|Elite|lo               >=65    52     1   0.019    0.064
+  2|Monster|hi              <25    10     2   0.200    0.113
+  2|Monster|hi            25-35    13     0   0.000    0.008
+  2|Monster|hi            35-50    55     0   0.000    0.002
+  2|Monster|hi            50-65   100     0   0.000    0.000
+  2|Monster|hi             >=65   387     0   0.000    0.000
+  2|Monster|lo              <25    18     4   0.222    0.132
+  2|Monster|lo            25-35    12     0   0.000    0.014
+  2|Monster|lo            35-50    48     1   0.021    0.006
+  2|Monster|lo            50-65   101     0   0.000    0.000
+  2|Monster|lo             >=65   219     0   0.000    0.000
+Saved agent/data/route_model_a1.json

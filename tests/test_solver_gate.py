@@ -374,6 +374,7 @@ def test_result_row_falls_back_to_the_env_inferrer_for_unstamped_results(monkeyp
 def _run_main(monkeypatch, played, argv=("1", "Ironclad"), policy="naive"):
     """policy=None leaves STS2_OOC_POLICY unset (= the default)."""
     monkeypatch.setattr(sys, "argv", ["play_full_run.py", *argv])
+    monkeypatch.delenv("STS2_ROUTE_POLICY", raising=False)
     if policy is None:
         monkeypatch.delenv("STS2_OOC_POLICY", raising=False)
         # the default is greedy, whose lazy import main() does up front
@@ -396,7 +397,7 @@ def test_main_header_names_the_inferrer(monkeypatch, capsys):
     _run_main(monkeypatch, [])
     header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
     assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy naive, "
-                      "solver inferrer on)"]
+                      "solver inferrer on, route policy random)"]
 
 
 def test_main_header_names_the_default_greedy_policy(monkeypatch, capsys):
@@ -404,14 +405,14 @@ def test_main_header_names_the_default_greedy_policy(monkeypatch, capsys):
     _run_main(monkeypatch, [], policy=None)
     header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
     assert header == ["Playing 1 runs as Ironclad (ascension 0, ooc policy greedy, "
-                      "solver inferrer on)"]
+                      "solver inferrer on, route policy random)"]
 
 
 def test_main_header_names_an_off_inferrer(monkeypatch, capsys):
     monkeypatch.setenv("STS2_SOLVER_INFERRER", "OFF")
     _run_main(monkeypatch, [])
     out = capsys.readouterr().out
-    assert "solver inferrer off)" in out
+    assert "solver inferrer off, route policy random)" in out
 
 
 def test_main_rejects_a_bad_inferrer_before_any_game(monkeypatch):
@@ -430,7 +431,7 @@ def test_main_default_seed_offset_plays_prefix_1_to_n_with_the_unchanged_header(
     assert played == ["p_1", "p_2", "p_3"]
     header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
     assert header == ["Playing 3 runs as Ironclad (ascension 0, ooc policy naive, "
-                      "solver inferrer on)"]
+                      "solver inferrer on, route policy random)"]
 
 
 def test_main_explicit_zero_seed_offset_is_the_default(monkeypatch, capsys):
@@ -441,7 +442,7 @@ def test_main_explicit_zero_seed_offset_is_the_default(monkeypatch, capsys):
     assert played == ["p_1", "p_2"]
     header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
     assert header == ["Playing 2 runs as Ironclad (ascension 0, ooc policy naive, "
-                      "solver inferrer on)"]
+                      "solver inferrer on, route policy random)"]
 
 
 def test_main_seed_offset_shifts_the_seed_range(monkeypatch, capsys):
@@ -452,7 +453,7 @@ def test_main_seed_offset_shifts_the_seed_range(monkeypatch, capsys):
     assert played == ["p_21", "p_22"]
     header = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Playing ")]
     assert header == ["Playing 2 runs as Ironclad (ascension 0, ooc policy naive, "
-                      "solver inferrer on, seeds p_21..p_22)"]
+                      "solver inferrer on, route policy random, seeds p_21..p_22)"]
 
 
 def test_main_rejects_a_negative_seed_offset_before_any_game(monkeypatch, capsys):
