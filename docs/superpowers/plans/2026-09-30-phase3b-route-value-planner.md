@@ -321,3 +321,20 @@ Smoke: 2 games × 5 characters, `STS2_OOC_POLICY=greedy STS2_ROUTE_POLICY=value 
 ### Task 8: paired A/B and verdict
 
 Arms: `random` vs `value`, both `STS2_OOC_POLICY=greedy`, `--ascension 1 --seed-prefix p3b_`, 40 seeds × 5 characters, 5 lanes × `STS2_SOLVER_THREADS=3`, `--keep-game-logs "$AB/games_${arm}"`, results `$AB/${char}_${arm}.jsonl` (same launcher shape as Phase 3a Task 7). Report per character: paired global-floor diff, t, p, A1/A2 boss pass rates, wins, route planned / forced / fallbacks / cell fallbacks. Also a **checkpoint drift** table from the value arm's `[route]` lines: predicted vs actual hp / relics / deck_burst / deck_top8 at the Treasure and RestSite rows (mean error, mean absolute error). Verdict: ship `value` as the default if the mean paired diff across characters is > 0 and no character is significantly worse (p < 0.05); otherwise keep `random` and report. Update `CLAUDE.md` Protocol notes with `STS2_ROUTE_POLICY` / `STS2_ROUTE_MODEL` and the verdict.
+
+## Result (2026-10-16): keep `random`
+
+Batch `logs/batches/p3b-route-ab-20261012-160225` (a1, `p3b_1..40` × 5 characters, both arms greedy OOC + solver, 3 threads/lane; the launcher died in a reboot at 186/400 games and was finished with `run_batch.py --resume`). Report: `~/.sts2-train/p3b/report_final.txt` (script `~/.sts2-train/p3b/report.py`).
+
+| character | pairs | floor random → value | diff | p | wins random → value | A2 boss pass |
+|---|---|---|---|---|---|---|
+| Ironclad | 40 | 43.75 → 38.80 | −4.95 | 0.016 | 17 → 11 | 78% → 50% |
+| Silent | 37 | 36.24 → 35.14 | −1.11 | 0.45 | 1 → 1 | 35% → 27% |
+| Defect | 39 | 45.97 → 46.90 | +0.92 | 0.47 | 17 → 14 | 85% → 87% |
+| Regent | 36 | 38.11 → 39.56 | +1.44 | 0.58 | 9 → 4 | 56% → 53% |
+| Necrobinder | 39 | 43.13 → 42.44 | −0.69 | 0.71 | 18 → 9 (p=0.021) | 77% → 67% |
+| pooled | 191 | 41.56 → 40.63 | −0.93 | 0.28 | 62 → 39 (p=0.003) | |
+
+Mean per-character diff −0.88 and Ironclad significantly worse: the ship rule fails. Route fallbacks 0 and cell fallbacks 0 on every character, so the planner ran as designed. Technical failures (excluded from pairs): 5 random, 4 value — 4 of them one laptop sleep (low battery) on 2026-10-14, one a 10 h Test Subject boss stall at 1 HP (Silent `p3b_2`).
+
+**Why it loses.** Checkpoint drift says the transition cells are fine (n_relics/deck_burst/deck_top8 mean error ≈ 0 at every horizon; hp +2..+4 optimistic 4+ rows out). The value model is the problem: an observational linear fit whose coefficients the planner exploits — gold +0.66 floors/SD (spending at a shop lowers V), deck_top8 −1.25 and deck_size −0.65 (a stronger, bigger deck scores lower), a relic ≈ +0.24 floors against a heavy hp_frac term. Route mix, random → value, shops per act ≈ 0.6–0.9 → 0.2–0.4, elites in A2 ≈ 1.5–1.7 → 0.5–1.2, rest sites ≈ 2.5 → 3.2–3.5; Ironclad reached the A3 boss with 522 gold vs 286 and fewer relics at the same HP. Floors look roughly flat on four characters because the value arm trades elite deaths en route for boss deaths (Regent A3-boss deaths 5 → 16, Silent A2-boss 15 → 23), which is why wins fall even where floors don't.
