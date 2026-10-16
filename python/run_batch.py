@@ -34,6 +34,19 @@ changes, and --kind defaults to `ab` when arms are given.
     .venv/bin/python python/run_batch.py --name route-ab --games 40 --chars all \
         --ascension 1 --seed-prefix p3b_ \
         --arm random:STS2_ROUTE_POLICY=random --arm value:STS2_ROUTE_POLICY=value
+
+Continuing a batch whose launcher died (reboot, kill): `--resume <batch dir | batch id>
+[--max-lanes N] [--dry-run]`. Every lane restarts from the batch's own manifest, argv and
+environment, appending to the same <lane>.jsonl / .log / games/: a lane's progress is the
+longest run of its seeds (<prefix><offset+1>, ...) that have a results row, so it resumes at
+the next seed with `--seed-offset` and `--game-index-offset` advanced (game_index counts on
+from the games already played); a lane with all its games is not started. Rows that do not
+continue that run (a gap, a duplicate, a seed outside the lane's range) abort the resume --
+it never guesses -- and so does a lane still running play_full_run. A truncated last row
+(a lane killed mid-write) is skipped with a warning. The manifest gains a `resumes` entry;
+`--dry-run` prints the plan and the lane commands and writes nothing.
+
+    .venv/bin/python python/run_batch.py --resume p3b-route-ab-20261012-160225
 """
 import argparse
 import datetime as dt
@@ -47,6 +60,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,7 +83,7 @@ TERM_GRACE_S = 10.0     # after SIGTERM, before SIGKILL, when stopping lanes
 # Flags the launcher sets itself on every lane; a duplicate after `--` would win
 # silently (argparse: last one wins) and the manifest would then lie about the batch.
 MANAGED_FLAGS = ("--batch-id", "--lane", "--results-log", "--keep-game-logs",
-                 "--seed-prefix", "--seed-offset", "--ascension")
+                 "--seed-prefix", "--seed-offset", "--ascension", "--game-index-offset")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # An arm name becomes half of a lane name and of a file name: no '/', no spaces.
@@ -265,10 +279,15 @@ def _default_prefix():
 
 def build_lane_command(args, batch_id, batch_dir, lane):
     """argv of the play_full_run process for `lane` (the character, or
-    `<Character>/<arm>`). Every arm of a character gets the same seed arguments."""
+    `<Character>/<arm>`). Every arm of a character gets the same seed arguments.
+    A lane spec carrying `resume` ({"games", "seed_offset", "game_index_offset"}, set by
+    run_batch.py --resume) plays only its remaining games, from its next seed."""
     prefix = list(args.play_full_run_cmd) if args.play_full_run_cmd else _default_prefix()
     batch_dir = Path(batch_dir)
     spec = lane_spec(args, lane)
+    resume = spec.get("resume")
+    games = resume["games"] if resume else args.games
+    seed_offset = resume["seed_offset"] if resume else args.seed_offset
     stem = safe_lane_name(lane)
     games_dir = batch_dir / "games"
     if spec["arm"]:
@@ -276,15 +295,17 @@ def build_lane_command(args, batch_id, batch_dir, lane):
         # character play the same seeds, so a shared directory would have the second
         # arm overwrite the first's logs (and the results rows' game_log paths).
         games_dir = games_dir / stem
-    cmd = [*prefix, str(args.games), spec["character"],
+    cmd = [*prefix, str(games), spec["character"],
            "--ascension", str(args.ascension),
            "--seed-prefix", args.seed_prefix]
-    if args.seed_offset:
-        cmd += ["--seed-offset", str(args.seed_offset)]
+    if seed_offset:
+        cmd += ["--seed-offset", str(seed_offset)]
     cmd += ["--batch-id", batch_id, "--lane", lane,
             "--keep-game-logs", str(games_dir),
-            "--results-log", str(batch_dir / f"{stem}.jsonl"),
-            *args.extra]
+            "--results-log", str(batch_dir / f"{stem}.jsonl")]
+    if resume and resume["game_index_offset"] > 0:
+        cmd += ["--game-index-offset", str(resume["game_index_offset"])]
+    cmd += args.extra
     return cmd
 
 
@@ -365,8 +386,11 @@ class LaneRunner:
     returns True while any lane is still queued or running.
     """
 
-    def __init__(self, batch_dir, lanes, max_lanes, make_command, env, clock=time.time):
-        """`env` is the lanes' environment, or a function lane -> environment."""
+    def __init__(self, batch_dir, lanes, max_lanes, make_command, env, clock=time.time,
+                 initial_status=None):
+        """`env` is the lanes' environment, or a function lane -> environment.
+        `initial_status` (lane -> entry; run_batch.py --resume) seeds the status of lanes
+        that must not (re)start: a "done" lane is never started and stays "done"."""
         self.batch_dir = Path(batch_dir)
         self.max_lanes = max_lanes
         self._make_command = make_command
@@ -376,6 +400,13 @@ class LaneRunner:
         self._procs = {}
         self.status = {lane: {"state": "queued", "pid": None, "started_at": None,
                               "ended_at": None, "returncode": None} for lane in self._order}
+        for lane, entry in (initial_status or {}).items():
+            if lane not in self.status:
+                raise ValueError(f"initial status for unknown lane {lane!r}")
+            if entry.get("state") not in ("queued", "done"):
+                raise ValueError(f"initial status of {lane!r} must be queued or done, "
+                                 f"got {entry.get('state')!r}")
+            self.status[lane] = dict(entry)
 
     def write_status(self):
         _write_json_atomic(self.batch_dir / "lanes_status.json", self.status)
@@ -545,10 +576,350 @@ def format_summary(batch_id, batch_dir, lanes, planned, status, elapsed_s):
     return "\n".join(lines)
 
 
+# --- --resume ---------------------------------------------------------------------------------
+
+def _resume_requested(argv):
+    """True if `--resume` is among the launcher's own arguments (before any bare `--`:
+    what follows it belongs to play_full_run)."""
+    for arg in argv:
+        if arg == "--":
+            return False
+        if arg == "--resume" or arg.startswith("--resume="):
+            return True
+    return False
+
+
+def _build_resume_parser():
+    parser = argparse.ArgumentParser(
+        prog="run_batch.py",
+        usage="run_batch.py --resume BATCH [--max-lanes N] [--dry-run] [--batches-dir DIR]",
+        description="Continue a batch whose launcher died (reboot, kill): each unfinished "
+                    "lane restarts after its last completed seed and appends to the same "
+                    "files; finished lanes are skipped. The batch's own manifest supplies "
+                    "everything else, so no launch option is accepted.")
+    parser.add_argument("--resume", required=True, metavar="BATCH",
+                        help="The batch directory, or a batch id under --batches-dir.")
+    parser.add_argument("--max-lanes", type=_positive_int, default=None,
+                        help="Lanes running at once (default: the batch's own).")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the plan and the lane commands; write and start nothing.")
+    parser.add_argument("--batches-dir", default=str(BATCHES_DIR), metavar="DIR",
+                        help="Where a batch id is looked up (default logs/batches).")
+    parser.add_argument("--play-full-run-cmd", default=None, help=argparse.SUPPRESS)
+    return parser
+
+
+def parse_resume_args(argv):
+    """Arguments of `run_batch.py --resume ...`; any other launch option, or a bare `--`,
+    is an argparse error (exit 2)."""
+    argv = list(argv)
+    parser = _build_resume_parser()
+    if "--" in argv:
+        parser.error("a bare `--` cannot be combined with --resume: the lanes restart with "
+                     "the play_full_run arguments the batch was launched with")
+    opts, unknown = parser.parse_known_args(argv)
+    if unknown:
+        parser.error(f"--resume continues the batch exactly as it was launched and takes no "
+                     f"other launch options (unexpected: {' '.join(unknown)})")
+    if opts.play_full_run_cmd is not None:
+        opts.play_full_run_cmd = shlex.split(opts.play_full_run_cmd)
+        if not opts.play_full_run_cmd:
+            parser.error("--play-full-run-cmd must not be empty")
+    return opts
+
+
+def _resume_error(message):
+    return SystemExit(f"run_batch.py: error: {message}")
+
+
+def _read_json_file(path, what):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _resume_error(f"cannot read {what} {path}: {exc}")
+
+
+def _resolve_batch_dir(target, batches_dir):
+    """`target` if it is an existing directory, else <batches_dir>/<target>."""
+    path = Path(target)
+    if not path.is_dir():
+        path = Path(batches_dir) / target
+    if not (path / "manifest.json").is_file():
+        raise _resume_error(f"no manifest.json in {path} -- not a batch directory "
+                            f"(--resume takes a batch directory or a batch id under "
+                            f"{batches_dir})")
+    return path.resolve()
+
+
+def _is_play_full_run_alive(pid):
+    """True if `pid` is a live process whose command line mentions play_full_run. (After a
+    reboot a recorded pid is often reused by something else: that is not a running lane.)"""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and "play_full_run" in out.stdout
+
+
+def _read_lane_status(batch_dir):
+    path = Path(batch_dir) / "lanes_status.json"
+    try:
+        status = _read_json_file(path, "lanes_status.json")
+    except FileNotFoundError:
+        return {}
+    if not isinstance(status, dict):
+        raise _resume_error(f"{path} is not a JSON object")
+    return status
+
+
+def _check_batch_not_running(status):
+    for lane, entry in status.items():
+        if not isinstance(entry, dict) or entry.get("state") != "running":
+            continue
+        pid = entry.get("pid")
+        if _is_play_full_run_alive(pid):
+            raise _resume_error(
+                f"the batch is still running: lane {lane} (pid {pid}) is alive and running "
+                "play_full_run; stop it first (resuming now would play its seeds twice)")
+
+
+def _read_result_seeds(path):
+    """The "seed" of every results row of `path`, in file order (None for a row without a
+    string seed). A line that is not a JSON object -- typically the last one of a lane
+    killed mid-write -- is skipped with a warning naming the file and line."""
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return []
+    seeds = []
+    for number, raw in enumerate(data.split(b"\n"), start=1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            row = None
+        if not isinstance(row, dict):
+            print(f"WARNING: {path.name} line {number}: not a JSON object (a lane killed "
+                  "mid-write?), skipped", flush=True)
+            continue
+        seed = row.get("seed")
+        seeds.append(seed if isinstance(seed, str) else None)
+    return seeds
+
+
+def _plan_lane(entry, seeds):
+    """Where a lane stands: its `done` games are the longest run of seeds
+    <prefix><offset+1>, <prefix><offset+2>, ... that all have a results row. Rows that are
+    not part of that run (a gap, a duplicate, a seed outside the lane's range) are `stray`."""
+    prefix, base, planned = entry["seed_prefix"], entry["seed_offset"], entry["planned_games"]
+    expected = [f"{prefix}{base + k}" for k in range(1, planned + 1)]
+    counts = Counter(seeds)
+    done = 0
+    while done < planned and counts[expected[done]]:
+        done += 1
+    played = set(expected[:done])
+    stray = []
+    for seed in seeds:
+        label = "<row without a seed>" if seed is None else seed
+        if seed not in played and label not in stray:
+            stray.append(label)
+    stray += [f"{seed} (appears {counts[seed]} times)" for seed in expected[:done]
+              if counts[seed] > 1]
+    return {"lane": entry["lane"], "prefix": prefix, "base": base, "planned": planned,
+            "done": done, "stray": stray, "complete": done >= planned,
+            "remaining": planned - done}
+
+
+def _lane_stray_error(plan, file_name):
+    shown = ", ".join(plan["stray"][:8]) + (" ..." if len(plan["stray"]) > 8 else "")
+    run = (f"{plan['prefix']}{plan['base'] + 1}..{plan['prefix']}{plan['base'] + plan['done']}"
+           if plan["done"] else "none")
+    return (f"lane {plan['lane']}: {file_name} has rows that do not continue the lane's seeds "
+            f"{plan['prefix']}{plan['base'] + 1}..{plan['prefix']}{plan['base'] + plan['planned']} "
+            f"(completed run: {run}): {shown}. Fix or move those rows by hand; --resume "
+            "never guesses")
+
+
+def _validate_manifest_lane(entry, args):
+    ok = (isinstance(entry, dict) and isinstance(entry.get("lane"), str)
+          and isinstance(entry.get("seed_prefix"), str)
+          and all(isinstance(entry.get(k), int) and not isinstance(entry.get(k), bool)
+                  for k in ("planned_games", "seed_offset")))
+    if not ok:
+        raise _resume_error(f"manifest lane entry is malformed: {entry!r}")
+    if entry["seed_prefix"] != args.seed_prefix:
+        raise _resume_error(f"manifest lane {entry['lane']} has seed_prefix "
+                            f"{entry['seed_prefix']!r} but the batch's argv says "
+                            f"{args.seed_prefix!r}")
+
+
+def _terminate_last_line(path):
+    """Make a non-empty file end with a newline (a lane killed mid-write leaves a partial
+    last line; the resumed lane's first row would otherwise be glued onto it). Returns True
+    if one was added."""
+    try:
+        with open(path, "rb+") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) == b"\n":
+                return False
+            fh.seek(0, os.SEEK_END)
+            fh.write(b"\n")
+            return True
+    except FileNotFoundError:
+        return False
+
+
+def _plan_text(plans, batch_id, batch_dir, max_lanes):
+    resumed = [plan for plan in plans if not plan["complete"]]
+    width = max([12, *(len(plan["lane"]) for plan in plans)])
+    lines = [f"Resuming batch {batch_id}: {len(resumed)} of {len(plans)} lane(s) to resume, "
+             f"max {max_lanes} at once\n  {batch_dir}"]
+    for plan in plans:
+        done = f"{plan['done']}/{plan['planned']} done"
+        if plan["complete"]:
+            what = "complete, not started"
+        else:
+            first = f"{plan['prefix']}{plan['base'] + plan['done'] + 1}"
+            last = f"{plan['prefix']}{plan['base'] + plan['planned']}"
+            what = f"resumed seeds {first}..{last} ({plan['remaining']} game(s))"
+        lines.append(f"  {plan['lane']:<{width}} {done:<12} {what}")
+    return "\n".join(lines)
+
+
+def _run_to_completion(runner, batch_id, batch_dir, lanes, planned):
+    started = time.monotonic()
+    code = run_lanes(runner)
+    if code == 130:
+        print(f"Batch {batch_id} stopped; lanes terminated, see {batch_dir}/lanes_status.json")
+        return code
+    print(format_summary(batch_id, batch_dir, lanes, planned, runner.status,
+                         time.monotonic() - started), flush=True)
+    return code
+
+
+def resume_batch(argv):
+    """`run_batch.py --resume BATCH ...`: restart the unfinished lanes of an interrupted
+    batch in its own directory. Returns the launcher's exit code (0 / 1 / 130)."""
+    opts = parse_resume_args(argv)
+    batch_dir = _resolve_batch_dir(opts.resume, opts.batches_dir)
+    manifest = _read_json_file(batch_dir / "manifest.json", "manifest.json")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("argv"), list) \
+            or not manifest.get("batch_id") or not isinstance(manifest.get("lanes"), list):
+        raise _resume_error(f"{batch_dir / 'manifest.json'} is not a run_batch manifest "
+                            "(needs batch_id, argv and lanes)")
+    if manifest.get("dry_run"):
+        raise _resume_error(f"batch {manifest['batch_id']} was a --dry-run: it never ran; "
+                            "start a new batch")
+    batch_id = manifest["batch_id"]
+
+    # the original arguments, exactly as launched (arms, env, ascension, extra args ...)
+    args = parse_args(manifest["argv"][1:])
+    if opts.max_lanes is not None:
+        args.max_lanes = opts.max_lanes
+    args.dry_run = opts.dry_run
+    if opts.play_full_run_cmd is not None:
+        args.play_full_run_cmd = opts.play_full_run_cmd
+    known = [spec["lane"] for spec in args.lanes]
+    for entry in manifest["lanes"]:
+        _validate_manifest_lane(entry, args)
+    lanes = [entry["lane"] for entry in manifest["lanes"]]
+    if sorted(lanes) != sorted(known):
+        raise _resume_error(f"the manifest's lanes ({', '.join(lanes)}) do not match the "
+                            f"lanes its argv builds ({', '.join(known)})")
+
+    status = _read_lane_status(batch_dir)
+    _check_batch_not_running(status)
+
+    plans, errors = [], []
+    for entry in manifest["lanes"]:
+        file_name = f"{safe_lane_name(entry['lane'])}.jsonl"
+        plan = _plan_lane(entry, _read_result_seeds(batch_dir / file_name))
+        if plan["stray"]:
+            errors.append(_lane_stray_error(plan, file_name))
+        plans.append(plan)
+    if errors:
+        raise _resume_error("\n  ".join(errors))
+
+    initial = {}
+    for plan in plans:
+        lane = plan["lane"]
+        if plan["complete"]:
+            old = status.get(lane) if isinstance(status.get(lane), dict) else {}
+            initial[lane] = dict(old) if old.get("state") == "done" else {
+                "state": "done", "pid": old.get("pid"), "started_at": old.get("started_at"),
+                "ended_at": old.get("ended_at"), "returncode": old.get("returncode")}
+        else:
+            lane_spec(args, lane)["resume"] = {
+                "games": plan["remaining"], "seed_offset": plan["base"] + plan["done"],
+                "game_index_offset": plan["done"]}
+    resumed = [plan for plan in plans if not plan["complete"]]
+
+    print(_plan_text(plans, batch_id, batch_dir, args.max_lanes), flush=True)
+    resumes = manifest.get("resumes")
+    previous = (resumes[-1].get("git_commit") if resumes and isinstance(resumes[-1], dict)
+                else manifest.get("git_commit"))
+    current = _git_commit()
+    if previous and current and previous != current:
+        print(f"WARNING: the remaining games run on different code than the batch started "
+              f"on (HEAD is {current}, the batch last ran on {previous}); results from "
+              "before and after the resume are not strictly comparable", flush=True)
+    if not resumed:
+        print(f"Batch {batch_id} is already complete: every lane has all its games; "
+              "nothing to resume")
+        return 0
+
+    if args.dry_run:
+        for plan in resumed:
+            lane = plan["lane"]
+            print(shlex.join(build_lane_command(args, batch_id, batch_dir, lane)))
+            if lane_spec(args, lane)["arm"]:
+                print(f"  {lane} env: " + " ".join(
+                    f"{k}={v}" for k, v in lane_spec(args, lane)["arm_env"].items()))
+        print("env: " + " ".join(f"{k}={v}" for k, v in lane_env_overrides(args).items()))
+        print("dry run: nothing written, no lane started")
+        return 0
+
+    now = _now()
+    for plan in resumed:
+        stem = safe_lane_name(plan["lane"])
+        if _terminate_last_line(batch_dir / f"{stem}.jsonl"):
+            print(f"[{plan['lane']}] {stem}.jsonl ended mid-row: added a newline so the "
+                  "resumed lane's rows start on their own line", flush=True)
+        log_path = batch_dir / f"{stem}.log"
+        _terminate_last_line(log_path)
+        first = f"{plan['prefix']}{plan['base'] + plan['done'] + 1}"
+        last = f"{plan['prefix']}{plan['base'] + plan['planned']}"
+        with open(log_path, "a", encoding="utf-8") as log:
+            log.write(f"=== run_batch --resume {now.isoformat(timespec='seconds')}: seeds "
+                      f"{first}..{last} ({plan['done']} already done) ===\n")
+    manifest.setdefault("resumes", []).append({
+        "at": now.timestamp(), "git_commit": current, "max_lanes": args.max_lanes,
+        "lanes": {plan["lane"]: {"done": plan["done"], "seed_offset": plan["base"] + plan["done"],
+                                 "games": plan["remaining"]} for plan in resumed}})
+    _write_json_atomic(batch_dir / "manifest.json", manifest)
+
+    runner = LaneRunner(batch_dir, lanes, args.max_lanes,
+                        lambda lane: build_lane_command(args, batch_id, batch_dir, lane),
+                        lambda lane: build_lane_env(args, lane), initial_status=initial)
+    return _run_to_completion(runner, batch_id, batch_dir, lanes, args.games)
+
+
 # --- main -------------------------------------------------------------------------------------
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if _resume_requested(argv):
+        return resume_batch(argv)
     args = parse_args(argv)
 
     created = _now()
@@ -578,14 +949,7 @@ def main(argv=None):
     runner = LaneRunner(batch_dir, lanes, args.max_lanes,
                         lambda lane: build_lane_command(args, batch_id, batch_dir, lane),
                         lambda lane: build_lane_env(args, lane))
-    started = time.monotonic()
-    code = run_lanes(runner)
-    if code == 130:
-        print(f"Batch {batch_id} stopped; lanes terminated, see {batch_dir}/lanes_status.json")
-        return code
-    print(format_summary(batch_id, batch_dir, lanes, args.games, runner.status,
-                         time.monotonic() - started), flush=True)
-    return code
+    return _run_to_completion(runner, batch_id, batch_dir, lanes, args.games)
 
 
 if __name__ == "__main__":

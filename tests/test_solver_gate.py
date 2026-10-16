@@ -931,3 +931,25 @@ def test_main_rejects_a_blank_batch_id_before_any_game(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         _main_calls(monkeypatch, ["1", "Silent", "--batch-id", "   "])
     assert "--batch-id" in capsys.readouterr().err
+
+
+def test_main_game_index_offset_continues_the_lane_numbering(monkeypatch):
+    """run_batch.py --resume: 3 games were already played, 2 remain."""
+    calls = _main_calls(monkeypatch, ["2", "Silent", "--batch-id", "b-9", "--lane", "L1",
+                                      "--seed-prefix", "p_", "--seed-offset", "3",
+                                      "--game-index-offset", "3"])
+    assert [(c["seed"], c["game_index"], c["games_total"]) for c in calls] == [
+        ("p_4", 4, 5), ("p_5", 5, 5)]
+
+
+def test_main_game_index_offset_defaults_to_zero(monkeypatch):
+    calls = _main_calls(monkeypatch, ["2", "Silent", "--batch-id", "b-9",
+                                      "--game-index-offset", "0"])
+    assert [(c["game_index"], c["games_total"]) for c in calls] == [(1, 2), (2, 2)]
+
+
+def test_main_rejects_a_negative_game_index_offset_before_any_game(monkeypatch, capsys):
+    with pytest.raises(SystemExit):
+        _main_calls(monkeypatch, ["2", "Silent", "--batch-id", "b-9",
+                                  "--game-index-offset", "-1"])
+    assert "--game-index-offset must be >= 0" in capsys.readouterr().err

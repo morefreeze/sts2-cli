@@ -1493,6 +1493,9 @@ def main():
     parser.add_argument("--seed-offset", type=int, default=0,
                         help="Start seeds at <prefix><offset+1> (default 0) -- lets one "
                              "experiment's seed range be split across several processes.")
+    parser.add_argument("--game-index-offset", type=int, default=0,
+                        help="Set by run_batch.py --resume: number of this lane's games "
+                             "already played; game_index/games_total count from it.")
     parser.add_argument("--game-version", default=None, metavar="VERSION",
                         help="Game version to record in every game log (e.g. v0.111.0). "
                              "Default: $STS2_GAME_VERSION, else the install's "
@@ -1522,6 +1525,8 @@ def main():
         parser.error(f"--ascension must be >= 0, got {args.ascension}")
     if args.seed_offset < 0:
         parser.error(f"--seed-offset must be >= 0, got {args.seed_offset}")
+    if args.game_index_offset < 0:
+        parser.error(f"--game-index-offset must be >= 0, got {args.game_index_offset}")
     if args.experiment is not None and not args.experiment.strip():
         parser.error("--experiment must not be blank")
     if args.experiment is not None and len(args.experiment.strip()) > 100:
@@ -1580,7 +1585,8 @@ def main():
         seed = f"{args.seed_prefix}{args.seed_offset + i + 1}"
         print(f"\n--- Run {i+1}/{num_runs} (seed: {seed}) ---")
         batch_kwargs = ({"batch_id": batch_id, "lane": lane,
-                         "game_index": i + 1, "games_total": num_runs}
+                         "game_index": args.game_index_offset + i + 1,
+                         "games_total": args.game_index_offset + num_runs}
                         if batch_id else {})
         result = play_run(seed, character, verbose=True, ascension=args.ascension,
                           keep_log_dir=args.keep_game_logs,
