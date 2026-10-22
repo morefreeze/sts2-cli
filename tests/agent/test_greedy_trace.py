@@ -653,6 +653,8 @@ def test_map_evidence_matches_choice():
         idx = next(i for i, c in enumerate(row["state"]["choices"])
                    if c["col"] == args["col"] and c["row"] == args["row"])
         assert trace.score_of("node", idx) == min(trace.ok_scores("node"))
+        assert fired[0]["values"]["best_index"] == idx
+        assert idx == min(fired[0]["values"]["tied_best"])
         _sums_match(trace)
         n += 1
     assert n > 0

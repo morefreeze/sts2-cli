@@ -9,8 +9,11 @@ from agent.card_scoring import SMITH_PRIORITY_THRESHOLD, best_smith_target
 
 
 class MapStrategy(Protocol):
-    def choose(self, state: dict, choices: list[dict]) -> dict:
-        """Select a map node. Returns a full command dict for the engine."""
+    def choose(self, state: dict, choices: list[dict], trace=None) -> dict:
+        """Select a map node. Returns a full command dict for the engine.
+
+        trace (agent.greedy_trace.GreedyTrace) is optional evidence recording;
+        greedy_action passes it when tracing, so every strategy must accept it."""
         ...
 
 
@@ -37,7 +40,9 @@ class Act1SafeStrategy:
         "Boss": 99,
     }
 
-    def choose(self, state: dict, choices: list[dict]) -> dict:
+    def choose(self, state: dict, choices: list[dict], trace=None) -> dict:
+        """trace is accepted so greedy_action can pass it to any map strategy;
+        this strategy records nothing."""
         gold = state.get("player", {}).get("gold", 0)
         floor = state.get("floor") or state.get("context", {}).get("floor", 99)
         scored = []
@@ -63,16 +68,15 @@ class HpAwareMapStrategy(Act1SafeStrategy):
     HP-ratio penalties so a damaged run doesn't feed into an elite.
     When HP > 75% and past floor 6, elites are actively preferred over
     monsters (relic gain is worth the risk).
-    Act 2 (floor 16+) is handled separately: always avoid elites unless
-    very healthy (>90%), heal aggressively, shop actively.
+    Acts 2+ (from state["act"]; floors are act-local) are handled separately:
+    always avoid elites unless very healthy (>90%), heal aggressively, shop actively.
     """
     HP_DANGER = 0.40   # below this: strong elite avoidance
     HP_LOW    = 0.60   # below this: moderate elite avoidance
     HP_STRONG = 0.85   # above this (and floor > 6): slight elite preference
 
     ELITE_PREFER_FLOOR = 6  # only prefer elites after Act 1 mid-game
-    ACT2_START = 16          # Act 2 begins at floor 16
-    ACT2_BOSS_ZONE = 19      # pre-Act-2-boss zone: save HP
+    ACT2_BOSS_ZONE = 13      # act-local floor from which acts 2+ save HP for the boss
 
     def choose(self, state: dict, choices: list[dict], trace=None) -> dict:
         player = state.get("player", {})
@@ -81,13 +85,14 @@ class HpAwareMapStrategy(Act1SafeStrategy):
         hp_ratio = hp / max_hp
         gold = player.get("gold", 0)
         floor = state.get("floor") or state.get("context", {}).get("floor", 99)
-        in_act2 = isinstance(floor, int) and floor >= self.ACT2_START
+        act = state.get("act") or (state.get("context") or {}).get("act")
+        in_act2 = isinstance(act, int) and not isinstance(act, bool) and act >= 2
 
         scored = []
         for i, c in enumerate(choices):
             base = self.PRIORITY.get(c.get("type", "Unknown"), 4)
             p = base
-            comps = [("map.base_priority", base, c.get("type"))]
+            comps = [("map.base_priority", base, c.get("type", "Unknown"))]
             # Shop value scales up in Act 2 — lower gold threshold
             act2_shop_threshold = 75 if in_act2 else self.SHOP_GOLD_THRESHOLD
             if c.get("type") == "Shop" and gold < act2_shop_threshold:
@@ -126,7 +131,7 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                               # 13%→0% even though avg_floor rose — paths around elite force
                               # tougher unavoidable fights. Reverted to +3.
                     comps.append(("map.elite_pre_boss", 3, None))
-                if isinstance(floor, int) and floor >= self.ACT2_BOSS_ZONE:
+                if in_act2 and isinstance(floor, int) and floor >= self.ACT2_BOSS_ZONE:
                     p += 4  # pre-Act-2-boss: strongly avoid elites regardless of HP
                     comps.append(("map.elite_act2_boss_zone", 4, None))
             if trace is not None:
@@ -137,7 +142,9 @@ class HpAwareMapStrategy(Act1SafeStrategy):
         scored.sort()
         best = scored[0][2]
         if trace is not None:
+            best_p = scored[0][0]
             trace.rule("map.pick_min_priority", "fired", best_index=scored[0][1],
+                       tied_best=[i for p, i, _ in scored if p == best_p],
                        hp_ratio=hp_ratio, gold=gold, floor=floor, in_act2=in_act2)
         return {"cmd": "action", "action": "select_map_node",
                 "args": {"col": best["col"], "row": best["row"]}}
