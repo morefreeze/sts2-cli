@@ -7,7 +7,8 @@ import pytest
 
 from agent.combat_env import greedy_action
 from agent.greedy_trace import GreedyTrace, reset_greedy_context
-from tests.agent.advisor_corpus import corpus_games, fresh_greedy_state
+from tests.agent.advisor_corpus import (corpus_games, corpus_rows, fresh_greedy_state,
+                                        require_same_greedy_data)
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +29,10 @@ _TRACED_CORPUS = None
 def _traced_corpus_all():
     global _TRACED_CORPUS
     if _TRACED_CORPUS is None:
+        # a stray env var or a changed data file must fail here, not poison the
+        # cache every later test reads
+        fresh_greedy_state()
+        require_same_greedy_data()
         out = []
         for _game, rows in corpus_games():
             reset_greedy_context()
@@ -329,10 +334,12 @@ def test_card_select_evidence_matches_choice():
             assert key == "card_select.no_cards"
             continue
         picked = [int(i) for i in action["args"]["indices"].split(",")]
+        assert fired[0]["values"]["picked"] == picked
         scores = {o["index"]: o["score"] for o in trace.to_dict()["options"]
                   if o["status"] == "ok"}
         if key in {"card_select.rest_best", "card_select.combat_best"}:
             assert len(picked) == 1
+            assert fired[0]["values"]["fallback"] is (not scores)
             if scores:
                 assert scores[picked[0]] == max(scores.values())
             else:
@@ -345,6 +352,197 @@ def test_card_select_evidence_matches_choice():
             assert [scores[i] for i in picked] == want
         n += 1
     assert n > 0
+
+
+def _run_both(state):
+    """(action, trace) of a traced greedy_action call, after checking it picks
+    exactly what the untraced call picks and that the trace is JSON-safe."""
+    trace = GreedyTrace()
+    traced = greedy_action(state, trace=trace)
+    assert traced == greedy_action(state)
+    json.dumps(trace.to_dict(), allow_nan=False)
+    return traced, trace
+
+
+def _corpus_card_pool():
+    """[(score_card score, card)] for each distinct, non-BROKEN card id in the
+    corpus's card_select / card_reward states, ascending by (score, id)."""
+    from agent.card_scoring import BROKEN_CARDS, score_card
+    by_id = {}
+    for row in corpus_rows():
+        state = row["state"]
+        if state["decision"] in ("card_select", "card_reward"):
+            for card in state["cards"]:
+                if card["id"].removeprefix("CARD.") not in BROKEN_CARDS:
+                    by_id.setdefault(card["id"], card)
+    pool = [(score_card(card), card) for card in by_id.values()]
+    pool.sort(key=lambda sc: (sc[0], sc[1]["id"]))
+    return pool
+
+
+def _card_select_state(room_type, cards, max_select=1):
+    """A real corpus card_select state with its room, cards and max_select replaced."""
+    for _game, rows in corpus_games():
+        for row in rows:
+            if row["state"]["decision"] == "card_select":
+                state = copy.deepcopy(row["state"])
+                state["context"]["room_type"] = room_type
+                state["cards"] = copy.deepcopy(list(cards))
+                state["max_select"] = max_select
+                return state
+    pytest.fail("no card_select state in the corpus")
+
+
+def _bundle_state(bundles):
+    """A real corpus bundle_select state with its bundles replaced."""
+    for _game, rows in corpus_games():
+        for row in rows:
+            if row["state"]["decision"] == "bundle_select":
+                state = copy.deepcopy(row["state"])
+                state["bundles"] = copy.deepcopy(bundles)
+                return state
+    pytest.fail("no bundle_select state in the corpus")
+
+
+def _picked(action):
+    return [int(i) for i in action["args"]["indices"].split(",")]
+
+
+def test_card_select_lowest_scores_for_a_long_junk_free_list():
+    """More than 10 cards and none scoring < 3: still a deck selection (the
+    worst card goes), and has_junk says why it is not the junk rule."""
+    from agent.card_scoring import score_card
+    by_score = {}
+    for sc, c in _corpus_card_pool():
+        if sc >= 3.0:
+            by_score.setdefault(sc, c)             # one card per distinct score
+    assert len(by_score) >= 11, len(by_score)
+    cards = [by_score[sc] for sc in sorted(by_score, reverse=True)[:11]]
+    scores = [score_card(c) for c in cards]        # best first, worst last
+    assert scores == sorted(scores, reverse=True) and len(set(scores)) == 11
+    assert min(scores) >= 3.0
+    action, trace = _run_both(_card_select_state("Event", cards))
+    (rule,) = trace.fired()
+    assert rule["key"] == "card_select.lowest_scores"
+    assert rule["values"]["has_junk"] is False
+    assert rule["values"]["n_cards"] == 11
+    worst = min(range(len(scores)), key=lambda i: scores[i])
+    assert worst == 10 and _picked(action) == [worst]
+    assert rule["values"]["picked"] == [worst]
+    assert [trace.score_of("card", i) for i in range(11)] == scores
+
+
+def test_card_select_one_junk_card_makes_a_short_list_a_deck_selection():
+    """Exactly 10 cards, one scoring < 3: has_junk alone triggers lowest_scores."""
+    from agent.card_scoring import score_card
+    pool = _corpus_card_pool()
+    junk = next(c for sc, c in pool if sc < 3.0)
+    good = [c for sc, c in pool if sc >= 3.0][-9:]
+    cards = good[:4] + [junk] + good[4:]
+    assert len(cards) == 10
+    scores = [score_card(c) for c in cards]
+    assert [i for i, sc in enumerate(scores) if sc < 3.0] == [4]
+    action, trace = _run_both(_card_select_state("Shop", cards))
+    (rule,) = trace.fired()
+    assert rule["key"] == "card_select.lowest_scores"
+    assert rule["values"]["has_junk"] is True
+    assert _picked(action) == [4] and rule["values"]["picked"] == [4]
+
+
+def test_card_select_ties_keep_the_lower_index_first():
+    from agent.card_scoring import score_card
+    pool = _corpus_card_pool()
+    junk = next(c for sc, c in pool if sc < 3.0)          # score < 3
+    mid = next(c for sc, c in pool if 3.0 <= sc < 9.0)
+    high = pool[-1][1]
+    assert score_card(junk) < score_card(mid) < score_card(high)
+
+    # lowest N: three tied junk cards (0, 2, 4), then the tied mid cards (1, 3)
+    cards = [junk, mid, junk, mid, junk]
+    action, trace = _run_both(_card_select_state("Event", cards, max_select=4))
+    (rule,) = trace.fired()
+    assert rule["key"] == "card_select.lowest_scores" and rule["values"]["has_junk"] is True
+    assert _picked(action) == [0, 2, 4, 1] == rule["values"]["picked"]
+
+    # highest N: no junk, tied high cards (0, 2, 4), then the tied mid cards (1, 3)
+    cards = [high, mid, high, mid, high]
+    action, trace = _run_both(_card_select_state("Event", cards, max_select=4))
+    (rule,) = trace.fired()
+    assert rule["key"] == "card_select.top_scores" and rule["values"]["has_junk"] is False
+    assert _picked(action) == [0, 2, 4, 1] == rule["values"]["picked"]
+
+
+@pytest.mark.parametrize("room_type, rule_key", [
+    ("RestSite", "card_select.rest_best"), ("Monster", "card_select.combat_best")])
+def test_card_select_all_broken_cards_fall_back_to_index_zero(room_type, rule_key):
+    from agent.card_scoring import BROKEN_CARDS
+    pool = _corpus_card_pool()
+    template = pool[-1][1]
+    broken = []
+    for name in sorted(BROKEN_CARDS):
+        card = copy.deepcopy(template)
+        card["id"] = "CARD." + name
+        broken.append(card)
+    assert len(broken) >= 2
+    action, trace = _run_both(_card_select_state(room_type, broken))
+    (rule,) = trace.fired()
+    assert rule["key"] == rule_key
+    assert rule["values"]["fallback"] is True
+    assert rule["values"]["picked"] == [0] and _picked(action) == [0]
+    assert {o["status"] for o in trace.to_dict()["options"]} == {"broken"}
+    assert trace.ok_scores("card") == []
+
+    # a broken card in front of a playable one is skipped, and that is no fallback
+    action, trace = _run_both(_card_select_state(room_type, [broken[0], template]))
+    (rule,) = trace.fired()
+    assert rule["values"]["fallback"] is False
+    assert rule["values"]["picked"] == [1] and _picked(action) == [1]
+    assert [o["status"] for o in trace.to_dict()["options"]] == ["broken", "ok"]
+
+
+def _real_bundle_cards():
+    for _game, rows in corpus_games():
+        for row in rows:
+            if row["state"]["decision"] == "bundle_select":
+                cards = row["state"]["bundles"][0]["cards"]
+                assert len(cards) >= 2
+                return copy.deepcopy(cards)
+    pytest.fail("no bundle_select state in the corpus")
+
+
+def test_bundle_equal_sums_pick_the_first_bundle():
+    a, b = _real_bundle_cards()[:2]
+    bundles = [{"index": 0, "cards": [a, b]}, {"index": 1, "cards": [b, a]}]
+    action, trace = _run_both(_bundle_state(bundles))
+    assert action["args"] == {"bundle_index": 0}
+    (rule,) = trace.fired()
+    assert rule["key"] == "bundle.pick_best" and rule["values"]["best_index"] == 0
+    assert trace.score_of("bundle", 0) == trace.score_of("bundle", 1)
+    _sums_match(trace)
+
+
+def test_bundle_single_still_shows_what_the_bundle_holds():
+    from agent.card_scoring import score_card
+    cards = _real_bundle_cards()
+    action, trace = _run_both(_bundle_state([{"index": 0, "cards": cards}]))
+    assert action["args"] == {"bundle_index": 0}
+    (rule,) = trace.fired()
+    assert rule["key"] == "bundle.single" and rule["values"]["n_bundles"] == 1
+    scores = [score_card(c) for c in cards]
+    assert trace.score_of("bundle", 0) == sum(scores)
+    (opt,) = trace.to_dict()["options"]
+    assert opt["kind"] == "bundle" and opt["status"] == "ok"
+    assert [c["key"] for c in opt["components"]] == ["bundle.card"] * len(cards)
+    assert [c["value"] for c in opt["components"]] == scores
+    _sums_match(trace)
+
+
+def test_bundle_none_records_only_the_rule():
+    action, trace = _run_both(_bundle_state([]))
+    assert action["args"] == {"bundle_index": 0}
+    assert trace.to_dict()["options"] == []
+    (rule,) = trace.fired()
+    assert rule["key"] == "bundle.single" and rule["values"]["n_bundles"] == 0
 
 
 SHOP_RULES = ["shop.heal_potion", "shop.remove_basic", "shop.remove_value",

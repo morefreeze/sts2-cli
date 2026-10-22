@@ -655,6 +655,11 @@ def greedy_action(state: dict, trace=None) -> dict:
         else:
             best_idx = 0
             if trace is not None:
+                if len(bundles) == 1:
+                    # the only bundle is taken whatever it holds; show what it holds
+                    card_scores = [score_card(c) for c in bundles[0].get("cards", [])]
+                    trace.option(0, kind="bundle", score=sum(card_scores), components=[
+                        ("bundle.card", s, ci) for ci, s in enumerate(card_scores)])
                 trace.rule("bundle.single", "fired", n_bundles=len(bundles))
         return {"cmd": "action", "action": "select_bundle", "args": {"bundle_index": best_idx}}
 
@@ -674,14 +679,16 @@ def greedy_action(state: dict, trace=None) -> dict:
                 best = pick_best_card(cards, threshold=0.0, **trace_kwargs)
                 idx = best if best is not None else 0
                 if trace is not None:
-                    trace.rule("card_select.rest_best", "fired", picked=idx, **select_values)
+                    trace.rule("card_select.rest_best", "fired", picked=[idx],
+                               fallback=best is None, **select_values)
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             elif room_type in ("Boss", "Monster", "Elite", "CombatRoom") or not room_type:
                 # Mid-combat select (potion: pick best; boss mechanic: rare, pick best as heuristic)
                 best = pick_best_card(cards, threshold=0.0, **trace_kwargs)
                 idx = best if best is not None else 0
                 if trace is not None:
-                    trace.rule("card_select.combat_best", "fired", picked=idx, **select_values)
+                    trace.rule("card_select.combat_best", "fired", picked=[idx],
+                               fallback=best is None, **select_values)
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             else:
                 # Distinguish "add N from external pool" vs "remove/transform from deck"
