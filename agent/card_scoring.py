@@ -2481,7 +2481,8 @@ def _energy_value_bonus(card_id: str) -> float:
 
 
 def pick_best_card(cards: list[dict], threshold: float = 3.5,
-                   deck: list[dict] = None) -> int | None:
+                   deck: list[dict] = None, trace=None,
+                   trace_indices: list[int] | None = None) -> int | None:
     """Return index of the best card above threshold, or None to skip.
     If `deck` is provided, uses deck-aware scoring (synergy bonuses) and the
     v2 set-normalized predictor bonus (when v2 model is loaded).
@@ -2490,12 +2491,26 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
     with valid game state, the MC rollout signal REPLACES the v2 bonus
     (richer-but-slower forward simulation outranks the deck-only regressor).
 
-    Cards in BROKEN_CARDS are force-skipped (they crash combat in headless)."""
+    Cards in BROKEN_CARDS are force-skipped (they crash combat in headless).
+
+    trace (agent.greedy_trace.GreedyTrace) records each card's nine summed
+    score terms -- the same lists `totals` is built from -- and BROKEN_CARDS
+    rejections. trace_indices maps a position in `cards` to the index the
+    caller reports (card_reward passes the reward's own indices after the
+    quality gate filtered some out)."""
     if not cards:
         return None
     # Filter broken cards before scoring so they're never picked, even if their
     # synergy/predictor scores rank highest.
     valid = [(i, c) for i, c in enumerate(cards) if _card_id_norm(c) not in BROKEN_CARDS]
+
+    def _reported(i: int) -> int:
+        return trace_indices[i] if trace_indices is not None else i
+    if trace is not None:
+        valid_positions = {i for i, _ in valid}
+        for i in range(len(cards)):
+            if i not in valid_positions:
+                trace.option(_reported(i), kind="card", status="broken")
     if not valid:
         return None  # all offered cards are blacklisted → skip
     valid_cards = [c for _, c in valid]
@@ -2579,6 +2594,21 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
               for b, s, t, ct, bd, br, q, a, qa in
               zip(base, set_bonus, tag_bonus, ct_bonus, bd_bonus, br_bonus,
                   q_bonus, arch_bonus, q_adj)]
+    if trace is not None:
+        ratings = _load_advisor_ratings()
+        for k, (orig_i, c) in enumerate(valid):
+            tier = (ratings.get(_card_id_norm(c)) or {}).get("tier")
+            trace.option(_reported(orig_i), kind="card", score=totals[k], components=[
+                ("card.base", base[k], tier),
+                ("card.set_bonus", set_bonus[k], None),
+                ("card.tag_synergy", tag_bonus[k], None),
+                ("card.combat_type", ct_bonus[k], None),
+                ("card.boss_defense_gap", bd_bonus[k], None),
+                ("card.boss_readiness", br_bonus[k], None),
+                ("card.quality_lift", q_bonus[k], None),
+                ("card.archetype", arch_bonus[k], None),
+                ("card.q_adjust", q_adj[k], None),
+            ])
     scored = sorted(enumerate(totals), key=lambda x: x[1], reverse=True)
     best_valid_idx, best_score = scored[0]
     if best_score < threshold:

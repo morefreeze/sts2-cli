@@ -445,16 +445,24 @@ def _random_choice_for(state: dict) -> dict | None:
     return None
 
 
-def greedy_action(state: dict) -> dict:
-    """Greedy heuristic for non-combat decisions. Used during training and by coordinator."""
+def greedy_action(state: dict, trace=None) -> dict:
+    """Greedy heuristic for non-combat decisions. Used during training and by coordinator.
+
+    trace: optional agent.greedy_trace.GreedyTrace that records the evidence each
+    decision was made with (the in-game advisor's reasons). None records nothing
+    and takes the same code path."""
     decision = state.get("decision", "")
     if _RANDOMIZE_DECISIONS:
         _rnd = _random_choice_for(state)
         if _rnd is not None:
+            if trace is not None:
+                trace.rule("greedy.randomized", "fired", decision=decision)
             return _rnd
     if _decision_advisor_enabled():
         advised = _decision_advisor.choose(state)
         if advised is not None:
+            if trace is not None:
+                trace.rule("greedy.decision_advisor", "fired", decision=decision)
             return advised
 
     if decision == "map_select":
@@ -515,7 +523,8 @@ def greedy_action(state: dict) -> dict:
             # one. The marginal card is still net-positive value, so skipping it
             # costs more power than the tighter deck returns. Deck size is a
             # SYMPTOM of deep runs, not the cause of the boss loss.
-            threshold += _card_threshold_lift()
+            lift = _card_threshold_lift()
+            threshold += lift
             # Provide game-state context for MC rollout (no-op when STS2_MC_ROLLOUT
             # is off — the v2 predictor path doesn't read it).
             from agent.card_scoring import set_mc_context as _set_mc_ctx
@@ -539,7 +548,8 @@ def greedy_action(state: dict) -> dict:
                 and isinstance(floor, (int, float))
                 and floor >= 12
             )
-            if _card_quality_gate_enabled() and late_act1:
+            gate_on = _card_quality_gate_enabled() and late_act1
+            if gate_on:
                 act = state.get("act") or (state.get("context") or {}).get("act")
                 indexed_cards = [
                     (original_index, card)
@@ -548,16 +558,43 @@ def greedy_action(state: dict) -> dict:
                 ]
                 if not indexed_cards and state.get("can_skip") is False:
                     indexed_cards = list(enumerate(cards))
+            if trace is not None:
+                kept = {i for i, _ in indexed_cards}
+                for i in range(len(cards)):
+                    if i not in kept:
+                        trace.option(i, kind="card", status="filtered")
+                reward_values = {"threshold": threshold, "lift": lift, "act": _act,
+                                 "deck_size": deck_size, "quality_gate": gate_on}
             eligible_cards = [card for _, card in indexed_cards]
             if not eligible_cards:
+                if trace is not None:
+                    trace.rule("card_reward.all_filtered", "fired", **reward_values)
                 return {"cmd": "action", "action": "skip_card_reward"}
+            # The trace kwargs are passed only when tracing, so the untraced
+            # call is exactly the pre-trace call (test doubles of
+            # pick_best_card take just threshold= and deck=).
+            trace_kwargs = ({"trace": trace,
+                             "trace_indices": [i for i, _ in indexed_cards]}
+                            if trace is not None else {})
             best_eligible = pick_best_card(
-                eligible_cards, threshold=threshold, deck=deck
+                eligible_cards, threshold=threshold, deck=deck, **trace_kwargs
             )
             if best_eligible is not None:
                 best = indexed_cards[best_eligible][0]
+                if trace is not None:
+                    trace.rule("card_reward.pick_best", "fired", best_index=best,
+                               best_score=trace.score_of("card", best), **reward_values)
                 return {"cmd": "action", "action": "select_card_reward",
                         "args": {"card_index": best}}
+            if trace is not None:
+                ok = trace.ok_scores("card")
+                if ok:
+                    trace.rule("card_reward.below_threshold", "fired",
+                               best_score=max(ok), **reward_values)
+                else:
+                    trace.rule("card_reward.all_broken", "fired", **reward_values)
+        elif trace is not None:
+            trace.rule("card_reward.no_cards", "fired")
         return {"cmd": "action", "action": "skip_card_reward"}
 
     elif decision == "rest_site":
@@ -736,6 +773,8 @@ def greedy_action(state: dict) -> dict:
                             "args": {"potion_index": best_potion.get("index", 0)}}
         return {"cmd": "action", "action": "leave_room"}
 
+    if trace is not None:
+        trace.rule("greedy.unhandled", "fired", decision=decision)
     return {"cmd": "action", "action": "proceed"}
 
 
