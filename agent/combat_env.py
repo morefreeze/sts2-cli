@@ -478,6 +478,8 @@ def greedy_action(state: dict, trace=None) -> dict:
     if decision == "map_select":
         choices = state.get("choices", [])
         if choices:
+            if trace is not None:
+                return _map_strategy.choose(state, choices, trace=trace)
             return _map_strategy.choose(state, choices)
 
     elif decision == "card_reward":

@@ -437,3 +437,25 @@ def test_shop_remove_basic_is_skipped_for_other_characters_basics(character):
     assert rule["outcome"] == "fired"
     assert rule["values"]["basic_scope"] == "all"
     assert rule["values"]["n_basic"] >= 3
+
+
+def test_map_evidence_matches_choice():
+    n = 0
+    unhandled = 0
+    for row, action, trace in traced_corpus("map_select"):
+        fired = trace.fired()
+        if action["action"] != "select_map_node":
+            # no choices to pick from: greedy falls through to its proceed default
+            assert [r["key"] for r in fired] == ["greedy.unhandled"]
+            assert not row["state"].get("choices")
+            unhandled += 1
+            continue
+        assert [r["key"] for r in fired] == ["map.pick_min_priority"]
+        args = action["args"]
+        idx = next(i for i, c in enumerate(row["state"]["choices"])
+                   if c["col"] == args["col"] and c["row"] == args["row"])
+        assert trace.score_of("node", idx) == min(trace.ok_scores("node"))
+        _sums_match(trace)
+        n += 1
+    assert n > 0
+    assert unhandled > 0  # the corpus' empty-choices row

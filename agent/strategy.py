@@ -74,7 +74,7 @@ class HpAwareMapStrategy(Act1SafeStrategy):
     ACT2_START = 16          # Act 2 begins at floor 16
     ACT2_BOSS_ZONE = 19      # pre-Act-2-boss zone: save HP
 
-    def choose(self, state: dict, choices: list[dict]) -> dict:
+    def choose(self, state: dict, choices: list[dict], trace=None) -> dict:
         player = state.get("player", {})
         hp = player.get("hp", 80)
         max_hp = max(player.get("max_hp", 80), 1)
@@ -85,42 +85,60 @@ class HpAwareMapStrategy(Act1SafeStrategy):
 
         scored = []
         for i, c in enumerate(choices):
-            p = self.PRIORITY.get(c.get("type", "Unknown"), 4)
+            base = self.PRIORITY.get(c.get("type", "Unknown"), 4)
+            p = base
+            comps = [("map.base_priority", base, c.get("type"))]
             # Shop value scales up in Act 2 — lower gold threshold
             act2_shop_threshold = 75 if in_act2 else self.SHOP_GOLD_THRESHOLD
             if c.get("type") == "Shop" and gold < act2_shop_threshold:
                 p += 5
+                comps.append(("map.shop_low_gold", 5, None))
             if c.get("type") == "Elite":
                 # Floor-based early avoidance (inherited logic)
                 if isinstance(floor, int) and floor < self.ELITE_AVOID_FLOOR:
                     p += 10
+                    comps.append(("map.elite_early_floor", 10, None))
                 # HP-based avoidance — takes priority over floor preference
                 if hp_ratio < self.HP_DANGER:
                     p += 15
+                    comps.append(("map.elite_hp_danger", 15, None))
                 elif hp_ratio < self.HP_LOW:
                     p += 7
+                    comps.append(("map.elite_hp_low", 7, None))
                 elif in_act2:
                     # Act 2 elites: only seek them at 90%+ HP; otherwise avoid
                     if hp_ratio >= 0.90:
                         p -= 1.0  # healthy enough to risk Act 2 elite for relic
+                        comps.append(("map.elite_act2_healthy", -1.0, None))
                     else:
                         p += 5  # Act 2 elites are significantly harder
+                        comps.append(("map.elite_act2", 5, None))
                 elif hp_ratio >= self.HP_STRONG and isinstance(floor, int) and floor > self.ELITE_PREFER_FLOOR and floor <= 12:
                     p -= 1.9  # very healthy (85%+) + mid-game: elites worth it for relics
                     # Use 1.9 not 2.0: prevents Elite from tying Unknown/Event (p=4)
                     # when both appear — tied priority resolves by index (Elite=0 wins), which
                     # would silently prefer combat over a safe event room.
                     # HP_STRONG raised to 0.85: runs at 75-85% HP shouldn't seek elites.
+                    comps.append(("map.elite_strong_midgame", -1.9, None))
                 elif isinstance(floor, int) and floor >= 13:
                     p += 3  # pre-boss zone: save HP for boss fight, avoid elites
                               # Jun 10 attempted +10 boost (strong avoid) regressed boss-reach
                               # 13%→0% even though avg_floor rose — paths around elite force
                               # tougher unavoidable fights. Reverted to +3.
+                    comps.append(("map.elite_pre_boss", 3, None))
                 if isinstance(floor, int) and floor >= self.ACT2_BOSS_ZONE:
                     p += 4  # pre-Act-2-boss: strongly avoid elites regardless of HP
+                    comps.append(("map.elite_act2_boss_zone", 4, None))
+            if trace is not None:
+                trace.option(i, kind="node", score=p, components=comps,
+                             detail={"col": c.get("col"), "row": c.get("row"),
+                                     "type": c.get("type")})
             scored.append((p, i, c))
         scored.sort()
         best = scored[0][2]
+        if trace is not None:
+            trace.rule("map.pick_min_priority", "fired", best_index=scored[0][1],
+                       hp_ratio=hp_ratio, gold=gold, floor=floor, in_act2=in_act2)
         return {"cmd": "action", "action": "select_map_node",
                 "args": {"col": best["col"], "row": best["row"]}}
 
