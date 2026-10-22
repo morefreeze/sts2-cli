@@ -100,3 +100,21 @@ def test_corpus_event_keyword_rows_are_two_option_flips():
         assert (phrases[0] == keyword) == (kw_score < rival_score)
         picked = row["expected"]["args"]["option_index"]
         assert phrases[picked] == (keyword if kw_score > rival_score else rival)
+
+
+# remove_card_hp_cost's phrase also fires remove_card (it trims remove_card's +6);
+# every other phrase fires exactly its own branch.
+EXPECTED_HIT_KEYS = {
+    "event.kw.remove_card_hp_cost": ["event.kw.remove_card", "event.kw.remove_card_hp_cost"],
+}
+
+
+@pytest.mark.parametrize("key", list(bac.EVENT_KEYWORD_CASES), ids=lambda k: k)
+def test_keyword_phrase_records_its_own_key(key):
+    """The score table cannot tell two equal-valued branches apart (heal and
+    potion are both +2.0); this ties each phrase to the key it is reported under."""
+    title, description = bac.EVENT_KEYWORD_CASES[key]
+    hits = []
+    got = _score_event_option({"title": title, "description": description}, hits)
+    assert [h[0] for h in hits] == EXPECTED_HIT_KEYS.get(key, [key])
+    assert sum(h[1] for h in hits) == got == EXPECTED_SCORES[(title, description)]
