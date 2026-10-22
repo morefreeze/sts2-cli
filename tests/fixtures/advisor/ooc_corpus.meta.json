@@ -1,0 +1,16 @@
+{
+  "batch": "logs/batches/p3b-route-ab-20261012-160225",
+  "data_sha256": {
+    "data/advisor_card_ratings.json": "4a404bc0fcc686b805356d28849c911a7945c2f144e36942b881be37ddbe0531",
+    "data/advisor_card_tags.json": "9a0b9cabb4948a4b1e03c7cf9b347e2c81a8d8f8a154d27e9a574ae2c3d7e7ea",
+    "data/card_empirical.json": "777ace945f57027c4d464742ac099ad460b20e442839887566c92a9776e71ce6",
+    "data/card_metadata.json": "4971e8fd4193ba415bdcb23e4ebcbf86b40cd60615afb128ceeda6abf660cbad",
+    "data/card_q_values.json": "80e3678509baaac51c7cc9ae209cd617307025303baa699504a1b913cc5258b9",
+    "data/card_synergies.py": "e7916face146b8788b946156227a7eae98ddd2d64db368b3e2a93abea6a1b82b",
+    "data/deck_predictor.pkl": "bce853dad0d355c243665826de2312577f36b335f47e95bbf5f4b81944a4ff8a",
+    "data/deck_predictor_hp.pkl": "6f9a9763dd7b27963ed44ff01f359f9265a6c11f1e52ded6feef750b7ec9864d",
+    "data/deck_predictor_v2.pkl": "b34cf22d9e295d5367fc5c51742b22974a2b242d8f5f4b2050cf0801a720da3c",
+    "data/ironclad_card_tags.json": "c5e5d716dfe5b3155ae66eb3d6cf25130c123106d31f9179e80c683b47091945",
+    "data/ironclad_cards.json": "4af2a8905ff8add14c4fffaa046dea758666102df02898b6c9e34babdf1177fc"
+  }
+}

@@ -11,6 +11,9 @@ A key outside TRACE_KEYS raises KeyError, so a typo fails the advisor's tests
 """
 from __future__ import annotations
 
+import hashlib
+import os
+
 # Env vars that change what greedy_action picks: play_full_run.GREEDY_KNOBS plus
 # three it does not stamp (STS2_CARD_PICK_TEMP, STS2_MC_ROLLOUT,
 # STS2_VANTOM_REST_HEAL) and six that agent/card_scoring.py reads
@@ -28,6 +31,34 @@ GREEDY_BEHAVIOR_ENV = (
     "STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
     "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET", "STS2_MC_SMART_THRESH",
 )
+
+# Local data files greedy_action's choices depend on (each loaded by
+# agent/card_scoring.py; mostly gitignored under data/), repo-relative. The
+# golden corpus records their sha256 so a changed file fails loudly, not as a
+# mysterious golden mismatch.
+GREEDY_DATA_FILES = (
+    "data/advisor_card_ratings.json", "data/advisor_card_tags.json",
+    "data/card_empirical.json", "data/card_metadata.json",
+    "data/card_q_values.json", "data/card_synergies.py",
+    "data/deck_predictor.pkl", "data/deck_predictor_v2.pkl",
+    "data/deck_predictor_hp.pkl", "data/ironclad_card_tags.json",
+    "data/ironclad_cards.json",
+)
+
+
+def greedy_data_sha256(root: str | None = None) -> dict:
+    """{GREEDY_DATA_FILES entry: sha256 hex, or None if the file is absent}."""
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = {}
+    for rel in GREEDY_DATA_FILES:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            out[rel] = None
+            continue
+        with open(path, "rb") as f:
+            out[rel] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
 
 # card_scoring._MC_CONTEXT as the module defines it at import time.
 MC_CONTEXT_START = {"hp": 80, "max_hp": 80, "floor": 5}
