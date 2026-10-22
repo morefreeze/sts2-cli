@@ -230,3 +230,52 @@ def test_rest_site_must_upgrade_says_when_smith_is_unavailable():
     assert trace.rules[-1]["key"] == "rest.fallback"
     assert trace.rules[-1]["outcome"] == "fired"
     assert len(trace.fired()) == 1
+
+
+def test_event_evidence_matches_choice():
+    n = 0
+    for row, action, trace in traced_corpus("event_choice"):
+        fired = trace.fired()
+        assert len(fired) == 1, trace.rules
+        if action["action"] == "choose_option":
+            idx = action["args"]["option_index"]
+            assert fired[0]["key"] == "event.pick_best"
+            assert trace.score_of("option", idx) == max(trace.ok_scores("option"))
+        else:
+            assert fired[0]["key"] == "event.no_available"
+        locked = {o["index"] for o in row["state"]["options"] if o.get("is_locked")}
+        for opt in trace.to_dict()["options"]:
+            assert (opt["status"] == "locked") == (opt["index"] in locked)
+        _sums_match(trace)
+        n += 1
+    assert n > 0
+
+
+def test_event_keyword_hits_are_recorded():
+    from agent.combat_env import _score_event_option
+    hits = []
+    # text = "obtain a rare card  lose 5 hp.": lose_hp (-2) fires ("lose" + "hp",
+    # no "max"), then rare_card (+8) ("rare" + "card"); the elif'd card_reward
+    # branch is skipped. lose_hp precedes rare_card in the source.
+    score = _score_event_option(
+        {"title": "Obtain a Rare card", "description": "Lose 5 HP."}, hits)
+    assert [h[0] for h in hits] == ["event.kw.lose_hp", "event.kw.rare_card"]
+    assert score == sum(h[1] for h in hits) == 6.0
+
+
+def test_event_keyword_hits_follow_source_order_and_cover_every_branch():
+    """Hits come out in _score_event_option's source order (= EVENT_KEYWORD_KEYS
+    order), each branch at most once; across the corpus every branch fires."""
+    from agent.greedy_trace import EVENT_KEYWORD_KEYS
+    position = {key: i for i, key in enumerate(EVENT_KEYWORD_KEYS)}
+    seen = set()
+    for row, _action, trace in traced_corpus("event_choice"):
+        for opt in trace.to_dict()["options"]:
+            if opt["status"] != "ok":
+                continue
+            keys = [c["key"] for c in opt["components"]]
+            assert all(k in position for k in keys), (row["game"], row["seq"], keys)
+            places = [position[k] for k in keys]
+            assert places == sorted(set(places)), (row["game"], row["seq"], keys)
+            seen.update(keys)
+    assert seen == set(EVENT_KEYWORD_KEYS), sorted(set(EVENT_KEYWORD_KEYS) - seen)

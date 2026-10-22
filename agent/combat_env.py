@@ -243,8 +243,18 @@ def _score_shop_potion(potion: dict) -> float:
 #       Ironclad     10.992 -> 10.967  (-0.025, p=0.81)
 #     All three negative. Removed rather than shipped default-off, per the same rule that
 #     retired the deck-size penalty: a knob measured harmful is worse than a null one.
-def _score_event_option(opt: dict) -> float:
-    """Score an event option by keyword analysis. Higher = better."""
+def _kw(score: float, hits, key: str, delta: float) -> float:
+    """One _score_event_option keyword branch: add delta, note it in hits."""
+    if hits is not None:
+        hits.append((key, delta, None))
+    return score + delta
+
+
+def _score_event_option(opt: dict, hits: list | None = None) -> float:
+    """Score an event option by keyword analysis. Higher = better.
+
+    hits: if a list, gets (trace key, delta, None) for every branch that fired.
+    """
     import re as _re
     title = (opt.get("title") or "").lower()
     desc = (opt.get("description") or "").lower()
@@ -260,68 +270,68 @@ def _score_event_option(opt: dict) -> float:
     _lose_max_hp = ("lose max" in text or "maximum hp" in text or
                     bool(_re.search(r'lose\s+(?:\{[^}]+\}|\d+)\s+max\s*hp', text)))
     if _lose_max_hp:
-        score -= 10.0
+        score = _kw(score, hits, "event.kw.lose_max_hp", -10.0)
     if "curse" in text:
-        score -= 8.0
+        score = _kw(score, hits, "event.kw.curse", -8.0)
     # "lose ALL gold" — losing all gold is very bad
     if "lose" in text and "all" in text and "gold" in text:
-        score -= 5.0
+        score = _kw(score, hits, "event.kw.lose_all_gold", -5.0)
     elif "lose" in text and "gold" in text:
-        score -= 2.0
+        score = _kw(score, hits, "event.kw.lose_gold", -2.0)
     if "torment" in title:
-        score -= 5.0  # Neow's Torment adds a negative card
+        score = _kw(score, hits, "event.kw.torment", -5.0)  # Neow's Torment adds a negative card
     if "take" in text and "damage" in text:
-        score -= 2.0  # one-time HP loss is recoverable; was -3 (too harsh for HP→MaxHP trades)
+        score = _kw(score, hits, "event.kw.take_damage", -2.0)  # one-time HP loss is recoverable; was -3 (too harsh for HP→MaxHP trades)
     if "lose" in text and "hp" in text and "max" not in text:
-        score -= 2.0  # "Lose N HP" phrasing (same cost as take damage)
+        score = _kw(score, hits, "event.kw.lose_hp", -2.0)  # "Lose N HP" phrasing (same cost as take damage)
     if "downgrade" in text:
-        score -= 4.0  # downgrading cards is very bad
+        score = _kw(score, hits, "event.kw.downgrade", -4.0)  # downgrading cards is very bad
     # Negative: adds basic/weak cards to deck
     if "add" in text and ("additional strike" in text or "additional defend" in text):
-        score -= 3.0
+        score = _kw(score, hits, "event.kw.add_basic", -3.0)
     # Strong positives
     if "rare" in text and ("card" in text or "obtain" in text or "random" in text):
-        score += 8.0
+        score = _kw(score, hits, "event.kw.rare_card", 8.0)
     elif "uncommon" in text and "card" in text:
-        score += 4.0  # uncommon card reward: decent, not as good as rare
+        score = _kw(score, hits, "event.kw.uncommon_card", 4.0)  # uncommon card reward: decent, not as good as rare
     elif "card" in text and ("obtain" in text or "choose" in text) and "curse" not in text:
-        score += 2.0  # generic card reward (common): better than nothing
+        score = _kw(score, hits, "event.kw.card_reward", 2.0)  # generic card reward (common): better than nothing
     if "remove" in text and ("card" in text or "deck" in text):
-        score += 6.0  # deck thinning = very valuable
+        score = _kw(score, hits, "event.kw.remove_card", 6.0)  # deck thinning = very valuable
     # Removing cards at HP cost (e.g. Precarious Shears): net value reduced vs free removal
     if "remove" in text and ("card" in text or "deck" in text) and "hp" in text and "curse" not in text:
-        score -= 3.0
+        score = _kw(score, hits, "event.kw.remove_card_hp_cost", -3.0)
     if "relic" in text and "add" not in text:
-        score += 5.0  # relics without downside
+        score = _kw(score, hits, "event.kw.relic", 5.0)  # relics without downside
     elif "relic" in text:
-        score += 2.0  # relics with some downside (e.g. also adds Strike)
+        score = _kw(score, hits, "event.kw.relic_with_downside", 2.0)  # relics with some downside (e.g. also adds Strike)
     if "upgrade" in text:
-        score += 4.0
+        score = _kw(score, hits, "event.kw.upgrade", 4.0)
     if "transform" in text:
-        score += 3.0  # transform replaces bad starters with random cards
+        score = _kw(score, hits, "event.kw.transform", 3.0)  # transform replaces bad starters with random cards
     # Use word-boundary search for "gain" to avoid "bargain", "again", "regain" false positives
     _gain = bool(_re.search(r'\bgain\b', text))
     if _gain and "gold" in text:
-        score += 3.0
+        score = _kw(score, hits, "event.kw.gain_gold", 3.0)
     if "max hp" in text and ("raise" in text or "increase" in text or _gain):
-        score += 3.0  # gaining max HP is good
+        score = _kw(score, hits, "event.kw.gain_max_hp", 3.0)  # gaining max HP is good
     if "potion" in text:
-        score += 2.0
+        score = _kw(score, hits, "event.kw.potion", 2.0)
     if "heal" in text and "hp" in text:
-        score += 2.0
+        score = _kw(score, hits, "event.kw.heal", 2.0)
     if "colorless" in text and "card" in text:
-        score += 2.0  # colorless cards add utility
+        score = _kw(score, hits, "event.kw.colorless_card", 2.0)  # colorless cards add utility
     # Permanent stat gains are very strong
     if "strength" in text and _gain and "enem" not in text and "lose" not in text:
-        score += 4.0  # +str permanently is game-warping for Ironclad
+        score = _kw(score, hits, "event.kw.gain_strength", 4.0)  # +str permanently is game-warping for Ironclad
     elif "strength" in text and _gain and "enem" in text:
-        score -= 3.0  # enemies gaining strength is very bad
+        score = _kw(score, hits, "event.kw.enemy_strength", -3.0)  # enemies gaining strength is very bad
     if "dexterity" in text and _gain and "enem" not in text and "lose" not in text:
-        score += 3.0  # +dex permanently is strong defense
+        score = _kw(score, hits, "event.kw.gain_dexterity", 3.0)  # +dex permanently is strong defense
     if "energy" in text and "each turn" in text and "lose" not in text:
-        score += 5.0  # extra energy per turn = unlimited scaling
+        score = _kw(score, hits, "event.kw.energy_each_turn", 5.0)  # extra energy per turn = unlimited scaling
     elif "energy" in text and _gain and "lose" not in text:
-        score += 1.5  # one-time energy gain: small but real value
+        score = _kw(score, hits, "event.kw.energy_once", 1.5)  # one-time energy gain: small but real value
     return score
 
 
@@ -606,10 +616,25 @@ def greedy_action(state: dict, trace=None) -> dict:
     elif decision == "event_choice":
         options = state.get("options", [])
         available = [o for o in options if not o.get("is_locked")]
+        if trace is not None:
+            for o in options:
+                if o.get("is_locked"):
+                    trace.option(o["index"], kind="option", status="locked")
         if available:
-            best = max(available, key=_score_event_option)
+            def _event_key(o):
+                hits = [] if trace is not None else None
+                score = _score_event_option(o, hits)
+                if trace is not None:
+                    trace.option(o["index"], kind="option", score=score, components=hits)
+                return score
+            best = max(available, key=_event_key)
+            if trace is not None:
+                trace.rule("event.pick_best", "fired", best_index=best["index"],
+                           n_options=len(options))
             return {"cmd": "action", "action": "choose_option",
                     "args": {"option_index": best["index"]}}
+        if trace is not None:
+            trace.rule("event.no_available", "fired", n_options=len(options))
         return {"cmd": "action", "action": "leave_room"}
 
     elif decision == "bundle_select":
