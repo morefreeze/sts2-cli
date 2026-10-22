@@ -601,7 +601,7 @@ def greedy_action(state: dict, trace=None) -> dict:
         return {"cmd": "action", "action": "skip_card_reward"}
 
     elif decision == "rest_site":
-        return rest_site_action(state, state.get("options", []))
+        return rest_site_action(state, state.get("options", []), trace=trace)
 
     elif decision == "event_choice":
         options = state.get("options", [])

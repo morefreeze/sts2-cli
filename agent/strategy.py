@@ -5,7 +5,7 @@ Swap strategies globally via set_map_strategy() or pass directly.
 """
 from typing import Protocol
 
-from agent.card_scoring import best_smith_target
+from agent.card_scoring import SMITH_PRIORITY_THRESHOLD, best_smith_target
 
 
 class MapStrategy(Protocol):
@@ -125,7 +125,7 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                 "args": {"col": best["col"], "row": best["row"]}}
 
 
-def rest_site_action(state: dict, options: list[dict]) -> dict:
+def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
     """Decide heal vs upgrade at a rest site.
 
     Decision order:
@@ -138,6 +138,9 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
 
     The SMITH-priority override is the change requested 2026-05-06: "even at low
     HP, upgrade if there's a must-upgrade card; don't always rest."
+
+    trace (agent.greedy_trace.GreedyTrace) records each rule checked, in order, up to
+    the one that decided.
     """
     player = state.get("player", {})
     hp = player.get("hp", 0)
@@ -187,7 +190,8 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
     heal  = next((o for o in enabled if "heal"  in (o.get("option_id") or "").lower()), None)
     smith = next((o for o in enabled if "smith" in (o.get("option_id") or "").lower()), None)
 
-    has_must_upgrade = smith is not None and best_smith_target(deck) is not None
+    smith_target = best_smith_target(deck) if smith is not None else None
+    has_must_upgrade = smith_target is not None
 
     # SMITH-override pays off when many combats remain; loses when boss is next.
     # Floor 14+ = pre-boss zone (boss at 17, max 2 fights remain), so HEAL wins.
@@ -203,22 +207,41 @@ def rest_site_action(state: dict, options: list[dict]) -> dict:
         and 11 <= floor <= 13
         and hp_ratio < 0.70
     )
-    if hp_ratio < CRITICAL_HEAL and heal is not None:
-        choice = heal
-    elif vantom_mid_boss_low and heal is not None:
-        choice = heal
-    elif pre_boss_zone and hp_ratio < heal_threshold and heal is not None:
-        choice = heal  # boss prep: HEAL over SMITH at floor 14+
-    elif has_must_upgrade:
-        choice = smith
-    elif hp_ratio < heal_threshold and heal is not None:
-        choice = heal
-    elif smith is not None:
-        choice = smith
+    # Same conditions, same order as the if/elif chain this replaced; every
+    # condition is a side-effect-free boolean, so evaluating them all up front
+    # (to record the skipped ones) cannot change which rule decides.
+    # "rest.pre_boss_heal" is the boss-prep rule: HEAL over SMITH at floor 14+.
+    checks = (
+        ("rest.critical_heal", hp_ratio < CRITICAL_HEAL and heal is not None, heal,
+         {"hp_ratio": hp_ratio, "threshold": CRITICAL_HEAL, "floor": floor}),
+        ("rest.vantom_mid_boss", vantom_mid_boss_low and heal is not None, heal,
+         {"enabled": vantom_rest_heal_enabled, "hp_ratio": hp_ratio, "floor": floor}),
+        ("rest.pre_boss_heal",
+         pre_boss_zone and hp_ratio < heal_threshold and heal is not None, heal,
+         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor}),
+        ("rest.must_upgrade", has_must_upgrade, smith,
+         {"deck_index": smith_target, "threshold": SMITH_PRIORITY_THRESHOLD}),
+        ("rest.heal_threshold", hp_ratio < heal_threshold and heal is not None, heal,
+         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor}),
+        ("rest.default_smith", smith is not None, smith, {}),
+    )
+    choice = None
+    for key, applies, option, values in checks:
+        if applies:
+            choice = option
+            if trace is not None:
+                trace.rule(key, "fired", **values)
+            break
+        if trace is not None:
+            trace.rule(key, "skipped", **values)
     else:
         choice = heal or (enabled[0] if enabled else None)
+        if trace is not None and choice:
+            trace.rule("rest.fallback", "fired")
 
     if choice:
         return {"cmd": "action", "action": "choose_option",
                 "args": {"option_index": choice["index"]}}
+    if trace is not None:
+        trace.rule("rest.no_choice", "fired")
     return {"cmd": "action", "action": "proceed"}
