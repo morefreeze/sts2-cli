@@ -1,5 +1,7 @@
 """greedy_action(state, trace=...) records the evidence it decided with, and the
 evidence agrees with the choice. Replays the corpus in game order."""
+import json
+
 import pytest
 
 from agent.combat_env import greedy_action
@@ -22,6 +24,8 @@ def traced_corpus(decision=None):
         for row in rows:
             trace = GreedyTrace()
             action = greedy_action(row["state"], trace=trace)
+            # the advisor emits the trace as JSON
+            json.dumps(trace.to_dict(), allow_nan=False)
             if decision is None or row["state"]["decision"] == decision:
                 yield row, action, trace
 

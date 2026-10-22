@@ -549,6 +549,7 @@ def greedy_action(state: dict, trace=None) -> dict:
                 and floor >= 12
             )
             gate_on = _card_quality_gate_enabled() and late_act1
+            gate_fallback = False
             if gate_on:
                 act = state.get("act") or (state.get("context") or {}).get("act")
                 indexed_cards = [
@@ -558,13 +559,15 @@ def greedy_action(state: dict, trace=None) -> dict:
                 ]
                 if not indexed_cards and state.get("can_skip") is False:
                     indexed_cards = list(enumerate(cards))
+                    gate_fallback = True
+            reward_values = {"threshold": threshold, "lift": lift, "act": _act,
+                             "deck_size": deck_size, "quality_gate": gate_on,
+                             "gate_fallback": gate_fallback}
             if trace is not None:
                 kept = {i for i, _ in indexed_cards}
                 for i in range(len(cards)):
                     if i not in kept:
                         trace.option(i, kind="card", status="filtered")
-                reward_values = {"threshold": threshold, "lift": lift, "act": _act,
-                                 "deck_size": deck_size, "quality_gate": gate_on}
             eligible_cards = [card for _, card in indexed_cards]
             if not eligible_cards:
                 if trace is not None:

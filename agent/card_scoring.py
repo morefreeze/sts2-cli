@@ -2507,6 +2507,7 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
     def _reported(i: int) -> int:
         return trace_indices[i] if trace_indices is not None else i
     if trace is not None:
+        assert trace_indices is None or len(trace_indices) == len(cards)
         valid_positions = {i for i, _ in valid}
         for i in range(len(cards)):
             if i not in valid_positions:
@@ -2595,6 +2596,10 @@ def pick_best_card(cards: list[dict], threshold: float = 3.5,
               zip(base, set_bonus, tag_bonus, ct_bonus, bd_bonus, br_bonus,
                   q_bonus, arch_bonus, q_adj)]
     if trace is not None:
+        # card.base is score_card_in_deck (tier base + context/override/empirical
+        # + deck synergy), not the bare tier score; `tier` is its detail. With
+        # STS2_CARD_PICK_TEMP > 0 the pick may be sampled rather than the max
+        # (the advisor warns on that env var).
         ratings = _load_advisor_ratings()
         for k, (orig_i, c) in enumerate(valid):
             tier = (ratings.get(_card_id_norm(c)) or {}).get("tier")
