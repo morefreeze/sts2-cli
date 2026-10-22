@@ -640,10 +640,20 @@ def greedy_action(state: dict, trace=None) -> dict:
     elif decision == "bundle_select":
         bundles = state.get("bundles", [])
         if len(bundles) >= 2:
-            scores = [sum(score_card(c) for c in b.get("cards", [])) for b in bundles]
+            scores = []
+            for bi, b in enumerate(bundles):
+                card_scores = [score_card(c) for c in b.get("cards", [])]
+                scores.append(sum(card_scores))
+                if trace is not None:
+                    trace.option(bi, kind="bundle", score=scores[-1], components=[
+                        ("bundle.card", s, ci) for ci, s in enumerate(card_scores)])
             best_idx = scores.index(max(scores))
+            if trace is not None:
+                trace.rule("bundle.pick_best", "fired", best_index=best_idx)
         else:
             best_idx = 0
+            if trace is not None:
+                trace.rule("bundle.single", "fired", n_bundles=len(bundles))
         return {"cmd": "action", "action": "select_bundle", "args": {"bundle_index": best_idx}}
 
     elif decision == "card_select":
@@ -651,32 +661,51 @@ def greedy_action(state: dict, trace=None) -> dict:
         if cards:
             room_type = state.get("context", {}).get("room_type", "")
             max_sel = max(state.get("max_select", 1), 1)
-            combat_rooms = ("RestSiteRoom", "Boss", "Monster", "Elite", "CombatRoom")
+            select_values = {"room_type": room_type, "n_cards": len(cards),
+                             "max_select": max_sel}
+            # trace is passed to pick_best_card only when tracing, so the
+            # untraced call is the pre-trace call (test doubles of
+            # pick_best_card take just threshold= and deck=).
+            trace_kwargs = {"trace": trace} if trace is not None else {}
             if "rest" in room_type.lower():
                 # SMITH upgrade: always single-card selection, pick best
-                best = pick_best_card(cards, threshold=0.0)
+                best = pick_best_card(cards, threshold=0.0, **trace_kwargs)
                 idx = best if best is not None else 0
+                if trace is not None:
+                    trace.rule("card_select.rest_best", "fired", picked=idx, **select_values)
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             elif room_type in ("Boss", "Monster", "Elite", "CombatRoom") or not room_type:
                 # Mid-combat select (potion: pick best; boss mechanic: rare, pick best as heuristic)
-                best = pick_best_card(cards, threshold=0.0)
+                best = pick_best_card(cards, threshold=0.0, **trace_kwargs)
                 idx = best if best is not None else 0
+                if trace is not None:
+                    trace.rule("card_select.combat_best", "fired", picked=idx, **select_values)
                 return {"cmd": "action", "action": "select_cards", "args": {"indices": str(idx)}}
             else:
                 # Distinguish "add N from external pool" vs "remove/transform from deck"
                 # External event pools (discover/cheese) never contain Strikes/Defends.
                 # Deck selections (remove/transform) always include the player's junk cards.
-                has_junk = any(score_card(c) < 3.0 for c in cards)
+                card_scores = [score_card(c) for c in cards]
+                has_junk = any(s < 3.0 for s in card_scores)
                 is_deck_selection = has_junk or len(cards) > 10
                 if not is_deck_selection:
                     # External pool (no junk, small-ish): event "add N cards" — pick best N
-                    scored_by = sorted(enumerate(cards), key=lambda x: score_card(x[1]), reverse=True)
+                    scored_by = sorted(enumerate(cards), key=lambda x: card_scores[x[0]], reverse=True)
                 else:
                     # Deck selection (remove/transform): pick worst N
-                    scored_by = sorted(enumerate(cards), key=lambda x: score_card(x[1]))
+                    scored_by = sorted(enumerate(cards), key=lambda x: card_scores[x[0]])
                 selected = [str(scored_by[k][0]) for k in range(min(max_sel, len(scored_by)))]
+                if trace is not None:
+                    for i, s in enumerate(card_scores):
+                        trace.option(i, kind="card", score=s, components=[("card.score", s, None)])
+                    trace.rule("card_select.lowest_scores" if is_deck_selection
+                               else "card_select.top_scores", "fired",
+                               has_junk=has_junk, picked=[int(i) for i in selected],
+                               **select_values)
                 return {"cmd": "action", "action": "select_cards",
                         "args": {"indices": ",".join(selected)}}
+        if trace is not None:
+            trace.rule("card_select.no_cards", "fired")
         return {"cmd": "action", "action": "skip_select"}
 
     elif decision == "shop":

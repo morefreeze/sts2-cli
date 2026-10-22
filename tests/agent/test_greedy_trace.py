@@ -17,18 +17,41 @@ def _hermetic_greedy():
     fresh_greedy_state()
 
 
+# The traced replay of the whole corpus costs ~10 s and nearly every test below
+# wants a slice of it, so it is computed once per process (on first use, under
+# the autouse fixture's fresh greedy state, starting each game from
+# reset_greedy_context() exactly as a per-test replay did) and every caller gets
+# a deep copy: a test cannot mutate what the next one sees.
+_TRACED_CORPUS = None
+
+
+def _traced_corpus_all():
+    global _TRACED_CORPUS
+    if _TRACED_CORPUS is None:
+        out = []
+        for _game, rows in corpus_games():
+            reset_greedy_context()
+            for row in rows:
+                trace = GreedyTrace()
+                action = greedy_action(row["state"], trace=trace)
+                # the advisor emits the trace as JSON
+                json.dumps(trace.to_dict(), allow_nan=False)
+                out.append((row, action, trace))
+        _TRACED_CORPUS = out
+    return _TRACED_CORPUS
+
+
 def traced_corpus(decision=None):
     """(row, action, trace) for every corpus state of `decision` (None = all).
-    Every state is replayed (traced) so greedy's hidden context stays in step."""
-    for _game, rows in corpus_games():
-        reset_greedy_context()
-        for row in rows:
-            trace = GreedyTrace()
-            action = greedy_action(row["state"], trace=trace)
-            # the advisor emits the trace as JSON
-            json.dumps(trace.to_dict(), allow_nan=False)
-            if decision is None or row["state"]["decision"] == decision:
-                yield row, action, trace
+    Every state is replayed (traced) in game order so greedy's hidden context
+    stays in step; the replay runs once per process and each call yields deep
+    copies of the cached results.
+
+    Tests that set an environment variable (or otherwise change what greedy
+    does) must call greedy_action themselves, not use this."""
+    for row, action, trace in _traced_corpus_all():
+        if decision is None or row["state"]["decision"] == decision:
+            yield copy.deepcopy((row, action, trace))
 
 
 def _sums_match(trace):
@@ -279,3 +302,46 @@ def test_event_keyword_hits_follow_source_order_and_cover_every_branch():
             assert places == sorted(set(places)), (row["game"], row["seq"], keys)
             seen.update(keys)
     assert seen == set(EVENT_KEYWORD_KEYS), sorted(set(EVENT_KEYWORD_KEYS) - seen)
+
+
+def test_bundle_evidence_matches_choice():
+    n = 0
+    for row, action, trace in traced_corpus("bundle_select"):
+        fired = trace.fired()
+        assert len(fired) == 1
+        idx = action["args"]["bundle_index"]
+        if fired[0]["key"] == "bundle.pick_best":
+            assert trace.score_of("bundle", idx) == max(trace.ok_scores("bundle"))
+            _sums_match(trace)
+        else:
+            assert fired[0]["key"] == "bundle.single" and idx == 0
+        n += 1
+    assert n > 0
+
+
+def test_card_select_evidence_matches_choice():
+    n = 0
+    for row, action, trace in traced_corpus("card_select"):
+        fired = trace.fired()
+        assert len(fired) == 1, trace.rules
+        key = fired[0]["key"]
+        if action["action"] == "skip_select":
+            assert key == "card_select.no_cards"
+            continue
+        picked = [int(i) for i in action["args"]["indices"].split(",")]
+        scores = {o["index"]: o["score"] for o in trace.to_dict()["options"]
+                  if o["status"] == "ok"}
+        if key in {"card_select.rest_best", "card_select.combat_best"}:
+            assert len(picked) == 1
+            if scores:
+                assert scores[picked[0]] == max(scores.values())
+            else:
+                assert picked == [0]
+        else:
+            assert key in {"card_select.top_scores", "card_select.lowest_scores"}
+            ranked = sorted(scores, key=lambda i: scores[i],
+                            reverse=(key == "card_select.top_scores"))
+            want = [scores[i] for i in ranked[:len(picked)]]
+            assert [scores[i] for i in picked] == want
+        n += 1
+    assert n > 0
