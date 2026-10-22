@@ -12,12 +12,21 @@ A key outside TRACE_KEYS raises KeyError, so a typo fails the advisor's tests
 from __future__ import annotations
 
 # Env vars that change what greedy_action picks: play_full_run.GREEDY_KNOBS plus
-# three it does not stamp. The advisor warns when any is set; the corpus builder
+# three it does not stamp (STS2_CARD_PICK_TEMP, STS2_MC_ROLLOUT,
+# STS2_VANTOM_REST_HEAL) and six that agent/card_scoring.py reads
+# (STS2_ARCHETYPE, STS2_BOSS_READINESS_LIFT, STS2_CTX_WEIGHTS,
+# STS2_OVERRIDE_DELTA_CAP, STS2_PREDICTOR_TARGET, STS2_MC_SMART_THRESH). Several
+# of those are read at import time, so they must be set before `agent` is
+# imported. STS2_MC_DIAG and the CombatEnv-only vars (STS2_MAP_PLANNER,
+# STS2_RUN_EPISODE, STS2_STUCK_DUMP, ...) were reviewed and are not on
+# greedy_action's path. The advisor warns when any is set; the corpus builder
 # refuses to run.
 GREEDY_BEHAVIOR_ENV = (
     "STS2_RANDOMIZE", "STS2_DECISION_ADVISOR", "STS2_CARD_THRESHOLD_LIFT",
     "STS2_BASIC_PURGE_ALL", "STS2_CARD_QUALITY_GATE",
     "STS2_CARD_PICK_TEMP", "STS2_MC_ROLLOUT", "STS2_VANTOM_REST_HEAL",
+    "STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
+    "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET", "STS2_MC_SMART_THRESH",
 )
 
 # card_scoring._MC_CONTEXT as the module defines it at import time.
@@ -80,11 +89,17 @@ def _check_key(key: str) -> None:
 
 
 def reset_greedy_context() -> None:
-    """Put greedy's hidden per-process state back to its import-time value.
+    """Reset card_scoring._MC_CONTEXT to its import-time value (only that).
 
     card_reward rewrites card_scoring._MC_CONTEXT on every call and later
     decisions read it, so a replay that should match a fresh process must
-    reset it at the start of each game."""
+    reset it at the start of each game.
+
+    greedy also reads local, gitignored data files under data/
+    (card_q_values.json, card_empirical.json, card_metadata.json,
+    ironclad_card_tags.json, ironclad_cards.json, deck_predictor*.pkl); those
+    are not reset -- they are part of the configuration (the corpus records
+    their hashes)."""
     from agent import card_scoring
     card_scoring._MC_CONTEXT.clear()
     card_scoring._MC_CONTEXT.update(MC_CONTEXT_START)
@@ -110,6 +125,8 @@ class GreedyTrace:
             if extra is not None:
                 item["detail"] = extra
             comps.append(item)
+        if (kind, int(index)) in self._options:
+            raise ValueError(f"option {kind}:{int(index)} recorded twice")
         entry = {"kind": kind, "index": int(index),
                  "score": None if score is None else float(score),
                  "status": status, "components": comps}
@@ -117,7 +134,7 @@ class GreedyTrace:
             entry["detail"] = detail
         self._options[(kind, int(index))] = entry
 
-    def rule(self, key: str, outcome: str, **values) -> None:
+    def rule(self, key: str, outcome: str, /, **values) -> None:
         _check_key(key)
         if outcome not in RULE_OUTCOMES:
             raise ValueError(f"unknown rule outcome {outcome!r}")

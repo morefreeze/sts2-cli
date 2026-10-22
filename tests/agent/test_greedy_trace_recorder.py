@@ -28,6 +28,7 @@ def test_option_and_rule_round_trip():
     assert d["options"][0]["score"] is None and d["options"][0]["status"] == "filtered"
     assert d["rules"] == [{"key": "card_reward.pick_best", "outcome": "fired",
                            "values": {"best_index": 2, "threshold": 5.5}}]
+    assert sum(c["value"] for c in d["options"][1]["components"]) == d["options"][1]["score"]
     assert t.score_of("card", 2) == 7.5
     assert t.ok_scores("card") == [7.5]
     assert [r["key"] for r in t.fired()] == ["card_reward.pick_best"]
@@ -53,6 +54,10 @@ def test_behavior_env_covers_play_full_run_knobs():
     import play_full_run
     assert set(play_full_run.GREEDY_KNOBS) <= set(GREEDY_BEHAVIOR_ENV)
     assert {"STS2_CARD_PICK_TEMP", "STS2_MC_ROLLOUT", "STS2_VANTOM_REST_HEAL"} <= set(GREEDY_BEHAVIOR_ENV)
+    # read by agent/card_scoring.py on greedy_action's path
+    assert {"STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
+            "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET",
+            "STS2_MC_SMART_THRESH"} <= set(GREEDY_BEHAVIOR_ENV)
 
 
 def test_reset_greedy_context_restores_module_default():
@@ -63,3 +68,39 @@ def test_reset_greedy_context_restores_module_default():
 
 def test_event_keyword_keys_are_trace_keys():
     assert sum(1 for k in TRACE_KEYS if k.startswith("event.kw.")) == 28
+
+
+def test_rule_key_and_outcome_are_positional_only():
+    t = GreedyTrace()
+    t.rule("card_reward.pick_best", "fired", key=1)
+    assert t.rules == [{"key": "card_reward.pick_best", "outcome": "fired",
+                        "values": {"key": 1}}]
+
+
+def test_option_recorded_twice_raises():
+    t = GreedyTrace()
+    t.option(1, kind="card", score=1.0)
+    with pytest.raises(ValueError, match="option card:1 recorded twice"):
+        t.option(1, kind="card", score=2.0)
+    assert t.score_of("card", 1) == 1.0
+    # same index under another kind is a different option
+    t.option(1, kind="relic", score=3.0)
+    assert t.score_of("relic", 1) == 3.0
+
+
+def test_option_detail_appears_in_to_dict():
+    t = GreedyTrace()
+    t.option(0, kind="shop", score=4.0, detail={"price": 75})
+    t.option(1, kind="shop", score=2.0)
+    d = t.to_dict()
+    assert d["options"][0]["detail"] == {"price": 75}
+    assert "detail" not in d["options"][1]
+
+
+def test_to_dict_orders_options_by_kind_then_index():
+    t = GreedyTrace()
+    t.option(0, kind="relic", score=1.0)
+    t.option(2, kind="card", score=1.0)
+    t.option(0, kind="card", score=1.0)
+    assert [(o["kind"], o["index"]) for o in t.to_dict()["options"]] == [
+        ("card", 0), ("card", 2), ("relic", 0)]
