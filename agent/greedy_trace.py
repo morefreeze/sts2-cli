@@ -35,13 +35,16 @@ GREEDY_BEHAVIOR_ENV = (
 # Local data files greedy_action's choices depend on (each loaded by
 # agent/card_scoring.py; mostly gitignored under data/), repo-relative. The
 # golden corpus records their sha256 so a changed file fails loudly, not as a
-# mysterious golden mismatch.
+# mysterious golden mismatch. Left out on purpose: data/deck_predictor.pkl
+# (v1; only loaded when deck_predictor_v2.pkl is absent) and
+# data/deck_predictor_hp.pkl (only with STS2_PREDICTOR_TARGET=hp, which is in
+# GREEDY_BEHAVIOR_ENV) -- an audit hook showed neither is opened under the
+# default env.
 GREEDY_DATA_FILES = (
     "data/advisor_card_ratings.json", "data/advisor_card_tags.json",
     "data/card_empirical.json", "data/card_metadata.json",
     "data/card_q_values.json", "data/card_synergies.py",
-    "data/deck_predictor.pkl", "data/deck_predictor_v2.pkl",
-    "data/deck_predictor_hp.pkl", "data/ironclad_card_tags.json",
+    "data/deck_predictor_v2.pkl", "data/ironclad_card_tags.json",
     "data/ironclad_cards.json",
 )
 
@@ -126,9 +129,7 @@ def reset_greedy_context() -> None:
     decisions read it, so a replay that should match a fresh process must
     reset it at the start of each game.
 
-    greedy also reads local, gitignored data files under data/
-    (card_q_values.json, card_empirical.json, card_metadata.json,
-    ironclad_card_tags.json, ironclad_cards.json, deck_predictor*.pkl); those
+    greedy also reads local data files under data/ (GREEDY_DATA_FILES); those
     are not reset -- they are part of the configuration (the corpus records
     their hashes)."""
     from agent import card_scoring

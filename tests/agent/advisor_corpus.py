@@ -9,7 +9,8 @@ import os
 
 import pytest
 
-from agent.greedy_trace import greedy_data_sha256
+from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, greedy_data_sha256,
+                                reset_greedy_context)
 
 CORPUS = os.path.join(os.path.dirname(__file__), "..", "fixtures", "advisor",
                       "ooc_corpus.jsonl.gz")
@@ -18,7 +19,7 @@ META = os.path.join(os.path.dirname(__file__), "..", "fixtures", "advisor",
 
 
 def corpus_rows() -> list:
-    with gzip.open(CORPUS, "rt") as f:
+    with gzip.open(CORPUS, "rt", encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
 
@@ -30,7 +31,7 @@ def corpus_games() -> list:
 
 def corpus_meta() -> dict:
     """{"batch": ..., "data_sha256": {GREEDY_DATA_FILES entry: hex or None}}"""
-    with open(META) as f:
+    with open(META, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -54,3 +55,22 @@ def require_same_greedy_data() -> None:
                     + "; ".join(drift)
                     + "; rebuild with tools/build_advisor_corpus.py --batch "
                     + corpus_meta()["batch"])
+
+
+def fresh_greedy_state() -> None:
+    """Put greedy in the state a fresh process has, for a hermetic test.
+
+    - fails naming any GREEDY_BEHAVIOR_ENV variable that is set: several are
+      read when agent.card_scoring is imported, so unsetting one inside a test
+      cannot undo it;
+    - makes card_scoring reload its Q table from data/card_q_values.json (an
+      earlier test may have called update_card_q);
+    - resets card_scoring._MC_CONTEXT (reset_greedy_context)."""
+    set_knobs = [k for k in GREEDY_BEHAVIOR_ENV if (os.environ.get(k) or "").strip()]
+    if set_knobs:
+        pytest.fail(f"greedy behaviour env vars are set: {set_knobs}; unset them "
+                    "(they are read at import time, so a test cannot undo them)")
+    from agent import card_scoring
+    card_scoring._CARD_Q = {}
+    card_scoring._CARD_Q_LOADED = False
+    reset_greedy_context()
