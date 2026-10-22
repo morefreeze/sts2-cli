@@ -9,9 +9,9 @@ is reset at every game start -- the tests replay the same way.
 
 Real states never reach some greedy branches (a rest site below the heal
 threshold with every card upgraded, the shop heal-potion rule, an event with
-every option locked, a map with an Elite beside a Monster at floor 1, ...), so
-the corpus ends with one extra game, "synthetic": variants of real states with
-a few fields rewritten (synthetic_rows).
+every option locked, a map with an Elite beside a Monster at floor 1, 11 of the
+28 event keywords, ...), so the corpus ends with one extra game, "synthetic":
+variants of real states with a few fields rewritten (synthetic_rows).
 
 It also writes ooc_corpus.meta.json next to the corpus: the batch it was built
 from and the sha256 of every local data file greedy loads (GREEDY_DATA_FILES),
@@ -39,7 +39,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from agent.greedy_trace import (  # noqa: E402
-    GREEDY_BEHAVIOR_ENV, greedy_data_sha256, reset_greedy_context)
+    EVENT_KEYWORD_KEYS, GREEDY_BEHAVIOR_ENV, greedy_data_drift,
+    greedy_data_sha256, reset_greedy_context)
 
 CHARACTERS = ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder")
 ADVISED = frozenset({"card_reward", "rest_site", "event_choice", "bundle_select",
@@ -139,6 +140,59 @@ def build_rows(files: list, greedy, stats: dict = None) -> list:
 
 # --- synthetic variants ------------------------------------------------------
 
+# One (title, description) per branch of combat_env._score_event_option, keyed
+# by the branch's trace key (agent.greedy_trace.EVENT_KEYWORD_KEYS, source
+# order). Each phrase fires its branch and, bar remove_card_hp_cost (which
+# refines remove_card), no other. tests/agent/test_event_option_scores.py pins
+# every phrase's score and checks it against this table.
+EVENT_KEYWORD_CASES = {
+    "event.kw.lose_max_hp": ("Sacrifice", "Lose 5 Max HP."),
+    "event.kw.curse": ("Dark Pact", "Add a Curse to your deck."),
+    "event.kw.lose_all_gold": ("Tribute", "Lose all your gold."),
+    "event.kw.lose_gold": ("Toll", "Lose 50 gold."),
+    "event.kw.torment": ("Torment", "Accept the mark."),
+    "event.kw.take_damage": ("Brace", "Take 10 damage."),
+    "event.kw.lose_hp": ("Bleed", "Lose 10 HP."),
+    "event.kw.downgrade": ("Wear Down", "Downgrade a card."),
+    "event.kw.add_basic": ("Stowaway", "Add an additional Strike to your deck."),
+    "event.kw.rare_card": ("Gambit", "Obtain a rare card."),
+    "event.kw.uncommon_card": ("Trade", "Obtain an uncommon card."),
+    "event.kw.card_reward": ("Offer", "Choose a card to obtain."),
+    "event.kw.remove_card": ("Purge", "Remove a card from your deck."),
+    "event.kw.remove_card_hp_cost": ("Blood Price", "Pay 6 HP to remove a card from your deck."),
+    "event.kw.relic": ("Find", "Obtain a random relic."),
+    "event.kw.relic_with_downside": ("Idol", "Obtain a relic and add a Strike to your deck."),
+    "event.kw.upgrade": ("Anvil", "Upgrade a card."),
+    "event.kw.transform": ("Morph", "Transform a card."),
+    "event.kw.gain_gold": ("Windfall", "Gain 100 gold."),
+    "event.kw.gain_max_hp": ("Vitality", "Raise your Max HP by 7."),
+    "event.kw.potion": ("Elixir", "Obtain a random potion."),
+    "event.kw.heal": ("Rest", "Heal 20 HP."),
+    "event.kw.colorless_card": ("Gift", "Add a colorless card to your deck."),
+    "event.kw.gain_strength": ("Training", "Gain 1 Strength."),
+    "event.kw.enemy_strength": ("Rage", "Enemies gain 1 Strength."),
+    "event.kw.gain_dexterity": ("Agility", "Gain 1 Dexterity."),
+    "event.kw.energy_each_turn": ("Focus", "Gain 1 energy at the start of each turn."),
+    "event.kw.energy_once": ("Surge", "Gain 1 energy."),
+}
+assert list(EVENT_KEYWORD_CASES) == list(EVENT_KEYWORD_KEYS)
+
+# The keyword option is paired with a neutral one (matches no keyword, scores 0).
+EVENT_NEUTRAL_OPTION = ("Walk away", "Leave the area.")
+# remove_card_hp_cost only trims remove_card's +6, so its rival is the free removal.
+EVENT_RIVAL_OPTION = {"event.kw.remove_card_hp_cost": ("Purge", "Remove a card from your deck.")}
+# Keyword options whose total score is below the rival's go FIRST: max() keeps
+# the first of equal scores, so dropping the branch's negative delta flips the
+# pick to the keyword option. The rest go second: dropping a positive delta
+# ties them and the first (rival) option wins instead.
+EVENT_KEYWORD_FIRST = frozenset({
+    "event.kw.lose_max_hp", "event.kw.curse", "event.kw.lose_all_gold",
+    "event.kw.lose_gold", "event.kw.torment", "event.kw.take_damage",
+    "event.kw.lose_hp", "event.kw.downgrade", "event.kw.add_basic",
+    "event.kw.remove_card_hp_cost", "event.kw.enemy_strength",
+})
+
+
 def _first(real_rows: list, decision: str, ok=lambda state: True) -> dict:
     for row in real_rows:
         if row["state"]["decision"] == decision and ok(row["state"]):
@@ -216,20 +270,67 @@ def synthetic_rows(real_rows: list, greedy) -> list:
     variants.append(("shop broke leave", s))
 
     # event_choice: every option locked.
-    s = copy.deepcopy(_first(real_rows, "event_choice", lambda s: s["options"]))
+    event = _first(real_rows, "event_choice", lambda s: s["options"])
+    s = copy.deepcopy(event)
     for o in s["options"]:
         o["is_locked"] = True
     variants.append(("event all-locked", s))
+
+    # event_choice: one row per _score_event_option keyword branch -- exactly two
+    # unlocked options, a rival and the keyword option, ordered so that dropping
+    # the branch's delta would flip the pick (see EVENT_KEYWORD_FIRST).
+    for key, (title, desc) in EVENT_KEYWORD_CASES.items():
+        rival = EVENT_RIVAL_OPTION.get(key, EVENT_NEUTRAL_OPTION)
+        pair = [rival, (title, desc)]
+        if key in EVENT_KEYWORD_FIRST:
+            pair.reverse()
+        s = copy.deepcopy(event)
+        template = s["options"][0]
+        s["options"] = [dict(copy.deepcopy(template), index=i, title=t, description=d,
+                             is_locked=False, was_chosen=False, vars=None)
+                        for i, (t, d) in enumerate(pair)]
+        variants.append((key, s))
 
     # bundle_select: a single bundle.
     s = copy.deepcopy(_first(real_rows, "bundle_select", lambda s: len(s["bundles"]) >= 2))
     s["bundles"] = s["bundles"][:1]
     variants.append(("bundle single", s))
 
-    # card_select: nothing to select.
-    s = copy.deepcopy(_first(real_rows, "card_select"))
+    # card_select: nothing to select; and a small external pool in an Event room
+    # (nothing scoring below 3) from which the best max_select cards are taken.
+    card_select = _first(real_rows, "card_select", lambda s: 2 <= len(s["cards"]) <= 10)
+    s = copy.deepcopy(card_select)
     s["cards"] = []
     variants.append(("card_select empty", s))
+    s = copy.deepcopy(card_select)
+    s["context"]["room_type"] = "Event"
+    s["max_select"] = 2
+    variants.append(("card_select event pool top-N", s))
+
+    # card_reward: no cards; a BROKEN_CARDS card among normal ones, and only
+    # broken cards; late Act 1 with a >=16-card deck (the quality gate rejects
+    # every offered card) and can_skip false, so greedy falls back to all cards.
+    reward = _first(real_rows, "card_reward", lambda s: len(s["cards"]) >= 3)
+    s = copy.deepcopy(reward)
+    s["cards"] = []
+    variants.append(("card_reward no-cards", s))
+    s = copy.deepcopy(reward)
+    s["cards"][0].update(id="CARD.WHIRLWIND", name="Whirlwind")
+    variants.append(("card_reward broken-card among others", s))
+    s = copy.deepcopy(reward)
+    s["cards"] = s["cards"][:2]
+    s["cards"][0].update(id="CARD.WHIRLWIND", name="Whirlwind")
+    s["cards"][1].update(id="CARD.FLASH_OF_STEEL", name="Flash of Steel")
+    variants.append(("card_reward all-broken", s))
+    s = copy.deepcopy(reward)
+    _set_progress(s, 13, 1)
+    deck = s["player"]["deck"]
+    starter = list(deck)
+    while len(deck) < 16:
+        deck.append(copy.deepcopy(starter[len(deck) % len(starter)]))
+    s["player"]["deck_size"] = len(deck)
+    s["can_skip"] = False
+    variants.append(("card_reward act1 gate-rejects-all can_skip=false", s))
 
     # map_select: an Elite beside a Monster (real col/row shape), and no choices.
     maps = _first(real_rows, "map_select", lambda s: len(s["choices"]) >= 2)
@@ -318,6 +419,15 @@ def check_rows(rows: list, out: str) -> int:
     if only_new or only_old or state_changed:
         print(f"  corpus shape differs from the batch: {only_new} new row(s), "
               f"{only_old} missing row(s), {state_changed} row(s) with a different state")
+    mp = meta_path(out)
+    if os.path.isfile(mp):
+        with open(mp, encoding="utf-8") as f:
+            drift = greedy_data_drift(json.load(f).get("data_sha256", {}))
+        if drift:
+            print("  greedy's local data files differ from the corpus meta "
+                  "(the golden test fails until the corpus is rebuilt):")
+            for line in drift:
+                print(f"    {line}")
     return 1 if (changed or only_new or only_old or state_changed) else 0
 
 

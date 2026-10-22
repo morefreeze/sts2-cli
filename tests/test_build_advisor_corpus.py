@@ -3,9 +3,9 @@ that keep it from writing a bad corpus, deterministic output, and --check.
 
 Everything runs on tiny fake batches in a tmp dir (states copied from the
 committed corpus), never on the real fixture or logs/."""
-import gzip
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -56,6 +56,25 @@ def build_args(batch, out, *extra):
 
 def state(decision):
     return {"type": "decision", "decision": decision}
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """(batch, out dir) of one build of the tiny batch; building scores cards
+    with the predictor, so tests share it and copy the out dir to change it."""
+    fresh_greedy_state()
+    root = tmp_path_factory.mktemp("built")
+    batch = full_batch(root)
+    out = root / "out" / "ooc_corpus.jsonl.gz"
+    assert bac.main(build_args(batch, out)) == 0
+    return batch, out.parent
+
+
+def copy_of(built, tmp_path):
+    """(batch, writable copy of the built out path) for a test that changes it."""
+    batch, out_dir = built
+    shutil.copytree(out_dir, tmp_path / "out")
+    return batch, tmp_path / "out" / "ooc_corpus.jsonl.gz"
 
 
 # --- game_states --------------------------------------------------------------
@@ -148,17 +167,16 @@ def test_main_writes_corpus_meta_and_a_synthetic_game_and_leaves_no_tmp_files(tm
     assert set(meta["data_sha256"]) and list(meta) == sorted(meta)
 
 
-def test_main_output_is_byte_identical_for_identical_input(tmp_path):
-    batch = full_batch(tmp_path)
-    a, b = tmp_path / "a" / "c.jsonl.gz", tmp_path / "b" / "c.jsonl.gz"
-    assert bac.main(build_args(batch, a)) == 0
-    assert bac.main(build_args(batch, b)) == 0
-    assert a.read_bytes() == b.read_bytes()
+def test_main_output_is_byte_identical_for_identical_input(built, tmp_path):
+    batch, out_dir = built
+    again = tmp_path / "again" / "ooc_corpus.jsonl.gz"
+    assert bac.main(build_args(batch, again)) == 0
+    for name in ("ooc_corpus.jsonl.gz", "ooc_corpus.meta.json"):
+        assert (tmp_path / "again" / name).read_bytes() == (out_dir / name).read_bytes()
 
 
-def test_synthetic_variants_reach_the_branches_real_states_never_do(tmp_path):
-    out = tmp_path / "c.jsonl.gz"
-    assert bac.main(build_args(full_batch(tmp_path), out)) == 0
+def test_synthetic_variants_reach_the_branches_real_states_never_do(built):
+    out = built[1] / "ooc_corpus.jsonl.gz"
     by_variant = {r["variant"]: r["expected"]
                   for r in bac.read_corpus(str(out)) if r["game"] == bac.SYNTHETIC_GAME}
     proceed = {"cmd": "action", "action": "proceed"}
@@ -169,6 +187,12 @@ def test_synthetic_variants_reach_the_branches_real_states_never_do(tmp_path):
     assert by_variant["bundle single"]["args"] == {"bundle_index": 0}
     assert by_variant["shop heal-potion hp30%"]["action"] == "buy_potion"
     assert by_variant["shop broke leave"]["action"] == "leave_room"
+    assert by_variant["card_reward no-cards"]["action"] == "skip_card_reward"
+    assert by_variant["card_reward all-broken"]["action"] == "skip_card_reward"
+    assert by_variant["card_reward broken-card among others"]["action"] == "select_card_reward"
+    assert by_variant["card_reward broken-card among others"]["args"]["card_index"] != 0  # card 0 is Whirlwind
+    assert by_variant["card_reward act1 gate-rejects-all can_skip=false"]["action"] == "select_card_reward"
+    assert len(by_variant["card_select event pool top-N"]["args"]["indices"].split(",")) == 2
     # an Elite beside a Monster: avoided on floor 1, taken at floor 8 with 95% hp
     assert by_variant["map elite-vs-monster act1 f1 hp1.0"]["args"] != \
         by_variant["map elite-vs-monster act1 f8 hp0.95"]["args"]
@@ -176,27 +200,21 @@ def test_synthetic_variants_reach_the_branches_real_states_never_do(tmp_path):
 
 # --- main --check ---------------------------------------------------------------
 
-def test_check_passes_on_an_unchanged_corpus_and_writes_nothing(tmp_path, capsys):
-    batch = full_batch(tmp_path)
-    out = tmp_path / "out" / "ooc_corpus.jsonl.gz"
-    assert bac.main(build_args(batch, out)) == 0
+def test_check_passes_on_an_unchanged_corpus_and_writes_nothing(built, tmp_path, capsys):
+    batch, out = copy_of(built, tmp_path)
     before = {p.name: p.read_bytes() for p in out.parent.iterdir()}
-    capsys.readouterr()
     assert bac.main(build_args(batch, out, "--check")) == 0
     assert "0 expected action(s) changed" in capsys.readouterr().out
     assert {p.name: p.read_bytes() for p in out.parent.iterdir()} == before
 
 
-def test_check_fails_and_names_the_decision_after_an_expected_action_changes(tmp_path, capsys):
-    batch = full_batch(tmp_path)
-    out = tmp_path / "out" / "ooc_corpus.jsonl.gz"
-    assert bac.main(build_args(batch, out)) == 0
+def test_check_fails_and_names_the_decision_after_an_expected_action_changes(built, tmp_path, capsys):
+    batch, out = copy_of(built, tmp_path)
     rows = bac.read_corpus(str(out))
     victim = next(r for r in rows if r["state"]["decision"] == "card_reward")
     victim["expected"] = {"cmd": "action", "action": "skip_card_reward"}
     os.replace(bac.write_corpus(rows, str(out)), str(out))
     before = out.read_bytes()
-    capsys.readouterr()
     assert bac.main(build_args(batch, out, "--check")) == 1
     printed = capsys.readouterr().out
     assert "1 expected action(s) changed" in printed
@@ -204,7 +222,24 @@ def test_check_fails_and_names_the_decision_after_an_expected_action_changes(tmp
     assert out.read_bytes() == before  # --check never rewrites the corpus
 
 
+def test_check_names_the_data_files_that_differ_from_the_meta(built, tmp_path, capsys):
+    batch, out = copy_of(built, tmp_path)
+    meta_file = out.parent / "ooc_corpus.meta.json"
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    meta["data_sha256"]["data/card_q_values.json"] = "0" * 64
+    meta_file.write_text(json.dumps(meta), encoding="utf-8")
+    rows = bac.read_corpus(str(out))
+    next(r for r in rows if r["state"]["decision"] == "shop")["expected"] = {
+        "cmd": "action", "action": "leave_room", "stale": True}
+    os.replace(bac.write_corpus(rows, str(out)), str(out))
+    assert bac.main(build_args(batch, out, "--check")) == 1
+    printed = capsys.readouterr().out
+    assert "local data files differ from the corpus meta" in printed
+    assert "data/card_q_values.json: built 000000000000, now" in printed
+
+
 def test_check_fails_when_the_corpus_is_missing(tmp_path):
     out = tmp_path / "nope.jsonl.gz"
     assert bac.main(build_args(full_batch(tmp_path), out, "--check")) == 2
     assert not out.exists()
+

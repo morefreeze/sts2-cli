@@ -63,6 +63,17 @@ def greedy_data_sha256(root: str | None = None) -> dict:
     return out
 
 
+def greedy_data_drift(built: dict, root: str | None = None) -> list:
+    """One human-readable line per GREEDY_DATA_FILES entry whose current sha256
+    (or absence) differs from `built` ({path: sha256 or None}, as recorded in
+    the golden corpus meta)."""
+    def short(digest):
+        return "absent" if digest is None else digest[:12]
+    now = greedy_data_sha256(root)
+    return [f"{rel}: built {short(built.get(rel))}, now {short(now[rel])}"
+            for rel in sorted(now) if built.get(rel) != now[rel]]
+
+
 # card_scoring._MC_CONTEXT as the module defines it at import time.
 MC_CONTEXT_START = {"hp": 80, "max_hp": 80, "floor": 5}
 

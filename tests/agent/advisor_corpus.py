@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, greedy_data_sha256,
+from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, greedy_data_drift,
                                 reset_greedy_context)
 
 CORPUS = os.path.join(os.path.dirname(__file__), "..", "fixtures", "advisor",
@@ -35,17 +35,10 @@ def corpus_meta() -> dict:
         return json.load(f)
 
 
-def _short(digest) -> str:
-    return "absent" if digest is None else digest[:12]
-
-
 def data_drift() -> list:
     """One human-readable line per GREEDY_DATA_FILES entry whose current sha256
     (or absence) differs from the one the corpus was built with."""
-    built = corpus_meta()["data_sha256"]
-    now = greedy_data_sha256()
-    return [f"{rel}: built {_short(built.get(rel))}, now {_short(now[rel])}"
-            for rel in sorted(now) if built.get(rel) != now[rel]]
+    return greedy_data_drift(corpus_meta()["data_sha256"])
 
 
 def require_same_greedy_data() -> None:
