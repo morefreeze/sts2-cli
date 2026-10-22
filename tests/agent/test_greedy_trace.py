@@ -345,3 +345,95 @@ def test_card_select_evidence_matches_choice():
             assert [scores[i] for i in picked] == want
         n += 1
     assert n > 0
+
+
+SHOP_RULES = ["shop.heal_potion", "shop.remove_basic", "shop.remove_value",
+              "shop.card_must_buy", "shop.card_threshold", "shop.relic",
+              "shop.potion", "shop.leave"]
+SHOP_ACTION = {"shop.heal_potion": "buy_potion", "shop.remove_basic": "remove_card",
+               "shop.remove_value": "remove_card", "shop.card_must_buy": "buy_card",
+               "shop.card_threshold": "buy_card", "shop.relic": "buy_relic",
+               "shop.potion": "buy_potion", "shop.leave": "leave_room"}
+
+
+def test_shop_rule_chain_matches_action():
+    n = 0
+    for row, action, trace in traced_corpus("shop"):
+        keys = [r["key"] for r in trace.rules]
+        fired = trace.fired()
+        assert len(fired) == 1 and trace.rules[-1] is fired[0], keys
+        assert keys == SHOP_RULES[:len(keys)]
+        assert SHOP_ACTION[fired[0]["key"]] == action["action"]
+        if action["action"] == "buy_card":
+            idx = action["args"]["card_index"]
+            assert trace.score_of("card", idx) == max(trace.ok_scores("card"))
+        n += 1
+    assert n > 0
+
+
+def test_shop_remove_basic_reports_its_ironclad_only_scope():
+    for row, _action, trace in traced_corpus("shop"):
+        rule = next((r for r in trace.rules if r["key"] == "shop.remove_basic"), None)
+        if rule is not None:
+            assert rule["values"]["basic_scope"] == "ironclad_only"
+            return
+    pytest.fail("no shop state reached shop.remove_basic")
+
+
+def _non_ironclad_shop_state(character_prefix, *, gold=500, removal_cost=75):
+    """A real corpus shop state from a `character_prefix` game ("Silent",
+    "Defect"), edited so the deck holds >= 3 of that character's own basic
+    Strike/Defend, with plenty of gold and a removal cost (so the basic purge
+    would fire if it were not scoped to Ironclad's two card ids)."""
+    own = {"Silent": ("STRIKE_SILENT", "DEFEND_SILENT"),
+           "Defect": ("STRIKE_DEFECT", "DEFEND_DEFECT")}[character_prefix]
+    for game, rows in corpus_games():
+        if not game.startswith(character_prefix):
+            continue
+        for row in rows:
+            if row["state"]["decision"] == "shop":
+                state = copy.deepcopy(row["state"])
+                deck = state["player"]["deck"]
+                for card, cid in zip(deck[:4], (own[0], own[0], own[1], own[1])):
+                    card["id"] = "CARD." + cid
+                state["player"]["gold"] = gold
+                state["card_removal_cost"] = removal_cost
+                state["player"]["hp"] = state["player"]["max_hp"]  # no heal-potion rule
+                return state
+    pytest.fail(f"no {character_prefix} shop state in the corpus")
+
+
+@pytest.mark.parametrize("character", ["Silent", "Defect"])
+def test_shop_remove_basic_is_skipped_for_other_characters_basics(character):
+    """The basic purge only counts Ironclad's STRIKE/DEFEND ids (the A/B-measured
+    configuration), so another character's deck of basics reports n_basic == 0
+    and the rule is skipped, whatever the gold. Shown as-is."""
+    state = _non_ironclad_shop_state(character)
+    assert sum(1 for c in state["player"]["deck"]
+               if c["id"].split(".")[-1].startswith(("STRIKE_", "DEFEND_"))
+               and not c["id"].endswith("_IRONCLAD")) >= 3
+    trace = GreedyTrace()
+    traced = greedy_action(state, trace=trace)
+    assert traced == greedy_action(state)
+    json.dumps(trace.to_dict(), allow_nan=False)
+
+    rule = next(r for r in trace.rules if r["key"] == "shop.remove_basic")
+    assert rule["outcome"] == "skipped"
+    assert rule["values"]["basic_scope"] == "ironclad_only"
+    assert rule["values"]["n_basic"] == 0
+    assert rule["values"]["removal_cost"] == 75
+    assert rule["values"]["gold"] == 500
+
+    # STS2_BASIC_PURGE_ALL widens the scope: the same state then fires the rule.
+    # It is read on every call; fresh_greedy_state refuses to run with it set, so
+    # it must not leak out of the context.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("STS2_BASIC_PURGE_ALL", "1")
+        wide = GreedyTrace()
+        wide_action = greedy_action(state, trace=wide)
+        assert wide_action == greedy_action(state)
+    assert wide_action == {"cmd": "action", "action": "remove_card"}
+    rule = next(r for r in wide.rules if r["key"] == "shop.remove_basic")
+    assert rule["outcome"] == "fired"
+    assert rule["values"]["basic_scope"] == "all"
+    assert rule["values"]["n_basic"] >= 3

@@ -717,8 +717,18 @@ def greedy_action(state: dict, trace=None) -> dict:
         removal_cost = state.get("card_removal_cost")
         pre_boss = isinstance(floor, int) and floor >= 11
 
+        def _skip(key, **values):
+            if trace is not None:
+                trace.rule(key, "skipped", **values)
+
+        def _fire(key, cmd, **values):
+            if trace is not None:
+                trace.rule(key, "fired", **values)
+            return cmd
+
         # Emergency: buy health potion first when HP is critically low (< 50%)
         # Jun 10 attempted "buy proactive at floor≥6 HP<85%" regressed → reverted.
+        heal_potion = None
         if hp_ratio < 0.50 and held_potions < 3:
             shop_potions = [p for p in state.get("potions", [])
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
@@ -728,8 +738,15 @@ def greedy_action(state: dict, trace=None) -> dict:
                 sp_desc = (sp.get("description") or {})
                 sp_desc = (sp_desc.get("en", "") if isinstance(sp_desc, dict) else str(sp_desc)).lower()
                 if ("heal" in sp_name + sp_desc or "restore" in sp_name + sp_desc) and "curse" not in sp_name + sp_desc:
-                    return {"cmd": "action", "action": "buy_potion",
-                            "args": {"potion_index": sp.get("index", 0)}}
+                    heal_potion = sp
+                    break
+        heal_values = {"hp_ratio": hp_ratio, "held_potions": held_potions}
+        if heal_potion is not None:
+            return _fire("shop.heal_potion",
+                         {"cmd": "action", "action": "buy_potion",
+                          "args": {"potion_index": heal_potion.get("index", 0)}},
+                         potion_index=heal_potion.get("index", 0), **heal_values)
+        _skip("shop.heal_potion", **heal_values)
 
         # See the card-reward site: act-local floor >= 16 is not "in Act 2".
         _act = state.get("act") or (state.get("context") or {}).get("act")
@@ -766,13 +783,18 @@ def greedy_action(state: dict, trace=None) -> dict:
         # (a real knob, not dead config: it moves Defect +1.33 and Regent -0.73).
         # A per-character rule fitted to n=1 positive / 1 negative / 2 null would
         # be overfitting, so none is shipped.
-        _basic_ids = (_BASIC_CARD_IDS
-                      if os.environ.get("STS2_BASIC_PURGE_ALL", "").strip().lower()
-                      in {"1", "true", "on"}
+        purge_all = (os.environ.get("STS2_BASIC_PURGE_ALL", "").strip().lower()
+                     in {"1", "true", "on"})
+        _basic_ids = (_BASIC_CARD_IDS if purge_all
                       else ("STRIKE_IRONCLAD", "DEFEND_IRONCLAD"))
         n_basic = sum(1 for c in deck if _card_id_norm(c) in _basic_ids)
+        basic_values = {"n_basic": n_basic,
+                        "basic_scope": "all" if purge_all else "ironclad_only",
+                        "removal_cost": removal_cost, "gold": gold}
         if removal_cost and gold >= removal_cost and n_basic >= 3:
-            return {"cmd": "action", "action": "remove_card"}
+            return _fire("shop.remove_basic", {"cmd": "action", "action": "remove_card"},
+                         **basic_values)
+        _skip("shop.remove_basic", **basic_values)
 
         # === Card removal — gated by quantified marginal value ===
         # User observation (Jun 10): removal payoff strong at deck ≤15, weak >20.
@@ -788,18 +810,42 @@ def greedy_action(state: dict, trace=None) -> dict:
             _best_score = max(score_card_in_deck(c, deck) for c in _cards_peek)
         else:
             _best_score = 0.0
+        rv_values = {"removal_value": float(rv), "best_card_score": float(_best_score),
+                     "removal_cost": removal_cost, "gold": gold}
         if removal_cost and gold >= removal_cost and rv > max(_best_score, 3.0):
-            return {"cmd": "action", "action": "remove_card"}
+            return _fire("shop.remove_value", {"cmd": "action", "action": "remove_card"},
+                         **rv_values)
+        _skip("shop.remove_value", **rv_values)
 
         # Find best affordable card — deck-aware so synergy cards rank higher.
         cards_avail = [c for c in state.get("cards", [])
                        if c.get("is_stocked") and c.get("cost", 999) <= gold]
-        best_card = max(cards_avail, key=lambda c: score_card_in_deck(c, deck)) if cards_avail else None
+        if trace is not None:
+            # The complement of cards_avail, so no card is recorded twice.
+            for c in state.get("cards", []):
+                if not c.get("is_stocked"):
+                    trace.option(c.get("index", 0), kind="card", status="unstocked")
+                elif c.get("cost", 999) > gold:
+                    trace.option(c.get("index", 0), kind="card", status="unaffordable")
+
+        def _card_key(c):
+            s = score_card_in_deck(c, deck)
+            if trace is not None:
+                trace.option(c.get("index", 0), kind="card", score=s,
+                             components=[("card.in_deck_score", s, None)])
+            return s
+        best_card = max(cards_avail, key=_card_key) if cards_avail else None
         best_score = score_card_in_deck(best_card, deck) if best_card else 0.0
+        best_card_index = best_card.get("index", 0) if best_card else None
         # Buy elite cards first (score ≥ 8.0 with synergy)
         if best_card and best_score >= 8.0:
-            return {"cmd": "action", "action": "buy_card",
-                    "args": {"card_index": best_card.get("index", 0)}}
+            return _fire("shop.card_must_buy",
+                         {"cmd": "action", "action": "buy_card",
+                          "args": {"card_index": best_card.get("index", 0)}},
+                         best_card_index=best_card_index, best_card_score=float(best_score),
+                         threshold=8.0)
+        _skip("shop.card_must_buy", best_card_index=best_card_index,
+              best_card_score=float(best_score), threshold=8.0)
         # Lower thresholds across the board (more aggressive shop usage)
         if in_act2:
             card_buy_threshold = 4.5
@@ -807,28 +853,66 @@ def greedy_action(state: dict, trace=None) -> dict:
             card_buy_threshold = 5.0
         else:
             card_buy_threshold = 5.5
+        threshold_values = {"best_card_index": best_card_index,
+                            "best_card_score": float(best_score),
+                            "threshold": card_buy_threshold, "act": _act, "pre_boss": pre_boss}
         if best_card and best_score >= card_buy_threshold:
-            return {"cmd": "action", "action": "buy_card",
-                    "args": {"card_index": best_card.get("index", 0)}}
+            return _fire("shop.card_threshold",
+                         {"cmd": "action", "action": "buy_card",
+                          "args": {"card_index": best_card.get("index", 0)}},
+                         **threshold_values)
+        _skip("shop.card_threshold", **threshold_values)
         # Buy a relic — smaller buffer (25g vs 50g), lower threshold (4.0 vs 5.0).
         RELIC_GOLD_THRESHOLD = 25
         relics = [r for r in state.get("relics", [])
                   if r.get("is_stocked") and r.get("cost", 999) <= gold - RELIC_GOLD_THRESHOLD]
+        if trace is not None:
+            for r in state.get("relics", []):
+                if not r.get("is_stocked"):
+                    trace.option(r.get("index", 0), kind="relic", status="unstocked")
+                elif r.get("cost", 999) > gold - RELIC_GOLD_THRESHOLD:
+                    trace.option(r.get("index", 0), kind="relic", status="unaffordable")
+
+        def _relic_key(r):
+            s = _score_shop_relic(r)
+            if trace is not None:
+                trace.option(r.get("index", 0), kind="relic", score=s,
+                             components=[("shop.relic_score", s, None)])
+            return s
+        relic_values = {"threshold": 4.0, "gold_reserve": RELIC_GOLD_THRESHOLD,
+                        "n_affordable": len(relics)}
         if relics:
-            best_relic = max(relics, key=_score_shop_relic)
+            best_relic = max(relics, key=_relic_key)
+            relic_values["best_relic_index"] = best_relic.get("index", 0)
+            relic_values["best_relic_score"] = float(_score_shop_relic(best_relic))
             if _score_shop_relic(best_relic) >= 4.0:
-                return {"cmd": "action", "action": "buy_relic",
-                        "args": {"relic_index": best_relic.get("index", 0)}}
+                return _fire("shop.relic",
+                             {"cmd": "action", "action": "buy_relic",
+                              "args": {"relic_index": best_relic.get("index", 0)}},
+                             **relic_values)
+        _skip("shop.relic", **relic_values)
         # Buy a potion if we have empty slots and it's affordable
+        potion_values = {"threshold": 4.5, "held_potions": held_potions}
         if held_potions < 3:
             shop_potions = [p for p in state.get("potions", [])
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
             if shop_potions:
-                best_potion = max(shop_potions, key=_score_shop_potion)
+                def _potion_key(p):
+                    s = _score_shop_potion(p)
+                    if trace is not None:
+                        trace.option(p.get("index", 0), kind="potion", score=s,
+                                     components=[("shop.potion_score", s, None)])
+                    return s
+                best_potion = max(shop_potions, key=_potion_key)
+                potion_values["best_potion_index"] = best_potion.get("index", 0)
+                potion_values["best_potion_score"] = float(_score_shop_potion(best_potion))
                 if _score_shop_potion(best_potion) >= 4.5:
-                    return {"cmd": "action", "action": "buy_potion",
-                            "args": {"potion_index": best_potion.get("index", 0)}}
-        return {"cmd": "action", "action": "leave_room"}
+                    return _fire("shop.potion",
+                                 {"cmd": "action", "action": "buy_potion",
+                                  "args": {"potion_index": best_potion.get("index", 0)}},
+                                 **potion_values)
+        _skip("shop.potion", **potion_values)
+        return _fire("shop.leave", {"cmd": "action", "action": "leave_room"})
 
     if trace is not None:
         trace.rule("greedy.unhandled", "fired", decision=decision)
