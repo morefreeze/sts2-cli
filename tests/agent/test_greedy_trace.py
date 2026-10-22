@@ -1,5 +1,6 @@
 """greedy_action(state, trace=...) records the evidence it decided with, and the
 evidence agrees with the choice. Replays the corpus in game order."""
+import copy
 import json
 
 import pytest
@@ -105,20 +106,38 @@ def test_rest_site_rules_stop_at_the_deciding_one():
     assert n > 0
 
 
-def _vantom_rest_state():
-    """A real corpus rest_site state, moved to the Vantom mid-boss window: a
-    Vantom boss, act-local floor 12, HP at 60%."""
-    import copy
+def _rest_state(*, floor, hp, max_hp=80, boss=None, heal_enabled=True,
+                smith_enabled=True):
+    """A real corpus rest_site state, edited: act-local `floor`, `hp`/`max_hp`,
+    optionally another boss, and the HEAL / SMITH option disabled."""
     for _game, rows in corpus_games():
         for row in rows:
             if row["state"]["decision"] == "rest_site":
                 state = copy.deepcopy(row["state"])
-                state["context"]["boss"] = {"id": "VANTOM_BOSS", "name": "Vantom"}
-                state["context"]["floor"] = 12
                 state.pop("floor", None)
-                state["player"]["hp"] = int(state["player"]["max_hp"] * 0.6)
+                state["context"]["floor"] = floor
+                if boss is not None:
+                    state["context"]["boss"] = boss
+                state["player"]["hp"] = hp
+                state["player"]["max_hp"] = max_hp
+                for opt in state["options"]:
+                    name = opt["option_id"].lower()
+                    if "heal" in name:
+                        opt["is_enabled"] = heal_enabled
+                    elif "smith" in name:
+                        opt["is_enabled"] = smith_enabled
                 return state
     pytest.fail("no rest_site state in the corpus")
+
+
+def _option_index(state, name):
+    return next(o["index"] for o in state["options"] if name in o["option_id"].lower())
+
+
+def _vantom_rest_state():
+    """A corpus rest_site state moved to the Vantom mid-boss window: a Vantom
+    boss, act-local floor 12, HP at 60%."""
+    return _rest_state(floor=12, hp=48, boss={"id": "VANTOM_BOSS", "name": "Vantom"})
 
 
 def test_rest_site_vantom_mid_boss_rule_is_env_gated():
@@ -148,6 +167,66 @@ def test_rest_site_vantom_mid_boss_rule_is_env_gated():
     assert keys == [("rest.critical_heal", "skipped"), ("rest.vantom_mid_boss", "fired")]
     vantom = trace.rules[-1]
     assert vantom["values"]["enabled"] is True
+    assert vantom["values"]["is_vantom"] is True
+    assert vantom["values"]["available"] is True
     assert vantom["values"]["floor"] == 12
     assert abs(vantom["values"]["hp_ratio"] - 0.6) < 0.02
     json.dumps(trace.to_dict(), allow_nan=False)
+
+
+def test_rest_site_heal_rules_say_when_heal_is_unavailable():
+    """10/80 HP at floor 3 is far below the critical threshold, but HEAL is
+    disabled: the skipped rule must say so, or it reads as a rule that failed."""
+    state = _rest_state(floor=3, hp=10, heal_enabled=False,
+                       boss={"id": "CEREMONIAL_BEAST_BOSS", "name": "Ceremonial Beast"})
+    smith_index = _option_index(state, "smith")
+    trace = GreedyTrace()
+    traced = greedy_action(state, trace=trace)
+    assert traced == greedy_action(state)
+    assert traced == {"cmd": "action", "action": "choose_option",
+                      "args": {"option_index": smith_index}}
+    json.dumps(trace.to_dict(), allow_nan=False)
+
+    by_key = {r["key"]: r for r in trace.rules}
+    critical = by_key["rest.critical_heal"]
+    assert critical["outcome"] == "skipped"
+    assert critical["values"]["hp_ratio"] == 0.125
+    assert critical["values"]["hp_ratio"] < critical["values"]["threshold"]
+    assert critical["values"]["available"] is False
+    # every heal rule that was checked says HEAL is unavailable (rest.heal_threshold
+    # only appears when must_upgrade did not already decide)
+    heal_rules = [r for r in trace.rules if r["key"] in HEAL_RULES]
+    assert {r["key"] for r in heal_rules} >= {
+        "rest.critical_heal", "rest.vantom_mid_boss", "rest.pre_boss_heal"}
+    assert all(r["values"]["available"] is False for r in heal_rules)
+    assert by_key["rest.vantom_mid_boss"]["values"]["is_vantom"] is False
+    # the SMITH rules decide: must_upgrade if the deck has a target, else default_smith
+    fired = trace.fired()
+    assert len(fired) == 1 and trace.rules[-1] is fired[0]
+    assert fired[0]["key"] in {"rest.must_upgrade", "rest.default_smith"}
+
+
+def test_rest_site_must_upgrade_says_when_smith_is_unavailable():
+    """Full HP, SMITH disabled: must_upgrade cannot fire whatever the deck holds."""
+    state = _rest_state(floor=3, hp=80, smith_enabled=False)
+    heal_index = _option_index(state, "heal")
+    trace = GreedyTrace()
+    traced = greedy_action(state, trace=trace)
+    assert traced == greedy_action(state)
+    assert traced == {"cmd": "action", "action": "choose_option",
+                      "args": {"option_index": heal_index}}
+    json.dumps(trace.to_dict(), allow_nan=False)
+
+    by_key = {r["key"]: r for r in trace.rules}
+    must = by_key["rest.must_upgrade"]
+    assert must["outcome"] == "skipped"
+    assert must["values"]["available"] is False
+    assert must["values"]["deck_index"] is None
+    # HEAL is available but full HP clears every heal rule; with no SMITH either,
+    # the fallback takes HEAL
+    assert all(by_key[k]["values"]["available"] is True for k in (
+        "rest.critical_heal", "rest.pre_boss_heal", "rest.heal_threshold"))
+    assert by_key["rest.default_smith"]["outcome"] == "skipped"
+    assert trace.rules[-1]["key"] == "rest.fallback"
+    assert trace.rules[-1]["outcome"] == "fired"
+    assert len(trace.fired()) == 1

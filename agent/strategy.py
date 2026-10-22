@@ -128,13 +128,20 @@ class HpAwareMapStrategy(Act1SafeStrategy):
 def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
     """Decide heal vs upgrade at a rest site.
 
-    Decision order:
-      1. HP critical (< CRITICAL_HEAL ratio)  → always heal, no exceptions
-      2. Deck has an un-upgraded high-value card (score ≥ 7) → SMITH that card
-         (only if HP isn't critical — a +1 upgrade pays off every remaining combat,
-         while +30% HP from rest is one-shot value)
-      3. HP below the floor-graduated heal threshold → heal
-      4. Otherwise → SMITH (default)
+    Rules, checked in this order; the first that applies decides (a heal rule needs
+    an enabled HEAL option, a smith rule an enabled SMITH one):
+      1. rest.critical_heal    HP < CRITICAL_HEAL ratio → heal, no exceptions
+      2. rest.vantom_mid_boss  STS2_VANTOM_REST_HEAL on, Vantom boss, floors 11-13,
+                               HP < 70% → heal
+      3. rest.pre_boss_heal    floor ≥ 14 and HP < the heal threshold → heal
+      4. rest.must_upgrade     deck has an un-upgraded high-value card
+                               (score ≥ SMITH_PRIORITY_THRESHOLD) → SMITH that card
+                               (a +1 upgrade pays off every remaining combat, while
+                               +30% HP from rest is one-shot value)
+      5. rest.heal_threshold   HP < the floor-graduated heal threshold → heal
+      6. rest.default_smith    otherwise → SMITH
+    If none applies: rest.fallback takes HEAL, else the first enabled option;
+    with nothing enabled, rest.no_choice proceeds.
 
     The SMITH-priority override is the change requested 2026-05-06: "even at low
     HP, upgrade if there's a must-upgrade card; don't always rest."
@@ -207,23 +214,27 @@ def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
         and 11 <= floor <= 13
         and hp_ratio < 0.70
     )
-    # Same conditions, same order as the if/elif chain this replaced; every
-    # condition is a side-effect-free boolean, so evaluating them all up front
-    # (to record the skipped ones) cannot change which rule decides.
-    # "rest.pre_boss_heal" is the boss-prep rule: HEAL over SMITH at floor 14+.
+    # Conditions are side-effect-free booleans, evaluated up front. `available` =
+    # the option the rule would pick exists and is enabled.
+    heal_ok, smith_ok = heal is not None, smith is not None
     checks = (
-        ("rest.critical_heal", hp_ratio < CRITICAL_HEAL and heal is not None, heal,
-         {"hp_ratio": hp_ratio, "threshold": CRITICAL_HEAL, "floor": floor}),
-        ("rest.vantom_mid_boss", vantom_mid_boss_low and heal is not None, heal,
-         {"enabled": vantom_rest_heal_enabled, "hp_ratio": hp_ratio, "floor": floor}),
+        ("rest.critical_heal", hp_ratio < CRITICAL_HEAL and heal_ok, heal,
+         {"hp_ratio": hp_ratio, "threshold": CRITICAL_HEAL, "floor": floor,
+          "available": heal_ok}),
+        ("rest.vantom_mid_boss", vantom_mid_boss_low and heal_ok, heal,
+         {"enabled": vantom_rest_heal_enabled, "is_vantom": is_vantom,
+          "hp_ratio": hp_ratio, "floor": floor, "available": heal_ok}),
         ("rest.pre_boss_heal",
-         pre_boss_zone and hp_ratio < heal_threshold and heal is not None, heal,
-         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor}),
+         pre_boss_zone and hp_ratio < heal_threshold and heal_ok, heal,
+         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor,
+          "available": heal_ok}),
         ("rest.must_upgrade", has_must_upgrade, smith,
-         {"deck_index": smith_target, "threshold": SMITH_PRIORITY_THRESHOLD}),
-        ("rest.heal_threshold", hp_ratio < heal_threshold and heal is not None, heal,
-         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor}),
-        ("rest.default_smith", smith is not None, smith, {}),
+         {"deck_index": smith_target, "threshold": SMITH_PRIORITY_THRESHOLD,
+          "available": smith_ok}),
+        ("rest.heal_threshold", hp_ratio < heal_threshold and heal_ok, heal,
+         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor,
+          "available": heal_ok}),
+        ("rest.default_smith", smith_ok, smith, {}),
     )
     choice = None
     for key, applies, option, values in checks:
@@ -234,7 +245,7 @@ def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
             break
         if trace is not None:
             trace.rule(key, "skipped", **values)
-    else:
+    else:  # no rule applied
         choice = heal or (enabled[0] if enabled else None)
         if trace is not None and choice:
             trace.rule("rest.fallback", "fired")
