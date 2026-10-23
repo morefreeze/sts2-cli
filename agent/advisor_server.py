@@ -16,9 +16,17 @@ NaN/Infinity: a trace that cannot be encoded strictly becomes "no advice".
 
     .venv/bin/python agent/advisor_server.py --port 8767
 """
+import os
+
+# Before anything imports numpy / scikit-learn: the card_reward scorer calls
+# sklearn HistGradientBoosting predict, whose OpenMP thread pool oversubscribes
+# a busy machine (the game is running next to us) and made one card_reward
+# ~20x slower (2.1 s vs 47.9 s for a replayed game). One thread gives the same
+# predictions; only the speed changes.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import json
-import os
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,6 +40,8 @@ import play_full_run  # noqa: E402
 from agent.greedy_trace import GREEDY_BEHAVIOR_ENV, GreedyTrace  # noqa: E402
 
 DEFAULT_PORT = 8767
+MAX_BODY = 4 * 1024 * 1024  # a decision JSON is a few KB; this only bounds abuse
+CLIENT_TIMEOUT = 5  # seconds; requests are served one at a time, so a stalled client must not hold the line
 ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 
 
@@ -63,37 +73,81 @@ def advise(state: dict, greedy, warnings: list) -> dict:
     if action is None:
         reply["warnings"].append("greedy_none")
         return reply
+    advice = dict(reply, action=action, **evidence)
     try:
-        # strict JSON only: a NaN/Infinity score would break the mod's parser
-        json.dumps(evidence, default=_json_default, allow_nan=False)
+        # strict JSON only, and the WHOLE reply: a NaN/Infinity anywhere (a score,
+        # a rule value, the action) would break the mod's parser
+        json.dumps(advice, default=_json_default, allow_nan=False)
     except (ValueError, TypeError):
         reply["warnings"].append("trace_not_serializable")
         return reply
-    reply["action"] = action
-    reply.update(evidence)
-    return reply
+    return advice
 
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "Sts2Advisor/1"
+    timeout = CLIENT_TIMEOUT  # socket timeout for every read on a connection
+
+    def log_request(self, code="-", size="-"):
+        """Log failures only: the mod forwards our stderr into its log and polls /health."""
+        try:
+            failed = int(code) >= 400
+        except (TypeError, ValueError):
+            failed = True
+        if failed:
+            super().log_request(code, size)
 
     def do_GET(self):
-        if self.path != "/health":
-            return self._send(404, {"error": "not found"})
-        self._send(200, {"ok": True, "policy": "greedy", "commit": self.server.commit,
-                         "warnings": self.server.warnings})
+        try:
+            if self.path != "/health":
+                return self._send(404, {"error": "not found"})
+            self._send(200, {"ok": True, "policy": "greedy", "commit": self.server.commit,
+                             "warnings": self.server.warnings})
+        except Exception as exc:
+            self._fail(exc)
 
     def do_POST(self):
-        if self.path != "/advise":
-            return self._send(404, {"error": "not found"})
-        length = int(self.headers.get("Content-Length") or 0)
         try:
-            state = json.loads(self.rfile.read(length) or b"null")
-        except ValueError:
-            return self._send(400, {"error": "body is not JSON"})
-        if not isinstance(state, dict):
-            return self._send(400, {"error": "body must be a decision object"})
-        self._send(200, advise(state, self.server.greedy, self.server.warnings))
+            if self.path != "/advise":
+                return self._send(404, {"error": "not found"})
+            body, error = self._read_body()
+            if error:
+                return self._send(*error)
+            try:
+                state = json.loads(body)
+            except ValueError:  # includes UnicodeDecodeError
+                return self._send(400, {"error": "body is not JSON"})
+            if not isinstance(state, dict):
+                return self._send(400, {"error": "body must be a decision object"})
+            self._send(200, advise(state, self.server.greedy, self.server.warnings))
+        except Exception as exc:
+            self._fail(exc)
+
+    def _read_body(self):
+        """(body bytes, None) or (None, (status, error body)) -- never hangs for
+        longer than the socket timeout and never trusts Content-Length blindly."""
+        raw = (self.headers.get("Content-Length") or "").strip()
+        if not (raw.isascii() and raw.isdigit()):
+            return None, (400, {"error": "Content-Length must be a non-negative integer"})
+        length = int(raw)
+        if length > MAX_BODY:
+            return None, (413, {"error": f"body larger than {MAX_BODY} bytes"})
+        try:
+            body = self.rfile.read(length)
+        except OSError:  # includes the socket timeout and a reset connection
+            return None, (400, {"error": "could not read the request body"})
+        if len(body) != length:
+            return None, (400, {"error": "request body shorter than Content-Length"})
+        return body, None
+
+    def _fail(self, exc: Exception) -> None:
+        """Unexpected error: one log line, a 500 if the client is still there."""
+        self.log_error("%s %s failed: %s: %s", self.command, self.path,
+                       type(exc).__name__, exc)
+        try:
+            self._send(500, {"error": type(exc).__name__})
+        except Exception:
+            pass
 
     def _send(self, code: int, body: dict) -> None:
         data = json.dumps(body, default=_json_default, ensure_ascii=False,
@@ -105,6 +159,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class _Server(HTTPServer):
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError)):  # client went away: no traceback
+            print(f"advisor: {client_address[0]}: {type(exc).__name__}", file=sys.stderr)
+        else:
+            super().handle_error(request, client_address)
+
+
 def _git_commit() -> str:
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
@@ -114,7 +177,7 @@ def _git_commit() -> str:
 
 
 def make_server(port: int, greedy=None, env=None) -> HTTPServer:
-    server = HTTPServer(("127.0.0.1", port), _Handler)
+    server = _Server(("127.0.0.1", port), _Handler)
     server.greedy = greedy or play_full_run._load_greedy_action()
     server.warnings = knob_warnings(os.environ if env is None else env)
     server.commit = _git_commit()

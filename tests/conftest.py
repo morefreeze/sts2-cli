@@ -1,7 +1,14 @@
 """Pytest fixtures: Game process wrapper for unit tests."""
 
-import json
 import os
+
+# One OpenMP thread, set before any test imports numpy / scikit-learn: the
+# predictions are identical, only the speed changes (sklearn HistGradientBoosting
+# predict under OpenMP oversubscription made greedy's card_reward ~20x slower
+# when the machine is busy). Same default as agent/advisor_server.py.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+import json
 import shutil
 import subprocess
 import threading
