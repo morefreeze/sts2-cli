@@ -99,7 +99,10 @@ def test_replay_writes_utf8_unescaped(tmp_path):
 
 
 def test_replay_records_hang_and_stops(tmp_path, monkeypatch):
-    monkeypatch.setattr(replay_states, "REPLY_TIMEOUT_S", 0.5)
+    # Only the per-reply watchdog is shortened; the ready wait keeps its own long timeout, so a
+    # loaded machine that is slow to start the fake engine cannot flake this test.
+    monkeypatch.setattr(replay_states, "REPLY_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(replay_states, "READY_TIMEOUT_S", 60)
     argv = _engine_file(tmp_path, ECHO_ENGINE)
     log = _log(tmp_path, [{"cmd": "start_run"}, {"cmd": "hang"}, {"cmd": "action", "action": "end_turn"}])
     out = tmp_path / "out.jsonl"
@@ -202,7 +205,7 @@ def test_main_compare_returns_zero_and_prints_identical(tmp_path, capsys):
     (a / "g.jsonl").write_text('{"n": 0}\n')
     (b / "g.jsonl").write_text('{"n": 0}\n')
     assert replay_states.main(["--compare", str(a), str(b)]) == 0
-    assert capsys.readouterr().out.strip() == "identical"
+    assert capsys.readouterr().out.strip() == "identical (1 files, 1 replies)"
 
 
 def test_main_compare_returns_one_and_prints_differences(tmp_path, capsys):
@@ -214,3 +217,153 @@ def test_main_compare_returns_one_and_prints_differences(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "identical" not in out
     assert "g.jsonl: first difference at reply 0" in out
+
+
+# ---- follow-ups: hangs fail the compare, exact line split, richer diffs, counts, basenames ----
+
+def _row(n, cmd, decision=None, **extra):
+    row = {"n": n, "cmd": cmd}
+    if decision is not None:
+        row["reply"] = {"type": "decision", "decision": decision}
+    row.update(extra)
+    return json.dumps(row, ensure_ascii=False)
+
+
+def _dump(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("".join(r + "\n" for r in rows).encode("utf-8"))
+
+
+def test_compare_flags_a_hang_even_when_both_builds_hang_at_the_same_reply(tmp_path):
+    rows = [_row(0, {"cmd": "start_run"}, "event_choice"),
+            _row(1, {"cmd": "action", "action": "end_turn"}, "combat_play"),
+            _row(2, {"cmd": "action", "action": "choose_option"}, hang=True)]
+    _dump(tmp_path / "a" / "g.jsonl", rows)
+    _dump(tmp_path / "b" / "g.jsonl", rows)  # byte-identical, hang row included
+    assert replay_states.compare(str(tmp_path / "a"), str(tmp_path / "b")) == [
+        "g.jsonl: engine hang at reply 2 (golden truncated)"]
+    assert replay_states.main(["--compare", str(tmp_path / "a"), str(tmp_path / "b")]) == 1
+
+
+def test_compare_flags_a_hang_that_only_one_side_has(tmp_path):
+    ok = [_row(0, {"cmd": "start_run"}, "event_choice"),
+          _row(1, {"cmd": "action", "action": "end_turn"}, "combat_play")]
+    hung = ok[:1] + [_row(1, {"cmd": "action", "action": "end_turn"}, hang=True)]
+    _dump(tmp_path / "a" / "g.jsonl", ok)
+    _dump(tmp_path / "b" / "g.jsonl", hung)
+    for first, second in (("a", "b"), ("b", "a")):  # either side may be the truncated one
+        diffs = replay_states.compare(str(tmp_path / first), str(tmp_path / second))
+        assert "g.jsonl: engine hang at reply 1 (golden truncated)" in diffs
+        assert any(d.startswith("g.jsonl: first difference at reply 1") for d in diffs)
+
+
+def test_compare_ignores_hang_text_that_is_not_a_hang_row(tmp_path):
+    rows = [json.dumps({"n": 0, "cmd": {"cmd": "start_run"},
+                        "reply": {"type": "decision", "note": '"hang": true'}})]
+    _dump(tmp_path / "a" / "g.jsonl", rows)
+    assert replay_states.compare(str(tmp_path / "a"), str(tmp_path / "a")) == []
+
+
+def test_replay_hang_dump_fails_compare_against_itself(tmp_path, monkeypatch):
+    monkeypatch.setattr(replay_states, "REPLY_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(replay_states, "READY_TIMEOUT_S", 60)
+    argv = _engine_file(tmp_path, ECHO_ENGINE)
+    log = _log(tmp_path, [{"cmd": "start_run"}, {"cmd": "hang"}])
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    replay_states.replay(str(log), str(out_dir / "game.jsonl"), argv=argv)
+    assert replay_states.compare(str(out_dir), str(out_dir)) == [
+        "game.jsonl: engine hang at reply 1 (golden truncated)"]
+
+
+def test_hang_row_is_written_unescaped_like_reply_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(replay_states, "REPLY_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(replay_states, "READY_TIMEOUT_S", 60)
+    argv = _engine_file(tmp_path, ECHO_ENGINE)
+    log = _log(tmp_path, [{"cmd": "hang", "note": "打击"}])
+    out = tmp_path / "out.jsonl"
+    replay_states.replay(str(log), str(out), argv=argv)
+    assert "打击".encode("utf-8") in out.read_bytes()
+
+
+def test_compare_splits_lines_on_newline_only(tmp_path):
+    # U+2028 / U+0085 are legal raw characters inside a JSON string (ensure_ascii=False); str.splitlines()
+    # would cut a reply in two and shift every later reply index.
+    a, b = tmp_path / "a", tmp_path / "b"
+    first = json.dumps({"n": 0, "reply": {"text": "x\u2028y\u0085z"}}, ensure_ascii=False)
+    _dump(a / "g.jsonl", [first, json.dumps({"n": 1, "v": 1})])
+    _dump(b / "g.jsonl", [first, json.dumps({"n": 1, "v": 2})])
+    assert replay_states.compare(str(a), str(a)) == []
+    assert replay_states.compare_with_counts(str(a), str(a)) == ([], 1, 2)
+    assert replay_states.compare(str(a), str(b)) == ["g.jsonl: first difference at reply 1"]
+
+
+def test_compare_difference_names_command_and_decision_of_both_sides(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    cmd = {"cmd": "action", "action": "choose_option"}
+    _dump(a / "g.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice"), _row(1, cmd, "event_choice")])
+    _dump(b / "g.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice"), _row(1, cmd, "card_reward")])
+    assert replay_states.compare(str(a), str(b)) == [
+        "g.jsonl: first difference at reply 1 (cmd action/choose_option; decision event_choice vs card_reward)"]
+
+
+def test_compare_difference_for_a_command_without_action_and_a_non_decision_reply(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _dump(a / "g.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice")])
+    _dump(b / "g.jsonl", [json.dumps({"n": 0, "cmd": {"cmd": "start_run"},
+                                      "reply": {"type": "error", "message": "boom"}})])
+    assert replay_states.compare(str(a), str(b)) == [
+        "g.jsonl: first difference at reply 0 (cmd start_run; decision event_choice vs error)"]
+
+
+def test_compare_difference_survives_a_line_that_is_not_json(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _dump(a / "g.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice")])
+    _dump(b / "g.jsonl", ['{"n": 0, "cmd": {"cmd": "start_run"}, "reply": {"trunc'])
+    assert replay_states.compare(str(a), str(b)) == [
+        "g.jsonl: first difference at reply 0 (cmd start_run vs ?; decision event_choice vs ?)"]
+
+
+def test_compare_with_counts_counts_files_and_replies(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        _dump(d / "g1.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice"),
+                               _row(1, {"cmd": "action", "action": "end_turn"}, "combat_play")])
+        _dump(d / "g2.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice")])
+    assert replay_states.compare_with_counts(str(a), str(b)) == ([], 2, 3)
+    assert replay_states.compare(str(a), str(b)) == []
+
+
+def test_main_compare_prints_file_and_reply_counts_when_identical(tmp_path, capsys):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        _dump(d / "g1.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice"),
+                               _row(1, {"cmd": "action", "action": "end_turn"}, "combat_play")])
+        _dump(d / "g2.jsonl", [_row(0, {"cmd": "start_run"}, "event_choice")])
+    assert replay_states.main(["--compare", str(a), str(b)]) == 0
+    assert capsys.readouterr().out.strip() == "identical (2 files, 3 replies)"
+
+
+def test_main_refuses_two_logs_with_the_same_basename(tmp_path, capsys, monkeypatch):
+    calls = []
+    monkeypatch.setattr(replay_states, "replay", lambda *a, **kw: calls.append(a) or 0)
+    d1, d2 = tmp_path / "x", tmp_path / "y"
+    d1.mkdir(); d2.mkdir()
+    (d1 / "game.jsonl").write_text("")
+    (d2 / "game.jsonl").write_text("")
+    out_dir = tmp_path / "out"
+    rc = replay_states.main([str(d1 / "game.jsonl"), str(d2 / "game.jsonl"), "--out", str(out_dir)])
+    assert rc == 2
+    assert "game.jsonl" in capsys.readouterr().err
+    assert calls == []  # refused before any replay
+    assert not out_dir.exists()
+
+
+def test_main_replays_logs_with_distinct_basenames(tmp_path, capsys, monkeypatch):
+    calls = []
+    monkeypatch.setattr(replay_states, "replay", lambda log, out: calls.append((log, out)) or 7)
+    logs = [str(tmp_path / "a.jsonl"), str(tmp_path / "b.jsonl")]
+    out_dir = tmp_path / "out"
+    assert replay_states.main(logs + ["--out", str(out_dir)]) == 0
+    assert calls == [(logs[0], str(out_dir / "a.jsonl")), (logs[1], str(out_dir / "b.jsonl"))]
+    assert capsys.readouterr().out.splitlines() == ["a.jsonl: 7 replies", "b.jsonl: 7 replies"]
