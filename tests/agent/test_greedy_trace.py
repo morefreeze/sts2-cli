@@ -637,6 +637,203 @@ def test_shop_remove_basic_is_skipped_for_other_characters_basics(character):
     assert rule["values"]["n_basic"] >= 3
 
 
+def _shop_item_status(item, kind, gold):
+    """What a card / relic / potion's recorded status must be, derived from the
+    state alone: unstocked; unaffordable when it costs more than the gold; for
+    relics `reserved` when the gold is there but within the 25g reserve."""
+    if not item.get("is_stocked"):
+        return "unstocked"
+    cost = item.get("cost", 999)
+    if cost > gold:
+        return "unaffordable"
+    if kind == "relic" and cost > gold - 25:
+        return "reserved"
+    return "ok"
+
+
+def test_shop_option_statuses_follow_the_state():
+    n_reserved = n_unaff = n_unstocked = 0
+    for row, _action, trace in traced_corpus("shop"):
+        state = row["state"]
+        gold = state["player"]["gold"]
+        keys = [r["key"] for r in trace.rules]
+        by_kind = {"card": {c["index"]: c for c in state.get("cards", [])},
+                   "relic": {r["index"]: r for r in state.get("relics", [])},
+                   "potion": {p["index"]: p for p in state.get("potions", [])}}
+        recorded = {"card": set(), "relic": set(), "potion": set()}
+        for opt in trace.to_dict()["options"]:
+            kind, idx = opt["kind"], opt["index"]
+            item = by_kind[kind][idx]
+            if kind == "potion":
+                # only stocked, affordable potions are recorded (and scored)
+                assert _shop_item_status(item, kind, gold) == "ok"
+            assert opt["status"] == _shop_item_status(item, kind, gold), (
+                row["game"], row["seq"], kind, idx)
+            assert (opt["score"] is not None) == (opt["status"] == "ok")
+            recorded[kind].add(idx)
+            n_reserved += opt["status"] == "reserved"
+            n_unaff += opt["status"] == "unaffordable"
+            n_unstocked += opt["status"] == "unstocked"
+        # a walk that got as far as the card / relic rule recorded every one
+        if "shop.card_must_buy" in keys:
+            assert recorded["card"] == set(by_kind["card"]), (row["game"], row["seq"])
+        if "shop.relic" in keys:
+            assert recorded["relic"] == set(by_kind["relic"]), (row["game"], row["seq"])
+    # all three non-ok statuses occur in the corpus' shops (the synthetic test
+    # below pins the reserve band's edges)
+    assert n_reserved > 0 and n_unaff > 0 and n_unstocked > 0
+
+
+def test_shop_card_scores_are_none_exactly_when_nothing_is_affordable():
+    n = 0
+    for row, _action, trace in traced_corpus("shop"):
+        by_key = {r["key"]: r for r in trace.rules}
+        for key in ("shop.remove_value", "shop.card_must_buy", "shop.card_threshold"):
+            rule = by_key.get(key)
+            if rule is None or rule["outcome"] == "fired" and key == "shop.remove_value":
+                continue  # not reached / remove_value fired before the cards were scored
+            ok = trace.ok_scores("card")
+            got = rule["values"]["best_card_score"]
+            assert got == (max(ok) if ok else None), (row["game"], row["seq"], key)
+            n += 1
+    assert n > 0
+
+
+def test_shop_relic_and_potion_picks_are_the_best_scored():
+    n_relic = n_potion = 0
+    for row, action, trace in traced_corpus("shop"):
+        fired = trace.fired()[0]
+        if fired["key"] == "shop.relic":
+            idx = action["args"]["relic_index"]
+            assert trace.score_of("relic", idx) == max(trace.ok_scores("relic"))
+            assert fired["values"]["best_relic_index"] == idx
+            assert fired["values"]["best_relic_score"] == trace.score_of("relic", idx)
+            assert trace.score_of("relic", idx) >= fired["values"]["threshold"]
+            n_relic += 1
+        elif fired["key"] == "shop.potion":
+            idx = action["args"]["potion_index"]
+            assert trace.score_of("potion", idx) == max(trace.ok_scores("potion"))
+            assert fired["values"]["best_potion_index"] == idx
+            assert trace.score_of("potion", idx) >= fired["values"]["threshold"]
+            n_potion += 1
+    assert n_relic > 0 and n_potion > 0
+
+
+def _shop_probe_state(*, gold=300, hp_ratio=1.0, shop_potions=None, held_potions=0):
+    """A real corpus shop state, edited into a quiet shop: no removal offered,
+    every card unstocked, `gold` and HP as given, the shop's own potions/relics
+    replaced as asked (relics emptied; use _relic())."""
+    for _game, rows in corpus_games():
+        for row in rows:
+            if row["state"]["decision"] == "shop" and row["state"].get("relics"):
+                state = copy.deepcopy(row["state"])
+                state["card_removal_cost"] = None
+                for c in state["cards"]:
+                    c["is_stocked"] = False
+                player = state["player"]
+                player["gold"] = gold
+                player["max_hp"] = 100
+                player["hp"] = int(100 * hp_ratio)
+                player["potions"] = [{"index": i, "id": "POTION.X", "name": "X"}
+                                     for i in range(held_potions)]
+                state["potions"] = shop_potions or []
+                return state
+    pytest.fail("no shop state with relics in the corpus")
+
+
+def _traced_and_untraced(state):
+    trace = GreedyTrace()
+    traced = greedy_action(state, trace=trace)
+    assert traced == greedy_action(state)
+    json.dumps(trace.to_dict(), allow_nan=False)
+    return traced, trace
+
+
+def test_shop_relic_inside_the_gold_reserve_is_reserved_not_unaffordable():
+    state = _shop_probe_state(gold=300)
+    template = state["relics"][0]
+
+    def relic(index, cost, stocked=True):
+        return dict(template, index=index, cost=cost, is_stocked=stocked)
+    state["relics"] = [
+        relic(0, 300 - 24),                  # gold is there, 24g left: reserved
+        relic(1, 300),                       # exactly all the gold: reserved
+        relic(2, 300 - 25),                  # leaves exactly 25g: allowed (ok)
+        relic(3, 300 + 1),                   # more than the gold: unaffordable
+        relic(4, 300 - 24, stocked=False),   # sold: unstocked, whatever the cost
+    ]
+    _action, trace = _traced_and_untraced(state)
+    status = {o["index"]: o["status"] for o in trace.to_dict()["options"]
+              if o["kind"] == "relic"}
+    assert status == {0: "reserved", 1: "reserved", 2: "ok", 3: "unaffordable",
+                      4: "unstocked"}
+    assert trace.score_of("relic", 0) is None and trace.score_of("relic", 1) is None
+    assert trace.score_of("relic", 2) is not None
+    relic_rule = next(r for r in trace.rules if r["key"] == "shop.relic")
+    assert relic_rule["values"]["n_affordable"] == 1
+    assert relic_rule["values"]["gold_reserve"] == 25
+
+
+def test_shop_heal_potion_rule_says_whether_a_heal_potion_is_for_sale():
+    def potion(index, name, description, cost=40):
+        return {"index": index, "id": "POTION.T", "name": name,
+                "description": description, "cost": cost, "is_stocked": True}
+
+    # 30% HP, free slots, but nothing to heal with for sale: skipped, unavailable
+    state = _shop_probe_state(hp_ratio=0.30, held_potions=0, shop_potions=[
+        potion(0, "Strength Potion", "Gain 2 Strength.")])
+    _action, trace = _traced_and_untraced(state)
+    heal = trace.rules[0]
+    assert heal["key"] == "shop.heal_potion" and heal["outcome"] == "skipped"
+    assert heal["values"]["available"] is False
+    assert heal["values"]["slots_free"] is True
+    assert heal["values"]["hp_ratio"] == 0.3
+
+    # the same shop with a heal potion: bought, and the rule says so
+    state["potions"].append(potion(1, "Blood Potion", "Heal 20% of your Max HP."))
+    action, trace = _traced_and_untraced(state)
+    heal = trace.rules[0]
+    assert heal["outcome"] == "fired"
+    assert heal["values"]["available"] is True and heal["values"]["slots_free"] is True
+    assert action == {"cmd": "action", "action": "buy_potion", "args": {"potion_index": 1}}
+    assert heal["values"]["potion_index"] == 1
+
+    # a heal potion for sale but every slot full: skipped, slots_free False
+    full = _shop_probe_state(hp_ratio=0.30, held_potions=3, shop_potions=[
+        potion(0, "Blood Potion", "Heal 20% of your Max HP.")])
+    _action, trace = _traced_and_untraced(full)
+    heal = trace.rules[0]
+    assert heal["outcome"] == "skipped"
+    assert heal["values"]["slots_free"] is False
+    assert heal["values"]["available"] is False
+
+
+def test_shop_best_card_score_is_none_when_no_card_is_affordable():
+    state = _shop_probe_state(gold=10)
+    for c in state["cards"]:
+        c["is_stocked"] = True
+        c["cost"] = 11            # one gold more than the player has
+    state["card_removal_cost"] = 75
+    _action, trace = _traced_and_untraced(state)
+    by_key = {r["key"]: r for r in trace.rules}
+    assert by_key["shop.remove_value"]["outcome"] == "skipped"
+    for key in ("shop.remove_value", "shop.card_must_buy", "shop.card_threshold"):
+        assert by_key[key]["values"]["best_card_score"] is None, key
+    assert by_key["shop.card_must_buy"]["values"]["best_card_index"] is None
+    assert by_key["shop.card_threshold"]["values"]["best_card_index"] is None
+    statuses = {o["status"] for o in trace.to_dict()["options"] if o["kind"] == "card"}
+    assert statuses == {"unaffordable"}
+
+    # one affordable card: the recorded score is that card's score, not None
+    state["cards"][0]["cost"] = 10
+    _action, trace = _traced_and_untraced(state)
+    by_key = {r["key"]: r for r in trace.rules}
+    score = trace.score_of("card", state["cards"][0]["index"])
+    assert score is not None
+    for key in ("shop.remove_value", "shop.card_must_buy"):
+        assert by_key[key]["values"]["best_card_score"] == score, key
+
+
 def test_map_evidence_matches_choice():
     n = 0
     unhandled = 0

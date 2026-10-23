@@ -125,7 +125,8 @@ TRACE_KEYS = frozenset({
 })
 
 RULE_OUTCOMES = ("fired", "skipped")
-OPTION_STATUSES = ("ok", "filtered", "locked", "unstocked", "unaffordable", "broken")
+OPTION_STATUSES = ("ok", "filtered", "locked", "unstocked", "unaffordable",
+                   "reserved", "broken")
 
 
 def _check_key(key: str) -> None:
