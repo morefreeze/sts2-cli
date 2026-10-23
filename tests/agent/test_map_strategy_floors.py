@@ -110,3 +110,30 @@ def test_act1_safe_accepts_a_trace_and_records_nothing():
     traced = Act1SafeStrategy().choose(state, ELITE_MONSTER, trace=trace)
     assert traced == plain
     assert trace.to_dict() == {"options": [], "rules": []}
+
+
+def test_act2_healthy_elite_ties_monster_and_node_order_decides():
+    # Pins a known, unretuned tie: act 2+, HP >= 90%, Elite 6-1.0 = 5.0 == Monster 5.
+    # The lowest index wins. Any retune of this must show up as a diff here.
+    state = _state(act=2, floor=8, hp=76, max_hp=80)          # 95% HP
+    elite = {"col": 0, "row": 1, "type": "Elite"}
+    monster = {"col": 1, "row": 1, "type": "Monster"}
+
+    values = _pick_rule([elite, monster], state)
+    assert values["tied_best"] == [0, 1] and values["best_index"] == 0
+    chosen = HpAwareMapStrategy().choose(state, [elite, monster])
+    assert chosen["args"] == {"col": 0, "row": 1}              # Elite, index 0
+
+    values = _pick_rule([monster, elite], state)
+    assert values["tied_best"] == [0, 1] and values["best_index"] == 0
+    chosen = HpAwareMapStrategy().choose(state, [monster, elite])
+    assert chosen["args"] == {"col": 1, "row": 1}              # Monster, index 0
+
+
+def test_state_act_wins_over_a_conflicting_context_act():
+    state = _state(act=1, floor=5, hp=56)
+    state["context"]["act"] = 2
+    assert "map.elite_act2" not in _components(state, ELITE_MONSTER)[0]
+    state = _state(act=2, floor=5, hp=56)
+    state["context"]["act"] = 1
+    assert "map.elite_act2" in _components(state, ELITE_MONSTER)[0]

@@ -86,6 +86,7 @@ class HpAwareMapStrategy(Act1SafeStrategy):
         gold = player.get("gold", 0)
         floor = state.get("floor") or state.get("context", {}).get("floor", 99)
         act = state.get("act") or (state.get("context") or {}).get("act")
+        # true for acts 2 and 3; names say act2 for history
         in_act2 = isinstance(act, int) and not isinstance(act, bool) and act >= 2
 
         scored = []
@@ -113,6 +114,8 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                 elif in_act2:
                     # Act 2 elites: only seek them at 90%+ HP; otherwise avoid
                     if hp_ratio >= 0.90:
+                        # Elite 6-1.0 = 5.0 ties Monster 5: node order decides (see tied_best).
+                        # Known, unretuned -- a change needs an A/B.
                         p -= 1.0  # healthy enough to risk Act 2 elite for relic
                         comps.append(("map.elite_act2_healthy", -1.0, None))
                     else:
@@ -132,7 +135,7 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                               # tougher unavoidable fights. Reverted to +3.
                     comps.append(("map.elite_pre_boss", 3, None))
                 if in_act2 and isinstance(floor, int) and floor >= self.ACT2_BOSS_ZONE:
-                    p += 4  # pre-Act-2-boss: strongly avoid elites regardless of HP
+                    p += 4  # pre-boss in acts 2+: strongly avoid elites regardless of HP
                     comps.append(("map.elite_act2_boss_zone", 4, None))
             if trace is not None:
                 trace.option(i, kind="node", score=p, components=comps,
