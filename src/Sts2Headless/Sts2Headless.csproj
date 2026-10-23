@@ -8,6 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Shared with the Sts2Advisor mod; see src/Sts2Shared/. -->
+    <Compile Include="..\Sts2Shared\**\*.cs" Link="Sts2Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Our GodotStubs (outputs as GodotSharp.dll to satisfy sts2.dll references) -->
     <ProjectReference Include="..\GodotStubs\GodotStubs.csproj" />
   </ItemGroup>
