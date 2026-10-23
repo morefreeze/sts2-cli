@@ -1,0 +1,10 @@
+<!-- Game-free logic of the Sts2Advisor mod. The mod compiles these sources in by <Compile Link>;
+     this project exists so they can be unit tested without the game. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Sts2Advisor.Core</RootNamespace>
+  </PropertyGroup>
+</Project>
