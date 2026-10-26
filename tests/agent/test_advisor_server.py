@@ -2,7 +2,10 @@
 """agent/advisor_server.py: the in-game mod's local advice service."""
 import http.client
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -12,7 +15,8 @@ import pytest
 
 from agent import advisor_server
 from agent.combat_env import greedy_action
-from agent.greedy_trace import GREEDY_BEHAVIOR_ENV, reset_greedy_context
+from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, MC_CONTEXT_START,
+                                reset_greedy_context)
 from tests.agent.advisor_corpus import (corpus_games, fresh_greedy_state,
                                         require_same_greedy_data)
 
@@ -225,3 +229,92 @@ def test_handle_error_logs_one_line_for_a_vanished_client(capsys):
     err = capsys.readouterr().err
     assert err.strip().count("\n") == 0 and "BrokenPipeError" in err
     assert "Traceback" not in err
+
+
+def test_warm_up_runs_one_card_reward_and_leaves_no_hidden_state():
+    from agent import card_scoring
+    seen = []
+
+    def spy(state, trace=None):
+        action = greedy_action(state, trace=trace)
+        seen.append((state["decision"], action["action"],
+                     dict(card_scoring._MC_CONTEXT) != MC_CONTEXT_START))
+        return action
+
+    card_scoring.set_mc_context(hp=1, max_hp=2, floor=40)  # junk from "an earlier request"
+    server = advisor_server.make_server(0, greedy=spy)
+    try:
+        # the built-in state is a valid card_reward that really picks a card, and
+        # it did change greedy's hidden context while it ran ...
+        assert seen == [("card_reward", "select_card_reward", True)]
+        # ... but the warm-up put it back to the fresh-process value
+        assert card_scoring._MC_CONTEXT == MC_CONTEXT_START
+        assert server.warmup_s is not None and server.warmup_s >= 0
+    finally:
+        server.server_close()
+
+
+def test_warm_false_skips_the_warm_up():
+    calls = []
+    server = advisor_server.make_server(
+        0, greedy=lambda state, trace=None: calls.append(state) or None, warm=False)
+    try:
+        assert calls == [] and server.warmup_s is None
+    finally:
+        server.server_close()
+
+
+def test_a_failing_warm_up_still_yields_a_working_server(capsys):
+    calls = []
+
+    def fails_once(state, trace=None):
+        calls.append(state["decision"])
+        if len(calls) == 1:
+            raise RuntimeError("cold start broke")
+        return {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}}
+
+    server = advisor_server.make_server(0, greedy=fails_once)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        err = capsys.readouterr().err
+        assert err.count("warm-up failed") == 1 and "RuntimeError: cold start broke" in err
+        assert len(err.strip().splitlines()) == 1
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        req = urllib.request.Request(base + "/advise",
+                                     data=json.dumps({"decision": "rest_site"}).encode())
+        with urllib.request.urlopen(req, timeout=10) as r:
+            reply = json.load(r)
+        assert reply["action"]["args"] == {"option_index": 0}
+        assert calls == ["card_reward", "rest_site"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+_COLD_PROCESS_PROBE = """
+import json, sys, time
+sys.path.insert(0, ".")
+from agent import advisor_server
+from tests.agent.advisor_corpus import corpus_rows
+state = next(r["state"] for r in corpus_rows() if r["state"]["decision"] == "card_reward")
+server = advisor_server.make_server(0)
+started = time.perf_counter()
+reply = advisor_server.advise(state, server.greedy, [])
+elapsed = time.perf_counter() - started
+server.server_close()
+print(json.dumps({"elapsed": elapsed, "warmup_s": server.warmup_s,
+                  "picked": reply["action"] is not None}))
+"""
+
+
+def test_first_card_reward_after_make_server_is_warm():
+    """In a FRESH process (this one is already warm from other tests): the first
+    real card_reward after make_server must not pay for the lazy loads."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    out = subprocess.run([sys.executable, "-c", _COLD_PROCESS_PROBE], cwd=root,
+                         capture_output=True, text=True, timeout=300, check=True)
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["picked"] is True
+    overloaded = os.getloadavg()[0] > (os.cpu_count() or 1)
+    assert result["elapsed"] < (2.0 if overloaded else 0.5), result

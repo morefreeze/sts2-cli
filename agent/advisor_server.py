@@ -29,6 +29,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,7 +38,8 @@ for _p in (ROOT, os.path.join(ROOT, "python")):
         sys.path.insert(0, _p)
 
 import play_full_run  # noqa: E402
-from agent.greedy_trace import GREEDY_BEHAVIOR_ENV, GreedyTrace  # noqa: E402
+from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, GreedyTrace,  # noqa: E402
+                                reset_greedy_context)
 
 DEFAULT_PORT = 8767
 MAX_BODY = 4 * 1024 * 1024  # a decision JSON is a few KB; this only bounds abuse
@@ -48,6 +50,50 @@ ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 def knob_warnings(env) -> list:
     """`KEY=value` for every greedy behaviour env var that is set (non-blank)."""
     return [f"{k}={env[k]}" for k in GREEDY_BEHAVIOR_ENV if (env.get(k) or "").strip()]
+
+
+def _warmup_state() -> dict:
+    """A minimal valid card_reward decision (Ironclad, A1F3, starter deck), used
+    only to warm greedy up. Real ids, so the card scorer takes its real path."""
+    def card(card_id, name, cost, kind, rarity=None):
+        return {"id": card_id, "name": name, "cost": cost, "type": kind,
+                "rarity": rarity, "upgraded": False, "description": "", "stats": None,
+                "keywords": None, "after_upgrade": None}
+    deck = ([card("CARD.STRIKE_IRONCLAD", "Strike", 1, "Attack")] * 5
+            + [card("CARD.DEFEND_IRONCLAD", "Defend", 1, "Skill")] * 4
+            + [card("CARD.BASH", "Bash", 2, "Attack")])
+    offered = [card("CARD.POMMEL_STRIKE", "Pommel Strike", 1, "Attack", "Common"),
+               card("CARD.SHRUG_IT_OFF", "Shrug It Off", 1, "Skill", "Common"),
+               card("CARD.IRON_WAVE", "Iron Wave", 1, "Attack", "Common")]
+    return {"type": "decision", "decision": "card_reward",
+            "context": {"act": 1, "floor": 3, "room_type": "Monster"},
+            "cards": [dict(c, index=i) for i, c in enumerate(offered)],
+            "can_skip": True, "gold_earned": 15,
+            "player": {"name": "The Ironclad", "hp": 72, "max_hp": 80, "block": 0,
+                       "gold": 99, "relics": [{"name": "Burning Blood"}], "potions": [],
+                       "deck_size": len(deck), "deck": deck}}
+
+
+def warm_up(greedy) -> float:
+    """Run greedy once on a built-in card_reward so the first real request is not
+    the one that pays for the lazy loads (sklearn + the deck predictor: ~2 s when
+    the machine is idle, 10-19 s when it is busy -- longer than the mod's request
+    timeout). Measured per decision type: card_reward is the only cold one; shop,
+    event_choice, rest_site, card_select and bundle_select take milliseconds cold.
+
+    Resets greedy's hidden state afterwards, so the warm-up leaves nothing behind.
+    A failure is logged and swallowed: the server must start regardless. Returns
+    the elapsed seconds."""
+    started = time.perf_counter()
+    try:
+        try:
+            greedy(_warmup_state(), trace=GreedyTrace())
+        finally:
+            reset_greedy_context()
+    except Exception as exc:
+        print(f"advisor: warm-up failed ({type(exc).__name__}: {exc}); "
+              "the first card_reward will be slow", file=sys.stderr)
+    return time.perf_counter() - started
 
 
 def _json_default(obj):
@@ -176,9 +222,14 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def make_server(port: int, greedy=None, env=None) -> HTTPServer:
+def make_server(port: int, greedy=None, env=None, warm: bool = True) -> HTTPServer:
+    greedy = greedy or play_full_run._load_greedy_action()
+    # warm greedy up BEFORE binding: a client that connects early waits in the
+    # backlog / gets "connection refused" instead of timing out on a cold request
+    warmup_s = warm_up(greedy) if warm else None
     server = _Server(("127.0.0.1", port), _Handler)
-    server.greedy = greedy or play_full_run._load_greedy_action()
+    server.greedy = greedy
+    server.warmup_s = warmup_s
     server.warnings = knob_warnings(os.environ if env is None else env)
     server.commit = _git_commit()
     return server
@@ -193,7 +244,8 @@ def main(argv=None) -> int:
         print(f"WARNING: greedy behaviour env set, advice differs from the measured policy: {w}",
               file=sys.stderr)
     print(f"Sts2Advisor advice service on http://127.0.0.1:{server.server_address[1]} "
-          f"(commit {server.commit})", file=sys.stderr, flush=True)
+          f"(commit {server.commit}, warm-up {server.warmup_s:.1f} s)",
+          file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
