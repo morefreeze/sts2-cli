@@ -2,13 +2,21 @@
 
 Per state: the traced pick equals the untraced pick, exactly one rule fired,
 and the trace serialises under a strict JSON parser (the mod rejects NaN).
+Every decision type greedy is advised on (build_advisor_corpus.ADVISED) must
+appear in the corpus, so a thin set of kept logs cannot pass vacuously.
 
-~25k states. A card_reward call costs ~0.8 s (a scikit-learn model predicts per
-call), so one process needs hours; games are independent (greedy's hidden state
-is reset at the start of each), so they are spread over worker processes, each
-with one OpenMP thread (OMP_NUM_THREADS=1, set before the workers start: the
-library reads it when it loads, so setting it inside a worker is too late).
-STS2_FULL_CORPUS_WORKERS picks the count (default 8; 1 = in-process)."""
+~44k states: about 100 s in one process (tests/conftest.py sets
+OMP_NUM_THREADS=1; without it OpenMP oversubscription makes a card_reward call
+~20x slower on a busy machine), 10-30 s spread over worker processes. Games
+are independent (greedy's hidden state is reset at the start of each), so they
+run in spawn workers; OMP_NUM_THREADS=1 is exported before the workers start
+because the library reads it when it loads.
+
+STS2_FULL_CORPUS_WORKERS sets the worker count: a positive integer, 1 =
+in-process, blank/unset = min(4, cpu_count // 2). It is deliberately modest:
+every worker is a busy core, and running this beside a regression or A/B batch
+slows that batch's time-budgeted solver (it plays worse when starved of CPU).
+Prefer a quiet machine, or STS2_FULL_CORPUS_WORKERS=1 under `nice`."""
 import collections
 import concurrent.futures
 import glob
@@ -28,7 +36,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 GAMES = sorted(glob.glob(os.path.join(ROOT, "logs", "batches", "*", "games", "*", "*.jsonl")))
 
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-from build_advisor_corpus import game_states  # noqa: E402
+from build_advisor_corpus import ADVISED, game_states  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("STS2_FULL_CORPUS") != "1" or not GAMES,
@@ -69,8 +77,17 @@ def _check_game(path: str) -> dict:
 
 
 def _workers() -> int:
-    raw = os.environ.get("STS2_FULL_CORPUS_WORKERS", "8")
-    return max(1, int(raw))
+    raw = (os.environ.get("STS2_FULL_CORPUS_WORKERS") or "").strip()
+    if not raw:
+        return max(1, min(4, (os.cpu_count() or 2) // 2))
+    try:
+        workers = int(raw)
+    except ValueError:
+        workers = 0
+    if workers < 1:
+        pytest.fail(f"STS2_FULL_CORPUS_WORKERS={raw!r}: expected a positive integer "
+                    "(1 = run in-process; blank = default)")
+    return workers
 
 
 def test_trace_never_changes_a_choice_on_any_kept_game(monkeypatch):
@@ -103,5 +120,8 @@ def test_trace_never_changes_a_choice_on_any_kept_game(monkeypatch):
           f"{time.monotonic() - started:.0f}s; "
           + ", ".join(f"{k}={v}" for k, v in sorted(per_decision.items())))
     assert n > 0
+    assert not set(ADVISED) - set(per_decision), (
+        "decision types with no state in the kept logs: "
+        f"{sorted(set(ADVISED) - set(per_decision))}")
     assert not mismatches, (len(mismatches), mismatches[:5])
     assert not unserialisable, (len(unserialisable), unserialisable[:5])
