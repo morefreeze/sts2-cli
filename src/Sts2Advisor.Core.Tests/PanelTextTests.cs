@@ -27,22 +27,24 @@ public class PanelTextTests
     public void RuleTemplatesFormatPercentagesAndNumbers()
     {
         var r = Rule("rest.heal_threshold", "fired", """{"hp_ratio": 0.5125, "threshold": 0.85, "floor": 11}""");
-        Assert.Equal("HP 51%，本层休息阈值 85%", TraceText.Rule(r, zh: true));
-        Assert.Equal("HP 51%, rest threshold here 85%", TraceText.Rule(r, zh: false));
+        Assert.Equal("HP 51.2%，本层休息阈值 85%", TraceText.Rule(r, zh: true));
+        Assert.Equal("HP 51.2%, rest threshold here 85%", TraceText.Rule(r, zh: false));
     }
 
     [Fact]
     public void MissingValuesRenderAsDash()
     {
         var r = Rule("shop.relic", "skipped", """{"threshold": 4.0, "gold_reserve": 25, "n_affordable": 0}""");
-        Assert.Equal("最佳遗物 —，阈值 4，至少留 25 金币", TraceText.Rule(r, zh: true));
+        Assert.Equal("最佳遗物 —，阈值 4.0，至少留 25 金币", TraceText.Rule(r, zh: true));
     }
 
     [Fact]
     public void WordValuesAreTranslated()
     {
         var r = Rule("shop.remove_basic", "skipped", """{"n_basic": 4, "basic_scope": "ironclad_only"}""");
-        Assert.Contains("只统计 Ironclad 的打击和防御（实测配置）", TraceText.Rule(r, zh: true));
+        var text = TraceText.Rule(r, zh: true);
+        Assert.Contains("只统计铁甲战士的打击和防御，实测配置", text);
+        Assert.Equal(1, text.Count(c => c == '（'));  // no parentheses nested inside the scope
     }
 
     [Fact]
@@ -63,7 +65,7 @@ public class PanelTextTests
         Assert.Equal("挑高分：选分数最高的 1, 2 张（没有低于 3 分的卡，共 — 张）", TraceText.Rule(known, zh: true));
 
         var shop = Rule("shop.remove_value", "skipped", """{"removal_value": 4.5, "best_card_score": null}""");
-        Assert.Equal("删牌价值 4.5，最佳卡 —", TraceText.Rule(shop, zh: true));
+        Assert.Equal("移除卡牌价值 4.5，最佳卡 —", TraceText.Rule(shop, zh: true));
     }
 
     [Fact]
@@ -122,8 +124,8 @@ public class PanelTextTests
     {
         var r = Rule("shop.heal_potion", "skipped",
             """{"hp_ratio": 0.3, "held_potions": 1, "slots_free": true, "available": false}""");
-        Assert.Equal("HP 30% < 50% 且药水 1/3 时买回复药水（没有可买的回复药水）", TraceText.Rule(r, zh: true));
-        Assert.Equal("Heal potion when HP 30% < 50% and potions 1/3 (no heal potion for sale)", TraceText.Rule(r, zh: false));
+        Assert.Equal("回复药水：需 HP < 50%（现 30%）且持有药水 < 3（现 1/3）（没有可买的回复药水）", TraceText.Rule(r, zh: true));
+        Assert.Equal("Heal potion: needs HP < 50% (now 30%) and potions < 3 (now 1/3) (no heal potion for sale)", TraceText.Rule(r, zh: false));
 
         // Each condition is needed: HP not low, no free slot, or a potion on sale.
         foreach (var json in new[]
@@ -147,8 +149,8 @@ public class PanelTextTests
     public void CardSelectBestSaysWhenItDefaultedToTheFirstCard(string key, string zhBase)
     {
         var fell = Rule(key, "fired", """{"picked": [0], "fallback": true, "room_type": "Monster", "n_cards": 2, "max_select": 1}""");
-        Assert.Equal(zhBase + "（没有可用的卡，默认第 1 张）", TraceText.Rule(fell, zh: true));
-        Assert.EndsWith(" (no usable card; defaulted to the first)", TraceText.Rule(fell, zh: false));
+        Assert.Equal(zhBase + "（没有达标的卡，默认第 1 张）", TraceText.Rule(fell, zh: true));
+        Assert.EndsWith(" (no card qualified; defaulted to the first)", TraceText.Rule(fell, zh: false));
 
         var normal = Rule(key, "fired", """{"picked": [1], "fallback": false, "room_type": "Monster", "n_cards": 2, "max_select": 1}""");
         Assert.Equal(zhBase, TraceText.Rule(normal, zh: true));
@@ -175,7 +177,7 @@ public class PanelTextTests
     {
         var r = Rule("card_reward.pick_best", "fired",
             """{"best_index": 0, "best_score": 5.1, "threshold": 4.5, "act": 1, "deck_size": 20, "quality_gate": true, "gate_fallback": true}""");
-        Assert.Equal("最高分 5.1 ≥ 跳过阈值 4.5（第 1 幕，牌组 20 张）（质量门过滤了全部且不能跳过，改从全部卡中选）",
+        Assert.Equal("最高分 5.1 ≥ 跳过阈值 4.5（阶段1，牌组 20 张）（质量门过滤了全部且不能跳过，改从全部卡中选）",
                      TraceText.Rule(r, zh: true));
         Assert.EndsWith(" (quality gate filtered all and skip is not allowed; picked from all)", TraceText.Rule(r, zh: false));
 
@@ -207,8 +209,8 @@ public class PanelTextTests
         Assert.Equal(new PanelLine("建议：燃烧", LineStyle.Pick), lines[1]);
         Assert.Contains(new PanelLine("燃烧  7.4", LineStyle.Fired), lines);
         Assert.Contains(new PanelLine("  卡牌分（评级 A） 6.8 · 格挡缺口 +0.6", LineStyle.Muted), lines);
-        Assert.Contains(new PanelLine("打击  已过滤（第 1 幕后期质量门）", LineStyle.Muted), lines);
-        Assert.Contains(new PanelLine("最高分 7.4 ≥ 跳过阈值 5.5（第 1 幕，牌组 14 张）", LineStyle.Fired), lines);
+        Assert.Contains(new PanelLine("已过滤（阶段1后期质量门）：打击", LineStyle.Muted), lines);
+        Assert.Contains(new PanelLine("最高分 7.4 ≥ 跳过阈值 5.5（阶段1，牌组 14 张）", LineStyle.Fired), lines);
         Assert.Equal(new PanelLine("STS2_MC_ROLLOUT=1", LineStyle.Warning), lines[^1]);
         Assert.Equal(new PanelLine("greedy 启发式打分，不是概率", LineStyle.Muted), lines[^2]);
     }
@@ -235,10 +237,10 @@ public class PanelTextTests
         """);
         var labels = new Dictionary<string, string> { ["relic:0"] = "炼金术", ["relic:1"] = "壶" };
         var zh = PanelText.Render(new DecisionHeader("shop", 1, 6, 1, 70, 80, 60), reply, labels, zh: true);
-        Assert.Contains(new PanelLine("炼金术  留作保底金（需留 25 金币）", LineStyle.Muted), zh);
-        Assert.Contains(new PanelLine("壶  买不起", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("留作保底金（需留 25 金币）：炼金术", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("买不起：壶", LineStyle.Muted), zh);
         var en = PanelText.Render(new DecisionHeader("shop", 1, 6, 1, 70, 80, 60), reply, labels, zh: false);
-        Assert.Contains(new PanelLine("炼金术  inside the 25-gold reserve", LineStyle.Muted), en);
+        Assert.Contains(new PanelLine("inside the 25-gold reserve: 炼金术", LineStyle.Muted), en);
     }
 
     [Fact]
@@ -261,7 +263,7 @@ public class PanelTextTests
         Assert.Equal(new PanelLine("  未命中关键词", LineStyle.Muted), zh[i1 + 1]);
         Assert.Equal(new PanelLine("祈祷  -2.0", LineStyle.Normal), zh[i1 + 2]);
         Assert.Equal(new PanelLine("  关键词：失去生命 -2.0", LineStyle.Muted), zh[i1 + 3]);
-        Assert.Contains(new PanelLine("献祭  已锁定", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("已锁定：献祭", LineStyle.Muted), zh);
 
         var en = PanelText.Render(new DecisionHeader("event_choice", 1, 5, 1, 60, 80, 30), reply, labels, zh: false);
         Assert.Contains(new PanelLine("  no keyword matched", LineStyle.Muted), en);

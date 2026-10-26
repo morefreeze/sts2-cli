@@ -18,10 +18,10 @@ public static class TraceText
         ["greedy.unhandled"] = ("greedy 没有处理这个决策", "greedy does not handle this decision"),
 
         ["card_reward.no_cards"] = ("没有可选的卡", "No cards offered"),
-        ["card_reward.all_filtered"] = ("全部被第 1 幕后期质量门过滤 → 跳过", "All filtered by the late Act 1 quality gate -> skip"),
+        ["card_reward.all_filtered"] = ("全部被阶段1后期质量门过滤 → 跳过", "All filtered by the late Act 1 quality gate -> skip"),
         ["card_reward.all_broken"] = ("全部是不可用的卡 → 跳过", "Every offered card is unusable -> skip"),
-        ["card_reward.below_threshold"] = ("最高分 {best_score} < 跳过阈值 {threshold}（第 {act} 幕，牌组 {deck_size} 张）", "Best {best_score} < skip threshold {threshold} (act {act}, deck {deck_size})"),
-        ["card_reward.pick_best"] = ("最高分 {best_score} ≥ 跳过阈值 {threshold}（第 {act} 幕，牌组 {deck_size} 张）", "Best {best_score} >= skip threshold {threshold} (act {act}, deck {deck_size})"),
+        ["card_reward.below_threshold"] = ("最高分 {best_score} < 跳过阈值 {threshold}（阶段{act}，牌组 {deck_size} 张）", "Best {best_score} < skip threshold {threshold} (act {act}, deck {deck_size})"),
+        ["card_reward.pick_best"] = ("最高分 {best_score} ≥ 跳过阈值 {threshold}（阶段{act}，牌组 {deck_size} 张）", "Best {best_score} >= skip threshold {threshold} (act {act}, deck {deck_size})"),
 
         ["card.base"] = ("卡牌分", "Card score"),
         ["card.set_bonus"] = ("组合预测", "Set predictor"),
@@ -36,12 +36,12 @@ public static class TraceText
         ["card.in_deck_score"] = ("卡牌分（含牌组协同）", "Card score (with deck synergy)"),
 
         ["rest.critical_heal"] = ("HP {hp_ratio:%}，必须休息线 {threshold:%}", "HP {hp_ratio:%}, must-rest line {threshold:%}"),
-        ["rest.vantom_mid_boss"] = ("Vantom 规则：HP {hp_ratio:%}（STS2_VANTOM_REST_HEAL）", "Vantom rule: HP {hp_ratio:%} (STS2_VANTOM_REST_HEAL)"),
-        ["rest.pre_boss_heal"] = ("Boss 前（第 {floor} 层）：HP {hp_ratio:%}，休息阈值 {threshold:%}", "Pre-boss (floor {floor}): HP {hp_ratio:%}, rest threshold {threshold:%}"),
+        ["rest.vantom_mid_boss"] = ("墨影幻灵规则：第 11–13 层且 HP < 70% 时休息（现第 {floor} 层，HP {hp_ratio:%}）", "Vantom rule: rest on floors 11-13 when HP < 70% (now floor {floor}, HP {hp_ratio:%})"),
+        ["rest.pre_boss_heal"] = ("第 14 层起（Boss 前）：HP {hp_ratio:%}，休息阈值 {threshold:%}", "Floor 14+ (pre-boss): HP {hp_ratio:%}, rest threshold {threshold:%}"),
         ["rest.must_upgrade"] = ("有分数 ≥ {threshold} 的未升级卡时锻造", "Smith when an unupgraded card scores >= {threshold}"),
         ["rest.heal_threshold"] = ("HP {hp_ratio:%}，本层休息阈值 {threshold:%}", "HP {hp_ratio:%}, rest threshold here {threshold:%}"),
-        ["rest.default_smith"] = ("默认：锻造", "Default: Smith"),
-        ["rest.fallback"] = ("没有休息或锻造，选第一个可用项", "No Rest or Smith: first available option"),
+        ["rest.default_smith"] = ("默认：能锻造就锻造", "Default: Smith if available"),
+        ["rest.fallback"] = ("没有适用的规则：能休息就休息，否则选第一个可用项", "No rule applied: Rest if possible, else the first available option"),
         ["rest.no_choice"] = ("没有可选项", "Nothing to choose"),
 
         ["event.pick_best"] = ("选分数最高的选项", "Highest-scoring option"),
@@ -50,7 +50,7 @@ public static class TraceText
         ["event.kw.curse"] = ("诅咒", "Curse"),
         ["event.kw.lose_all_gold"] = ("失去全部金币", "Lose all gold"),
         ["event.kw.lose_gold"] = ("失去金币", "Lose gold"),
-        ["event.kw.torment"] = ("折磨", "Torment"),
+        ["event.kw.torment"] = ("涅奥的苦痛", "Neow's Torment"),
         ["event.kw.take_damage"] = ("受到伤害", "Take damage"),
         ["event.kw.lose_hp"] = ("失去生命", "Lose HP"),
         ["event.kw.downgrade"] = ("降级卡牌", "Downgrade a card"),
@@ -58,8 +58,8 @@ public static class TraceText
         ["event.kw.rare_card"] = ("稀有卡", "Rare card"),
         ["event.kw.uncommon_card"] = ("罕见卡", "Uncommon card"),
         ["event.kw.card_reward"] = ("获得卡牌", "Card reward"),
-        ["event.kw.remove_card"] = ("删牌", "Remove a card"),
-        ["event.kw.remove_card_hp_cost"] = ("删牌要失去生命", "Removal costs HP"),
+        ["event.kw.remove_card"] = ("移除卡牌", "Remove a card"),
+        ["event.kw.remove_card_hp_cost"] = ("移除卡牌要失去生命", "Removal costs HP"),
         ["event.kw.relic"] = ("遗物", "Relic"),
         ["event.kw.relic_with_downside"] = ("有代价的遗物", "Relic with a downside"),
         ["event.kw.upgrade"] = ("升级", "Upgrade"),
@@ -86,13 +86,14 @@ public static class TraceText
         ["card_select.lowest_scores"] = ("挑低分：选分数最低的 {max_select} 张（有低于 3 分的卡，或超过 10 张）", "Pick the worst {max_select} (a card below 3, or more than 10 offered)"),
         ["card_select.no_cards"] = ("没有可选的卡 → 跳过", "No cards -> skip"),
 
-        ["shop.heal_potion"] = ("HP {hp_ratio:%} < 50% 且药水 {held_potions}/3 时买回复药水", "Heal potion when HP {hp_ratio:%} < 50% and potions {held_potions}/3"),
-        ["shop.remove_basic"] = ("删基础牌：{n_basic} 张，需要 ≥ 3 张（{basic_scope}）", "Remove a basic card: {n_basic}, needs >= 3 ({basic_scope})"),
-        ["shop.remove_value"] = ("删牌价值 {removal_value}，最佳卡 {best_card_score}", "Removal value {removal_value}, best card {best_card_score}"),
+        // "needs X (now Y)": a skipped rule must not read as a true comparison.
+        ["shop.heal_potion"] = ("回复药水：需 HP < 50%（现 {hp_ratio:%}）且持有药水 < 3（现 {held_potions}/3）", "Heal potion: needs HP < 50% (now {hp_ratio:%}) and potions < 3 (now {held_potions}/3)"),
+        ["shop.remove_basic"] = ("移除基础牌：{n_basic} 张，需要 ≥ 3 张（{basic_scope}）", "Remove a basic card: {n_basic}, needs >= 3 ({basic_scope})"),
+        ["shop.remove_value"] = ("移除卡牌价值 {removal_value}，最佳卡 {best_card_score}", "Card removal value {removal_value}, best card {best_card_score}"),
         ["shop.card_must_buy"] = ("最佳卡 {best_card_score}，必买线 {threshold}", "Best card {best_card_score}, must-buy line {threshold}"),
-        ["shop.card_threshold"] = ("最佳卡 {best_card_score}，买卡阈值 {threshold}（第 {act} 幕）", "Best card {best_card_score}, buy threshold {threshold} (act {act})"),
+        ["shop.card_threshold"] = ("最佳卡 {best_card_score}，买卡阈值 {threshold}（阶段{act}）", "Best card {best_card_score}, buy threshold {threshold} (act {act})"),
         ["shop.relic"] = ("最佳遗物 {best_relic_score}，阈值 {threshold}，至少留 {gold_reserve} 金币", "Best relic {best_relic_score}, threshold {threshold}, keep {gold_reserve} gold"),
-        ["shop.potion"] = ("最佳药水 {best_potion_score}，阈值 {threshold}，药水 {held_potions}/3", "Best potion {best_potion_score}, threshold {threshold}, potions {held_potions}/3"),
+        ["shop.potion"] = ("最佳药水 {best_potion_score}，阈值 {threshold}，持有药水 {held_potions}/3", "Best potion {best_potion_score}, threshold {threshold}, held potions {held_potions}/3"),
         ["shop.leave"] = ("没有值得买的 → 离开", "Nothing worth buying -> leave"),
         ["shop.relic_score"] = ("遗物分", "Relic score"),
         ["shop.potion_score"] = ("药水分", "Potion score"),
@@ -100,20 +101,20 @@ public static class TraceText
         ["map.pick_min_priority"] = ("选优先级数值最小的节点（越小越好）", "Lowest priority number wins (lower is better)"),
         ["map.base_priority"] = ("房间类型", "Room type"),
         ["map.shop_low_gold"] = ("金币不够", "Not enough gold"),
-        ["map.elite_early_floor"] = ("本幕前两层", "First two floors of the act"),
+        ["map.elite_early_floor"] = ("本阶段前两层", "First two floors of the act"),
         ["map.elite_hp_danger"] = ("HP < 40%", "HP < 40%"),
         ["map.elite_hp_low"] = ("HP < 60%", "HP < 60%"),
-        ["map.elite_act2_healthy"] = ("第 2 幕起 HP ≥ 90%", "Act 2+, HP >= 90%"),
-        ["map.elite_act2"] = ("第 2 幕起的精英", "Act 2+ elite"),
+        ["map.elite_act2_healthy"] = ("阶段2起 HP ≥ 90%", "Act 2+, HP >= 90%"),
+        ["map.elite_act2"] = ("阶段2起的精英", "Act 2+ elite"),
         ["map.elite_strong_midgame"] = ("HP ≥ 85% 且第 7–12 层", "HP >= 85%, floors 7-12"),
         ["map.elite_pre_boss"] = ("第 13 层起（Boss 前）", "Floor 13+ (pre-boss)"),
-        ["map.elite_act2_boss_zone"] = ("第 2 幕起，第 13 层起", "Act 2+, floor 13+"),
+        ["map.elite_act2_boss_zone"] = ("阶段2起，第 13 层起", "Act 2+, floor 13+"),
     };
 
     /// <summary>Rule values that are words, not numbers.</summary>
     private static readonly Dictionary<string, (string Zh, string En)> ValueWords = new()
     {
-        ["ironclad_only"] = ("只统计 Ironclad 的打击和防御（实测配置）", "Ironclad's Strike/Defend only (the measured config)"),
+        ["ironclad_only"] = ("只统计铁甲战士的打击和防御，实测配置", "Ironclad's Strike/Defend only, the measured config"),
         ["all"] = ("统计全部角色的打击和防御", "every character's Strike/Defend"),
     };
 
@@ -131,6 +132,13 @@ public static class TraceText
         "rest.heal_threshold", "rest.must_upgrade",
     };
 
+    /// <summary>Rule values that are scores, shown in the same format as the option scores
+    /// (so "5.45 &lt; 5.5" is never rounded into "5.5 &lt; 5.5"). Everything else is a count or an id.</summary>
+    private static readonly HashSet<string> ScoreValues = new()
+    {
+        "best_score", "best_card_score", "removal_value", "best_relic_score", "best_potion_score", "threshold",
+    };
+
     private static readonly Regex Placeholder = new(@"\{(\w+)(:%)?\}");
 
     public static string Rule(TraceRule rule, bool zh)
@@ -138,11 +146,16 @@ public static class TraceText
         if (!Templates.TryGetValue(rule.Key, out var t))
             return rule.Values.Count == 0
                 ? rule.Key
-                : rule.Key + " " + string.Join(" ", rule.Values.Select(kv => $"{kv.Key}={Value(kv.Value, false, zh)}"));
+                : rule.Key + " " + string.Join(" ", rule.Values.Select(kv => $"{kv.Key}={Value(kv.Key, kv.Value, false, zh)}"));
         return Placeholder.Replace(zh ? t.Zh : t.En, m =>
-            rule.Values.TryGetValue(m.Groups[1].Value, out var v) ? Value(v, m.Groups[2].Success, zh) : "—")
+            rule.Values.TryGetValue(m.Groups[1].Value, out var v) ? Value(m.Groups[1].Value, v, m.Groups[2].Success, zh) : "—")
             + RuleSuffix(rule, zh);
     }
+
+    /// <summary>Rules the panel leaves out: the Vantom rest rule while its env switch is off is noise.</summary>
+    public static bool IsHidden(TraceRule rule) =>
+        rule.Key == "rest.vantom_mid_boss"
+        && rule.Values.TryGetValue("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.False;
 
     /// <summary>What a rule line adds when its values show a special case; "" otherwise.</summary>
     public static string RuleSuffix(TraceRule rule, bool zh)
@@ -163,11 +176,19 @@ public static class TraceText
             case "card_select.rest_best":
             case "card_select.combat_best":
                 return Is("fallback", JsonValueKind.True)
-                    ? (zh ? "（没有可用的卡，默认第 1 张）" : " (no usable card; defaulted to the first)") : "";
+                    ? (zh ? "（没有达标的卡，默认第 1 张）" : " (no card qualified; defaulted to the first)") : "";
             case "card_reward.pick_best":
                 return Is("gate_fallback", JsonValueKind.True)
                     ? (zh ? "（质量门过滤了全部且不能跳过，改从全部卡中选）"
                           : " (quality gate filtered all and skip is not allowed; picked from all)") : "";
+            case "shop.remove_basic":
+            case "shop.remove_value":
+                // Skipped only because the removal service costs more than the gold in hand.
+                return values.TryGetValue("removal_cost", out var cost) && cost.ValueKind == JsonValueKind.Number
+                       && values.TryGetValue("gold", out var gold) && gold.ValueKind == JsonValueKind.Number
+                       && gold.GetDouble() < cost.GetDouble()
+                    ? (zh ? $"（需 {Value("removal_cost", cost, false, zh)} 金币，现 {Value("gold", gold, false, zh)}）"
+                          : $" (needs {Value("removal_cost", cost, false, zh)} gold, have {Value("gold", gold, false, zh)})") : "";
             case "map.pick_min_priority":
                 return values.TryGetValue("tied_best", out var tied) && tied.ValueKind == JsonValueKind.Array
                        && tied.GetArrayLength() > 1
@@ -190,14 +211,30 @@ public static class TraceText
         return $"{Label(c.Key, zh)}{detail} {number}";
     }
 
-    public static string Num(double v) => v.ToString("0.0", CultureInfo.InvariantCulture);
-
-    public static string Signed(double v) => (v >= 0 ? "+" : "") + Num(v);
-
-    private static string Value(JsonElement v, bool percent, bool zh) => v.ValueKind switch
+    /// <summary>The one score format: one decimal, two when the value needs them ("5.0", "5.5", "5.45").
+    /// Rounded away from zero first, so a tiny negative never prints as "-0.0".</summary>
+    public static string Num(double v)
     {
-        JsonValueKind.Number when percent =>
-            Math.Round(v.GetDouble() * 100).ToString("0", CultureInfo.InvariantCulture) + "%",
+        var rounded = Math.Round(v, 2, MidpointRounding.AwayFromZero);
+        return (rounded == 0 ? 0.0 : rounded).ToString("0.0#", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>A ratio as a percentage, floored to one decimal: an HP of 49.99% reads "49.9%", never
+    /// the "50%" threshold it is below.</summary>
+    public static string Percent(double ratio) =>
+        (Math.Floor(ratio * 1000 + 1e-6) / 10).ToString("0.#", CultureInfo.InvariantCulture) + "%";
+
+    /// <summary>"+0.6" / "-1.9"; a value that rounds to zero is "+0.0", whatever its sign.</summary>
+    public static string Signed(double v)
+    {
+        var n = Num(v);
+        return n.StartsWith('-') ? n : "+" + n;
+    }
+
+    private static string Value(string name, JsonElement v, bool percent, bool zh) => v.ValueKind switch
+    {
+        JsonValueKind.Number when percent => Percent(v.GetDouble()),
+        JsonValueKind.Number when ScoreValues.Contains(name) => Num(v.GetDouble()),
         JsonValueKind.Number => v.GetDouble().ToString("0.##", CultureInfo.InvariantCulture),
         JsonValueKind.String => ValueWords.TryGetValue(v.GetString()!, out var w) ? (zh ? w.Zh : w.En) : v.GetString()!,
         JsonValueKind.True => zh ? "是" : "yes",
@@ -205,7 +242,7 @@ public static class TraceText
         JsonValueKind.Null => "—",
         JsonValueKind.Array => v.GetArrayLength() == 0
             ? "—"
-            : string.Join(", ", v.EnumerateArray().Select(e => Value(e, false, zh))),
+            : string.Join(", ", v.EnumerateArray().Select(e => Value(name, e, false, zh))),
         _ => v.GetRawText(),
     };
 }

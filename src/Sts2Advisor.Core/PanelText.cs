@@ -16,7 +16,12 @@ public sealed record DecisionHeader(string Decision, int Act, int Floor, int Asc
 /// "bundle_card:1:2" -- the decision JSON itself is English-only.</summary>
 public static class PanelText
 {
-    private const int MaxOptions = 5;
+    /// <summary>Scored options listed per kind (cards, relics, potions, ...), the picked ones always on top of this.
+    /// The cap is per kind so a shop's relic and potion picks are not pushed out by its cards.</summary>
+    private const int MaxOptionsPerKind = 3;
+
+    /// <summary>Components shown on an option's sub-line (the base score counts as one).</summary>
+    private const int MaxComponents = 3;
 
     private static readonly Dictionary<string, (string Zh, string En)> DecisionNames = new()
     {
@@ -32,7 +37,7 @@ public static class PanelText
 
     private static readonly Dictionary<string, (string Zh, string En)> StatusNames = new()
     {
-        ["filtered"] = ("已过滤（第 1 幕后期质量门）", "filtered (late Act 1 quality gate)"),
+        ["filtered"] = ("已过滤（阶段1后期质量门）", "filtered (late Act 1 quality gate)"),
         ["locked"] = ("已锁定", "locked"),
         ["unstocked"] = ("已售出", "sold out"),
         ["unaffordable"] = ("买不起", "can't afford"),
@@ -81,11 +86,10 @@ public static class PanelText
 
         lines.Add(new PanelLine(T(zh, "建议：", "Pick: ") + PickText(h.Decision, reply, labels, zh), LineStyle.Pick));
 
-        bool ascending = h.Decision == "map_select";
-        var ok = reply.Options.Where(o => o.Status == "ok" && o.Score != null)
-            .OrderBy(o => KindOrder(o.Kind))
-            .ThenBy(o => ascending ? o.Score!.Value : -o.Score!.Value)
-            .Take(MaxOptions);
+        // Lower is better on the map, and when a card_select picks the lowest cards (remove / transform).
+        bool ascending = h.Decision == "map_select"
+            || reply.Rules.Any(r => r.Key == "card_select.lowest_scores" && r.Outcome == "fired");
+        var ok = Listed(reply, ascending);
         foreach (var o in ok)
         {
             lines.Add(new PanelLine($"{OptionLabel(o, labels)}  {TraceText.Num(o.Score!.Value)}",
@@ -102,12 +106,14 @@ public static class PanelText
                 lines.Add(new PanelLine("  " + (isEventOption ? T(zh, "关键词：", "Keywords: ") : "") + parts,
                                         LineStyle.Muted));
         }
-        foreach (var o in reply.Options.Where(o => o.Status != "ok"))
+        // One line per reason: "买不起：A、B".
+        foreach (var group in reply.Options.Where(o => o.Status != "ok").GroupBy(o => o.Status))
         {
-            var status = StatusNames.TryGetValue(o.Status, out var s) ? (zh ? s.Zh : s.En) : o.Status;
-            lines.Add(new PanelLine($"{OptionLabel(o, labels)}  {status}", LineStyle.Muted));
+            var status = StatusNames.TryGetValue(group.Key, out var s) ? (zh ? s.Zh : s.En) : group.Key;
+            lines.Add(new PanelLine(status + T(zh, "：", ": ")
+                + string.Join(T(zh, "、", ", "), group.Select(o => OptionLabel(o, labels))), LineStyle.Muted));
         }
-        foreach (var r in reply.Rules)
+        foreach (var r in reply.Rules.Where(r => !TraceText.IsHidden(r)))
             lines.Add(new PanelLine(TraceText.Rule(r, zh), r.Outcome == "fired" ? LineStyle.Fired : LineStyle.Muted));
 
         if (h.Decision == "event_choice")
@@ -119,6 +125,27 @@ public static class PanelText
             : T(zh, "greedy 启发式打分，不是概率", "greedy heuristic scores, not probabilities"), LineStyle.Muted));
         lines.AddRange(reply.Warnings.Select(w => new PanelLine(w, LineStyle.Warning)));
         return lines;
+    }
+
+    /// <summary>The scored options to list: per kind the best few (lowest few when ascending), plus every
+    /// option the advice picks wherever it ranks. Cards first, then relics, potions, the rest.</summary>
+    private static List<TraceOption> Listed(AdviceReply reply, bool ascending)
+    {
+        var ordered = reply.Options.Where(o => o.Status == "ok" && o.Score != null)
+            .OrderBy(o => KindOrder(o.Kind))
+            .ThenBy(o => ascending ? o.Score!.Value : -o.Score!.Value)
+            .ToList();
+        var listed = new List<TraceOption>();
+        var perKind = new Dictionary<string, int>();
+        foreach (var o in ordered)
+        {
+            perKind.TryGetValue(o.Kind, out var n);
+            if (n >= MaxOptionsPerKind && !IsPicked(o, reply))
+                continue;
+            perKind[o.Kind] = n + 1;
+            listed.Add(o);
+        }
+        return listed;
     }
 
     private static int KindOrder(string kind) => kind switch
@@ -135,14 +162,18 @@ public static class PanelText
     private static string TopComponents(TraceOption o, IReadOnlyDictionary<string, string> labels, bool zh)
     {
         var shown = o.Components.Where(c => c.Key == "card.base" || c.Key == "map.base_priority").ToList();
-        shown.AddRange(o.Components
+        var others = o.Components
             .Where(c => c.Key != "card.base" && c.Key != "map.base_priority" && Math.Abs(c.Value) > 1e-9)
             .OrderByDescending(c => Math.Abs(c.Value))
-            .Take(3 - shown.Count));
-        return string.Join(" · ", shown.Select(c =>
+            .ToList();
+        var room = Math.Max(0, MaxComponents - shown.Count);
+        shown.AddRange(others.Take(room));
+        var text = string.Join(" · ", shown.Select(c =>
             c.Key == "bundle.card" && c.Detail is { ValueKind: JsonValueKind.Number } ci
                 ? $"{Label(labels, $"bundle_card:{o.Index}:{ci.GetInt32()}", "?")} {TraceText.Num(c.Value)}"
                 : TraceText.Component(c, zh)));
+        // Say so when components were left out, so the shown ones are not mistaken for the whole sum.
+        return others.Count > room && text.Length > 0 ? text + " …" : text;
     }
 
     private static bool IsPicked(TraceOption o, AdviceReply reply)
@@ -186,7 +217,7 @@ public static class PanelText
             case "buy_potion":
                 return Label(labels, $"potion:{Index("potion_index")}", "?");
             case "remove_card":
-                return T(zh, "删一张牌", "Remove a card");
+                return T(zh, "移除卡牌", "Remove a card");
             case "leave_room":
                 return T(zh, "离开", "Leave");
             case "select_bundle":
