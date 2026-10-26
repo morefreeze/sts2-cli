@@ -319,5 +319,10 @@ public class PanelTextTests
                      PanelText.Status(null, StatusKind.Offline, null, zh: false)[^1].Text);
         Assert.Equal("读取失败：NEventRoom",
                      PanelText.Status(null, StatusKind.ReadFailed, "NEventRoom", zh: true)[^1].Text);
+        Assert.Equal("建议服务回复格式不对（版本不匹配？）",
+                     PanelText.Status(null, StatusKind.BadReply, null, zh: true)[^1].Text);
+        Assert.Equal("Advice service sent an unexpected reply (version mismatch?)",
+                     PanelText.Status(null, StatusKind.BadReply, null, zh: false)[^1].Text);
+        Assert.Equal(LineStyle.Warning, PanelText.Status(null, StatusKind.BadReply, null, zh: true)[^1].Style);
     }
 }

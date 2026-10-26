@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Sts2Advisor.Core;
 
 /// <summary>User settings, read from &lt;game user dir&gt;/Sts2Advisor/config.json
-/// (written by tools/install_advisor_mod.sh). Missing keys take the defaults.</summary>
+/// (written by tools/install_advisor_mod.sh). Missing or unusable keys take the defaults.</summary>
 public sealed record AdvisorConfig(string RepoPath, string Python, int Port, bool Autostart, string Hotkey)
 {
     public const int DefaultPort = 8767;
@@ -17,20 +17,50 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
         : string.IsNullOrWhiteSpace(RepoPath) ? ""
         : Path.Combine(RepoPath, ".venv", "bin", "python");
 
-    /// <summary>Defaults when the file is absent; throws JsonException when it is not JSON.</summary>
+    /// <summary>Defaults when the file is absent. Throws <see cref="JsonException"/> -- and only
+    /// that -- when the file exists but is unusable: unreadable (the original exception is the
+    /// inner one), not JSON, or JSON whose root is not an object. Inside a usable file, a key with
+    /// the wrong type takes its default; "port" must be a JSON number in 1..65535 (else 8767) and
+    /// "autostart" a boolean or the string "true"/"false" in any case (else true).</summary>
     public static AdvisorConfig Load(string path)
     {
-        if (!File.Exists(path))
-            return Defaults;
-        using var doc = JsonDocument.Parse(File.ReadAllText(path));
-        var root = doc.RootElement;
-        return new AdvisorConfig(
-            Str(root, "repo_path") ?? Defaults.RepoPath,
-            Str(root, "python") ?? Defaults.Python,
-            root.TryGetProperty("port", out var p) && p.TryGetInt32(out var port) ? port : DefaultPort,
-            root.TryGetProperty("autostart", out var a) && a.ValueKind is JsonValueKind.True or JsonValueKind.False
-                ? a.GetBoolean() : Defaults.Autostart,
-            Str(root, "hotkey") ?? DefaultHotkey);
+        try
+        {
+            if (!File.Exists(path))
+                return Defaults;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new JsonException($"the root must be a JSON object, not {root.ValueKind}");
+            return new AdvisorConfig(
+                Str(root, "repo_path") ?? Defaults.RepoPath,
+                Str(root, "python") ?? Defaults.Python,
+                ReadPort(root),
+                ReadAutostart(root),
+                Str(root, "hotkey") ?? DefaultHotkey);
+        }
+        catch (Exception e)
+        {
+            throw new JsonException($"unusable config file {path}: {e.Message}", e);
+        }
+    }
+
+    private static int ReadPort(JsonElement root) =>
+        root.TryGetProperty("port", out var p) && p.ValueKind == JsonValueKind.Number
+        && p.TryGetInt32(out var port) && port is >= 1 and <= 65535
+            ? port : DefaultPort;
+
+    private static bool ReadAutostart(JsonElement root)
+    {
+        if (!root.TryGetProperty("autostart", out var a))
+            return Defaults.Autostart;
+        return a.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String when bool.TryParse(a.GetString(), out var parsed) => parsed,
+            _ => Defaults.Autostart,
+        };
     }
 
     private static string? Str(JsonElement root, string name) =>

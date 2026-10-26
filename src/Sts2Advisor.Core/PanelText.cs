@@ -4,7 +4,7 @@ namespace Sts2Advisor.Core;
 
 public enum LineStyle { Title, Pick, Normal, Fired, Muted, Warning }
 
-public enum StatusKind { Thinking, Offline, Combat, NoAdvice, ReadFailed, Unsupported, ConfigMissing }
+public enum StatusKind { Thinking, Offline, Combat, NoAdvice, ReadFailed, Unsupported, ConfigMissing, BadReply }
 
 public sealed record PanelLine(string Text, LineStyle Style);
 
@@ -62,6 +62,7 @@ public static class PanelText
             StatusKind.ReadFailed => new PanelLine(T(zh, "读取失败：", "Could not read: ") + detail, LineStyle.Warning),
             StatusKind.Unsupported => new PanelLine(T(zh, "游戏版本未适配，建议已停用", "Unsupported game version; advice is off"), LineStyle.Warning),
             StatusKind.ConfigMissing => new PanelLine(T(zh, "缺少配置：", "Missing config: ") + detail, LineStyle.Warning),
+            StatusKind.BadReply => new PanelLine(T(zh, "建议服务回复格式不对（版本不匹配？）", "Advice service sent an unexpected reply (version mismatch?)"), LineStyle.Warning),
             _ => new PanelLine(kind.ToString(), LineStyle.Muted),
         });
         return lines;
