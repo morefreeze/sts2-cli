@@ -103,6 +103,9 @@ internal static class DecisionCapture
 
     private static Capture CardReward(NCardRewardSelectionScreen s, RunState rs, Player player, LocLookup loc)
     {
+        // The screen lingers for a moment after a pick or a skip: its choice is already made.
+        if (s._completionSource?.Task.IsCompleted == true)
+            return Simple(CaptureKind.NoAdvice, "card_reward_done", rs, player);
         var cards = s._options.Select(o => o.Card).ToList();
         bool canSkip = s._extraOptions.Any(a => string.Equals(a.OptionId, "Skip", StringComparison.OrdinalIgnoreCase));
         var labels = new Dictionary<string, string>();
@@ -193,7 +196,7 @@ internal static class DecisionCapture
     private static Capture Rest(RestSiteRoom rr, RunState rs, Player player, LocLookup loc)
     {
         var options = rr.Options;
-        if (options.Count == 0 || RunManager.Instance.RestSiteSynchronizer.GetChosenOptionIndex(player.NetId) != null)
+        if (options.Count == 0)
             return Simple(CaptureKind.NoAdvice, "rest_site_done", rs, player);
         var labels = new Dictionary<string, string>();
         for (int i = 0; i < options.Count; i++)

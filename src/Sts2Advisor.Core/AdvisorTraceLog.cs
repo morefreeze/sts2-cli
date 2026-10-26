@@ -8,19 +8,27 @@ namespace Sts2Advisor.Core;
 /// The first in-game session's file becomes tests/fixtures/advisor/real_game_trace.jsonl,
 /// which tests/test_advisor_trace_contract.py checks against headless field shapes.
 /// Logging is best effort: <see cref="Append"/> runs on a background thread after each reply and
-/// never throws; a line whose JSON is invalid, or whose write fails, is dropped and counted.</summary>
+/// never throws; a line whose JSON is invalid, or whose write fails, is dropped and counted.
+/// The file is capped: once it is larger than the cap, the next append first moves it to
+/// <c>advisor_trace.1.jsonl</c> (replacing the previous backup) and starts a fresh file, so the
+/// log never takes more than about twice the cap on disk.</summary>
 public sealed class AdvisorTraceLog
 {
     private static readonly JsonWriterOptions WriterOptions =
         new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
+    /// <summary>Size above which the file is rotated (20 MB).</summary>
+    public const long DefaultMaxBytes = 20L * 1024 * 1024;
+
     private readonly string _path;
+    private readonly long _maxBytes;
     private readonly object _gate = new();
     private int _dropped;
 
-    public AdvisorTraceLog(string path)
+    public AdvisorTraceLog(string path, long maxBytes = DefaultMaxBytes)
     {
         _path = path;
+        _maxBytes = maxBytes;
         try { EnsureDirectory(); }
         catch (Exception) { /* retried on every Append; a missing log must not stop the mod loading */ }
     }
@@ -36,6 +44,7 @@ public sealed class AdvisorTraceLog
             lock (_gate)
             {
                 EnsureDirectory();
+                RotateIfTooBig();
                 File.AppendAllText(_path, line);
             }
         }
@@ -43,6 +52,24 @@ public sealed class AdvisorTraceLog
         {
             Interlocked.Increment(ref _dropped);
         }
+    }
+
+    /// <summary>The previous file, e.g. advisor_trace.1.jsonl next to advisor_trace.jsonl.</summary>
+    private string BackupPath =>
+        Path.Combine(Path.GetDirectoryName(_path) ?? "",
+                     Path.GetFileNameWithoutExtension(_path) + ".1" + Path.GetExtension(_path));
+
+    /// <summary>Best effort: a failed move must not cost the line being appended, so it is swallowed
+    /// (the file just keeps growing until a later append manages to rotate it).</summary>
+    private void RotateIfTooBig()
+    {
+        try
+        {
+            var file = new FileInfo(_path);
+            if (file.Exists && file.Length > _maxBytes)
+                File.Move(_path, BackupPath, overwrite: true);
+        }
+        catch (Exception) { }
     }
 
     private void EnsureDirectory()

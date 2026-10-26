@@ -15,6 +15,10 @@ The mod parses replies with a strict JSON parser, so the service never emits
 NaN/Infinity: a trace that cannot be encoded strictly becomes "no advice".
 
     .venv/bin/python agent/advisor_server.py --port 8767
+
+`--exit-on-stdin-eof`: exit when stdin reaches EOF. The mod starts the service
+with a piped stdin it never writes to, so the pipe closes when the game process
+dies for any reason (a crash included) and the service does not outlive it.
 """
 import os
 
@@ -29,6 +33,7 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -222,6 +227,27 @@ def _git_commit() -> str:
         return "unknown"
 
 
+def watch_stdin_eof(stream=None, exit_fn=os._exit) -> threading.Thread:
+    """Start a daemon thread that blocks reading `stream` (default: stdin) and calls
+    exit_fn(0) at EOF. A stream that cannot be read at all counts as EOF too: the
+    parent that owned the pipe is gone. Bytes are read and dropped, never decoded."""
+    if stream is None:
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+
+    def run():
+        try:
+            read = getattr(stream, "read1", stream.read)
+            while read(65536):
+                pass
+        except (OSError, ValueError, AttributeError):
+            pass
+        exit_fn(0)
+
+    thread = threading.Thread(target=run, name="stdin-eof-watch", daemon=True)
+    thread.start()
+    return thread
+
+
 def make_server(port: int, greedy=None, env=None, warm: bool = True) -> HTTPServer:
     greedy = greedy or play_full_run._load_greedy_action()
     # warm greedy up BEFORE binding: a client that connects early waits in the
@@ -238,7 +264,11 @@ def make_server(port: int, greedy=None, env=None, warm: bool = True) -> HTTPServ
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Sts2Advisor local advice service")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--exit-on-stdin-eof", action="store_true",
+                    help="exit when stdin reaches EOF (the parent process died)")
     args = ap.parse_args(argv)
+    if args.exit_on_stdin_eof:
+        watch_stdin_eof()  # before the warm-up: an orphan must not sit through that either
     server = make_server(args.port)
     for w in server.warnings:
         print(f"WARNING: greedy behaviour env set, advice differs from the measured policy: {w}",

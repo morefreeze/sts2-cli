@@ -124,4 +124,76 @@ public class AdvisorTraceLogTests
         Assert.Equal(400, seen.Count);
         Assert.Equal(0, log.Dropped);
     }
+
+    private static string BackupOf(string path) =>
+        Path.Combine(Path.GetDirectoryName(path)!, "advisor_trace.1.jsonl");
+
+    private static int Number(string line)
+    {
+        using var doc = JsonDocument.Parse(line);
+        return doc.RootElement.GetProperty("state").GetProperty("n").GetInt32();
+    }
+
+    [Fact]
+    public void TheDefaultCapIs20MegabytesAndASmallFileIsNeverRotated()
+    {
+        Assert.Equal(20L * 1024 * 1024, AdvisorTraceLog.DefaultMaxBytes);
+        var path = NewPath();
+        var log = new AdvisorTraceLog(path);
+        for (int n = 0; n < 20; n++)
+            log.Append("shop", $$"""{"n": {{n}}}""", null, null);
+        Assert.Equal(20, File.ReadAllLines(path).Length);
+        Assert.False(File.Exists(BackupOf(path)));
+    }
+
+    [Fact]
+    public void AFileOverTheCapIsMovedToTheBackupAndAFreshOneStarted()
+    {
+        var path = NewPath();
+        var log = new AdvisorTraceLog(path, maxBytes: 500);
+        for (int n = 0; n < 12; n++)
+            log.Append("shop", $$"""{"n": {{n}}}""", null, null);
+
+        Assert.True(File.Exists(BackupOf(path)));
+        var backup = File.ReadAllLines(BackupOf(path));
+        var current = File.ReadAllLines(path);
+        Assert.NotEmpty(backup);
+        Assert.NotEmpty(current);
+        // Nothing lost, nothing duplicated, in order, every line whole.
+        var numbers = backup.Concat(current).Select(Number).ToList();
+        Assert.Equal(Enumerable.Range(0, 12), numbers);
+        Assert.Equal(0, log.Dropped);
+        // The live file only passes the cap by the line that crossed it.
+        Assert.True(new FileInfo(path).Length <= 500 + current.Max(l => l.Length + 1));
+    }
+
+    [Fact]
+    public void ASecondRotationReplacesTheBackupInsteadOfPilingUpFiles()
+    {
+        var path = NewPath();
+        var log = new AdvisorTraceLog(path, maxBytes: 300);
+        for (int n = 0; n < 60; n++)
+            log.Append("shop", $$"""{"n": {{n}}}""", null, null);
+
+        Assert.Equal(2, Directory.GetFiles(Path.GetDirectoryName(path)!).Length);
+        var backup = File.ReadAllLines(BackupOf(path)).Select(Number).ToList();
+        var current = File.ReadAllLines(path).Select(Number).ToList();
+        Assert.Equal(59, current[^1]);
+        Assert.Equal(current[0] - 1, backup[^1]);  // the backup is the file right before the live one
+        Assert.True(backup[0] > 0);                // older lines are gone
+        Assert.Equal(0, log.Dropped);
+    }
+
+    [Fact]
+    public void AFailedRotationNeverThrowsAndNeverCostsTheLine()
+    {
+        var path = NewPath();
+        var log = new AdvisorTraceLog(path, maxBytes: 100);
+        // A non-empty directory where the backup should go: the move cannot succeed.
+        Directory.CreateDirectory(Path.Combine(BackupOf(path), "keep"));
+        for (int n = 0; n < 5; n++)
+            log.Append("shop", $$"""{"n": {{n}}}""", null, null);
+        Assert.Equal(Enumerable.Range(0, 5), File.ReadAllLines(path).Select(Number));
+        Assert.Equal(0, log.Dropped);
+    }
 }

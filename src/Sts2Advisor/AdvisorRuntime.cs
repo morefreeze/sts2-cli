@@ -45,7 +45,9 @@ internal static class AdvisorRuntime
     private static string? _requested;
     private static string? _language = "";
     private static string? _configProblem;
+    private static string? _lastSeenFingerprint;
     private static string? _failScreen;
+    private static string? _failFingerprint;
     private static int _failCount;
     private static int _loggedDropped;
     private static string? _tickErrorKey;
@@ -86,7 +88,14 @@ internal static class AdvisorRuntime
         {
             _disabled = true;
             ModLog.Error($"game API mismatch, advisor disabled: {ex}");
-            Show(PanelText.Status(null, StatusKind.Unsupported, null, Zh));
+            // The missing member may be LocManager itself: fall back to English, never throw out of the tick.
+            try
+            {
+                bool zh = false;
+                try { zh = Zh; } catch (Exception) { }
+                Show(PanelText.Status(null, StatusKind.Unsupported, null, zh));
+            }
+            catch (Exception) { }
         }
         catch (Exception ex)
         {
@@ -131,29 +140,46 @@ internal static class AdvisorRuntime
         }
         catch (Exception ex) when (ex is not (TypeLoadException or MissingMemberException))
         {
-            ReadFailed(DetectScreen, ex);
+            ReadFailed(DetectScreen, null, ex);
             return;
         }
-        if (_failScreen == DetectScreen)
+        // A parked screen is forgiven as soon as the player is on anything else (combat, a menu, another
+        // screen class, or a different state of the same class), so leaving and coming back retries it.
+        if (_failScreen != null && (cap?.Screen != _failScreen || cap.Fingerprint != _failFingerprint))
             ResetFailures();
         _current = cap;
         if (cap == null)
         {
             _requested = null;
+            _lastSeenFingerprint = null;
             _panel.Hide();
             return;
         }
         if (cap.Kind != CaptureKind.Advise)
         {
             _requested = null;
+            _lastSeenFingerprint = null;
             Show(PanelText.Status(cap.Header, cap.Kind == CaptureKind.Combat ? StatusKind.Combat : StatusKind.NoAdvice, null, Zh));
             return;
         }
-        if (cap.Screen == _failScreen && _failCount >= MaxScreenFailures) return;
+        if (cap.Screen == _failScreen && _failCount >= MaxScreenFailures)
+        {
+            Show(PanelText.Status(null, StatusKind.ReadFailed, cap.Screen, Zh));  // dedupes identical text
+            return;
+        }
         if (cap.Fingerprint == _requested) return;
+        // Screens animate in and their state settles over a frame or two: ask only about a fingerprint
+        // seen on two polls in a row. The first sighting just records it.
+        bool settled = cap.Fingerprint == _lastSeenFingerprint;
+        _lastSeenFingerprint = cap.Fingerprint;
         if (_offline && !Reconnect.Ready(now))
         {
             Show(PanelText.Status(cap.Header, StatusKind.Offline, null, Zh));
+            return;
+        }
+        if (!settled)
+        {
+            Show(PanelText.Status(cap.Header, StatusKind.Thinking, null, Zh));  // not the last screen's advice
             return;
         }
 
@@ -164,7 +190,7 @@ internal static class AdvisorRuntime
         }
         catch (Exception ex) when (ex is not (TypeLoadException or MissingMemberException))
         {
-            ReadFailed(cap.Screen, ex);
+            ReadFailed(cap.Screen, cap.Fingerprint, ex);
             return;
         }
         if (cap.Screen == _failScreen)
@@ -237,12 +263,13 @@ internal static class AdvisorRuntime
         }
     }
 
-    private static void ReadFailed(string screen, Exception ex)
+    private static void ReadFailed(string screen, string? fingerprint, Exception ex)
     {
-        if (screen == _failScreen) _failCount++;
+        if (screen == _failScreen && fingerprint == _failFingerprint) _failCount++;
         else
         {
             _failScreen = screen;
+            _failFingerprint = fingerprint;
             _failCount = 1;
         }
         if (_failCount <= MaxScreenFailures)  // a persistent failure must not flood the log at 3 Hz
@@ -253,6 +280,7 @@ internal static class AdvisorRuntime
     private static void ResetFailures()
     {
         _failScreen = null;
+        _failFingerprint = null;
         _failCount = 0;
     }
 
@@ -260,7 +288,7 @@ internal static class AdvisorRuntime
     private static void LogTickFailure(Exception ex)
     {
         double now = Clock.Elapsed.TotalSeconds;
-        string key = ex.GetType().FullName + ":" + ex.Message;
+        string key = TickFailureKey(ex);
         if (key == _tickErrorKey && now - _tickErrorLoggedAt < TickErrorLogSeconds)
         {
             _tickErrorsSuppressed++;
@@ -271,6 +299,25 @@ internal static class AdvisorRuntime
         _tickErrorKey = key;
         _tickErrorLoggedAt = now;
         _tickErrorsSuppressed = 0;
+    }
+
+    /// <summary>Exception type + where it was thrown, never its message (messages often carry ids that
+    /// change every frame). The first frame in this mod's own code is preferred: a KeyNotFoundException
+    /// from two call sites is two bugs, but the same top frame inside Dictionary.</summary>
+    private static string TickFailureKey(Exception ex)
+    {
+        string type = ex.GetType().FullName ?? ex.GetType().Name;
+        try
+        {
+            var frames = new StackTrace(ex, false).GetFrames();
+            var methods = frames.Select(f => f.GetMethod()).Where(m => m != null).ToList();
+            var method = methods.FirstOrDefault(m => m!.DeclaringType?.Namespace?.StartsWith("Sts2") == true) ?? methods.FirstOrDefault();
+            return method == null ? type : $"{type}@{method.DeclaringType?.FullName}.{method.Name}";
+        }
+        catch (Exception)
+        {
+            return type;
+        }
     }
 
     private static void PollHotkey()
@@ -285,5 +332,9 @@ internal static class AdvisorRuntime
         _hotkeyDown = down;
     }
 
-    private static void Show(IReadOnlyList<PanelLine> lines) => _panel?.Show(lines, _language);
+    /// <summary>Nothing is shown while the player has the panel hidden (F8): a reply that lands late must not undo that.</summary>
+    private static void Show(IReadOnlyList<PanelLine> lines)
+    {
+        if (_visible) _panel?.Show(lines, _language);
+    }
 }

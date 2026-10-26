@@ -9,6 +9,7 @@ namespace Sts2Advisor;
 internal static class SidecarProcess
 {
     private static Process? _process;
+    private static volatile bool _stopping;
 
     public static async Task EnsureStartedAsync(AdvisorConfig config, IAdvisor advisor)
     {
@@ -37,11 +38,17 @@ internal static class SidecarProcess
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
+                // A pipe we never write to and never close: when the game process dies, however it dies,
+                // the service sees EOF on it and exits instead of lingering as an orphan.
+                RedirectStandardInput = true,
             };
             info.ArgumentList.Add(script);
             info.ArgumentList.Add("--port");
             info.ArgumentList.Add(config.Port.ToString());
+            info.ArgumentList.Add("--exit-on-stdin-eof");
             _process = Process.Start(info)!;
+            _process.EnableRaisingEvents = true;
+            _process.Exited += OnExited;
             _process.ErrorDataReceived += (_, e) => { if (e.Data != null) ModLog.Info("[advisor_server] " + e.Data); };
             _process.OutputDataReceived += (_, e) => { if (e.Data != null) ModLog.Info("[advisor_server] " + e.Data); };
             _process.BeginErrorReadLine();
@@ -55,8 +62,25 @@ internal static class SidecarProcess
         }
     }
 
+    /// <summary>A Python crash at startup would otherwise leave no trace but an "offline" panel.</summary>
+    private static void OnExited(object? sender, EventArgs e)
+    {
+        try
+        {
+            var process = (Process)sender!;
+            // WaitForExit() also waits for the redirected streams to drain, so the traceback reaches the
+            // log before this line. Bounded: a grandchild holding the pipe open must not swallow the message.
+            Task.Run(process.WaitForExit).Wait(2000);
+            string message = $"sidecar exited with code {process.ExitCode}";
+            if (_stopping) ModLog.Info(message);
+            else ModLog.Error(message);
+        }
+        catch (Exception) { }
+    }
+
     public static void Stop()
     {
+        _stopping = true;
         try
         {
             if (_process is { HasExited: false })

@@ -318,3 +318,75 @@ def test_first_card_reward_after_make_server_is_warm():
     assert result["picked"] is True
     overloaded = os.getloadavg()[0] > (os.cpu_count() or 1)
     assert result["elapsed"] < (2.0 if overloaded else 0.5), result
+
+
+# --- --exit-on-stdin-eof: no orphan service after a game crash -----------------
+
+def test_watch_stdin_eof_exits_only_at_eof():
+    read_fd, write_fd = os.pipe()
+    exited = threading.Event()
+    codes = []
+    with os.fdopen(read_fd, "rb") as reader:
+        thread = advisor_server.watch_stdin_eof(reader, exit_fn=lambda code: (codes.append(code), exited.set()))
+        os.write(write_fd, b"not a request, and not valid utf-8: \xff\xfe")
+        assert not exited.wait(0.3), "data on stdin must not stop the service"
+        os.close(write_fd)
+        assert exited.wait(5), "EOF on stdin must stop the service"
+        thread.join(5)
+    assert codes == [0]
+
+
+def test_watch_stdin_eof_treats_an_unreadable_stdin_as_eof():
+    read_fd, write_fd = os.pipe()
+    reader = os.fdopen(read_fd, "rb")
+    reader.close()
+    os.close(write_fd)
+    exited = threading.Event()
+    advisor_server.watch_stdin_eof(reader, exit_fn=lambda code: exited.set())
+    assert exited.wait(5)
+
+
+def test_main_watches_stdin_only_with_the_flag(monkeypatch):
+    class Stop(Exception):
+        pass
+
+    watched = []
+    monkeypatch.setattr(advisor_server, "watch_stdin_eof", lambda *a, **k: watched.append(1))
+    monkeypatch.setattr(advisor_server, "make_server", lambda port: (_ for _ in ()).throw(Stop()))
+    with pytest.raises(Stop):
+        advisor_server.main(["--port", "0"])
+    assert watched == []
+    with pytest.raises(Stop):
+        advisor_server.main(["--port", "0", "--exit-on-stdin-eof"])
+    assert watched == [1]
+
+
+def test_service_process_exits_when_its_stdin_closes(tmp_path):
+    """The real thing: the service the mod starts must not outlive the game."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    log = open(tmp_path / "server.log", "wb")
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(root, "agent", "advisor_server.py"), "--port", str(port),
+         "--exit-on-stdin-eof"],
+        cwd=root, stdin=subprocess.PIPE, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 180  # warm-up is 2-19 s idle, longer on a busy machine
+        while True:
+            assert proc.poll() is None, (tmp_path / "server.log").read_text()
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+                    assert json.load(r)["ok"] is True
+                break
+            except (urllib.error.URLError, OSError):
+                assert time.monotonic() < deadline, "the service never came up"
+                time.sleep(0.5)
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
