@@ -163,12 +163,37 @@ public class PanelTextReviewTests
 
     // ---- 5. rest.pre_boss_heal states its condition ---------------------------------------------------------
 
-    [Fact]
-    public void PreBossHealNamesItsFloorConditionNotTheCurrentFloor()
+    [Theory]
+    [InlineData(14)]
+    [InlineData(15)]
+    [InlineData(16)]
+    public void PreBossHealShowsItsNumbersOnceTheFloorIsReached(int floor)
     {
-        var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 1.0, threshold = 0.95, floor = 7, available = true });
+        var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 1.0, threshold = 0.95, floor, available = true });
         Assert.Equal("第 14 层起（Boss 前）：HP 100%，休息阈值 95%", TraceText.Rule(r, zh: true));
         Assert.Equal("Floor 14+ (pre-boss): HP 100%, rest threshold 95%", TraceText.Rule(r, zh: false));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(13)]
+    public void PreBossHealBelowFloor14ShowsNoNumbers(int floor)
+    {
+        // Below floor 14 the recorded threshold is the current floor's, not the pre-boss one.
+        var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 0.8125, threshold = 0.8, floor, available = true });
+        Assert.Equal("第 14 层起（Boss 前）休息", TraceText.Rule(r, zh: true));
+        Assert.Equal("Floor 14+ (pre-boss): rest", TraceText.Rule(r, zh: false));
+
+        var missingOption = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 0.8125, threshold = 0.8, floor, available = false });
+        Assert.Equal("第 14 层起（Boss 前）休息（没有该选项）", TraceText.Rule(missingOption, zh: true));
+    }
+
+    [Fact]
+    public void PreBossHealWithoutAFloorKeepsTheFullLine()
+    {
+        var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 1.0, threshold = 0.95 });
+        Assert.Equal("第 14 层起（Boss 前）：HP 100%，休息阈值 95%", TraceText.Rule(r, zh: true));
     }
 
     // ---- 6. removal rules say why they were skipped when gold is short --------------------------------------
@@ -338,6 +363,112 @@ public class PanelTextReviewTests
         var on = PanelText.Render(header, Reply(new { cmd = "action", action = "proceed" }, Array.Empty<object>(), (IEnumerable<object>)Rules(true)),
                                   new Dictionary<string, string>(), zh: true);
         Assert.Contains(on, l => l.Text.Contains("墨影幻灵"));
+    }
+
+    [Theory]
+    [InlineData(true, true, false)]    // switch on and a Vantom boss: shown
+    [InlineData(false, true, true)]    // switch off: hidden
+    [InlineData(true, false, true)]    // switch on but the next boss is not Vantom: hidden
+    [InlineData(false, false, true)]
+    public void TheVantomRuleShowsOnlyWhenEnabledAndTheBossIsVantom(bool enabled, bool isVantom, bool hidden)
+    {
+        var rules = new object[]
+        {
+            RuleObj("rest.critical_heal", "skipped", new { hp_ratio = 1.0, threshold = 0.3, floor = 12, available = true }),
+            RuleObj("rest.vantom_mid_boss", "skipped", new { enabled, is_vantom = isVantom, hp_ratio = 1.0, floor = 12, available = true }),
+        };
+        var lines = PanelText.Render(new DecisionHeader("rest_site", 1, 12, 1, 80, 80, 99),
+                                     Reply(new { cmd = "action", action = "proceed" }, Array.Empty<object>(), rules),
+                                     new Dictionary<string, string>(), zh: true);
+        Assert.Equal(hidden, lines.All(l => !l.Text.Contains("墨影幻灵")));
+        Assert.Contains(lines, l => l.Text.StartsWith("HP 100%，必须休息线"));
+    }
+
+    [Fact]
+    public void TheVantomRuleStaysVisibleWhenItsFlagsAreMissing()
+    {
+        var rules = new object[] { RuleObj("rest.vantom_mid_boss", "skipped", new { hp_ratio = 1.0, floor = 12 }) };
+        var lines = PanelText.Render(new DecisionHeader("rest_site", 1, 12, 1, 80, 80, 99),
+                                     Reply(new { cmd = "action", action = "proceed" }, Array.Empty<object>(), rules),
+                                     new Dictionary<string, string>(), zh: true);
+        Assert.Contains(lines, l => l.Text.Contains("墨影幻灵"));
+    }
+
+    [Fact]
+    public void TheCapSaysHowManyCardsItLeftOut()
+    {
+        var options = Enumerable.Range(0, 8).Select(i => (object)Opt("card", i, 8 - i)).ToList();
+        var rules = new object[] { RuleObj("card_select.top_scores", "fired", new { has_junk = false, picked = new[] { 0 }, n_cards = 8, max_select = 1 }) };
+        var reply = Reply(SelectCards("0"), options, rules);
+        var header = new DecisionHeader("card_select", 1, 5, 1, 60, 80, 99);
+        var zh = PanelText.Render(header, reply, Labels("card", 8), zh: true);
+        Assert.Contains(new PanelLine("另有 5 张卡未列出", LineStyle.Muted), zh);
+        var en = PanelText.Render(header, reply, Labels("card", 8), zh: false);
+        Assert.Contains(new PanelLine("5 more cards not shown", LineStyle.Muted), en);
+
+        // It comes right after the listed options and before the rule lines.
+        var texts = Texts(zh);
+        var lastOption = texts.FindLastIndex(t => Regex.IsMatch(t, @"^C\d  "));
+        Assert.Equal("另有 5 张卡未列出", texts[lastOption + 1]);
+        Assert.Equal(1, zh.Count(l => l.Text.StartsWith("另有")));
+    }
+
+    [Fact]
+    public void APickedOptionBeyondTheCapIsNotCountedAsHidden()
+    {
+        var options = Enumerable.Range(0, 8).Select(i => (object)Opt("card", i, 8 - i)).ToList();
+        var rules = new object[] { RuleObj("card_select.top_scores", "fired", new { has_junk = false, picked = new[] { 0, 7 }, n_cards = 8, max_select = 2 }) };
+        var lines = PanelText.Render(new DecisionHeader("card_select", 1, 5, 1, 60, 80, 99),
+                                     Reply(SelectCards("0,7"), options, rules), Labels("card", 8), zh: true);
+        Assert.Contains(new PanelLine("另有 4 张卡未列出", LineStyle.Muted), lines);   // 8 scored, 4 listed
+    }
+
+    [Fact]
+    public void TheCapCountsEachKindSeparately()
+    {
+        var options = new List<object>();
+        for (int i = 0; i < 4; i++) options.Add(Opt("card", i, 9 - i));
+        for (int i = 0; i < 5; i++) options.Add(Opt("relic", i, 7 - i));
+        for (int i = 0; i < 4; i++) options.Add(Opt("potion", i, 6 - i));
+        var action = new { cmd = "action", action = "buy_card", args = new { card_index = 0 } };
+        var labels = Labels("card", 4, "Card").Concat(Labels("relic", 5, "Relic")).Concat(Labels("potion", 4, "Potion"))
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
+        var header = new DecisionHeader("shop", 1, 6, 1, 70, 80, 400);
+        var zh = PanelText.Render(header, Reply(action, options, Array.Empty<object>()), labels, zh: true);
+        Assert.Contains(new PanelLine("另有 1 张卡未列出", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("另有 2 件遗物未列出", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("另有 1 瓶药水未列出", LineStyle.Muted), zh);
+        var en = PanelText.Render(header, Reply(action, options, Array.Empty<object>()), labels, zh: false);
+        Assert.Contains(new PanelLine("1 more card not shown", LineStyle.Muted), en);
+        Assert.Contains(new PanelLine("2 more relics not shown", LineStyle.Muted), en);
+        Assert.Contains(new PanelLine("1 more potion not shown", LineStyle.Muted), en);
+        // Cards, then relics, then potions.
+        var texts = Texts(zh);
+        Assert.True(texts.IndexOf("另有 1 张卡未列出") < texts.IndexOf("另有 2 件遗物未列出"));
+        Assert.True(texts.IndexOf("另有 2 件遗物未列出") < texts.IndexOf("另有 1 瓶药水未列出"));
+    }
+
+    [Fact]
+    public void OtherKindsGetAGenericCount()
+    {
+        var options = Enumerable.Range(0, 5).Select(i => (object)Opt("node", i, 5 + i)).ToList();
+        var action = new { cmd = "action", action = "select_map_node", args = new { col = 1, row = 1 } };
+        var header = new DecisionHeader("map_select", 1, 1, 1, 80, 80, 99);
+        var reply = Reply(action, options, Array.Empty<object>());
+        Assert.Contains(new PanelLine("另有 2 个未列出", LineStyle.Muted), PanelText.Render(header, reply, new Dictionary<string, string>(), zh: true));
+        Assert.Contains(new PanelLine("2 more not shown", LineStyle.Muted), PanelText.Render(header, reply, new Dictionary<string, string>(), zh: false));
+    }
+
+    [Fact]
+    public void NothingIsSaidWhenNothingWasLeftOutOrOnlyUnavailableOptionsAreMissing()
+    {
+        var options = new List<object> { Opt("card", 0, 7.0), Opt("card", 1, 6.0), Opt("card", 2, 5.0) };
+        for (int i = 3; i < 8; i++) options.Add(Opt("card", i, null, "unaffordable"));
+        var action = new { cmd = "action", action = "buy_card", args = new { card_index = 0 } };
+        var lines = PanelText.Render(new DecisionHeader("shop", 1, 6, 1, 70, 80, 400),
+                                     Reply(action, options, Array.Empty<object>()), Labels("card", 8), zh: true);
+        Assert.DoesNotContain(lines, l => l.Text.StartsWith("另有"));
+        Assert.Contains(lines, l => l.Text.StartsWith("买不起："));
     }
 
     [Fact]

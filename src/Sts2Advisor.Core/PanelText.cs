@@ -109,6 +109,7 @@ public static class PanelText
                 lines.Add(new PanelLine("  " + (isEventOption ? T(zh, "关键词：", "Keywords: ") : "") + parts,
                                         LineStyle.Muted));
         }
+        lines.AddRange(HiddenCounts(reply, ok, zh));
         // One line per reason: "买不起：A、B".
         foreach (var group in reply.Options.Where(o => o.Status != "ok").GroupBy(o => o.Status))
         {
@@ -150,6 +151,26 @@ public static class PanelText
         }
         return listed;
     }
+
+    /// <summary>One muted line per kind for the scored options the per-kind cap left out.</summary>
+    private static IEnumerable<PanelLine> HiddenCounts(AdviceReply reply, List<TraceOption> listed, bool zh)
+    {
+        foreach (var kind in reply.Options.Where(o => o.Status == "ok" && o.Score != null)
+                     .GroupBy(o => o.Kind).OrderBy(g => KindOrder(g.Key)))
+        {
+            var hidden = kind.Count() - listed.Count(o => o.Kind == kind.Key);
+            if (hidden > 0)
+                yield return new PanelLine(MoreNotShown(kind.Key, hidden, zh), LineStyle.Muted);
+        }
+    }
+
+    private static string MoreNotShown(string kind, int n, bool zh) => kind switch
+    {
+        "card" => zh ? $"另有 {n} 张卡未列出" : $"{n} more {(n == 1 ? "card" : "cards")} not shown",
+        "relic" => zh ? $"另有 {n} 件遗物未列出" : $"{n} more {(n == 1 ? "relic" : "relics")} not shown",
+        "potion" => zh ? $"另有 {n} 瓶药水未列出" : $"{n} more {(n == 1 ? "potion" : "potions")} not shown",
+        _ => zh ? $"另有 {n} 个未列出" : $"{n} more not shown",
+    };
 
     private static int KindOrder(string kind) => kind switch
     {

@@ -139,10 +139,18 @@ public static class TraceText
         "best_score", "best_card_score", "removal_value", "best_relic_score", "best_potion_score", "threshold",
     };
 
+    /// <summary>rest.pre_boss_heal below its floor: the recorded threshold is the current floor's, not the
+    /// pre-boss one, so the numbers are left out.</summary>
+    private const int PreBossFloor = 14;
+
     private static readonly Regex Placeholder = new(@"\{(\w+)(:%)?\}");
 
     public static string Rule(TraceRule rule, bool zh)
     {
+        if (rule.Key == "rest.pre_boss_heal"
+            && rule.Values.TryGetValue("floor", out var floor) && floor.ValueKind == JsonValueKind.Number
+            && floor.GetDouble() < PreBossFloor)
+            return (zh ? "第 14 层起（Boss 前）休息" : "Floor 14+ (pre-boss): rest") + RuleSuffix(rule, zh);
         if (!Templates.TryGetValue(rule.Key, out var t))
             return rule.Values.Count == 0
                 ? rule.Key
@@ -152,10 +160,12 @@ public static class TraceText
             + RuleSuffix(rule, zh);
     }
 
-    /// <summary>Rules the panel leaves out: the Vantom rest rule while its env switch is off is noise.</summary>
+    /// <summary>Rules the panel leaves out: the Vantom rest rule is noise while its env switch is off, and
+    /// when the next boss is not Vantom.</summary>
     public static bool IsHidden(TraceRule rule) =>
         rule.Key == "rest.vantom_mid_boss"
-        && rule.Values.TryGetValue("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.False;
+        && (rule.Values.TryGetValue("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.False
+            || rule.Values.TryGetValue("is_vantom", out var isVantom) && isVantom.ValueKind == JsonValueKind.False);
 
     /// <summary>What a rule line adds when its values show a special case; "" otherwise.</summary>
     public static string RuleSuffix(TraceRule rule, bool zh)
