@@ -1,0 +1,46 @@
+<!-- The in-game Sts2Advisor mod. Builds against the REAL game assemblies (not src/GodotStubs, not the
+     IL-patched lib/sts2.dll). Shared serializer and Core sources are compiled in: the game's
+     ModManager loads exactly one <id>.dll per mod. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>13.0</LangVersion>
+    <AssemblyName>Sts2Advisor</AssemblyName>
+    <RootNamespace>Sts2Advisor</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(HOME)/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64</Sts2DataDir>
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="all" />
+    <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="GodotSharp">
+      <HintPath>$(Sts2DataDir)/GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Sts2Shared\**\*.cs" Link="Sts2Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\Sts2Advisor.Core\**\*.cs"
+             Exclude="..\Sts2Advisor.Core\bin\**;..\Sts2Advisor.Core\obj\**"
+             Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
+    <None Update="Sts2Advisor.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="CheckGameInstall" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(Sts2DataDir)/sts2.dll')"
+           Text="sts2.dll not found under Sts2DataDir=$(Sts2DataDir). Install the game or pass -p:Sts2DataDir=..." />
+  </Target>
+</Project>

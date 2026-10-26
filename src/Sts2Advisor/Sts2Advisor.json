@@ -1,0 +1,12 @@
+{
+  "id": "Sts2Advisor",
+  "name": "Sts2Advisor",
+  "author": "morefreeze",
+  "description": "Out-of-combat advice (card rewards, rest sites, events, shops, maps) with the reasons behind each pick. Combat is left to CombatSolver.",
+  "version": "0.1.0",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false,
+  "min_game_version": "0.111.0",
+  "dependencies": []
+}
