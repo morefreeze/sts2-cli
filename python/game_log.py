@@ -60,9 +60,14 @@ def cleanup_old_logs(max_age_days=LOG_RETENTION_DAYS):
         fpath = os.path.join(LOG_DIR, fname)
         if not os.path.isfile(fpath):
             continue
-        if os.path.getmtime(fpath) < cutoff:
-            os.remove(fpath)
-            removed += 1
+        # run_batch.py starts several lanes at once, and each runs this purge. Another
+        # lane may delete fpath after we listed it; a file already gone is simply skipped.
+        try:
+            if os.path.getmtime(fpath) < cutoff:
+                os.remove(fpath)
+                removed += 1
+        except FileNotFoundError:
+            continue
     if removed:
         print(f"  [log] Cleaned up {removed} old log file(s)")
 

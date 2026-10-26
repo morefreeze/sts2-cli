@@ -264,3 +264,68 @@ def test_cleanup_removes_old_top_level_logs_but_never_touches_logs_batches(_isol
     assert not stale.exists()
     assert fresh.exists()
     assert kept.exists() and results.exists() and manifest.exists()
+
+
+def _two_stale_logs(log_dir: Path) -> tuple[Path, Path]:
+    import os
+
+    old = time.time() - 30 * 86400
+    racing = log_dir / "20260901_000000_Ironclad_racing.jsonl"
+    racing.write_text("{}\n")
+    other = log_dir / "20260901_000001_Silent_other.jsonl"
+    other.write_text("{}\n")
+    for path in (racing, other):
+        os.utime(path, (old, old))
+    return racing, other
+
+
+def test_cleanup_survives_file_removed_by_another_lane_before_getmtime(
+    _isolated_log_dir, monkeypatch, capsys
+):
+    """run_batch.py starts several play_full_run lanes at once; each runs the purge.
+    A file listed by one lane can be deleted by another lane before this lane's
+    getmtime call. That must be skipped, not kill the lane."""
+    import os
+
+    racing, other = _two_stale_logs(_isolated_log_dir)
+    real_getmtime = os.path.getmtime
+
+    def racing_getmtime(path):
+        if os.path.basename(path) == racing.name:
+            os.remove(path)  # the other lane wins the race...
+            raise FileNotFoundError(2, "No such file or directory", path)  # ...we lose
+        return real_getmtime(path)
+
+    monkeypatch.setattr(game_log.os.path, "getmtime", racing_getmtime)
+
+    game_log.cleanup_old_logs()  # must not raise
+
+    assert not racing.exists()
+    assert not other.exists()
+    # the racing file was removed by someone else, so it is not counted here
+    assert "Cleaned up 1 old log file(s)" in capsys.readouterr().out
+
+
+def test_cleanup_survives_file_removed_by_another_lane_before_remove(
+    _isolated_log_dir, monkeypatch, capsys
+):
+    """Same race, but the other lane deletes the file between this lane's
+    getmtime (which saw it as stale) and its os.remove."""
+    import os
+
+    racing, other = _two_stale_logs(_isolated_log_dir)
+    real_remove = os.remove
+
+    def racing_remove(path):
+        if os.path.basename(path) == racing.name:
+            real_remove(path)  # the other lane wins the race...
+            raise FileNotFoundError(2, "No such file or directory", path)  # ...we lose
+        return real_remove(path)
+
+    monkeypatch.setattr(game_log.os, "remove", racing_remove)
+
+    game_log.cleanup_old_logs()  # must not raise
+
+    assert not racing.exists()
+    assert not other.exists()
+    assert "Cleaned up 1 old log file(s)" in capsys.readouterr().out
