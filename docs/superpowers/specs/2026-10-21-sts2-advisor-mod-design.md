@@ -68,22 +68,22 @@ agent/advisor_server.py（.venv）
 ```
 
 1. **`src/Sts2Advisor/`**：新建 C# 工程，`net9.0`。
-   - 引用 Steam 安装目录（`$STS2_GAME_DIR`，默认值同 `python/run_batch.py` 的 `DEFAULT_GAME_DIR`）里**真实的** `sts2.dll`、`GodotSharp.dll`、`0Harmony.dll`，设 `Private=false` 不复制进输出。不用本仓库的 `src/GodotStubs`，也不用 `lib/` 里 IL 打过补丁的 `sts2.dll`。
+   - 引用 Steam 安装目录里**真实的** `sts2.dll`、`GodotSharp.dll`，设 `Private=false` 不复制进输出。路径是 MSBuild 属性 `Sts2DataDir`（默认是 macOS Steam 安装里的 `SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64`；`tools/install_advisor_mod.sh` 用 `$STS2_GAME_APP` 算出它再传入）。不用本仓库的 `src/GodotStubs`，也不用 `lib/` 里 IL 打过补丁的 `sts2.dll`。
    - 产出 `Sts2Advisor.dll` 和清单 `Sts2Advisor.json`：`id: "Sts2Advisor"`、`has_dll: true`、`has_pck: false`、`affects_gameplay: false`、`min_game_version: "0.111.0"`、`dependencies: []`。
    - 入口是 `[ModInitializer]` 类：读配置，按需拉起 sidecar，把 `AdvisorPanel` 挂到场景树根节点。
-   - 本版不需要 Harmony 补丁来识别决策点（见第 2 段）；只在轮询拿不到的数据上加只读 postfix。
+   - mod 里没有任何 Harmony 补丁（见第 2 段）：游戏的私有字段靠 Krafs.Publicizer 直接读。
 2. **`DecisionSerializer`**：新共享源文件 `src/Sts2Shared/DecisionSerializer.cs`，两个工程都用 `<Compile Include=... Link=...>` 编进去。
    - 内容是从 `RunSimulator.cs` 抽出来的"模型 → `Dictionary<string, object?>`"纯函数：卡牌、玩家摘要、`RunContext`、事件、篝火、商店、地图、卡牌奖励、选牌、卷轴盒。
-   - 输入是游戏模型对象和一个 `ILocSource`。不读 `RunSimulator` 的私有状态，不推进游戏，**不引用任何 Godot 类型**。
+   - 输入是游戏模型对象和一个 `LocLookup`。不读 `RunSimulator` 的私有状态，不推进游戏，**不引用任何 Godot 类型**。
    - `RunSimulator` 保留自己的控制流（何时 `ForceToMap`、待决的 selector/bundle），改为调用这些函数。
-3. **`ILocSource`**：只有 `Card(entry)`、`Bilingual(table, key)` 这些现在 `LocLookup` 上被序列化用到的方法。
-   - headless：现有的 `LocLookup`（读仓库里的 `localization_eng/`、`localization_zhs/`）。
-   - mod：同一个实现，读配置里 `repo_path` 下的同一份目录，所以字符串和 headless 完全一致。
+3. **不需要单独的 `ILocSource` 接口。** headless 和 mod 共用同一个 `Sts2Shared.LocLookup` 类（和 `DecisionSerializer` 一样编进两个工程，不引用 Godot）。
+   - headless：`new LocLookup()`，读仓库里的 `localization_eng/`、`localization_zhs/`。
+   - mod：`new LocLookup(repo_path)`，读配置里 `repo_path` 下的同一份目录，所以字符串和 headless 完全一致。
 4. **`agent/advisor_server.py`**：只绑 `127.0.0.1`，端口来自配置（默认 `8767`，避开 workbench 的 8765）。
    - `POST /advise`，请求体是一个决策 JSON，返回：
      ```json
      {"action": {...} | null,
-      "options": [{"index": 0, "label": {"en": "...", "zh": "..."}, "score": 7.4,
+      "options": [{"kind": "card", "index": 0, "score": 7.4,
                    "status": "ok",
                    "components": [{"key": "card.base", "value": 6.8, "detail": "A"},
                                   {"key": "card.boss_defense_gap", "value": 0.9}]}],
@@ -93,26 +93,29 @@ agent/advisor_server.py（.venv）
       "unverified": false,
       "policy": "greedy"}
      ```
+   - 决策 JSON 只有英文（`LocLookup.Lang` 默认 `en`），回复里也不带选项名。选项名由 mod 从游戏对象取当前语言的官方译名（`GameText`），按 `kind:index` 对应（`kind` 取 `card`、`relic`、`potion`、`option`（事件）、`node`（地图）、`bundle`，例如 `card:3`、`node:2`）。
    - `action` 永远是 `greedy_action(state, trace=recorder)` 的原样输出，通过 `play_full_run._load_greedy_action()` 的同一条导入路径取得。`options`、`rules` 都来自**同一次调用**里的 recorder，服务端不另外打分。
-   - `options[].status`：`ok`、`filtered`（被质量门过滤）、`locked`（事件选项锁定）、`unaffordable`（商店买不起）、`broken`（在 `BROKEN_CARDS` 里）。
+   - `options[].status`：`ok`、`filtered`（被质量门过滤）、`locked`（事件选项锁定）、`unstocked`（商店槽位已售出）、`unaffordable`（商店买不起）、`reserved`（商店遗物：钱够买，但买完剩下不足 25 金币的保底金，所以不进候选）、`broken`（在 `BROKEN_CARDS` 里）。商店的卡和遗物才会有 `unstocked`、`unaffordable`；`reserved` 只用于遗物。完整列表是 `agent/greedy_trace.py` 的 `OPTION_STATUSES`。
    - `rules[].outcome`：`fired`（这条规则决定了动作）、`skipped`（条件不成立，继续看下一条）。一个决策里最多一条 `fired`。
    - `warnings`：会改变 greedy 行为的环境变量和 `play_full_run` 的默认值不一致时，在这里列出。检查范围是 `GREEDY_KNOBS`，再加上 `STS2_CARD_PICK_TEMP`、`STS2_MC_ROLLOUT`、`STS2_VANTOM_REST_HEAL`；默认全部不设。任何一个被设置，启动时打印警告，并在每条回复里带上它。
    - `map_select` 的回复固定 `unverified: true`。
-   - `GET /health` 返回策略名和 git commit，给面板显示"已连接"用。
+   - `GET /health` 返回 `ok`、策略名、git commit 和 `warnings`。mod 启动时用它判断端口上是不是已经有一个健康的服务可以复用（面板不显示"已连接"，只在连不上时显示离线）。
 5. **greedy trace**（改 `agent/combat_env.py`、`agent/card_scoring.py`、`agent/strategy.py`）：
    - `greedy_action(state, trace=None)`。`trace` 是一个 recorder，提供 `option(index, score, components, status)` 和 `rule(key, outcome, values)`。它被一路传进 `pick_best_card`、`rest_site_action`、`_score_event_option`、商店分支、`HpAwareMapStrategy.choose` 等真正做判断的函数。
    - recorder 只在判断发生的地方被调用。`trace is None` 时代码路径和现在完全一样。
-   - `pick_best_card` 改成先构建一张"每张卡 × 9 个分项"的表，再按行求和取最大。它现在本来就是先算 9 个列表再相加，所以这只是换一种写法，不改变算式。
+   - `pick_best_card` 不改算式：它本来就是先算 9 个列表再按位相加。在 `totals` 算好之后，recorder 记录这 9 个已经算好的列表，顺序与求和顺序相同，每张卡的 `components` 之和就是它的总分。
    - 每个 `key` 是稳定的字符串，比如 `card.base`、`card.set_bonus`、`rest.must_upgrade`、`shop.remove_basic`、`event.kw.rare_card`、`map.elite_hp_low`。`_score_event_option` 的每个 `if` 分支各有一个 key。key 列表写在一个模块常量里，测试会检查它。
    - `shop.remove_basic` 的 `values` 里带 `basic_scope: "ironclad_only"`（默认）或 `"all"`（设了 `STS2_BASIC_PURGE_ALL`）和统计到的张数。
+   - `shop.heal_potion` 的 `values` 里带 `hp_ratio`、`held_potions`、`slots_free`（`held_potions < 3`）和 `available`。`available` 只有在 `hp_ratio < 0.5` 且 `slots_free` 时才有意义：代码只在这两个条件都成立时才去找回复药水（名称或描述含 heal/restore、不含 curse，有货且买得起），所以 `available` 记录的是"此刻商店里有没有这样一瓶"。HP ≥ 50% 或药水栏已满时它恒为 `false`，不表示商店没有。面板只在 `hp_ratio < 0.5`、`slots_free` 且 `available` 为 `false` 时加注"没有可买的回复药水"。
 6. **地图楼层语义修复**（改 `agent/strategy.py`）：
-   - "第 2 幕及以后"的判断从 `floor >= ACT2_START` 改成 `context.act >= 2`。
+   - "阶段 2 及以后"的判断从 `floor >= ACT2_START` 改成读 `state.act`（没有就读 `context.act`）`>= 2`。
    - `ACT2_BOSS_ZONE` 改成 `act >= 2 且幕内楼层 >= 13`，和第 1 幕已有的 Boss 前阈值 `floor >= 13` 对齐。
    - 其他阈值（3、6、12、13）保持不变，继续按幕内楼层在每一幕生效。`ELITE_AVOID_FLOOR = 3` 的注释写的是"第 1 幕"，但它实际在每一幕的前两层都生效；这次不改它的范围。因为 `in_act2` 分支排在前面，修复后"满血偏好精英"（第 7–12 层）和"Boss 前回避精英 +3"（第 13 层起）只在第 1 幕生效，这和原作者按全局楼层写的分支顺序一致。
    - 只影响经 `greedy_action` 走地图的调用方：`CombatEnv`、`eval_rl`、`coordinator`。`play_full_run` 的回归和 A/B 不经过它，所以已有的实测结论都不受影响。
+   - 已知的并列：阶段 2 起、HP ≥ 90%、阶段内楼层 3–12 时，精英的优先级是 6 − 1.0 = 5.0，和普通怪的 5 并列（第 1–2 层精英 +10，第 13 层起 +4，都不并列）。排序键是（优先级，选项在列表里的位置），并列时列表里靠前的那个赢。这是原作者留下的数值，没有重新调；改它需要 A/B。trace 的 `map.pick_min_priority` 里 `tied_best` 列出所有并列最优的选项，面板在并列时加注"并列，取列表中第一个"。
    - 修了之后仍然没有和随机路线做过 A/B，所以 `unverified` 保持 `true`。
-7. **生命周期**：mod 的 `Sts2Advisor.config.json` 放在 dll 旁边，包含 `repo_path`、`python`（默认 `<repo>/.venv/bin/python`）、`port`、`autostart`（默认 `true`）、`hotkey`（默认 `F8`）。
-   - `autostart` 时，mod 在初始化阶段启动一次 `python agent/advisor_server.py --port N`，游戏退出时结束它。端口已经被一个健康的服务占用时，直接复用，不再启动。
+7. **生命周期**：mod 的配置文件是 `<游戏用户目录>/Sts2Advisor/config.json`，日志 `Sts2Advisor.log` 和 `advisor_trace.jsonl` 在同一个目录；macOS 上游戏用户目录是 `~/Library/Application Support/SlayTheSpire2/`。不放在 mod 目录（dll 旁边）里，是因为创意工坊下载的 mod 目录是只读的。配置包含 `repo_path`、`python`（默认 `<repo>/.venv/bin/python`）、`port`、`autostart`（默认 `true`）、`hotkey`（默认 `F8`）。
+   - `autostart` 时，mod 在初始化阶段启动一次 `python agent/advisor_server.py --port N --exit-on-stdin-eof`：mod 给它一根自己从不写入的 stdin 管道，游戏进程无论怎么结束（包括崩溃），管道关闭后服务都会退出，不会留下孤儿进程。端口已经被一个健康的服务（`GET /health` 回 `ok`）占用时，直接复用，不再启动；复用的服务如果是在有这个参数之前遗留下来的，或是手动启动的，不会随游戏退出，会一直跑旧代码；改了 greedy 之后要先杀掉它（`pkill -f advisor_server.py`）再启动游戏。
    - 连不上时面板显示"建议服务离线"，不影响游戏。
 8. **战斗**：`combat_play` 时 mod 不发任何请求，面板缩成一行"战斗中，交给 CombatSolver"。不声明对 CombatSolver 的依赖。
 
@@ -120,12 +123,12 @@ agent/advisor_server.py（.venv）
 
 **一次建议的流程**
 
-1. `AdvisorPanel` 上挂一个 Godot `Timer`，每 0.3 秒在**主线程**按 AutoSlay 的方式判断当前决策点：先看 `NOverlayStack.Instance.Peek()` 的屏幕类型，再看 `NMapScreen.Instance.IsOpen`，最后看 `RunManager.Instance.DebugOnlyGetState()`（AutoSlay 取 `RunState` 用的就是它）的 `CurrentRoom` 类型。
+1. `AdvisorRuntime.Tick` 挂在 `SceneTree.ProcessFrame` 上，在**主线程**自己计时，每 0.3 秒判断一次当前决策点（不是 Godot `Timer`）。先取 `RunManager.Instance.DebugOnlyGetState()` 的 `RunState`（AutoSlay 取它用的就是这个）：玩家数不是 1 就标"联机"，不给建议（本版只支持单人）；`CombatManager.Instance.IsInProgress` 为真就是战斗；否则用 `ActiveScreenContext.Instance.GetCurrentScreen()`（游戏自己的当前界面解析器）取当前界面，按界面类型分派（`NMapScreen`、`NCardRewardSelectionScreen`、`NEventRoom` 等，对应下表）。
 2. 计算**决策指纹**：决策类型、各选项 id（或卡牌 id 加升级状态）、金币、牌组大小、HP、事件页 id。指纹没变就什么都不做。
-3. 指纹一变，就在主线程调 `DecisionSerializer` 生成决策 JSON。游戏状态不是线程安全的，只能在主线程读。
+3. 指纹一变，就在主线程调 `DecisionSerializer` 生成决策 JSON。游戏状态不是线程安全的，只能在主线程读。界面刚出现时状态还在变（进场动画），所以同一个指纹要连续两次轮询都看到才会发请求，第一次只记下，面板显示"正在获取建议…"。
 4. 在后台线程发 `POST /advise`，超时 2 秒。
-5. 结果用 `CallDeferred` 回到主线程。如果当前指纹已经和发请求时不同，结果作废，直接丢弃；否则刷新面板。
-6. 只有轮询拿不到的数据才加 Harmony postfix，而且只读。例如选牌的 `min_select`/`max_select` 只作为 `CardSelectCmd.FromDeckFor*` 和 `CardSelectorPrefs` 的参数传进来：postfix 把它们存到一个静态字段，界面关闭时清掉。
+5. 结果放进一个并发队列，下一次 `Tick` 在主线程取出。如果当前指纹已经和发请求时不同，结果作废，直接丢弃；否则刷新面板。
+6. 不需要 Harmony postfix：选牌界面的 `CardSelectorPrefs`（`min_select`/`max_select`）等私有字段，靠 Publicizer 直接从界面对象上读（例如 `NDeckCardSelectScreen._prefs`），所以 mod 里没有任何 Harmony 补丁。
 
 **覆盖范围**（界面列以 AutoSlay handler 为准）
 
@@ -162,15 +165,15 @@ agent/advisor_server.py（.venv）
 | 选牌 | 推荐哪几张 | 先写这次按"挑高分"还是"挑低分"处理，以及判断依据（房间类型、有没有低于 3 分的卡、选项是否超过 10 个）；再列各卡分数。 |
 | 地图 | 推荐下一个节点 | 每个可选节点的类型、优先级（越小越好）和各项加减，例如"精英：HP 45% < 60%，+7"。 |
 
-`TraceText` 按 `key` 把 trace 渲染成中、英文案，所有模板集中在这一个类里。遇到没有模板的 key，原样显示 key 和 values，不丢弃。选项名、卡名、遗物名用决策 JSON 里已有的双语 `label`，也就是游戏官方译名；其余文字是 mod 自己的界面文案，按 CLAUDE.md 的 `t(en, zh)` 约定提供双语。
+`TraceText` 按 `key` 把 trace 渲染成中、英文案，所有模板集中在这一个类里。遇到没有模板的 key，原样显示 key 和 values，不丢弃。选项名、卡名、遗物名由 mod 从游戏对象取当前语言的官方译名（`GameText`，按 `kind:index` 对应，见第 1 段第 4 条）；其余文字是 mod 自己的界面文案，按 CLAUDE.md 的 `t(en, zh)` 约定提供双语。
 
 ## 3. 错误处理、测试、安装
 
 **错误处理：mod 永远不能把游戏搞崩**
-- 每次 `Timer` 回调和每个 postfix 都包在 try/catch 里。异常写进 mod 目录下的 `Sts2Advisor.log`，面板显示"读取失败：<界面名>"。同一种界面连续失败 3 次就停止对它取数，直到换到别的界面。
+- 每次 `Tick` 都包在 try/catch 里（没有 postfix）。异常写进游戏用户目录下的 `Sts2Advisor/Sts2Advisor.log`，面板显示"读取失败：<界面名>"。同一个界面、同一个状态连续失败 3 次就停止对它取数，直到玩家换到别的界面，或这个界面的状态变了。
 - sidecar 连不上或超时，面板显示"建议服务离线"，按指数退避重连（1 秒起，最长 30 秒）。自动拉起每次游戏启动只尝试一次。
 - greedy 抛异常或返回 `None` 时，服务端回 `{"action": null, "options": [], "rules": [], "warnings": ["greedy_raised: <异常类型>"]}`（或 `greedy_none`），面板显示"无建议"。**不用 naive 兜底**：占位策略不能被当作建议显示出来。trace 记录本身出错时同样处理：宁可不显示依据，也不显示和选择对不上的依据。
-- 游戏更新导致类型或成员缺失（`TypeLoadException`、`MissingMethodException`、`MissingFieldException`）时，捕获后面板显示"游戏版本未适配"，停止取数。
+- 游戏 API 不匹配（游戏更新后类型或成员缺失：`TypeLoadException`、`MissingMemberException`）时，停用 mod，面板显示"游戏版本未适配，建议已停用"，本次游戏内不再取数。
 
 **测试**
 1. **序列化重构金标**：重构前，用固定种子、`STS2_SOLVER_CHARS=none`（启发式战斗，可复现）、每个角色几局，用 `--keep-game-logs` 跑出基线日志。重构后用同样设置再跑，逐字节比较每个日志里所有 `type == "state"` 行的 `data` 对象（不比 `ts`、`run_id` 这些每次都会变的外层字段），必须完全一致。然后按 CLAUDE.md 跑完整回归：`run_batch.py --name regression --kind regression --games 5 --chars all`，每条 lane 都要 `Completed: 5/5`。
@@ -195,7 +198,7 @@ agent/advisor_server.py（.venv）
 - `tools/install_advisor_mod.sh`：
   - 编译 `src/Sts2Advisor`；
   - 把 `Sts2Advisor.dll` 和 `Sts2Advisor.json` 拷进 `SlayTheSpire2.app/Contents/MacOS/mods/Sts2Advisor/`；
-  - 配置文件不存在时，生成 `Sts2Advisor.config.json`（`repo_path` 填当前仓库）。
+  - `<游戏用户目录>/Sts2Advisor/config.json` 不存在时才生成（`repo_path`、`python` 填当前仓库，已有的不覆盖）。
 - 第一次启动游戏会弹窗问是否加载 mod，选同意。Steam 更新或"验证文件完整性"可能清掉 app 包里的 `mods/`，那时重跑脚本即可。
 
 ## 不做
