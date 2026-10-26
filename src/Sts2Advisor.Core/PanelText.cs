@@ -33,6 +33,7 @@ public static class PanelText
         ["card_select"] = ("选牌", "Card select"),
         ["map_select"] = ("地图", "Map"),
         ["combat"] = ("战斗", "Combat"),
+        ["multiplayer"] = ("联机", "Multiplayer"),
     };
 
     private static readonly Dictionary<string, (string Zh, string En)> StatusNames = new()
@@ -47,10 +48,12 @@ public static class PanelText
 
     private static string T(bool zh, string zhText, string enText) => zh ? zhText : enText;
 
+    /// <summary>"卡牌奖励 · A1F13a1 · HP 52/80 · 金币 99". For a screen that is not a decision (the mod passes the
+    /// screen class name, "event_finished", ...) there is no name to show, so the title starts at "A1F7a1".</summary>
     public static string Header(DecisionHeader h, bool zh)
     {
-        var name = DecisionNames.TryGetValue(h.Decision, out var n) ? (zh ? n.Zh : n.En) : h.Decision;
-        return $"{name} · A{h.Act}F{h.Floor}a{h.Ascension} · HP {h.Hp}/{h.MaxHp} · {T(zh, "金币", "Gold")} {h.Gold}";
+        var position = $"A{h.Act}F{h.Floor}a{h.Ascension} · HP {h.Hp}/{h.MaxHp} · {T(zh, "金币", "Gold")} {h.Gold}";
+        return DecisionNames.TryGetValue(h.Decision, out var n) ? $"{(zh ? n.Zh : n.En)} · {position}" : position;
     }
 
     public static IReadOnlyList<PanelLine> Status(DecisionHeader? h, StatusKind kind, string? detail, bool zh)

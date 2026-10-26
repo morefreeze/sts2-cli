@@ -312,6 +312,46 @@ public class PanelTextTests
         Assert.Equal(new PanelLine("greedy_raised: KeyError", LineStyle.Muted), lines[2]);
     }
 
+    [Theory]
+    [InlineData("NRewardsScreen")]
+    [InlineData("event_finished")]
+    [InlineData("rest_site_done")]
+    public void TheTitleOmitsTheNameOfAScreenThatIsNotADecision(string screen)
+    {
+        var h = new DecisionHeader(screen, 1, 7, 1, 65, 80, 168);
+        Assert.Equal("A1F7a1 · HP 65/80 · 金币 168", PanelText.Header(h, zh: true));
+        Assert.Equal("A1F7a1 · HP 65/80 · Gold 168", PanelText.Header(h, zh: false));
+        var status = PanelText.Status(h, StatusKind.NoAdvice, null, zh: true);
+        Assert.Equal(new PanelLine("A1F7a1 · HP 65/80 · 金币 168", LineStyle.Title), status[0]);
+        Assert.DoesNotContain(screen, status[0].Text);
+    }
+
+    [Fact]
+    public void TheTitleNamesTheMultiplayerRun()
+    {
+        var h = new DecisionHeader("multiplayer", 2, 4, 0, 50, 90, 12);
+        Assert.Equal("联机 · A2F4a0 · HP 50/90 · 金币 12", PanelText.Header(h, zh: true));
+        Assert.Equal("Multiplayer · A2F4a0 · HP 50/90 · Gold 12", PanelText.Header(h, zh: false));
+    }
+
+    [Fact]
+    public void TheTitleStillNamesEveryKnownDecision()
+    {
+        var expected = new Dictionary<string, (string Zh, string En)>
+        {
+            ["card_reward"] = ("卡牌奖励", "Card reward"), ["rest_site"] = ("休息处", "Rest site"),
+            ["event_choice"] = ("事件", "Event"), ["shop"] = ("商店", "Shop"),
+            ["bundle_select"] = ("卡包选择", "Bundle choice"), ["card_select"] = ("选牌", "Card select"),
+            ["map_select"] = ("地图", "Map"), ["combat"] = ("战斗", "Combat"),
+        };
+        foreach (var (decision, names) in expected)
+        {
+            var h = new DecisionHeader(decision, 1, 7, 1, 65, 80, 168);
+            Assert.StartsWith(names.Zh + " · A1F7a1", PanelText.Header(h, zh: true));
+            Assert.StartsWith(names.En + " · A1F7a1", PanelText.Header(h, zh: false));
+        }
+    }
+
     [Fact]
     public void StatusLines()
     {

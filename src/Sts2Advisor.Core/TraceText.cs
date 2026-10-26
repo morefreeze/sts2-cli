@@ -183,7 +183,12 @@ public static class TraceText
                           : " (quality gate filtered all and skip is not allowed; picked from all)") : "";
             case "shop.remove_basic":
             case "shop.remove_value":
-                // Skipped only because the removal service costs more than the gold in hand.
+                // Say the gold is short only when that is why the rule was skipped: remove_basic needs 3 basic
+                // cards first, and with fewer the gold is beside the point.
+                if (rule.Key == "shop.remove_basic"
+                    && !(values.TryGetValue("n_basic", out var basics) && basics.ValueKind == JsonValueKind.Number
+                         && basics.GetDouble() >= 3))
+                    return "";
                 return values.TryGetValue("removal_cost", out var cost) && cost.ValueKind == JsonValueKind.Number
                        && values.TryGetValue("gold", out var gold) && gold.ValueKind == JsonValueKind.Number
                        && gold.GetDouble() < cost.GetDouble()

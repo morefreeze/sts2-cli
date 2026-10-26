@@ -197,6 +197,36 @@ public class PanelTextReviewTests
         }
     }
 
+    [Theory]
+    [InlineData(3, true)]
+    [InlineData(5, true)]
+    [InlineData(2, false)]
+    [InlineData(0, false)]
+    public void RemoveBasicBlamesGoldOnlyWhenEnoughBasicCardsWereHeld(int nBasic, bool blamesGold)
+    {
+        // Below 3 basic cards the rule was skipped for that reason, whatever the gold.
+        var r = ParsedRule("shop.remove_basic", "skipped",
+            new { n_basic = nBasic, basic_scope = "ironclad_only", removal_cost = 250, gold = 141 });
+        Assert.Equal(blamesGold, TraceText.Rule(r, zh: true).EndsWith("（需 250 金币，现 141）"));
+        Assert.Equal(blamesGold, TraceText.Rule(r, zh: false).EndsWith(" (needs 250 gold, have 141)"));
+    }
+
+    [Fact]
+    public void RemoveBasicWithoutACountDoesNotBlameGold()
+    {
+        var r = ParsedRule("shop.remove_basic", "skipped", new { removal_cost = 250, gold = 141 });
+        Assert.DoesNotContain("需 250", TraceText.Rule(r, zh: true));
+        var nullCount = ParsedRule("shop.remove_basic", "skipped", new { n_basic = (int?)null, removal_cost = 250, gold = 141 });
+        Assert.DoesNotContain("需 250", TraceText.Rule(nullCount, zh: true));
+    }
+
+    [Fact]
+    public void RemoveValueStillBlamesShortGoldWhateverTheBasicCount()
+    {
+        var r = ParsedRule("shop.remove_value", "skipped", new { removal_value = 2.2, best_card_score = 2.97, removal_cost = 250, gold = 141 });
+        Assert.EndsWith("（需 250 金币，现 141）", TraceText.Rule(r, zh: true));
+    }
+
     // ---- 7. one number format for scores ---------------------------------------------------------------------
 
     [Fact]
