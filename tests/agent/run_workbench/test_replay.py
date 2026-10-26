@@ -1204,3 +1204,70 @@ def test_parse_game_progress_treats_non_json_values_as_absent(field):
         assert progress["rooms"] == []
     else:
         assert progress["rooms"][0]["start_player"] == {}
+
+
+def _get_map(step):
+    return {"step": step, "ts": f"2026-07-10T00:00:{step:02d}", "type": "action", "data": {"cmd": "get_map"}}
+
+
+def _map_reply(step, act, floor):
+    """The engine's answer to get_map: a context but NO player."""
+    return {
+        "step": step,
+        "ts": f"2026-07-10T00:00:{step:02d}",
+        "type": "state",
+        "data": {
+            "type": "map",
+            "context": {
+                "act": act,
+                "act_name": "Test Act",
+                "floor": floor,
+                "room_type": "Map",
+                "boss": {"id": "BOSS", "name": "Boss"},
+            },
+            "rows": [],
+            "current_coord": None,
+        },
+    }
+
+
+def test_parse_game_progress_playerless_map_reply_keeps_the_last_real_exit_snapshot():
+    reward = _state(2, "card_reward", 1, 2, "Monster", 60, cards=[])
+    reward["data"]["player"]["gold"] = 120
+    reward["data"]["player"]["deck"] = [
+        {"name": "Strike", "type": "Attack", "upgraded": False},
+        {"name": "Cleave", "type": "Attack", "upgraded": False},
+    ]
+    entries = [
+        _state(1, "combat_play", 1, 2, "Monster", 70),
+        reward,
+        _get_map(3),
+        _map_reply(4, 1, 2),
+        _action(4, "select_map_node", col=1, row=3),
+        _state(5, "rest_site", 1, 3, "RestSite", 60),
+    ]
+
+    monster, rest = parse_game_progress(entries)["rooms"]
+
+    assert monster["room_type"] == "Monster"
+    assert monster["end_step"] == 3  # the map reply still extends the room
+    assert monster["end_player"]["gold"] == 120
+    assert [c["name"] for c in monster["end_player"]["deck"]] == ["Strike", "Cleave"]
+    assert monster["end_hp"] == 60
+    assert rest["start_player"]["deck"] != []
+
+
+def test_parse_game_progress_room_opened_by_a_playerless_map_reply_gets_its_start_player_later():
+    entries = [
+        _map_reply(1, 1, 5),
+        _get_map(2),
+        _state(2, "map_select", 1, 5, "Map", 55),
+    ]
+
+    (room,) = parse_game_progress(entries)["rooms"]
+
+    assert room["start_player"] != {}
+    assert room["start_player"]["gold"] == 99
+    assert [c["name"] for c in room["start_player"]["deck"]] == ["Strike"]
+    assert room["end_player"] == room["start_player"]
+    assert room["start_hp"] == 55

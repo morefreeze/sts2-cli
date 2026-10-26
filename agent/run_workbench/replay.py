@@ -1145,7 +1145,12 @@ def parse_game_progress(entries: list[dict[str, Any]], source_name: str | None =
             room["end_hp"] = hp
         if player.get("max_hp") is not None:
             room["max_hp"] = player.get("max_hp")
-        room["end_player"] = _compact_player(player)
+        # A playerless reply (the route planner's get_map -> {"type": "map"}) is
+        # not a snapshot of an empty deck: keep the last real one.
+        if player:
+            if not room["start_player"]:
+                room["start_player"] = _compact_player(player)
+            room["end_player"] = _compact_player(player)
 
         decision = state.get("decision")
         if decision == "game_over":

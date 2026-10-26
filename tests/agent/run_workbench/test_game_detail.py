@@ -283,6 +283,63 @@ def test_deck_delta_is_a_multiset_diff_and_reports_removals():
     assert room["deck_delta"]["added"] == []
 
 
+def _get_map(log: Log) -> None:
+    """The route planner's ``get_map`` and the engine's reply: a context but no player."""
+    log.action({"cmd": "get_map"})
+    log.reply({"type": "map",
+               "context": {"act": log.act, "act_name": "Overgrowth", "floor": log.floor,
+                           "room_type": "Map", "boss": {"id": "B", "name": "Boss"}},
+               "rows": [], "current_coord": None})
+
+
+def test_a_playerless_map_reply_is_not_an_empty_deck():
+    log = Log()
+    log.state("event_choice", event_name="Neow", options=[{"index": 0, "title": "Boon"}])
+    log.do("choose_option", option_index=0)
+    log.state("map_select", room="Map", choices=[{"col": 1, "row": 1, "type": "Monster"}])
+    _get_map(log)
+    log.do("select_map_node", col=1, row=1)
+    log.state("card_reward", room="Monster", floor=2,
+              cards=[{"index": 0, "id": "CARD.CLEAVE", "name": "Cleave", "cost": 1, "type": "Attack",
+                      "rarity": "Common"}], can_skip=True)
+    log.do("select_card_reward", card_index=0)
+    log.deck = log.deck + _deck(("Cleave", False))
+    log.state("map_select", room="Map", choices=[{"col": 1, "row": 2, "type": "Monster"}])
+    _get_map(log)
+    log.do("select_map_node", col=1, row=2)
+    log.state("shop", room="Shop", floor=3, cards=[], relics=[], potions=[], card_removal_cost=75)
+
+    neow, reward, shop = _detail(log)["rooms"]
+
+    assert neow["deck_delta"] == {"added": [], "removed": [], "upgraded": []}
+    assert neow["gold_start"] == neow["gold_end"] == 99
+    # a real change in a room that ends on a get_map reply is still reported
+    assert [c["name"] for c in reward["deck_delta"]["added"]] == ["Cleave"]
+    assert reward["deck_delta"]["removed"] == [] and reward["deck_delta"]["upgraded"] == []
+    assert shop["deck_delta"] == {"added": [], "removed": [], "upgraded": []}
+
+
+def test_a_room_whose_last_player_has_no_deck_reports_no_deck_delta():
+    log = Log()
+    log.state("shop", room="Shop", floor=2, cards=[], relics=[], potions=[], card_removal_cost=75)
+    log.state("map_select", room="Map", choices=[{"col": 1, "row": 3, "type": "Monster"}])
+    del log.rows[-1]["data"]["player"]["deck"]
+
+    (room,) = _detail(log)["rooms"]
+    assert room["deck_delta"] == {"added": [], "removed": [], "upgraded": []}
+
+
+def test_deck_delta_ignores_a_missing_snapshot_on_either_side():
+    log = Log()
+    log.state("shop", room="Shop", floor=2, cards=[], relics=[], potions=[], card_removal_cost=75)
+    del log.rows[-1]["data"]["player"]["deck"]
+    log.deck = log.deck + _deck(("Cleave", False))
+    log.state("map_select", room="Map", choices=[{"col": 1, "row": 3, "type": "Monster"}])
+
+    (room,) = _detail(log)["rooms"]
+    assert room["deck_delta"] == {"added": [], "removed": [], "upgraded": []}
+
+
 def test_final_deck_groups_duplicates_and_marks_upgrades():
     detail = _detail(_deck_room_log())
 

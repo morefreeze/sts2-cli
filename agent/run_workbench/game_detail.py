@@ -1258,7 +1258,10 @@ def _deck_card(card: Mapping[str, Any], names: _Names) -> dict[str, Any]:
 def _deck_delta(start: Sequence[Mapping[str, Any]], end: Sequence[Mapping[str, Any]], names: _Names):
     """Cards gained / removed / upgraded between two deck snapshots (multiset
     diff by card id and upgrade state; a card that lost its plain form and
-    gained its upgraded one counts as upgraded, not as a swap)."""
+    gained its upgraded one counts as upgraded, not as a swap).  An empty side
+    is a missing snapshot, not an empty deck (a deck never is): no delta."""
+    if not start or not end:
+        return {"added": [], "removed": [], "upgraded": []}
     before = Counter(_deck_key(c) for c in start)
     after = Counter(_deck_key(c) for c in end)
     sample = {_deck_key(c): c for c in [*start, *end]}
