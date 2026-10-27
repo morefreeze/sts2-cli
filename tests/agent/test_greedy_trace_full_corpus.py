@@ -33,7 +33,11 @@ from agent.greedy_trace import GreedyTrace, reset_greedy_context
 from tests.agent.advisor_corpus import fresh_greedy_state
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-GAMES = sorted(glob.glob(os.path.join(ROOT, "logs", "batches", "*", "games", "*", "*.jsonl")))
+# Both batch layouts: A/B batches write games/<Character>__<arm>/<file>.jsonl,
+# regression batches write games/<file>.jsonl flat.
+_BATCH_GAMES = os.path.join(ROOT, "logs", "batches", "*", "games")
+GAMES = sorted(set(glob.glob(os.path.join(_BATCH_GAMES, "*", "*.jsonl"))
+                   + glob.glob(os.path.join(_BATCH_GAMES, "*.jsonl"))))
 
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 from build_advisor_corpus import ADVISED, game_states  # noqa: E402

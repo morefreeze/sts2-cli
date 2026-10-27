@@ -1,6 +1,9 @@
 # tests/agent/test_greedy_trace_recorder.py
 """GreedyTrace: the recorder greedy_action writes its reasons into."""
+import json
 import os
+import re
+import subprocess
 import sys
 
 import pytest
@@ -8,8 +11,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python"))
 
 from agent import card_scoring
-from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, TRACE_KEYS, GreedyTrace,
+from agent.greedy_trace import (GREEDY_BEHAVIOR_DEFAULTS, GREEDY_BEHAVIOR_ENV,
+                                TRACE_KEYS, GreedyTrace, behavior_env_is_default,
                                 reset_greedy_context)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def test_option_and_rule_round_trip():
@@ -58,6 +64,93 @@ def test_behavior_env_covers_play_full_run_knobs():
     assert {"STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
             "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET",
             "STS2_MC_SMART_THRESH"} <= set(GREEDY_BEHAVIOR_ENV)
+
+
+# What the reading code resolves each variable to, read in a fresh interpreter
+# (several are read at import time) whose environment has no GREEDY_BEHAVIOR_ENV
+# variable but the ones a test passes.
+_PROBE = """
+import json
+from agent import card_scoring as cs, combat_env as ce
+print(json.dumps({
+    "randomize": sorted(ce._RANDOMIZE_DECISIONS),
+    "decision_advisor": ce._decision_advisor_enabled(),
+    "card_threshold_lift": ce._card_threshold_lift(),
+    "card_quality_gate": ce._card_quality_gate_enabled(),
+    "mc_rollout": [cs._MC_ROLLOUT_ENABLED, cs._MC_MODE],
+    "archetype": cs._ACTIVE_ARCHETYPE,
+    "ctx_weights": cs.CTX_BLOCK_VALUE,
+    "override_delta_cap": cs._OVERRIDE_DELTA_CAP,
+    "predictor_target": cs.PREDICTOR_TARGET,
+    "mc_smart_thresh": cs._MC_SMART_THRESHOLD,
+}))
+"""
+
+
+def _probe(extra_env=None):
+    env = {k: v for k, v in os.environ.items() if k not in GREEDY_BEHAVIOR_ENV}
+    env.update(extra_env or {})
+    out = subprocess.run([sys.executable, "-c", _PROBE], cwd=ROOT, env=env,
+                         capture_output=True, text=True, timeout=120, check=True)
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_behavior_defaults_cover_exactly_the_behavior_env():
+    assert set(GREEDY_BEHAVIOR_DEFAULTS) == set(GREEDY_BEHAVIOR_ENV)
+
+
+def test_behavior_env_is_default_rules():
+    assert behavior_env_is_default("STS2_CARD_QUALITY_GATE", None)
+    assert behavior_env_is_default("STS2_CARD_QUALITY_GATE", " 1 ")
+    assert not behavior_env_is_default("STS2_CARD_QUALITY_GATE", "0")
+    assert not behavior_env_is_default("STS2_CARD_QUALITY_GATE", "")   # set-but-blank = gate OFF
+    assert behavior_env_is_default("STS2_MC_ROLLOUT", " ")             # blank default: blank is unset
+    assert not behavior_env_is_default("STS2_MC_ROLLOUT", "smart")
+    assert behavior_env_is_default("STS2_OVERRIDE_DELTA_CAP", "2")     # numeric spelling
+    assert not behavior_env_is_default("STS2_OVERRIDE_DELTA_CAP", "2.5")
+    assert behavior_env_is_default("STS2_PREDICTOR_TARGET", "Floor")
+    assert not behavior_env_is_default("STS2_PREDICTOR_TARGET", "hp")
+
+
+def test_behavior_defaults_match_what_the_reading_code_resolves():
+    unset = _probe()
+    # the shipped values the map's non-blank defaults stand for
+    assert unset["card_quality_gate"] is True
+    assert unset["card_threshold_lift"] == 0.0
+    assert unset["override_delta_cap"] == 2.0
+    assert unset["predictor_target"] == "floor"
+    assert unset["mc_smart_thresh"] == 0.15
+    # every variable set to its default (blank defaults: set but blank) resolves
+    # exactly as the same variable unset
+    assert _probe(dict(GREEDY_BEHAVIOR_DEFAULTS)) == unset
+    # ...and the probe sees every one of them: a non-default value moves its entry
+    moved = _probe({"STS2_RANDOMIZE": "card_reward", "STS2_DECISION_ADVISOR": "1",
+                    "STS2_CARD_THRESHOLD_LIFT": "1.5", "STS2_CARD_QUALITY_GATE": "0",
+                    "STS2_MC_ROLLOUT": "smart", "STS2_ARCHETYPE": "orbs",
+                    "STS2_CTX_WEIGHTS": "legacy", "STS2_OVERRIDE_DELTA_CAP": "3",
+                    "STS2_PREDICTOR_TARGET": "hp", "STS2_MC_SMART_THRESH": "0.5"})
+    assert {k for k in unset if moved[k] != unset[k]} == set(unset)
+
+
+def test_behavior_defaults_match_the_literal_defaults_in_the_source():
+    """Every `environ.get("STS2_X", "<literal>")` on greedy's path agrees with the
+    map (this is also the only check of STS2_CARD_PICK_TEMP, read per call, and of
+    the blank-default flags read per call); a read with a computed default
+    (STS2_OVERRIDE_DELTA_CAP) is covered by the probe above."""
+    pattern = re.compile(r'get\(\s*"(STS2_[A-Z0-9_]+)"\s*(?:,\s*(?:"([^"]*)"|[^)]*))?\)')
+    seen = {}
+    for rel in ("agent/card_scoring.py", "agent/combat_env.py", "agent/strategy.py"):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            for m in pattern.finditer(f.read()):
+                if m.group(1) in GREEDY_BEHAVIOR_DEFAULTS:
+                    # group 2 is None when the default is not a string literal
+                    seen.setdefault(m.group(1), []).append((rel, m.group(2)))
+    # every variable is read somewhere this scan looks (a rename would drop it)
+    assert set(seen) == set(GREEDY_BEHAVIOR_ENV)
+    for key, reads in seen.items():
+        for rel, literal in reads:
+            if literal is not None:    # computed / absent defaults: see the probe
+                assert behavior_env_is_default(key, literal), (key, rel, literal)
 
 
 def test_reset_greedy_context_restores_module_default():

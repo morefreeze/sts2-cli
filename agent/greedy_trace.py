@@ -22,8 +22,8 @@ import os
 # of those are read at import time, so they must be set before `agent` is
 # imported. STS2_MC_DIAG and the CombatEnv-only vars (STS2_MAP_PLANNER,
 # STS2_RUN_EPISODE, STS2_STUCK_DUMP, ...) were reviewed and are not on
-# greedy_action's path. The advisor warns when any is set; the corpus builder
-# refuses to run.
+# greedy_action's path. The advisor warns when any is set to a non-default value
+# (GREEDY_BEHAVIOR_DEFAULTS); the corpus builder refuses to run when any is set.
 GREEDY_BEHAVIOR_ENV = (
     "STS2_RANDOMIZE", "STS2_DECISION_ADVISOR", "STS2_CARD_THRESHOLD_LIFT",
     "STS2_BASIC_PURGE_ALL", "STS2_CARD_QUALITY_GATE",
@@ -31,6 +31,49 @@ GREEDY_BEHAVIOR_ENV = (
     "STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
     "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET", "STS2_MC_SMART_THRESH",
 )
+
+# What each GREEDY_BEHAVIOR_ENV variable means when it is NOT set: the string the
+# reading code falls back to ("" = off / unset). The advisor warns only about a
+# value that differs from this -- STS2_CARD_QUALITY_GATE=1 is the shipped
+# behaviour, not a knob. Keep it next to the reading code's own defaults:
+# tests/agent/test_greedy_trace_recorder.py runs the reading code unset and with
+# each default set and fails on any difference.
+GREEDY_BEHAVIOR_DEFAULTS = {
+    "STS2_RANDOMIZE": "",            # combat_env._RANDOMIZE_DECISIONS: no decision type
+    "STS2_DECISION_ADVISOR": "",     # combat_env._decision_advisor_enabled: off
+    "STS2_CARD_THRESHOLD_LIFT": "0",  # combat_env._card_threshold_lift: 0.0
+    "STS2_BASIC_PURGE_ALL": "",      # greedy shop: Ironclad's two basics only
+    "STS2_CARD_QUALITY_GATE": "1",   # combat_env._card_quality_gate_enabled: ON
+    "STS2_CARD_PICK_TEMP": "0",      # card_scoring pick: argmax, no sampling
+    "STS2_MC_ROLLOUT": "",           # card_scoring._MC_ROLLOUT_ENABLED: off
+    "STS2_VANTOM_REST_HEAL": "",     # strategy: off
+    "STS2_ARCHETYPE": "",            # card_scoring._ACTIVE_ARCHETYPE: none
+    "STS2_BOSS_READINESS_LIFT": "",  # card_scoring.boss_readiness_lift_bonus: off
+    "STS2_CTX_WEIGHTS": "",          # card_scoring: the refit weights (not "legacy")
+    "STS2_OVERRIDE_DELTA_CAP": "2.0",  # card_scoring._OVERRIDE_DELTA_CAP_DEFAULT
+    "STS2_PREDICTOR_TARGET": "floor",  # card_scoring.PREDICTOR_TARGET
+    "STS2_MC_SMART_THRESH": "0.15",  # card_scoring._MC_SMART_THRESHOLD
+}
+
+
+def behavior_env_is_default(key: str, value) -> bool:
+    """Does `value` (None = the variable is unset) leave `key` at its default?
+
+    Compared after strip + lower-casing, and numerically ("2" == "2.0"). A blank
+    value equals only a blank default: STS2_CARD_QUALITY_GATE set to blank really
+    turns the gate off (the reading code defaults only an UNSET variable), so it
+    is not the default. A flag set to an explicit "0" / "off" is reported too --
+    the variable is set, and that is what the warning is about."""
+    if value is None:
+        return True
+    got = value.strip().lower()
+    want = GREEDY_BEHAVIOR_DEFAULTS[key].lower()
+    if got == want:
+        return True
+    try:
+        return float(got) == float(want)
+    except ValueError:
+        return False
 
 # Local data files greedy_action's choices depend on (each loaded by
 # agent/card_scoring.py; mostly gitignored under data/), repo-relative. The

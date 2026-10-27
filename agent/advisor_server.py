@@ -44,7 +44,7 @@ for _p in (ROOT, os.path.join(ROOT, "python")):
 
 import play_full_run  # noqa: E402
 from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, GreedyTrace,  # noqa: E402
-                                reset_greedy_context)
+                                behavior_env_is_default, reset_greedy_context)
 
 DEFAULT_PORT = 8767
 MAX_BODY = 4 * 1024 * 1024  # a decision JSON is a few KB; this only bounds abuse
@@ -53,8 +53,10 @@ ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 
 
 def knob_warnings(env) -> list:
-    """`KEY=value` for every greedy behaviour env var that is set (non-blank)."""
-    return [f"{k}={env[k]}" for k in GREEDY_BEHAVIOR_ENV if (env.get(k) or "").strip()]
+    """`KEY=value` for every greedy behaviour env var set to something other than
+    its default (STS2_CARD_QUALITY_GATE=1 is the default, so it is not listed)."""
+    return [f"{k}={env[k].strip()}" for k in GREEDY_BEHAVIOR_ENV
+            if not behavior_env_is_default(k, env.get(k))]
 
 
 def _warmup_state() -> dict:

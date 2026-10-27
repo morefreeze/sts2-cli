@@ -15,8 +15,8 @@ import pytest
 
 from agent import advisor_server
 from agent.combat_env import greedy_action
-from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, MC_CONTEXT_START,
-                                reset_greedy_context)
+from agent.greedy_trace import (GREEDY_BEHAVIOR_DEFAULTS, GREEDY_BEHAVIOR_ENV,
+                                MC_CONTEXT_START, reset_greedy_context)
 from tests.agent.advisor_corpus import (corpus_games, fresh_greedy_state,
                                         require_same_greedy_data)
 
@@ -84,11 +84,41 @@ def test_advise_gives_no_advice_when_the_action_is_not_strict_json(bad):
 
 
 def test_knob_warnings_lists_set_behaviour_env():
-    env = {"STS2_MC_ROLLOUT": "1", "STS2_CARD_QUALITY_GATE": " ", "OTHER": "1"}
+    env = {"STS2_MC_ROLLOUT": "1", "STS2_RANDOMIZE": " ", "OTHER": "1"}
     assert advisor_server.knob_warnings(env) == ["STS2_MC_ROLLOUT=1"]
-    # order follows GREEDY_BEHAVIOR_ENV, whatever order the env was built in
-    env = {key: "1" for key in reversed(GREEDY_BEHAVIOR_ENV)}
-    assert advisor_server.knob_warnings(env) == [f"{key}=1" for key in GREEDY_BEHAVIOR_ENV]
+    # order follows GREEDY_BEHAVIOR_ENV, whatever order the env was built in;
+    # "x" is a non-default value of every variable
+    env = {key: " x " for key in reversed(GREEDY_BEHAVIOR_ENV)}
+    assert advisor_server.knob_warnings(env) == [f"{key}=x" for key in GREEDY_BEHAVIOR_ENV]
+
+
+def test_knob_warnings_ignores_values_equal_to_the_default():
+    defaults = dict(GREEDY_BEHAVIOR_DEFAULTS)
+    assert set(defaults) == set(GREEDY_BEHAVIOR_ENV)
+    # STS2_CARD_QUALITY_GATE=1 is the shipped behaviour (the one that used to warn)
+    assert defaults["STS2_CARD_QUALITY_GATE"] == "1"
+    assert advisor_server.knob_warnings(defaults) == []
+    assert advisor_server.knob_warnings({}) == []
+    # case, whitespace and a numerically equal spelling are still the default
+    assert advisor_server.knob_warnings({"STS2_OVERRIDE_DELTA_CAP": " 2 ",
+                                         "STS2_PREDICTOR_TARGET": "FLOOR",
+                                         "STS2_MC_SMART_THRESH": "0.150",
+                                         "STS2_CARD_THRESHOLD_LIFT": "0.0"}) == []
+    # one non-default among defaults is the only warning
+    assert advisor_server.knob_warnings(dict(defaults, STS2_CARD_QUALITY_GATE="0")) == [
+        "STS2_CARD_QUALITY_GATE=0"]
+    assert advisor_server.knob_warnings(dict(defaults, STS2_OVERRIDE_DELTA_CAP="3",
+                                             STS2_MC_ROLLOUT="smart")) == [
+        "STS2_MC_ROLLOUT=smart", "STS2_OVERRIDE_DELTA_CAP=3"]
+    # blank equals only a blank default: a blank STS2_CARD_QUALITY_GATE turns the gate off
+    assert advisor_server.knob_warnings({"STS2_CARD_QUALITY_GATE": ""}) == ["STS2_CARD_QUALITY_GATE="]
+    # the server reports the same list, from the env it is given
+    server = advisor_server.make_server(0, env=dict(defaults, STS2_RANDOMIZE="card_reward"),
+                                        warm=False)
+    try:
+        assert server.warnings == ["STS2_RANDOMIZE=card_reward"]
+    finally:
+        server.server_close()
 
 
 def test_http_round_trip():
@@ -316,8 +346,15 @@ def test_first_card_reward_after_make_server_is_warm():
                          capture_output=True, text=True, timeout=300, check=True)
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert result["picked"] is True
-    overloaded = os.getloadavg()[0] > (os.cpu_count() or 1)
-    assert result["elapsed"] < (2.0 if overloaded else 0.5), result
+    # Measured in a fresh process at load ~9 on 18 cores (5 runs each): the first
+    # request after the warm-up took 0.003-0.005 s; the same request WITHOUT the
+    # warm-up (make_server(warm=False)) took 1.1-1.6 s, and the warm-up itself
+    # 1.1-2.6 s. The warm-up is the cold cost paid up front, in the same process
+    # under the same load, so the bound follows it: a warmed-up request is a few
+    # ms (~50x under the 0.25 s floor), a cold one costs about warmup_s -- and
+    # both scale together when the machine is busy, which a fixed bound cannot.
+    assert result["warmup_s"] is not None and result["warmup_s"] > 0.2, result
+    assert result["elapsed"] < max(0.25, result["warmup_s"] / 4), result
 
 
 # --- --exit-on-stdin-eof: no orphan service after a game crash -----------------
