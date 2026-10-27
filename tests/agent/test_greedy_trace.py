@@ -834,6 +834,36 @@ def test_shop_best_card_score_is_none_when_no_card_is_affordable():
         assert by_key[key]["values"]["best_card_score"] == score, key
 
 
+def test_shop_never_removes_a_card_when_the_removal_is_used_up():
+    """DecisionSerializer sends `card_removal_cost: null` once the shop's one card
+    removal is used (the entry is no longer stocked). Greedy then must not advise
+    another removal, however rich the player or however basic-heavy the deck, and
+    the trace records both removal rules as skipped, with the reason (no cost)."""
+    state = _shop_probe_state(gold=999)
+    template = state["player"]["deck"][0]
+    state["player"]["deck"] = [
+        dict(template, id="CARD." + ("STRIKE_IRONCLAD" if i % 2 else "DEFEND_IRONCLAD"))
+        for i in range(10)]
+    assert state["card_removal_cost"] is None
+
+    action, trace = _traced_and_untraced(state)
+    assert action["action"] != "remove_card"
+    by_key = {r["key"]: r for r in trace.rules}
+    assert by_key["shop.remove_basic"]["outcome"] == "skipped"
+    assert by_key["shop.remove_basic"]["values"]["n_basic"] == 10   # the deck qualifies...
+    assert by_key["shop.remove_basic"]["values"]["removal_cost"] is None   # ...only the cost is missing
+    assert by_key["shop.remove_value"]["outcome"] == "skipped"
+    assert by_key["shop.remove_value"]["values"]["removal_value"] > 3.0
+    assert by_key["shop.remove_value"]["values"]["removal_cost"] is None
+    assert not any(r["outcome"] == "fired" and "remove" in r["key"] for r in trace.rules)
+
+    # control: the same state with a removal on offer does remove
+    state["card_removal_cost"] = 75
+    action, trace = _traced_and_untraced(state)
+    assert action == {"cmd": "action", "action": "remove_card"}
+    assert trace.fired()[0]["key"] == "shop.remove_basic"
+
+
 def test_map_evidence_matches_choice():
     n = 0
     unhandled = 0

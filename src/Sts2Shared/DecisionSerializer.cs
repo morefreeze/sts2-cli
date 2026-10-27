@@ -437,7 +437,8 @@ internal static class DecisionSerializer
             ["cards"] = cards,
             ["relics"] = relics,
             ["potions"] = potions,
-            ["card_removal_cost"] = removal?.Cost,
+            // Null once the removal is used: IsStocked == !Used, which the real game's UI node sets, and Cost stays set
+            ["card_removal_cost"] = removal is { IsStocked: true } ? removal.Cost : null,
             ["player"] = PlayerSummary(player, loc),
         };
     }
