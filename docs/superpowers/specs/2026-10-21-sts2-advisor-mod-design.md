@@ -2,6 +2,7 @@
 
 Date: 2026-10-21. Approved by the user in chat, section by section. Branch `feat/deterministic-planner`.
 Revised 2026-10-21（用户要求）：建议的依据改为从 greedy 同一条代码路径产出的 trace；地图启发式修楼层语义；商店的 Ironclad 删牌规则只展示不改。
+Revised 2026-10-27（最终评审）：greedy 带跨调用的隐藏状态（背景事实第 3 条）；`warnings` 只对非默认值报警；用掉的商店删牌不再被建议；篝火依据和 `warnings` 的面板位置按实现更正。
 
 ## 目标
 
@@ -36,7 +37,8 @@ Revised 2026-10-21（用户要求）：建议的依据改为从 greedy 同一条
   - `NMapScreen.Instance.IsOpen`。
 
   它是"真实游戏里每个决策点的数据在哪"的权威参照。
-- **`greedy_action(state)` 是纯函数。** 只读一个 state dict 和几个环境变量开关（`play_full_run.GREEDY_KNOBS`），不连引擎（`STS2_MC_ROLLOUT` 默认关）。卡牌打分按 card **id** 查表（`card_scoring.score_card`），和语言无关。
+- **`greedy_action(state)` 不连引擎（`STS2_MC_ROLLOUT` 默认关），但不是纯函数。** 它读一个 state dict 和一组环境变量开关（完整列表见第 1 段第 4 条 `warnings`），卡牌打分按 card **id** 查表（`card_scoring.score_card`），和语言无关；另外它带一份**跨调用的隐藏状态** `card_scoring._MC_CONTEXT`（`hp`、`max_hp`、`floor`、`relics`）：每次 `card_reward` 决策都会先用该请求里的玩家状态重写它，之后读它的只有 `pick_best_card`——卡牌奖励本身（刚重写过），以及房间类型为篝火（锻造）或战斗类/空的 `card_select`。后两种 `card_select` 没有牌组可算协同，但战斗类型加成（`combat_type_bonus`）仍用 `_MC_CONTEXT` 里的楼层，所以**选牌的排序可能取决于更早的请求**：用的是最近一次卡牌奖励时的楼层，不是这次请求里的。
+  - 服务端和 `play_full_run` 的一条 lane 一样，让这份状态在 `/advise` 请求之间一直延续；只在启动时预热之后重置一次（`reset_greedy_context()`，让预热不留痕迹），之后**不会**重置——局与局之间不会，mod 重连也不会（服务端不知道局的边界）。所以：服务刚启动、本局还没出现过卡牌奖励时，用的是初始值（HP 80/80、第 5 层）；新开一局后，在第一个卡牌奖励之前，沿用上一局最后一次卡牌奖励的值；服务中途重启则回到初始值，直到下一个卡牌奖励。这和 `play_full_run` 在同一条 lane 里连续打多局时的行为一致，但和语料测试里"每局从头重置"的做法不同。
 - **headless 的状态构造函数吃的是游戏模型对象**：`EventChoiceState(EventRoom)`、`RestSiteState(RestSiteRoom)`、`ShopState(MerchantRoom, Player)`、`MapSelectState()`、`PlayerSummary(Player)`、`RunContext()`。正式游戏的 `RunState.CurrentRoom` 是同样的类型。但这些函数和 headless 的控制流混在一起（`ForceToMap()`、`_pendingCardReward`、`_cardSelector`），必须先拆开才能共用。
 - 游戏运行时是 `net9.0`（`sts2.runtimeconfig.json`），和本仓库的构建一致。
 - **greedy 各决策的实际判断方式**（决定了能展示哪些依据）：
@@ -75,6 +77,7 @@ agent/advisor_server.py（.venv）
 2. **`DecisionSerializer`**：新共享源文件 `src/Sts2Shared/DecisionSerializer.cs`，两个工程都用 `<Compile Include=... Link=...>` 编进去。
    - 内容是从 `RunSimulator.cs` 抽出来的"模型 → `Dictionary<string, object?>`"纯函数：卡牌、玩家摘要、`RunContext`、事件、篝火、商店、地图、卡牌奖励、选牌、卷轴盒。
    - 输入是游戏模型对象和一个 `LocLookup`。不读 `RunSimulator` 的私有状态，不推进游戏，**不引用任何 Godot 类型**。
+   - 商店的 `card_removal_cost` 在本店的删牌用掉之后是 `null`。真实游戏里 `MerchantCardRemovalEntry.IsStocked` 是 `!Used`，而 `Used` 只由界面节点置位（`NMerchantCardRemoval.OnCardRemovalUsed`），用掉之后条目的 `Cost` 仍然有值；序列化器因此写成 `removal is { IsStocked: true } ? removal.Cost : null`，否则 greedy 的两条删牌规则（`shop.remove_basic`、`shop.remove_value`）会在同一家店里再次建议删牌。headless 从不置 `Used`（`agent/bug.md` BUG-056：同一次商店访问可以重复买删牌），`IsStocked` 恒为真，输出和以前逐字节一致，所以重构金标覆盖不到 `null` 这条路径；它由 `tests/agent/test_greedy_trace.py` 里一条状态构造的测试保证（`card_removal_cost: null` 时 greedy 不会给出删牌，两条规则记为 `skipped`）。
    - `RunSimulator` 保留自己的控制流（何时 `ForceToMap`、待决的 selector/bundle），改为调用这些函数。
 3. **不需要单独的 `ILocSource` 接口。** headless 和 mod 共用同一个 `Sts2Shared.LocLookup` 类（和 `DecisionSerializer` 一样编进两个工程，不引用 Godot）。
    - headless：`new LocLookup()`，读仓库里的 `localization_eng/`、`localization_zhs/`。
@@ -97,7 +100,7 @@ agent/advisor_server.py（.venv）
    - `action` 永远是 `greedy_action(state, trace=recorder)` 的原样输出，通过 `play_full_run._load_greedy_action()` 的同一条导入路径取得。`options`、`rules` 都来自**同一次调用**里的 recorder，服务端不另外打分。
    - `options[].status`：`ok`、`filtered`（被质量门过滤）、`locked`（事件选项锁定）、`unstocked`（商店槽位已售出）、`unaffordable`（商店买不起）、`reserved`（商店遗物：钱够买，但买完剩下不足 25 金币的保底金，所以不进候选）、`broken`（在 `BROKEN_CARDS` 里）。商店的卡和遗物才会有 `unstocked`、`unaffordable`；`reserved` 只用于遗物。完整列表是 `agent/greedy_trace.py` 的 `OPTION_STATUSES`。
    - `rules[].outcome`：`fired`（这条规则决定了动作）、`skipped`（条件不成立，继续看下一条）。一个决策里最多一条 `fired`。
-   - `warnings`：会改变 greedy 行为的环境变量和 `play_full_run` 的默认值不一致时，在这里列出。检查范围是 `GREEDY_KNOBS`，再加上 `STS2_CARD_PICK_TEMP`、`STS2_MC_ROLLOUT`、`STS2_VANTOM_REST_HEAL`；默认全部不设。任何一个被设置，启动时打印警告，并在每条回复里带上它。
+   - `warnings`：会改变 greedy 行为的环境变量被设成**非默认值**时，在这里列出（`KEY=value`）。检查范围就是 `agent/greedy_trace.py` 的 `GREEDY_BEHAVIOR_ENV`，共 14 个：`play_full_run.GREEDY_KNOBS` 的 5 个（`STS2_RANDOMIZE`、`STS2_DECISION_ADVISOR`、`STS2_CARD_THRESHOLD_LIFT`、`STS2_BASIC_PURGE_ALL`、`STS2_CARD_QUALITY_GATE`）；`play_full_run` 不记录、但同样改变 greedy 的 3 个（`STS2_CARD_PICK_TEMP`、`STS2_MC_ROLLOUT`、`STS2_VANTOM_REST_HEAL`）；`agent/card_scoring.py` 读取的 6 个（`STS2_ARCHETYPE`、`STS2_BOSS_READINESS_LIFT`、`STS2_CTX_WEIGHTS`、`STS2_OVERRIDE_DELTA_CAP`、`STS2_PREDICTOR_TARGET`、`STS2_MC_SMART_THRESH`）。各变量的默认值写在同一个文件的 `GREEDY_BEHAVIOR_DEFAULTS` 里，是读取它们的代码在变量未设置时用的值，测试核对两者一致；只有和默认值不同才警告（字符串忽略大小写和空白，数字按数值比较）。例如 `STS2_CARD_QUALITY_GATE=1` 是它的默认值（质量门开），不警告，设成 `0` 才警告；空白值只等于空白的默认值，所以设成空白的 `STS2_CARD_QUALITY_GATE`（读取代码只对"未设置"用默认值，空白会关掉质量门）要警告。启动时打印警告，并在每条回复里带上它们。
    - `map_select` 的回复固定 `unverified: true`。
    - `GET /health` 返回 `ok`、策略名、git commit 和 `warnings`。mod 启动时用它判断端口上是不是已经有一个健康的服务可以复用（面板不显示"已连接"，只在连不上时显示离线）。
 5. **greedy trace**（改 `agent/combat_env.py`、`agent/card_scoring.py`、`agent/strategy.py`）：
@@ -150,7 +153,7 @@ agent/advisor_server.py（.venv）
 - 标题行：决策类型、进度（`A1F13a1`，记法见 CLAUDE.md Conventions）、HP、金币。
 - 推荐项：`action` 对应的选项名；`action` 是 `leave_room`、`skip_card_reward` 时显示"离开"或"跳过"。
 - 依据：按决策类型取 trace 里的内容，见下表。
-- 底部一行来源：`greedy 启发式打分，不是概率`；地图改成`启发式，只看下一步，未经 A/B 验证`。`warnings` 不为空时，在这一行前面再加一行警告。
+- 底部一行来源：`greedy 启发式打分，不是概率`；地图改成`启发式，只看下一步，未经 A/B 验证`。`warnings` 不为空时，每条各占一行（警告样式），列在这一行**后面**；`action` 为 null（显示"无建议"）时没有依据和来源行，`warnings` 以灰色逐行列在"无建议"下面。
 - 文字语言跟随游戏，简体中文显示 `zh`，其他语言显示 `en`。`F8`（可配置）显示或隐藏面板。
 
 **各决策点的依据**
@@ -158,7 +161,7 @@ agent/advisor_server.py（.venv）
 | 决策 | 推荐项 | 依据（全部来自同一次调用的 trace） |
 |---|---|---|
 | 卡牌奖励 | 推荐卡，或"跳过" | 每张卡的总分；每张卡贡献最大的 2–3 个非零分项，`card.base` 总是显示并带评级字母；跳过阈值及其来源（第几幕、牌组是否 ≥18 张）；被质量门过滤的卡标"已过滤"，`BROKEN_CARDS` 里的卡标"不可用"。 |
-| 篝火 | 休息或锻造 | 按顺序列出每条规则，`skipped` 的灰色、`fired` 的高亮，每条都带比较的两个数，例如"HP 51% < 本层休息阈值 85%"。 |
+| 篝火 | 休息或锻造 | 按顺序列出每条规则，`skipped` 的灰色、`fired` 的高亮。HP 类规则（`rest.critical_heal`、`rest.vantom_mid_boss`、`rest.pre_boss_heal`、`rest.heal_threshold`）带比较的两个数，例如"HP 51%，本层休息阈值 85%"。**不是每条规则都有两个数**：`rest.must_upgrade` 只显示阈值（"有分数 ≥ 7 的未升级卡时锻造"），因为 trace 记录的是 `best_smith_target` 选中的牌组下标 `deck_index`，不是那张卡的分数；`rest.default_smith`、`rest.fallback`、`rest.no_choice` 没有数。另外，玩家点了锻造之后的 `card_select`（房间类型为篝火）用 `pick_best_card`（`threshold=0.0`，没有牌组）打分，和 `best_smith_target`（`score_card`，`UPGRADE_PRIORITY_HIGH` 的卡再 +3.0，阈值 7.0）是两个不同的打分器，所以"必升"规则指向的牌和随后选牌界面推荐的牌可能不是同一张；面板两处各自如实显示，不去调和。 |
 | 事件 | 推荐选项 | 每个可选选项的分数和命中的关键词（带加减分，例如"稀有卡 +8""失去 HP −2"）；锁定的选项标"已锁定"；最后一行注明"按选项英文描述的关键词打分"。 |
 | 商店 | 这一步：买什么、删牌或离开 | 从第一条规则列到 `fired` 那条，每条带比较的数，例如"删牌价值 3.1，不高于最佳卡 6.2"、"最佳卡 6.2 ≥ 买卡阈值 4.5（第 2 幕）"。非 Ironclad 角色时，`shop.remove_basic` 这一行写明"只统计 Ironclad 的打击和防御（实测配置），已跳过"。最后一行"买完会重新评估下一步"。 |
 | 卷轴盒 | 推荐哪一包 | 每包的总分，以及包里各卡的分数。 |
@@ -184,7 +187,7 @@ agent/advisor_server.py（.venv）
    - **依据和选择一致**：卡牌奖励、卷轴盒、事件、地图里，被选中的选项必须是 `status == "ok"` 中分数最高的（地图是优先级最小的）；卡牌奖励选择跳过时，最高分必须低于记录下来的阈值。选牌里，选中的就是按记录的模式（挑高分或挑低分）排序后的前 `max_select` 张。篝火和商店里，恰好一条规则 `fired`，而且它对应的动作就是 `action`。
    - **分项加起来等于总分**：每张卡的 `components` 之和等于它的 `score`（浮点误差 1e-9 以内）。
    - 所有出现过的 `key` 都在模块常量的 key 列表里。
-   - `map_select` 必须是 `unverified: true`；`GREEDY_KNOBS` 被设置时 `warnings` 不为空。
+   - `map_select` 必须是 `unverified: true`；`GREEDY_BEHAVIOR_ENV` 里的变量被设成非默认值时 `warnings` 不为空，设成默认值时为空。
    - 现有的 greedy 相关测试（`tests/test_ooc_policy.py` 等）全部照常通过。
 4. **地图修复的单元测试**：构造幕内楼层的 `map_select` 状态，断言第 1 幕第 16、17 层**不再**套用第 2 幕规则；第 2 幕第 2 层**会**套用；`ACT2_BOSS_ZONE` 在第 2、3 幕第 13 层起生效，在第 1 幕不生效。
 5. **mod 纯逻辑单元测试**：指纹计算、`TraceText` 渲染、回复解析、退避计时放在不依赖 Godot 的类里，用一个单独的 C# 测试工程测。`TraceText` 必须覆盖 key 列表里的每一个 key（测试从 Python 侧导出的 key 列表读取）；没有模板的 key 原样显示。
