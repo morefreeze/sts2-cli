@@ -5,9 +5,9 @@ using System.Text.Json;
 namespace Sts2Advisor.Core;
 
 /// <summary>advisor_trace.jsonl: every decision JSON the mod sent and the reply it got.
-/// The first in-game session's file is to become tests/fixtures/advisor/real_game_trace.jsonl,
-/// which tests/test_advisor_trace_contract.py is to check against headless field shapes
-/// (both planned, Task C8 -- neither exists yet).
+/// The first in-game session's file (2026-10-28, Task C8) is saved gzipped as
+/// tests/fixtures/advisor/real_game_trace.jsonl.gz, which tests/test_advisor_trace_contract.py
+/// checks against the headless field shapes.
 /// Logging is best effort: <see cref="Append"/> runs on a background thread after each reply and
 /// never throws; a line whose JSON is invalid, or whose write fails, is dropped and counted.
 /// The file is capped: once it is larger than the cap, the next append first moves it to
