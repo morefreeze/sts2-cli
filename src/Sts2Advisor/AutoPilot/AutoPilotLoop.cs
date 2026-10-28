@@ -109,7 +109,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         }
         finally
         {
-            AutoPilotChoice.End();
+            AutoPilotChoice.End(this);
             _session.InCombat = false;
         }
     }

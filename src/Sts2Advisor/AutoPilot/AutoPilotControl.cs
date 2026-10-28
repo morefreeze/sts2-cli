@@ -18,6 +18,7 @@ internal static class AutoPilotControl
     private static Func<double> _now = () => 0;
     private static string? _unavailable;
     private static CancellationTokenSource? _cts;
+    private static Task? _runTask;
     private static CombatSolverStatus _combatSolver = CombatSolverStatus.Ok;
     private static double _stoppedAt = double.NegativeInfinity;
 
@@ -50,6 +51,11 @@ internal static class AutoPilotControl
             _stoppedAt = _now();
             return;
         }
+        if (_runTask is { IsCompleted: false })
+        {
+            ModLog.Info("autopilot: previous run still stopping");
+            return;
+        }
         if (!Session.Start())
             return;
         _combatSolver = CombatSolverSettings.Read(Path.Combine(_gameUserDir, CombatSolverSettings.FileName));
@@ -57,14 +63,21 @@ internal static class AutoPilotControl
         _cts = cts;
         ModLog.Info($"autopilot: started (CombatSolver {_combatSolver})");
         var loop = new AutoPilotLoop(_advisor, _loc, _trace, Session, _now);
-        _ = RunAsync(loop, cts);
+        _runTask = RunAsync(loop, cts);
     }
 
     private static async Task RunAsync(AutoPilotLoop loop, CancellationTokenSource cts)
     {
-        var (reason, detail) = await loop.RunAsync(cts.Token);
-        if (ReferenceEquals(cts, _cts))  // a hotkey Stop has already finished this session
-            Finish(reason, detail);
+        try
+        {
+            var (reason, detail) = await loop.RunAsync(cts.Token);
+            if (ReferenceEquals(cts, _cts))  // a hotkey Stop has already finished this session
+                Finish(reason, detail);
+        }
+        finally
+        {
+            cts.Dispose();
+        }
     }
 
     public static void Stop(StopReason reason, string? detail)
@@ -73,7 +86,7 @@ internal static class AutoPilotControl
             return;
         var cts = _cts;
         Finish(reason, detail);
-        cts?.Cancel();
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { }
     }
 
     private static void Finish(StopReason reason, string? detail)
@@ -82,8 +95,15 @@ internal static class AutoPilotControl
         Session.Stop(reason, detail);
         _stoppedAt = _now();
         ModLog.Info($"autopilot: stopped ({reason}{(detail == null ? "" : ": " + detail)}) after {Session.StepCount} step(s)");
-        _trace?.Append("autopilot_stop", JsonSerializer.Serialize(new { reason = reason.ToString(), detail, steps = Session.StepCount }),
-                       null, reason.ToString());
+        try
+        {
+            _trace?.Append("autopilot_stop", JsonSerializer.Serialize(new { reason = reason.ToString(), detail, steps = Session.StepCount }),
+                           null, reason.ToString());
+        }
+        catch (Exception e)
+        {
+            ModLog.Error($"autopilot: trace line for the stop failed: {e.Message}");
+        }
     }
 
     public static IReadOnlyList<PanelLine> RunningLines(string hotkey, bool zh) =>

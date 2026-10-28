@@ -1,4 +1,5 @@
 // src/Sts2Advisor/AutoPilot/AutoPilotChoice.cs
+using MegaCrit.Sts2.Core.AutoSlay;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
@@ -78,8 +79,11 @@ internal static class AutoPilotChoice
         Clear();
     }
 
-    public static void End()
+    /// <summary>Only the loop that began the session may end it: a stopped loop can finish after a new one began.</summary>
+    public static void End(IAutoPilotHost host)
     {
+        if (!ReferenceEquals(_host, host))
+            return;
         _host = null;
         Clear();
     }
@@ -102,8 +106,17 @@ internal static class AutoPilotChoice
     public static T? Pick<T>(Rng random, IEnumerable<T> items)
     {
         if (!Active)
-            return random.NextItem(items);
+        {
+            // Never pick randomly for a stopped autopilot (its old handler may still be running): only the
+            // game's own AutoSlay wants that.
+            if (AutoSlayer.IsActive)
+                return random.NextItem(items);
+            throw new OperationCanceledException("autopilot is not running");
+        }
         var list = items as IReadOnlyList<T> ?? items.ToList();
+        // A finished event offers one synthetic Proceed option, and the screen no longer reads as a decision.
+        if (list.Count > 0 && list.All(n => n is NEventOptionButton { Option.IsProceed: true }))
+            return list[0];
         var cap = DecisionCapture.Detect(_loc!);
         if (cap is not { Kind: CaptureKind.Advise })
             throw new AutoPilotException($"a handler picks among {list.Count} {typeof(T).Name} but the screen reads as {cap?.Screen ?? "nothing"}");

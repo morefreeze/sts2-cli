@@ -20,7 +20,8 @@ internal static class CombatWait
     /// 100 Strength/Plating/Regen and kills the enemies outright.</summary>
     public static async Task ForEventCombat(EventRoomHandler handler, CancellationToken ct)
     {
-        if (!AutoPilotChoice.Active)
+        // The cheat only for the game's own AutoSlay; a stopped autopilot's old handler must not run it either.
+        if (AutoSlayer.IsActive && !AutoPilotChoice.Active)
         {
             await handler.HandleEventCombat(ct);
             return;
