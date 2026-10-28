@@ -2405,3 +2405,327 @@ Expected: 最后打印 `installed to …/mods/Sts2Advisor`。启动游戏后，`
 - [ ] **Step 5: 验收通过后更新 fixture（可选）**
 
 新跑出的 trace 可以替换 `tests/fixtures/advisor/real_game_trace.jsonl.gz`（CLAUDE.md 有命令），然后重跑 `tests/test_advisor_trace_contract.py`。
+
+---
+
+## 追加（2026-10-28，用户要求）：面板按钮 + 单步
+
+Spec："修订 2：面板按钮与单步"。
+
+单步 = 执行一个建议的选择，继续做不需要决策的事，**下一次要问建议时停**（`StopReason.StepDone`）。面板在建议下方加按钮「执行这一步 (F10)」「全自动 (F9)」；运行中换成一个「停止」。
+
+### Task 15: Core —— `step_hotkey`、单步会话、按钮与文字
+
+**Files:**
+- Modify: `src/Sts2Advisor.Core/AdvisorConfig.cs`、`AutoPilotSession.cs`、`AutoPilotText.cs`
+- Test: `src/Sts2Advisor.Core.Tests/AdvisorConfigTests.cs`、`AutoPilotSessionTests.cs`、`AutoPilotTextTests.cs`
+
+- [ ] **Step 1: 写失败的测试**
+
+`AdvisorConfigTests` 追加：
+
+```csharp
+    [Fact]
+    public void StepHotkeyDefaultsToF10AndIsRead()
+    {
+        Assert.Equal("F10", AdvisorConfig.Defaults.StepHotkey);
+        Assert.Equal("F10", AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).StepHotkey);
+        Assert.Equal("F11", AdvisorConfig.Load(Write("""{"step_hotkey": "F11"}""")).StepHotkey);
+        Assert.Equal("F10", AdvisorConfig.Load(Write("""{"step_hotkey": 11}""")).StepHotkey);
+    }
+```
+
+`AutoPilotSessionTests` 追加：
+
+```csharp
+    [Fact]
+    public void SingleStepIsDoneAfterOneStep()
+    {
+        var s = new AutoPilotSession();
+        Assert.True(s.Start(singleStep: true));
+        Assert.True(s.SingleStep);
+        Assert.False(s.StepDone);
+        s.Record("地图：问号", null);
+        Assert.True(s.StepDone);
+        s.Stop(StopReason.StepDone, null);
+        Assert.True(s.Start());
+        Assert.False(s.SingleStep);
+        s.Record("x", null);
+        Assert.False(s.StepDone);
+    }
+```
+
+`AutoPilotTextTests`：
+
+- 把现有用例里所有 `AutoPilotText.Running(s, "F9", ...)` 改成 `AutoPilotText.Running(s, "F9", "F10", ...)`。
+- 把所有 `AutoPilotText.StopBanner(r, d, "F9", zh)` 改成 `AutoPilotText.StopBanner(r, d, "F9", "F10", zh)`。
+- 再追加：
+
+```csharp
+    [Fact]
+    public void SingleStepTitleNamesTheStepKey()
+    {
+        var s = new AutoPilotSession();
+        s.Start(singleStep: true);
+        Assert.Equal("单步执行中 · F10 停止", AutoPilotText.Running(s, "F9", "F10", CombatSolverStatus.Ok, zh: true)[0].Text);
+        Assert.Equal("Single step · F10 to stop", AutoPilotText.Running(s, "F9", "F10", CombatSolverStatus.Ok, zh: false)[0].Text);
+    }
+
+    [Fact]
+    public void StepDoneBannerIsMutedAndOffersTheNextStep()
+    {
+        var b = AutoPilotText.StopBanner(StopReason.StepDone, null, "F9", "F10", zh: true);
+        Assert.Equal(LineStyle.Muted, b.Style);
+        Assert.Contains("F10", b.Text);
+        Assert.DoesNotContain("F9", b.Text);
+    }
+
+    [Fact]
+    public void ButtonsOfferStepAndFullAutoOrStop()
+    {
+        var idle = AutoPilotText.Buttons(running: false, "F10", "F9", zh: true);
+        Assert.Equal(new[] { PanelAction.Step, PanelAction.Auto }, idle.Select(b => b.Action));
+        Assert.Equal("执行这一步 (F10)", idle[0].Text);
+        Assert.Equal("全自动 (F9)", idle[1].Text);
+        var running = AutoPilotText.Buttons(running: true, "F10", "F9", zh: false);
+        Assert.Equal(PanelAction.Stop, Assert.Single(running).Action);
+        Assert.Equal("Stop", running[0].Text);
+    }
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `~/.dotnet-arm64/dotnet test src/Sts2Advisor.Core.Tests`
+Expected: 编译失败（`StepHotkey`、`singleStep`、`PanelAction` 不存在）
+
+- [ ] **Step 3: 实现**
+
+`AdvisorConfig.cs`：
+
+- record 头末尾加参数 `string StepHotkey = AdvisorConfig.DefaultStepHotkey`；
+- 加常量 `public const string DefaultStepHotkey = "F10";`；
+- `Load` 末尾参数加 `Str(root, "step_hotkey") ?? DefaultStepHotkey`；
+- summary 里补一句 `"step_hotkey" likewise (else "F10")`。
+
+`AutoPilotSession.cs`：
+
+- `StopReason` 枚举**末尾**加 `StepDone`。enum summary 补一句 `StepDone: a single step executed its one advised choice and reached the next decision.`
+- 加属性：
+
+```csharp
+    /// <summary>Started as a single step: stop at the next decision once one advised choice is executed.</summary>
+    public bool SingleStep { get; private set; }
+
+    /// <summary>A single step has executed its choice; the next request for advice ends it.</summary>
+    public bool StepDone => SingleStep && StepCount > 0;
+```
+
+- `Start()` 改为 `public bool Start(bool singleStep = false)`，在 `Mode = AutoPilotMode.Running;` 后加 `SingleStep = singleStep;`。
+
+`AutoPilotText.cs`：
+
+- 文件顶部（类外）加：
+
+```csharp
+public enum PanelAction { Step, Auto, Stop }
+
+public sealed record PanelButton(PanelAction Action, string Text);
+```
+
+- `Running` 签名改为 `Running(AutoPilotSession s, string autoKey, string stepKey, CombatSolverStatus combat, bool zh)`，标题行改为：
+
+```csharp
+            s.SingleStep
+                ? new(T(zh, $"单步执行中 · {stepKey} 停止", $"Single step · {stepKey} to stop"), LineStyle.Title)
+                : new(T(zh, $"全托管中 · {autoKey} 接管", $"Autopilot on · {autoKey} to take over"), LineStyle.Title),
+```
+
+- `StopBanner` 签名改为 `StopBanner(StopReason reason, string? detail, string autoKey, string stepKey, bool zh)`。末尾提示改为：
+
+```csharp
+            + (reason == StopReason.StepDone
+                ? T(zh, $" · {stepKey} 下一步", $" · {stepKey} for the next step")
+                : T(zh, $" · {autoKey} 重新开启", $" · {autoKey} to restart"));
+```
+
+  Muted 条件加上 `StopReason.StepDone`。
+
+- `StopReasonText` 加 `StopReason.StepDone => T(zh, "单步完成", "step done"),`。
+- 加：
+
+```csharp
+    /// <summary>The panel's buttons: "do this step" and "full auto" while advising; one "stop" while running.</summary>
+    public static IReadOnlyList<PanelButton> Buttons(bool running, string stepKey, string autoKey, bool zh) =>
+        running
+            ? new[] { new PanelButton(PanelAction.Stop, T(zh, "停止", "Stop")) }
+            : new[]
+            {
+                new PanelButton(PanelAction.Step, T(zh, $"执行这一步 ({stepKey})", $"Do this step ({stepKey})")),
+                new PanelButton(PanelAction.Auto, T(zh, $"全自动 ({autoKey})", $"Full auto ({autoKey})")),
+            };
+```
+
+- [ ] **Step 4: 跑测试确认通过**（全部 Core 测试）。mod 会因签名变化编译失败，Task 16 修。
+
+- [ ] **Step 5: Commit** `feat(advisor): single-step session, step_hotkey and panel buttons (core)`
+
+### Task 16: mod —— 单步执行与面板按钮
+
+**Files:**
+- Modify: `src/Sts2Advisor/AutoPilot/AutoPilotControl.cs`、`AutoPilotLoop.cs`、`src/Sts2Advisor/AdvisorPanel.cs`、`src/Sts2Advisor/AdvisorRuntime.cs`
+
+- [ ] **Step 1: 循环在单步完成后停**
+
+`AutoPilotLoop.cs`：
+
+- `FetchAdviceAsync` 开头（`string? last = null;` 之前）加：
+
+```csharp
+        if (_session.StepDone)  // a single step stops at the next decision
+            throw new AutoPilotStopException(StopReason.StepDone, null);
+```
+
+- `HandleOverlayAsync` 里非模态的交还分支（没有 handler 的 overlay）在交还之前加同样两行：选遗物、水晶球也是决策。模态弹窗的交还不加。
+
+- [ ] **Step 2: 控制器支持单步**
+
+`AutoPilotControl.cs`：
+
+- 加字段 `private static bool _pendingSingle;`。
+- `Toggle()` 改为 `Toggle(bool singleStep = false)`：
+  - 运行中：照旧 `Stop(StopReason.Hotkey, null)`。
+  - 旧 run 还在收尾：`_startPending = !_startPending; _pendingSingle = singleStep;`。
+  - 否则：`Start(singleStep)`。
+- `Start(bool previousRunDone = false)` 改为 `Start(bool singleStep, bool previousRunDone = false)`：
+  - `Session.Start()` 改成 `Session.Start(singleStep)`；
+  - 日志写 `started ({(singleStep ? "single step" : "full auto")}, CombatSolver …)`。
+- `RunAsync` 的 finally 里改为 `Start(_pendingSingle, previousRunDone: true)`。
+- 加：
+
+```csharp
+    /// <summary>A panel button: Step / Auto start that mode; Stop stops whichever runs.</summary>
+    public static void Press(PanelAction action)
+    {
+        if (action == PanelAction.Stop) Stop(StopReason.Hotkey, null);
+        else Toggle(singleStep: action == PanelAction.Step);
+    }
+```
+
+- `RunningLines(string hotkey, bool zh)` 改为 `RunningLines(string autoKey, string stepKey, bool zh) => AutoPilotText.Running(Session, autoKey, stepKey, _combatSolver, zh);`
+- `Banner(string hotkey, bool zh)` 改为 `Banner(string autoKey, string stepKey, bool zh)`，转发给新的 `StopBanner`。
+
+- [ ] **Step 3: 面板加按钮**
+
+`AdvisorPanel.cs`：
+
+- 类 summary 改为：`... Ignores the mouse except on its buttons: it never blocks a click elsewhere.`
+- `TryCreate` 里，把 `panel.AddChild(text);` 改为放一个 `VBoxContainer`：
+
+```csharp
+        var column = new VBoxContainer { Name = "Column", MouseFilter = Control.MouseFilterEnum.Ignore };
+        column.AddThemeConstantOverride("separation", 8);
+        var buttons = new HBoxContainer { Name = "Buttons", MouseFilter = Control.MouseFilterEnum.Ignore };
+        buttons.AddThemeConstantOverride("separation", 8);
+        column.AddChild(text);
+        column.AddChild(buttons);
+        panel.AddChild(column);
+```
+
+  构造函数多存一个 `HBoxContainer _buttons`。
+
+- 加字段 `private string? _shownButtons;`。
+- `Show` 签名改为 `Show(IReadOnlyList<PanelLine> lines, string? language, IReadOnlyList<PanelButton> buttons, Action<PanelAction> onPress)`。在设置文字之后加：
+
+```csharp
+        // Rebuilt only when the buttons change (every 0.3 s poll re-shows the same ones).
+        string key = string.Join("|", buttons.Select(b => $"{b.Action}:{b.Text}")) + "|" + _fontLanguage;
+        if (key != _shownButtons)
+        {
+            foreach (var child in _buttons.GetChildren())
+                child.QueueFree();
+            foreach (var b in buttons)
+            {
+                var action = b.Action;
+                // FocusMode None: a click must not move keyboard/controller focus away from the game's own UI.
+                var button = new Button { Text = b.Text, FocusMode = Control.FocusModeEnum.None,
+                                          MouseFilter = Control.MouseFilterEnum.Stop };
+                button.AddThemeFontSizeOverride("font_size", 14);
+                button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                button.Pressed += () => onPress(action);
+                _buttons.AddChild(button);
+            }
+            _shownButtons = key;
+        }
+        _buttons.Visible = buttons.Count > 0;
+```
+
+  `ApplyLocaleFontSubstitution` 和 `RichTextLabel` 上用的是同一个扩展方法。确认它接受 `Control` 和主题字体名 `"font"`（在反编译里查它的定义）；不接受的话就照它对 `Button` 的正确写法改。
+
+- [ ] **Step 4: AdvisorRuntime 接线**
+
+1. 字段：`private static Key _stepKey = Key.F10; private static string _stepKeyName = "F10"; private static bool _stepKeyDown;`。
+2. `Start`：在解析 `_autoKey` 后加：
+
+```csharp
+        if (!Enum.TryParse(config.StepHotkey, ignoreCase: true, out _stepKey))
+            _stepKey = Key.F10;
+        _stepKeyName = _stepKey.ToString();
+        if (_stepKey == _hotkey || _stepKey == _autoKey)
+            autopilotProblem ??= $"step_hotkey {_stepKeyName} clashes with hotkey/autopilot_hotkey ({configPath})";
+```
+
+   `ModEntry` 的 loaded 日志行加上 `step_hotkey={config.StepHotkey}`。
+3. `PollHotkey` 末尾：步进键同样做边沿检测。和 `_hotkey` 相同时不轮询（面板开关优先）；和 `_autoKey` 相同时也不轮询，避免一下按两次。按下时 `AutoPilotControl.Toggle(singleStep: true); _requested = null;`。
+4. `RunningLines(_autoKeyName, Zh)` 改为 `RunningLines(_autoKeyName, _stepKeyName, Zh)`。
+5. `Show`：
+
+```csharp
+    private static void Show(IReadOnlyList<PanelLine> lines)
+    {
+        if (!_visible) return;
+        var banner = AutoPilotControl.Banner(_autoKeyName, _stepKeyName, Zh);
+        // No buttons while the mod cannot act (config missing, game version unsupported).
+        var buttons = _configProblem != null || _disabled
+            ? Array.Empty<PanelButton>()
+            : AutoPilotText.Buttons(AutoPilotControl.IsRunning, _stepKeyName, _autoKeyName, Zh);
+        _panel?.Show(banner == null ? lines : lines.Prepend(banner).ToList(), _language, buttons, OnPanelButton);
+    }
+
+    private static void OnPanelButton(PanelAction action)
+    {
+        try
+        {
+            AutoPilotControl.Press(action);
+            _requested = null;
+        }
+        catch (Exception ex)
+        {
+            LogTickFailure(ex);  // a Godot signal callback must not throw
+        }
+    }
+```
+
+6. 类 summary 补一句：`F10 (step_hotkey) or the panel's "do this step" button runs a single step: one advised choice, then stop at the next decision.`
+
+- [ ] **Step 5: 编译 + Core 测试**
+
+Run: `~/.dotnet-arm64/dotnet build src/Sts2Advisor/Sts2Advisor.csproj -c Release 2>&1 | grep -E "warn|Error\(s\)"` 和 `~/.dotnet-arm64/dotnet test src/Sts2Advisor.Core.Tests 2>&1 | tail -1`
+Expected: `0 Error(s)`，Core 测试全过。
+
+- [ ] **Step 6: Commit** `feat(advisor-mod): panel buttons and single step (F10)`
+
+### Task 17: 文档
+
+- `tools/install_advisor_mod.sh`：config heredoc 加 `"step_hotkey": "F10"`。
+- `CLAUDE.md` 的 Autopilot 条目：
+  - 开头改为 `F9 (config autopilot_hotkey) or the panel's 全自动 button hands the rest of the run to ...; F10 (step_hotkey) or 执行这一步 runs a single step -- one advised choice plus whatever needs no decision, stopping at the next decision (StopReason.StepDone). Any two equal hotkeys disable the autopilot.`
+  - 补一句 `The panel ignores the mouse except on its buttons, which never take keyboard focus.`
+- Commit `docs(advisor): single step and panel buttons`。
+
+### Task 18: 验证
+
+同 Task 14 Step 1；实机验收追加三项：
+
+1. 在地图、事件、商店、卡牌奖励各按一次「执行这一步」，确认只做了一个选择、停在下一个决策，横幅显示"单步完成 · F10 下一步"。
+2. 按钮点击不会穿透到游戏，也不抢键盘/手柄焦点。
+3. F8 隐藏面板时，按钮一起消失。
