@@ -46,14 +46,12 @@ public static class AutoPilotPlan
             ? i
             : throw new AutoPilotException($"{decision}: '{reply.ActionName}' needs a non-negative integer '{arg}'");
 
-    /// <summary>"4, 1,4" -> [4, 1]: order kept, duplicates dropped. A bare number is one index.</summary>
+    /// <summary>"4, 1,4" -> [4, 1]: order kept, duplicates dropped. Greedy always sends a string.</summary>
     private static IReadOnlyList<int> Indices(AdviceReply reply, string decision)
     {
         var arg = reply.Arg("indices");
-        if (arg is { ValueKind: JsonValueKind.Number } n && n.TryGetInt32(out int single) && single >= 0)
-            return new[] { single };
         if (arg is not { ValueKind: JsonValueKind.String } s)
-            throw new AutoPilotException($"{decision}: select_cards needs 'indices'");
+            throw new AutoPilotException($"{decision}: select_cards needs 'indices' as a comma-separated string");
         var result = new List<int>();
         foreach (var part in s.GetString()!.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {

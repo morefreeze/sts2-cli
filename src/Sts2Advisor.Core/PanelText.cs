@@ -227,6 +227,8 @@ public static class PanelText
             ? s.GetString()!.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToList()
             : Array.Empty<int>();
 
+    /// <summary>Expects a reply already validated by <see cref="AutoPilotPlan"/> or shaped by the advice
+    /// service; a malformed "indices" can throw <see cref="FormatException"/>.</summary>
     public static string PickText(string decision, AdviceReply reply, IReadOnlyDictionary<string, string> labels, bool zh)
     {
         int Index(string name) => reply.Arg(name) is { ValueKind: JsonValueKind.Number } v ? v.GetInt32() : -1;

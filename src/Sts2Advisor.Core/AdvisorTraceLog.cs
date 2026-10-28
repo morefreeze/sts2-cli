@@ -4,7 +4,8 @@ using System.Text.Json;
 
 namespace Sts2Advisor.Core;
 
-/// <summary>advisor_trace.jsonl: every decision JSON the mod sent and the reply it got.
+/// <summary>advisor_trace.jsonl: every decision JSON the mod sent and the reply it got
+/// (plus an optional <c>autopilot</c> key on the line whose advice the autopilot executed).
 /// The first in-game session's file (2026-10-28, Task C8) is saved gzipped as
 /// tests/fixtures/advisor/real_game_trace.jsonl.gz, which tests/test_advisor_trace_contract.py
 /// checks against the headless field shapes.
@@ -37,13 +38,13 @@ public sealed class AdvisorTraceLog
     /// <summary>Lines dropped so far (invalid JSON or a failed write).</summary>
     public int Dropped => Volatile.Read(ref _dropped);
 
-    /// <summary><paramref name="autopilotJson"/>: set when the autopilot executed this advice
-    /// ({"executed": true, "step": n}); written as an "autopilot" object.</summary>
-    public void Append(string decision, string stateJson, string? replyJson, string? error, string? autopilotJson = null)
+    /// <summary><paramref name="autopilotStep"/>: set when the autopilot executed this advice as its step n;
+    /// written as <c>"autopilot": {"executed": true, "step": n}</c>.</summary>
+    public void Append(string decision, string stateJson, string? replyJson, string? error, int? autopilotStep = null)
     {
         try
         {
-            var line = BuildLine(decision, stateJson, replyJson, error, autopilotJson);
+            var line = BuildLine(decision, stateJson, replyJson, error, autopilotStep);
             lock (_gate)
             {
                 EnsureDirectory();
@@ -85,7 +86,7 @@ public sealed class AdvisorTraceLog
     /// <summary>One compact line. The state and reply are parsed and re-written rather than pasted
     /// in raw, so invalid JSON throws here (before anything reaches the file) and a pretty-printed
     /// input still stays on one line.</summary>
-    private static string BuildLine(string decision, string stateJson, string? replyJson, string? error, string? autopilotJson)
+    private static string BuildLine(string decision, string stateJson, string? replyJson, string? error, int? autopilotStep)
     {
         using var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer, WriterOptions))
@@ -98,10 +99,12 @@ public sealed class AdvisorTraceLog
             w.WritePropertyName("reply");
             if (replyJson == null) w.WriteNullValue(); else WriteJson(w, replyJson);
             if (error != null) w.WriteString("error", error);
-            if (autopilotJson != null)
+            if (autopilotStep is { } step)
             {
-                w.WritePropertyName("autopilot");
-                WriteJson(w, autopilotJson);
+                w.WriteStartObject("autopilot");
+                w.WriteBoolean("executed", true);
+                w.WriteNumber("step", step);
+                w.WriteEndObject();
             }
             w.WriteEndObject();
         }

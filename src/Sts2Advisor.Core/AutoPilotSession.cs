@@ -19,11 +19,13 @@ public sealed class AutoPilotSession
     public const int MaxSteps = 6;
     public const double OfflineLimitSeconds = 10;
     public const int MaxAdviceRetries = 5;
+    public const int MaxTotalAdviceRetries = MaxAdviceRetries * 2;
 
     private readonly List<AutoPilotStep> _steps = new();  // newest first
     private double? _offlineSince;
     private string? _retryFingerprint;
     private int _retries;
+    private int _totalRetries;
 
     public AutoPilotMode Mode { get; private set; }
     public StopReason? LastStop { get; private set; }
@@ -49,6 +51,7 @@ public sealed class AutoPilotSession
         _offlineSince = null;
         _retryFingerprint = null;
         _retries = 0;
+        _totalRetries = 0;
         return true;
     }
 
@@ -70,6 +73,7 @@ public sealed class AutoPilotSession
             _steps.RemoveAt(_steps.Count - 1);
         _retryFingerprint = null;
         _retries = 0;
+        _totalRetries = 0;
         return StepCount;
     }
 
@@ -87,7 +91,8 @@ public sealed class AutoPilotSession
     public void Online() => _offlineSince = null;
 
     /// <summary>One more "ask for advice, then rerun the handler" on this decision; false past the cap
-    /// (the screen keeps changing under the handler, or the advice never fits).</summary>
+    /// for one decision (its advice never fits) or past the total cap since the last step (the screen
+    /// keeps changing under the handler).</summary>
     public bool CountAdviceRetry(string fingerprint)
     {
         if (fingerprint != _retryFingerprint)
@@ -95,6 +100,7 @@ public sealed class AutoPilotSession
             _retryFingerprint = fingerprint;
             _retries = 0;
         }
-        return ++_retries <= MaxAdviceRetries;
+        _totalRetries++;
+        return ++_retries <= MaxAdviceRetries && _totalRetries <= MaxTotalAdviceRetries;
     }
 }

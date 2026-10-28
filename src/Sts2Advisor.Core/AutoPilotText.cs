@@ -45,7 +45,7 @@ public static class AutoPilotText
         string text = T(zh, "全托管已停止：", "Autopilot stopped: ") + StopReasonText(reason, zh)
             + (string.IsNullOrEmpty(detail) ? "" : T(zh, "（", " (") + detail + T(zh, "）", ")"))
             + T(zh, $" · {hotkey} 重新开启", $" · {hotkey} to restart");
-        return new PanelLine(text, reason is StopReason.Hotkey or StopReason.GameOver ? LineStyle.Muted : LineStyle.Warning);
+        return new PanelLine(text, reason is StopReason.Hotkey or StopReason.GameOver or StopReason.LeftRun ? LineStyle.Muted : LineStyle.Warning);
     }
 
     public static string StopReasonText(StopReason reason, bool zh) => reason switch

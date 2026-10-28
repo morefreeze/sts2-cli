@@ -202,7 +202,7 @@ public class AdvisorTraceLogTests
     {
         var path = NewPath();
         var log = new AdvisorTraceLog(path);
-        log.Append("shop", """{"decision": "shop"}""", """{"action": null}""", null, """{"executed": true, "step": 3}""");
+        log.Append("shop", """{"decision": "shop"}""", """{"action": null}""", null, autopilotStep: 3);
         log.Append("shop", """{"decision": "shop"}""", """{"action": null}""", null);
         var lines = File.ReadAllLines(path);
         using var first = JsonDocument.Parse(lines[0]);

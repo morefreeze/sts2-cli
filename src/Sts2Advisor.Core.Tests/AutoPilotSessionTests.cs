@@ -81,6 +81,17 @@ public class AutoPilotSessionTests
     }
 
     [Fact]
+    public void AlternatingFingerprintsStillHitTheTotalCapUntilAStep()
+    {
+        var s = new AutoPilotSession();
+        for (int i = 0; i < AutoPilotSession.MaxTotalAdviceRetries; i++)
+            Assert.True(s.CountAdviceRetry(i % 2 == 0 ? "f1" : "f2"));
+        Assert.False(s.CountAdviceRetry("f1"));
+        s.Record("picked", null);
+        Assert.True(s.CountAdviceRetry("f2"));
+    }
+
+    [Fact]
     public void HandBackIsSetAndCleared()
     {
         var s = new AutoPilotSession();

@@ -44,9 +44,10 @@ public class AutoPilotPlanTests
     }
 
     [Fact]
-    public void CardSelectAcceptsANumber()
+    public void CardSelectIndicesMustBeAString()
     {
-        Assert.Equal(new[] { 17 }, Plan("card_select", """{"action": "select_cards", "args": {"indices": 17}}""").Indices);
+        var e = Assert.Throws<AutoPilotException>(() => Plan("card_select", """{"action": "select_cards", "args": {"indices": 17}}"""));
+        Assert.Contains("comma-separated string", e.Message);
     }
 
     [Theory]

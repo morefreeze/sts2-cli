@@ -6,7 +6,7 @@ missing or has another type, so this is the check the mod's serializer needs.
 
 Fixture: tests/fixtures/advisor/real_game_trace.jsonl.gz, one in-game run with the mod
 (Silent-like character, A1F1 -> A3F3, 2026-10-28, plan Task C8). Each line is
-{ts, decision, state, reply, error?}. Every attempt is logged again (the screen is
+{ts, decision, state, reply, error?, autopilot?}. Every attempt is logged again (the screen is
 re-sent on a retry, and Undo/Rewind mods put the player back on screens already seen),
 so `load_game_states` dedupes identical states and drops failed requests.
 

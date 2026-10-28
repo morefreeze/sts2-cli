@@ -88,5 +88,6 @@ public class AutoPilotTextTests
         Assert.Contains("F9", b.Text);
         Assert.Equal(LineStyle.Muted, AutoPilotText.StopBanner(StopReason.Hotkey, null, "F9", zh: true).Style);
         Assert.Equal(LineStyle.Muted, AutoPilotText.StopBanner(StopReason.GameOver, null, "F9", zh: true).Style);
+        Assert.Equal(LineStyle.Muted, AutoPilotText.StopBanner(StopReason.LeftRun, null, "F9", zh: true).Style);
     }
 }
