@@ -2,6 +2,7 @@
 
 Date: 2026-10-28. Approved by the user in chat. Branch `feat/deterministic-planner`.
 Builds on `docs/superpowers/specs/2026-10-21-sts2-advisor-mod-design.md` (the advice-only mod).
+Revised 2026-10-28（写计划与两轮代码评审后）：实现方式见文末"实现修订"一节，它取代第 1–3 段里与之冲突的写法。
 
 ## 目标
 
@@ -120,6 +121,62 @@ AutoPilot (新, src/Sts2Advisor/AutoPilot/)
   4. 遇到一次 hand-back 界面（选遗物或水晶球）。
   通过标准：两局都打到结算页，没有意外停止；trace 里每个局外决策都有 `executed: true`；存档里的解锁状态和开托管前一致。
 - **回归**：本改动不碰 `src/Sts2Shared/` 的序列化输出。若为了"选项模型列表"改了 `DecisionSerializer`，必须按 CLAUDE.md 跑 `tools/replay_states.py --compare`（逐字节一致）并跑全量 regression。
+
+## 实现修订（2026-10-28，计划 `docs/superpowers/plans/2026-10-28-sts2-advisor-autopilot.md` 与两轮代码评审）
+
+本节取代第 1–3 段里与之冲突的写法。
+
+- **注入**：`HandlerPatches` 在 mod 加载时用 Harmony **transpiler** 改写 9 个 AutoSlay handler 的 `HandleAsync` 状态机 `MoveNext`：
+  - 9 个 handler 是 Event、RestSite、DeckUpgrade、DeckTransform、DeckEnchant、DeckCardSelect、SimpleCardSelect、ChooseACard、ChooseABundle；
+  - `random.NextItem(list)` 改成 `AutoPilotChoice.Pick<T>(random, list)`；
+  - `HandleEventCombat(ct)` 改成 `CombatWait.ForEventCombat(handler, ct)`；
+  - 每个 handler 应改写几处写在代码里，对不上就禁用全托管，日志和面板说明原因。
+
+  没有用 `Rng.NextItem<T>` 前缀补丁，原因有两个：泛型方法的补丁影响全局；NextItem 可能被 JIT 内联进调用方，从而绕过补丁。
+- **事件战斗作弊被替换**：原 `HandleEventCombat` 会给玩家 +100 力量/覆甲/再生，并直接杀死敌人；改写后只等 CombatSolver 打完。只有游戏自己的 AutoSlay 在跑时才调回原方法。
+- **问建议**：
+  - `Pick` 先读当前画面。缓存的建议是同一指纹，就按建议、以对象引用找节点。网格里的卡退而按卡牌 id + 升级等级匹配。
+  - 没有对应建议时抛 `NeedAdviceException`。循环接住它，等画面稳定、异步问 sidecar，再重跑 handler。handler 在 NextItem 之前不点任何东西，所以可重入。
+  - 重问上限：同一决策 5 次，两步之间合计 10 次。
+  - 我们自己的 handler 直接 `await` 问建议。
+- **事件结束时的"继续"**：游戏会补一个合成的 PROCEED 选项。`Pick` 直接选它，不问建议，也不记步骤。
+- **overlay 盖住房间时**：事件 / 篝火的 handler 若在有 overlay 时要选项，`Pick` 抛 `YieldToLoopException`。循环先处理 overlay，再重跑房间 handler。
+- **自己的 handler**：
+  - 地图（`MapHandler`）：按建议坐标点节点。
+  - 奖励页（`RewardsHandler`）：同一奖励页上点过的按钮跨调用记住，跳过的卡牌奖励不会被反复点开。
+  - 卡牌奖励（可跳过）。
+  - 商店：逐步买 / 删 / 离开。删牌走 `MerchantCardRemovalEntry` 自己的购买入口。整体超时 4 小时，因为每步都有自己的时限。
+  - **网格选牌**（`GridSelectHandler`，包住 5 个 Deck*/Simple handler）：
+    - 先按建议按下所有卡，再交给原 handler 做预览和确认。原因是原 handler 一旦"确认"可点就停止选牌，范围选牌（Min<Max）或可选 0 张时会少选或空选。
+    - 按完后界面自己关掉（定数选择）就直接结束。
+    - 原 handler 返回后界面 2 秒内没关，就停。
+- **循环是状态驱动的**（不照搬 `PlayRunAsync`），每轮依次看：
+  1. 没局了，停（`LeftRun`）。
+  2. 结算页，停（`GameOver`）。
+  3. 模态弹窗（如新手提示），交还玩家。
+  4. 战斗中，等。**战斗判断在 overlay 之前**，战斗里绝不处理 overlay。
+  5. 有 overlay，交给对应 handler；没有建议的界面交还玩家。
+  6. 地图可走，交给地图 handler。
+  7. 按房间：事件有可选项，交给事件 handler；篝火、商店有进展才算完成；宝箱跑一次。
+  8. 点房间里可用的 Proceed / 事件"继续"。
+
+  同一房间 handler 连续 3 次没进展就停。什么都做不了时，30 秒停（`Stuck`）。handler 内部出现模态弹窗也交还玩家，等待时间不计入问建议的时限。
+- **开关安全**：
+  - 停止后旧循环的收尾不会清掉新会话。
+  - 停下的全托管里，`Pick` 抛取消异常，**绝不**回退随机。
+  - 旧循环还在收尾时按 F9，会记成"待启动"，收尾后自动开始；再按一次取消。
+  - 游戏 API 不匹配时整个 mod 停用，不会再自动重启全托管。
+- **热键冲突**：`hotkey` 与 `autopilot_hotkey` 相同时禁用全托管，面板开关照常。
+- **停止原因**比第 2 段多两个：`BadReply`（建议服务回复格式不对）和 `Disabled`（补丁或配置缺失，开不了）。玩家主动离开本局（`LeftRun`）、按 F9、本局结束这三种用灰字显示，其余用警告色。
+- **trace**：
+  - 执行的步骤写成 `"autopilot": {"executed": true, "step": n}`（嵌套对象，由 `AdvisorTraceLog.Append(..., autopilotStep: n)` 写出）。
+  - 停止写成 `decision: autopilot_stop` 的一行：`reply` 为 null，`error` 为原因。这种行会被 `tests/test_advisor_trace_contract.py` 的读取函数丢掉。
+- **已知未在实机验证的路径**（验收重点）：
+  - 商店删牌；
+  - 网格选牌的按下方式（Pressed 信号还是 grid 的 HolderPressed，按各原 handler 的写法）；
+  - 多页事件的重入；
+  - 模态弹窗交还；
+  - `NSimpleCardSelectScreen` 的范围选择。
 
 ## 不做
 
