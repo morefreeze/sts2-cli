@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Godot;
+using Sts2Advisor.AutoPilot;
 using Sts2Advisor.Core;
 using Sts2Shared;
 
@@ -11,7 +12,8 @@ namespace Sts2Advisor;
 
 /// <summary>Per-frame driver (SceneTree.ProcessFrame, main thread). Every 0.3 s: read the screen,
 /// and when its fingerprint changed, serialize it (main thread) and ask the advisor (background).
-/// Replies are applied on a later frame, only if the screen has not changed meanwhile.</summary>
+/// Replies are applied on a later frame, only if the screen has not changed meanwhile.
+/// The autopilot hotkey (F9) hands the run to AutoPilot; while it runs, the panel shows its steps and the advice requests here pause.</summary>
 internal static class AdvisorRuntime
 {
     private const double PollSeconds = 0.3;
@@ -57,6 +59,9 @@ internal static class AdvisorRuntime
     private static bool _offline, _offlineLogged, _hotkeyDown, _disabled;
     private static bool _visible = true;
     private static Key _hotkey = Key.F8;
+    private static Key _autoKey = Key.F9;
+    private static string _autoKeyName = "F9";
+    private static bool _autoKeyDown;
 
     private static bool Zh => GameText.IsChinese;
 
@@ -66,8 +71,17 @@ internal static class AdvisorRuntime
         _trace = new AdvisorTraceLog(System.IO.Path.Combine(userDir, "advisor_trace.jsonl"));
         if (!Enum.TryParse(config.Hotkey, ignoreCase: true, out _hotkey))
             _hotkey = Key.F8;
+        if (!Enum.TryParse(config.AutopilotHotkey, ignoreCase: true, out _autoKey))
+            _autoKey = Key.F9;
+        _autoKeyName = _autoKey.ToString();
+        if (_autoKey == _hotkey)  // one press would both hide the panel and start the autopilot
+            autopilotProblem ??= $"hotkey and autopilot_hotkey are both {_autoKeyName} ({configPath})";
         _loc = string.IsNullOrWhiteSpace(config.RepoPath) ? null : new LocLookup(config.RepoPath);
-        if (_loc == null || !_loc.IsLoaded)
+        bool locOk = _loc is { IsLoaded: true };
+        string gameUserDir = System.IO.Path.GetDirectoryName(userDir) ?? userDir;
+        AutoPilotControl.Init(_advisor, locOk ? _loc : null, _trace, gameUserDir, () => Clock.Elapsed.TotalSeconds,
+                   autopilotProblem ?? (locOk ? null : $"repo_path ({configPath})"));
+        if (!locOk)
         {
             _configProblem = $"repo_path ({configPath})";
             ModLog.Error($"no localization_eng/ under repo_path '{config.RepoPath}'; set repo_path in {configPath}");
@@ -88,6 +102,7 @@ internal static class AdvisorRuntime
         {
             _disabled = true;
             ModLog.Error($"game API mismatch, advisor disabled: {ex}");
+            try { AutoPilotControl.Stop(StopReason.Unsupported, ex.GetType().Name); } catch (Exception) { }
             // The missing member may be LocManager itself: fall back to English, never throw out of the tick.
             try
             {
@@ -130,6 +145,15 @@ internal static class AdvisorRuntime
         if (_configProblem != null)
         {
             Show(PanelText.Status(null, StatusKind.ConfigMissing, _configProblem, Zh));
+            return;
+        }
+
+        if (AutoPilotControl.IsRunning)
+        {
+            // The autopilot asks for its own advice; the advice panel would only ask twice.
+            _requested = null;
+            _lastSeenFingerprint = null;
+            Show(AutoPilotControl.RunningLines(_autoKeyName, Zh));
             return;
         }
 
@@ -330,11 +354,20 @@ internal static class AdvisorRuntime
             if (!_visible) _panel?.Hide();
         }
         _hotkeyDown = down;
+        bool autoDown = Input.IsKeyPressed(_autoKey);
+        if (autoDown && !_autoKeyDown)
+        {
+            AutoPilotControl.Toggle();
+            _requested = null;
+        }
+        _autoKeyDown = autoDown;
     }
 
     /// <summary>Nothing is shown while the player has the panel hidden (F8): a reply that lands late must not undo that.</summary>
     private static void Show(IReadOnlyList<PanelLine> lines)
     {
-        if (_visible) _panel?.Show(lines, _language);
+        if (!_visible) return;
+        var banner = AutoPilotControl.Banner(_autoKeyName, Zh);
+        _panel?.Show(banner == null ? lines : lines.Prepend(banner).ToList(), _language);
     }
 }
