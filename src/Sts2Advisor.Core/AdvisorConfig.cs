@@ -5,11 +5,13 @@ namespace Sts2Advisor.Core;
 /// <summary>User settings, read from &lt;game user dir&gt;/Sts2Advisor/config.json
 /// (written by tools/install_advisor_mod.sh). Missing or unusable keys take the defaults.</summary>
 public sealed record AdvisorConfig(string RepoPath, string Python, int Port, bool Autostart, string Hotkey,
-                                   string AutopilotHotkey = AdvisorConfig.DefaultAutopilotHotkey)
+                                   string AutopilotHotkey = AdvisorConfig.DefaultAutopilotHotkey,
+                                   string StepHotkey = AdvisorConfig.DefaultStepHotkey)
 {
     public const int DefaultPort = 8767;
     public const string DefaultHotkey = "F8";
     public const string DefaultAutopilotHotkey = "F9";
+    public const string DefaultStepHotkey = "F10";
 
     public static AdvisorConfig Defaults { get; } = new("", "", DefaultPort, true, DefaultHotkey);
 
@@ -24,7 +26,7 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
     /// inner one), not JSON, or JSON whose root is not an object. Inside a usable file, a key with
     /// the wrong type takes its default; "port" must be a JSON number in 1..65535 (else 8767) and
     /// "autostart" a boolean or the string "true"/"false" in any case (else true).
-    /// "autopilot_hotkey" is a Godot Key name like "hotkey" (else "F9").</summary>
+    /// "autopilot_hotkey" is a Godot Key name like "hotkey" (else "F9"); "step_hotkey" likewise (else "F10").</summary>
     public static AdvisorConfig Load(string path)
     {
         try
@@ -41,7 +43,8 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                 ReadPort(root),
                 ReadAutostart(root),
                 Str(root, "hotkey") ?? DefaultHotkey,
-                Str(root, "autopilot_hotkey") ?? DefaultAutopilotHotkey);
+                Str(root, "autopilot_hotkey") ?? DefaultAutopilotHotkey,
+                Str(root, "step_hotkey") ?? DefaultStepHotkey);
         }
         catch (Exception e)
         {

@@ -8,8 +8,9 @@ public enum AutoPilotMode { Advice, Running }
 /// HandlerFailed: a handler threw or the advice did not fit the screen. Stuck: no progress (a screen that
 /// will not close, nothing to do for 30 s, no settled decision, the same advice asked for too often).
 /// Offline: the advice service unreachable for more than 10 s. BadReply: it answered unusably.
-/// Unsupported: game API mismatch. Disabled: autopilot could not start (patches or config missing).</summary>
-public enum StopReason { Hotkey, GameOver, LeftRun, Multiplayer, HandlerFailed, Stuck, Offline, BadReply, Unsupported, Disabled }
+/// Unsupported: game API mismatch. Disabled: autopilot could not start (patches or config missing).
+/// StepDone: a single step executed its one advised choice and reached the next decision.</summary>
+public enum StopReason { Hotkey, GameOver, LeftRun, Multiplayer, HandlerFailed, Stuck, Offline, BadReply, Unsupported, Disabled, StepDone }
 
 public sealed record AutoPilotStep(int Number, string Text, string? Reason);
 
@@ -36,12 +37,19 @@ public sealed class AutoPilotSession
     public IReadOnlyList<AutoPilotStep> Steps => _steps;
     public int StepCount { get; private set; }
 
+    /// <summary>Started as a single step: stop at the next decision once one advised choice is executed.</summary>
+    public bool SingleStep { get; private set; }
+
+    /// <summary>A single step has executed its choice; the next request for advice ends it.</summary>
+    public bool StepDone => SingleStep && StepCount > 0;
+
     /// <summary>False when already running.</summary>
-    public bool Start()
+    public bool Start(bool singleStep = false)
     {
         if (Mode == AutoPilotMode.Running)
             return false;
         Mode = AutoPilotMode.Running;
+        SingleStep = singleStep;
         _steps.Clear();
         StepCount = 0;
         LastStop = null;

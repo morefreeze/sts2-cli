@@ -1,6 +1,10 @@
 // src/Sts2Advisor.Core/AutoPilotText.cs
 namespace Sts2Advisor.Core;
 
+public enum PanelAction { Step, Auto, Stop }
+
+public sealed record PanelButton(PanelAction Action, string Text);
+
 /// <summary>The panel while the autopilot runs, and the one-line banner after it stops.</summary>
 public static class AutoPilotText
 {
@@ -15,11 +19,13 @@ public static class AutoPilotText
         reply.Rules.FirstOrDefault(r => r.Outcome == "fired" && !TraceText.IsHidden(r)) is { } rule
             ? TraceText.Rule(rule, zh) : null;
 
-    public static IReadOnlyList<PanelLine> Running(AutoPilotSession s, string hotkey, CombatSolverStatus combat, bool zh)
+    public static IReadOnlyList<PanelLine> Running(AutoPilotSession s, string autoKey, string stepKey, CombatSolverStatus combat, bool zh)
     {
         var lines = new List<PanelLine>
         {
-            new(T(zh, $"全托管中 · {hotkey} 接管", $"Autopilot on · {hotkey} to take over"), LineStyle.Title),
+            s.SingleStep
+                ? new(T(zh, $"单步执行中 · {stepKey} 停止", $"Single step · {stepKey} to stop"), LineStyle.Title)
+                : new(T(zh, $"全托管中 · {autoKey} 接管", $"Autopilot on · {autoKey} to take over"), LineStyle.Title),
         };
         if (combat != CombatSolverStatus.Ok)
             lines.Add(new PanelLine(CombatWarning(combat, zh), LineStyle.Warning));
@@ -40,12 +46,15 @@ public static class AutoPilotText
         return lines;
     }
 
-    public static PanelLine StopBanner(StopReason reason, string? detail, string hotkey, bool zh)
+    public static PanelLine StopBanner(StopReason reason, string? detail, string autoKey, string stepKey, bool zh)
     {
         string text = T(zh, "全托管已停止：", "Autopilot stopped: ") + StopReasonText(reason, zh)
             + (string.IsNullOrEmpty(detail) ? "" : T(zh, "（", " (") + detail + T(zh, "）", ")"))
-            + T(zh, $" · {hotkey} 重新开启", $" · {hotkey} to restart");
-        return new PanelLine(text, reason is StopReason.Hotkey or StopReason.GameOver or StopReason.LeftRun ? LineStyle.Muted : LineStyle.Warning);
+            + (reason == StopReason.StepDone
+                ? T(zh, $" · {stepKey} 下一步", $" · {stepKey} for the next step")
+                : T(zh, $" · {autoKey} 重新开启", $" · {autoKey} to restart"));
+        return new PanelLine(text, reason is StopReason.Hotkey or StopReason.GameOver or StopReason.LeftRun or StopReason.StepDone
+            ? LineStyle.Muted : LineStyle.Warning);
     }
 
     public static string StopReasonText(StopReason reason, bool zh) => reason switch
@@ -59,9 +68,20 @@ public static class AutoPilotText
         StopReason.Offline => T(zh, "建议服务离线超过 10 秒", "advice service offline for over 10 s"),
         StopReason.BadReply => T(zh, "建议服务回复格式不对", "unexpected reply from the advice service"),
         StopReason.Unsupported => T(zh, "游戏版本未适配", "unsupported game version"),
+        StopReason.StepDone => T(zh, "单步完成", "step done"),
         StopReason.Disabled => T(zh, "全托管不可用", "autopilot unavailable"),
         _ => reason.ToString(),
     };
+
+    /// <summary>The panel's buttons: "do this step" and "full auto" while advising; one "stop" while running.</summary>
+    public static IReadOnlyList<PanelButton> Buttons(bool running, string stepKey, string autoKey, bool zh) =>
+        running
+            ? new[] { new PanelButton(PanelAction.Stop, T(zh, "停止", "Stop")) }
+            : new[]
+            {
+                new PanelButton(PanelAction.Step, T(zh, $"执行这一步 ({stepKey})", $"Do this step ({stepKey})")),
+                new PanelButton(PanelAction.Auto, T(zh, $"全自动 ({autoKey})", $"Full auto ({autoKey})")),
+            };
 
     private static string CombatWarning(CombatSolverStatus status, bool zh) => status switch
     {

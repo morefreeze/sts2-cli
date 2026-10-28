@@ -100,4 +100,20 @@ public class AutoPilotSessionTests
         s.ClearHandBack();
         Assert.Null(s.HandBackScreen);
     }
+
+    [Fact]
+    public void SingleStepIsDoneAfterOneStep()
+    {
+        var s = new AutoPilotSession();
+        Assert.True(s.Start(singleStep: true));
+        Assert.True(s.SingleStep);
+        Assert.False(s.StepDone);
+        s.Record("地图：问号", null);
+        Assert.True(s.StepDone);
+        s.Stop(StopReason.StepDone, null);
+        Assert.True(s.Start());
+        Assert.False(s.SingleStep);
+        s.Record("x", null);
+        Assert.False(s.StepDone);
+    }
 }

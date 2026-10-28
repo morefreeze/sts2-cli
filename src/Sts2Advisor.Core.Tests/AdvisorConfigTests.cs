@@ -162,4 +162,13 @@ public class AdvisorConfigTests
         var c = AdvisorConfig.Load(Write("""{"autopilot_hotkey": 9}"""));
         Assert.Equal("F9", c.AutopilotHotkey);
     }
+
+    [Fact]
+    public void StepHotkeyDefaultsToF10AndIsRead()
+    {
+        Assert.Equal("F10", AdvisorConfig.Defaults.StepHotkey);
+        Assert.Equal("F10", AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).StepHotkey);
+        Assert.Equal("F11", AdvisorConfig.Load(Write("""{"step_hotkey": "F11"}""")).StepHotkey);
+        Assert.Equal("F10", AdvisorConfig.Load(Write("""{"step_hotkey": 11}""")).StepHotkey);
+    }
 }
