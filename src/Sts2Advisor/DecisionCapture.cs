@@ -2,6 +2,7 @@
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
@@ -21,7 +22,7 @@ internal enum CaptureKind { Advise, Combat, NoAdvice }
 
 /// <summary>One look at the current screen. Build() produces the decision JSON (the headless
 /// engine's shape, via the shared DecisionSerializer); it must run on the main thread, in the
-/// same tick as Detect().</summary>
+/// same tick as Detect(). Choices lists the game objects behind the JSON's option indices.</summary>
 internal sealed class Capture
 {
     public required CaptureKind Kind { get; init; }
@@ -30,6 +31,14 @@ internal sealed class Capture
     public string Fingerprint { get; init; } = "";
     public Dictionary<string, string> Labels { get; init; } = new();
     public Func<Dictionary<string, object?>>? Build { get; init; }
+
+    /// <summary>The options in the order the decision JSON lists them, so an advised index finds its
+    /// game object: CardModel (card_reward, card_select), EventOption, RestSiteOption, MapPoint,
+    /// IReadOnlyList&lt;CardModel&gt; (bundle_select), MerchantEntry (shop cards: character then colorless).</summary>
+    public IReadOnlyList<object> Choices { get; init; } = Array.Empty<object>();
+
+    /// <summary>Shop only: relics, potions and the removal are found here by index.</summary>
+    public MerchantInventory? Inventory { get; init; }
 }
 
 /// <summary>Which decision the player faces, read the way the game's own screen resolver
@@ -98,6 +107,7 @@ internal static class DecisionCapture
             Fingerprint = Fingerprint.Of("map_select",
                 new object?[] { Common(rs, player) }.Concat(points.Select(p => $"{p.coord.col},{p.coord.row}"))),
             Build = () => DecisionSerializer.MapSelect(rs, points.Select(DecisionSerializer.MapChoice).ToList(), loc),
+            Choices = points.Cast<object>().ToList(),
         };
     }
 
@@ -119,6 +129,7 @@ internal static class DecisionCapture
                 new object?[] { Common(rs, player), canSkip }.Concat(cards.Select(CardKey))),
             // gold_earned: the real game gives no pre-combat gold snapshot; greedy does not read it.
             Build = () => DecisionSerializer.CardReward(cards, canSkip, null, rs, loc),
+            Choices = cards.Cast<object>().ToList(),
         };
     }
 
@@ -150,6 +161,7 @@ internal static class DecisionCapture
             Fingerprint = Fingerprint.Of("card_select",
                 new object?[] { screen, min, max, Common(rs, player) }.Concat(cards.Select(CardKey))),
             Build = () => DecisionSerializer.CardSelect(cards, min, max, player, rs, loc),
+            Choices = cards.Cast<object>().ToList(),
         };
     }
 
@@ -170,6 +182,7 @@ internal static class DecisionCapture
             Fingerprint = Fingerprint.Of("bundle_select",
                 new object?[] { Common(rs, player) }.Concat(bundles.Select(x => string.Join(",", x.Select(CardKey))))),
             Build = () => DecisionSerializer.BundleSelect(bundles, player, rs, loc),
+            Choices = bundles.Cast<object>().ToList(),
         };
     }
 
@@ -190,6 +203,7 @@ internal static class DecisionCapture
                 new object?[] { Common(rs, player), ev.Id.Entry, ev.Description?.LocEntryKey }
                     .Concat(options.Select(o => $"{o.TextKey}#{o.IsLocked}#{o.WasChosen}"))),
             Build = () => DecisionSerializer.EventChoice(ev, rs, loc),
+            Choices = options.Cast<object>().ToList(),
         };
     }
 
@@ -208,6 +222,7 @@ internal static class DecisionCapture
             Fingerprint = Fingerprint.Of("rest_site",
                 new object?[] { Common(rs, player) }.Concat(options.Select(o => $"{o.OptionId}#{o.IsEnabled}"))),
             Build = () => DecisionSerializer.RestSite(options, rs, loc),
+            Choices = options.Cast<object>().ToList(),
         };
     }
 
@@ -232,6 +247,7 @@ internal static class DecisionCapture
             Labels = labels,
             Fingerprint = Fingerprint.Of("shop", new object?[] { Common(rs, player) }.Concat(stock)),
             Build = () => DecisionSerializer.Shop(inv, player, rs, loc),
+            Choices = cardEntries.Cast<object>().ToList(), Inventory = inv,
         };
     }
 }
