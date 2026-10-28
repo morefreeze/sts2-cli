@@ -22,7 +22,8 @@ if [ ! -f "$USER_DIR/config.json" ]; then
   "python": "$ROOT/.venv/bin/python",
   "port": 8767,
   "autostart": true,
-  "hotkey": "F8"
+  "hotkey": "F8",
+  "autopilot_hotkey": "F9"
 }
 EOCFG
   echo "wrote $USER_DIR/config.json"

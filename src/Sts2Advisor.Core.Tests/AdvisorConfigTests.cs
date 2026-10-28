@@ -139,4 +139,27 @@ public class AdvisorConfigTests
         var c = AdvisorConfig.Load(Write("""{"repo_path": "/r", "future_option": {"a": 1}}"""));
         Assert.Equal("/r", c.RepoPath);
     }
+
+    [Fact]
+    public void AutopilotHotkeyDefaultsToF9()
+    {
+        Assert.Equal("F9", AdvisorConfig.Defaults.AutopilotHotkey);
+        var c = AdvisorConfig.Load(Write("""{"repo_path": "/r"}"""));
+        Assert.Equal("F9", c.AutopilotHotkey);
+    }
+
+    [Fact]
+    public void ReadsAutopilotHotkey()
+    {
+        var c = AdvisorConfig.Load(Write("""{"autopilot_hotkey": "F10"}"""));
+        Assert.Equal("F10", c.AutopilotHotkey);
+        Assert.Equal("F8", c.Hotkey);
+    }
+
+    [Fact]
+    public void NonStringAutopilotHotkeyTakesTheDefault()
+    {
+        var c = AdvisorConfig.Load(Write("""{"autopilot_hotkey": 9}"""));
+        Assert.Equal("F9", c.AutopilotHotkey);
+    }
 }
