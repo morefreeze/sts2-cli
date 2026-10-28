@@ -2066,7 +2066,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         bool zh = GameText.IsChinese;
         int n = _session.Record(AutoPilotText.StepText(a.Capture.Header.Decision, a.Reply, a.Capture.Labels, zh),
                                 AutoPilotText.Reason(a.Reply, zh));
-        _trace?.Append(a.Capture.Header.Decision, a.Json, a.Reply.Raw, null, $$"""{"executed": true, "step": {{n}}}""");
+        _trace?.Append(a.Capture.Header.Decision, a.Json, a.Reply.Raw, null, autopilotStep: n);
         ModLog.Info($"autopilot step {n}: {a.Capture.Header.Decision} {a.Reply.ActionName}");
     }
 
@@ -2235,6 +2235,8 @@ internal static class AutoPilotControl
         if (!Enum.TryParse(config.AutopilotHotkey, ignoreCase: true, out _autoKey))
             _autoKey = Key.F9;
         _autoKeyName = _autoKey.ToString();
+        if (_autoKey == _hotkey)  // one press would both hide the panel and start the autopilot
+            autopilotProblem ??= $"hotkey and autopilot_hotkey are both {_autoKeyName} ({configPath})";
         _loc = string.IsNullOrWhiteSpace(config.RepoPath) ? null : new LocLookup(config.RepoPath);
         bool locOk = _loc is { IsLoaded: true };
         string gameUserDir = System.IO.Path.GetDirectoryName(userDir) ?? userDir;
@@ -2329,8 +2331,9 @@ git commit -m "feat(advisor-mod): F9 toggles the autopilot; panel shows its step
 
    > **`AutoPilotLoop` 是状态驱动的**：每轮按顺序看：没局了 → 停；结算页 → 停；有 overlay → 对应 handler（没有建议的界面交还玩家）；战斗中 → 等；地图可走 → 地图 handler；否则按当前房间：事件有可选项 → 事件 handler；篝火、商店、宝箱各一次；最后点房间里可用的 Proceed / 事件"继续"选项。什么都不能做时等 200 ms，30 秒没进展就停（`Stuck`）。
 
-5. 停止原因列表加上 `BadReply`（建议服务回复格式不对）和 `Disabled`（补丁或配置缺失，开不了）。
-6. 文件头 `Date:` 行后加：`Revised 2026-10-28（写计划时）：注入改为 transpiler；地图、奖励页用自己的 handler；循环改为状态驱动；事件战斗作弊被替换。`
+5. 第 3 段 trace 条目改为：执行的步骤写成 `"autopilot": {"executed": true, "step": n}`（嵌套对象，由 `AdvisorTraceLog.Append(..., autopilotStep: n)` 写出）；停止写成 `decision: autopilot_stop` 的一行（`reply` 为 null，带 `error` = 原因）。
+6. 停止原因列表加上 `BadReply`（建议服务回复格式不对）和 `Disabled`（补丁或配置缺失，开不了）。
+7. 文件头 `Date:` 行后加：`Revised 2026-10-28（写计划时）：注入改为 transpiler；地图、奖励页用自己的 handler；循环改为状态驱动；事件战斗作弊被替换。`
 
 - [ ] **Step 2: CLAUDE.md**
 
