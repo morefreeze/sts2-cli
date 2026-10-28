@@ -48,6 +48,10 @@ public static class PanelText
 
     private static string T(bool zh, string zhText, string enText) => zh ? zhText : enText;
 
+    /// <summary>"卡牌奖励" / "Card reward"; the raw decision name when it has none.</summary>
+    public static string DecisionName(string decision, bool zh) =>
+        DecisionNames.TryGetValue(decision, out var n) ? (zh ? n.Zh : n.En) : decision;
+
     /// <summary>"卡牌奖励 · A1F13a1 · HP 52/80 · 金币 99". For a screen that is not a decision (the mod passes the
     /// screen class name, "event_finished", ...) there is no name to show, so the title starts at "A1F7a1".</summary>
     public static string Header(DecisionHeader h, bool zh)
@@ -223,7 +227,7 @@ public static class PanelText
             ? s.GetString()!.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToList()
             : Array.Empty<int>();
 
-    private static string PickText(string decision, AdviceReply reply, IReadOnlyDictionary<string, string> labels, bool zh)
+    public static string PickText(string decision, AdviceReply reply, IReadOnlyDictionary<string, string> labels, bool zh)
     {
         int Index(string name) => reply.Arg(name) is { ValueKind: JsonValueKind.Number } v ? v.GetInt32() : -1;
         switch (reply.ActionName)
