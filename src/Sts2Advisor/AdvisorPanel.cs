@@ -7,7 +7,8 @@ using Sts2Advisor.Core;
 namespace Sts2Advisor;
 
 /// <summary>Bottom-right overlay. Stock Godot nodes only -- no C# node subclasses, so no Godot
-/// source generators or script registration. Ignores the mouse except on its buttons: it never blocks a click elsewhere.</summary>
+/// source generators or script registration. Ignores the mouse except on its buttons: it never blocks a click elsewhere.
+/// The buttons are the panel's top row, away from the game's own End Turn / Proceed buttons at the bottom right.</summary>
 internal sealed class AdvisorPanel
 {
     private readonly CanvasLayer _layer;
@@ -56,8 +57,8 @@ internal sealed class AdvisorPanel
         column.AddThemeConstantOverride("separation", 8);
         var buttons = new HBoxContainer { Name = "Buttons", MouseFilter = Control.MouseFilterEnum.Ignore };
         buttons.AddThemeConstantOverride("separation", 8);
+        column.AddChild(buttons);  // on top, away from the game's own End Turn / Proceed buttons in the bottom-right
         column.AddChild(text);
-        column.AddChild(buttons);
         panel.AddChild(column);
         layer.AddChild(panel);
         panel.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.BottomRight, Control.LayoutPresetMode.Minsize, 16);
@@ -92,7 +93,10 @@ internal sealed class AdvisorPanel
         if (key != _shownButtons)
         {
             foreach (var child in _buttons.GetChildren())
+            {
+                _buttons.RemoveChild(child);  // QueueFree alone leaves it clickable until the end of the frame
                 child.QueueFree();
+            }
             foreach (var b in buttons)
             {
                 var action = b.Action;

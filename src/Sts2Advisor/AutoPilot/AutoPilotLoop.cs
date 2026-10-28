@@ -8,6 +8,7 @@ using MegaCrit.Sts2.Core.AutoSlay.Helpers;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Events;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
@@ -164,6 +165,10 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         switch (room)
         {
             case EventRoom er when !er.LocalMutableEvent.IsFinished && er.LocalMutableEvent.CurrentOptions.Any(o => !o.IsLocked):
+                // AutoSlay's EventRoomHandler walks through a FakeMerchant event and leaves it without asking
+                // anyone. Full auto keeps that; a single step must not silently take a second decision.
+                if (_session.StepDone && IsFakeMerchantEvent())
+                    throw new AutoPilotStopException(StopReason.StepDone, null);
                 await RunRoomAsync(_event, EventTimeout, roomKey, RoomDone.Never, ct);
                 return;
             case RestSiteRoom rr when rr.Options.Any(o => o.IsEnabled) && !_doneRooms.Contains(roomKey):
@@ -317,8 +322,13 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
 
     private void MarkProgress() => _progressKey = "";
 
+    public bool StepDone => _session.StepDone;
+
     public async Task<CachedAdvice> FetchAdviceAsync(CancellationToken ct)
     {
+        // A tip popup over the screen comes first: it must not end a step whose follow-up select it covers.
+        if (ModalOpen())
+            await HandBackAsync("modal", ModalOpen, ct);
         // A single step stops at the next decision, except the card select / bundle its own choice opened
         // (shop removal, smith, an event's "remove a card"): that is the second half of the same step.
         if (_session.StepDone && !OpenedByTheStep())
@@ -391,6 +401,12 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         var advice = new CachedAdvice(cap, reply, plan, json);
         AutoPilotChoice.Offer(advice);
         return advice;
+    }
+
+    private static bool IsFakeMerchantEvent()
+    {
+        var container = ((SceneTree)Engine.GetMainLoop()).Root.GetNodeOrNull(RoomContainerPath);
+        return container != null && UiHelper.FindFirst<NFakeMerchant>(container) != null;
     }
 
     private static (int Act, int Floor) CurrentFloor()

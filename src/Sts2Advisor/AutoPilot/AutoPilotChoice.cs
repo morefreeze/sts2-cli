@@ -44,6 +44,9 @@ internal interface IAutoPilotHost
     /// <summary>Whether the panel should say "combat" (an event's combat runs inside a room handler).</summary>
     bool InCombat { set; }
 
+    /// <summary>A single step has executed its choice: whatever asks for another one ends the run.</summary>
+    bool StepDone { get; }
+
     Task<CachedAdvice> FetchAdviceAsync(CancellationToken ct);
     void StepTaken(CachedAdvice advice);
     Task DrainUntilAsync(Task pending, CancellationToken ct);
@@ -168,6 +171,8 @@ internal static class AutoPilotChoice
             }
             return node;
         }
+        if (Remaining.Count == 0 && _host!.StepDone)
+            throw new AutoPilotStopException(StopReason.StepDone, null);
         throw new AutoPilotException(Remaining.Count == 0
             ? $"{cap.Screen}: the handler wants more picks than the advice has ({_advice.Plan.Indices.Count})"
             : $"{cap.Screen}: no advised option ({string.Join(",", Remaining)}) is among the {list.Count} the screen offers"

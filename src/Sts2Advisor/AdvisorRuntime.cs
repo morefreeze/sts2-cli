@@ -406,7 +406,7 @@ internal static class AdvisorRuntime
         if (!_visible) return;
         var banner = AutoPilotControl.Banner(_autoKeyName, _stepKeyName, Zh);
         // No buttons while the mod cannot act (config missing, game version unsupported).
-        var buttons = _configProblem != null || _disabled
+        var buttons = _configProblem != null || _disabled || !AutoPilotControl.Available
             ? Array.Empty<PanelButton>()
             : AutoPilotText.Buttons(AutoPilotControl.IsRunning, _stepKeyName, _autoKeyName, Zh);
         _panel?.Show(banner == null ? lines : lines.Prepend(banner).ToList(), _language, buttons, OnPanelButton);
@@ -414,14 +414,18 @@ internal static class AdvisorRuntime
 
     private static void OnPanelButton(PanelAction action)
     {
-        try
+        // Not inside the GUI click dispatch: the loop starts (and may touch the scene) on the next idle moment.
+        Callable.From(() =>
         {
-            AutoPilotControl.Press(action);
-            _requested = null;
-        }
-        catch (Exception ex)
-        {
-            LogTickFailure(ex);  // a Godot signal callback must not throw
-        }
+            try
+            {
+                AutoPilotControl.Press(action);
+                _requested = null;
+            }
+            catch (Exception ex)
+            {
+                LogTickFailure(ex);  // a deferred call must not throw
+            }
+        }).CallDeferred();
     }
 }

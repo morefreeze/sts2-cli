@@ -27,6 +27,9 @@ internal static class AutoPilotControl
     /// <summary>The loop hit a TypeLoad/MissingMember: the game changed, and the whole mod must go quiet.</summary>
     public static bool ApiMismatch { get; private set; }
 
+    /// <summary>Whether a start would run (else it only shows why not): the panel hides its buttons otherwise.</summary>
+    public static bool Available => _unavailable == null && _loc != null && _advisor != null && !ApiMismatch;
+
     public static bool IsRunning => Session.Mode == AutoPilotMode.Running;
 
     /// <summary><paramref name="unavailable"/>: why the autopilot cannot run (handlers not patched, no
@@ -49,9 +52,17 @@ internal static class AutoPilotControl
         else if (_runTask is { IsCompleted: false })
         {
             // The previous run has not finished stopping: start when it has (a further press cancels that).
-            _startPending = !_startPending;
-            _pendingSingle = singleStep;
-            ModLog.Info(_startPending ? "autopilot: previous run still stopping, will start when it has" : "autopilot: pending start cancelled");
+            if (_startPending && _pendingSingle != singleStep)  // the other mode: switch, keep waiting
+            {
+                _pendingSingle = singleStep;
+                ModLog.Info($"autopilot: pending start is now {(singleStep ? "single step" : "full auto")}");
+            }
+            else
+            {
+                _startPending = !_startPending;
+                _pendingSingle = singleStep;
+                ModLog.Info(_startPending ? "autopilot: previous run still stopping, will start when it has" : "autopilot: pending start cancelled");
+            }
         }
         else
             Start(singleStep);
@@ -111,6 +122,7 @@ internal static class AutoPilotControl
 
     public static void Stop(StopReason reason, string? detail)
     {
+        _startPending = false;
         if (!IsRunning)
             return;
         var cts = _cts;
