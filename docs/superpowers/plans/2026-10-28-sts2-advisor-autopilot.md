@@ -2585,6 +2585,7 @@ public sealed record PanelButton(PanelAction Action, string Text);
             throw new AutoPilotStopException(StopReason.StepDone, null);
 ```
 
+- 例外：单步的那个选择本身打开的 card_select / bundle_select（商店删牌、篝火锻造、事件"移除一张牌"）算这一步的一部分。`StepTaken` 记下当时的 (act, TotalFloor)；`FetchAdviceAsync` 开头的 StepDone 检查里，若当前画面是 Advise 的 card_select / bundle_select 且楼层没变，就不停，做完这个选择才停。
 - `HandleOverlayAsync` 里非模态的交还分支（没有 handler 的 overlay）在交还之前加同样两行：选遗物、水晶球也是决策。模态弹窗的交还不加。
 
 - [ ] **Step 2: 控制器支持单步**

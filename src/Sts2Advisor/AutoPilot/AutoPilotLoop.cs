@@ -56,6 +56,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     private int _sameOverlay;
     private string _noProgressRoom = "";
     private int _noProgressCount;
+    private (int Act, int Floor) _stepFloor;
 
     public AutoPilotLoop(IAdvisor advisor, LocLookup loc, AdvisorTraceLog? trace, AutoPilotSession session, Func<double> now)
     {
@@ -318,7 +319,9 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
 
     public async Task<CachedAdvice> FetchAdviceAsync(CancellationToken ct)
     {
-        if (_session.StepDone)  // a single step stops at the next decision
+        // A single step stops at the next decision, except the card select / bundle its own choice opened
+        // (shop removal, smith, an event's "remove a card"): that is the second half of the same step.
+        if (_session.StepDone && !OpenedByTheStep())
             throw new AutoPilotStopException(StopReason.StepDone, null);
         string? last = null;
         double deadline = _now() + FetchSeconds;
@@ -390,8 +393,21 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         return advice;
     }
 
+    private static (int Act, int Floor) CurrentFloor()
+    {
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        return rs == null ? (-1, -1) : (rs.CurrentActIndex, rs.TotalFloor);
+    }
+
+    /// <summary>The screen is a card/bundle select on the floor where the last step was taken.</summary>
+    private bool OpenedByTheStep() =>
+        DecisionCapture.Detect(_loc) is { Kind: CaptureKind.Advise } cap
+        && cap.Header.Decision is "card_select" or "bundle_select"
+        && CurrentFloor() == _stepFloor;
+
     public void StepTaken(CachedAdvice a)
     {
+        _stepFloor = CurrentFloor();
         bool zh = GameText.IsChinese;
         int n = _session.Record(AutoPilotText.StepText(a.Capture.Header.Decision, a.Reply, a.Capture.Labels, zh),
                                 AutoPilotText.Reason(a.Reply, zh));
