@@ -1,6 +1,8 @@
 // src/Sts2Advisor/ModEntry.cs
 using Godot;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
+using Sts2Advisor.AutoPilot;
 using Sts2Advisor.Core;
 
 namespace Sts2Advisor;
@@ -28,8 +30,21 @@ public static class ModEntry
             ModLog.Error($"bad {configPath}: {ex.Message}; using defaults");
             config = AdvisorConfig.Defaults;
         }
-        ModLog.Info($"loaded; config {configPath}: repo={config.RepoPath} port={config.Port} autostart={config.Autostart} hotkey={config.Hotkey}");
-        AdvisorRuntime.Start(config, configPath, userDir);
+        ModLog.Info($"loaded; config {configPath}: repo={config.RepoPath} port={config.Port} autostart={config.Autostart} hotkey={config.Hotkey} autopilot_hotkey={config.AutopilotHotkey}");
+        string? patchProblem;
+        try
+        {
+            patchProblem = HandlerPatches.Apply(new Harmony("morefreeze.sts2advisor.autopilot"));
+        }
+        catch (Exception ex)
+        {
+            patchProblem = $"{ex.GetType().Name}: {ex.Message}";
+        }
+        if (patchProblem != null)
+            ModLog.Error($"autopilot disabled, AutoSlay handlers not patched: {patchProblem}");
+        else
+            ModLog.Info("autopilot: AutoSlay handlers patched");
+        AdvisorRuntime.Start(config, configPath, userDir, patchProblem);
         var tree = (SceneTree)Engine.GetMainLoop();
         tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(AdvisorRuntime.Tick));
     }

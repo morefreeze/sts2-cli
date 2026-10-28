@@ -60,7 +60,7 @@ internal static class AdvisorRuntime
 
     private static bool Zh => GameText.IsChinese;
 
-    public static void Start(AdvisorConfig config, string configPath, string userDir)
+    public static void Start(AdvisorConfig config, string configPath, string userDir, string? autopilotProblem)
     {
         _advisor = new SidecarAdvisor(config.Port);
         _trace = new AdvisorTraceLog(System.IO.Path.Combine(userDir, "advisor_trace.jsonl"));
