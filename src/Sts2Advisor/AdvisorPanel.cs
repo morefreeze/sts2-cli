@@ -7,20 +7,23 @@ using Sts2Advisor.Core;
 namespace Sts2Advisor;
 
 /// <summary>Bottom-right overlay. Stock Godot nodes only -- no C# node subclasses, so no Godot
-/// source generators or script registration. Ignores the mouse: it never blocks a click.</summary>
+/// source generators or script registration. Ignores the mouse except on its buttons: it never blocks a click elsewhere.</summary>
 internal sealed class AdvisorPanel
 {
     private readonly CanvasLayer _layer;
     private readonly PanelContainer _panel;
     private readonly RichTextLabel _text;
+    private readonly HBoxContainer _buttons;
     private string? _fontLanguage = "";
     private string? _shownText;
+    private string? _shownButtons;
 
-    private AdvisorPanel(CanvasLayer layer, PanelContainer panel, RichTextLabel text)
+    private AdvisorPanel(CanvasLayer layer, PanelContainer panel, RichTextLabel text, HBoxContainer buttons)
     {
         _layer = layer;
         _panel = panel;
         _text = text;
+        _buttons = buttons;
     }
 
     public bool Alive => GodotObject.IsInstanceValid(_layer) && GodotObject.IsInstanceValid(_text);
@@ -49,7 +52,13 @@ internal sealed class AdvisorPanel
         };
         text.AddThemeFontSizeOverride("normal_font_size", 15);
         text.AddThemeFontSizeOverride("bold_font_size", 15);
-        panel.AddChild(text);
+        var column = new VBoxContainer { Name = "Column", MouseFilter = Control.MouseFilterEnum.Ignore };
+        column.AddThemeConstantOverride("separation", 8);
+        var buttons = new HBoxContainer { Name = "Buttons", MouseFilter = Control.MouseFilterEnum.Ignore };
+        buttons.AddThemeConstantOverride("separation", 8);
+        column.AddChild(text);
+        column.AddChild(buttons);
+        panel.AddChild(column);
         layer.AddChild(panel);
         panel.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.BottomRight, Control.LayoutPresetMode.Minsize, 16);
         panel.GrowHorizontal = Control.GrowDirection.Begin;
@@ -57,10 +66,10 @@ internal sealed class AdvisorPanel
         panel.Visible = false;
         host.CallDeferred(Node.MethodName.AddChild, layer);
         host.TreeExiting += SidecarProcess.Stop;
-        return new AdvisorPanel(layer, panel, text);
+        return new AdvisorPanel(layer, panel, text, buttons);
     }
 
-    public void Show(IReadOnlyList<PanelLine> lines, string? language)
+    public void Show(IReadOnlyList<PanelLine> lines, string? language, IReadOnlyList<PanelButton> buttons, Action<PanelAction> onPress)
     {
         if (!Alive) return;
         if (language != _fontLanguage)
@@ -78,6 +87,26 @@ internal sealed class AdvisorPanel
             _text.Text = bbcode;
             _shownText = bbcode;
         }
+        // Rebuilt only when the buttons change (every 0.3 s poll re-shows the same ones).
+        string key = string.Join("|", buttons.Select(b => $"{b.Action}:{b.Text}")) + "|" + _fontLanguage;
+        if (key != _shownButtons)
+        {
+            foreach (var child in _buttons.GetChildren())
+                child.QueueFree();
+            foreach (var b in buttons)
+            {
+                var action = b.Action;
+                // FocusMode None: a click must not move keyboard/controller focus away from the game's own UI.
+                var button = new Button { Text = b.Text, FocusMode = Control.FocusModeEnum.None,
+                                          MouseFilter = Control.MouseFilterEnum.Stop };
+                button.AddThemeFontSizeOverride("font_size", 14);
+                button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                button.Pressed += () => onPress(action);
+                _buttons.AddChild(button);
+            }
+            _shownButtons = key;
+        }
+        _buttons.Visible = buttons.Count > 0;
         _panel.Visible = true;
     }
 

@@ -20,6 +20,7 @@ internal static class AutoPilotControl
     private static CancellationTokenSource? _cts;
     private static Task? _runTask;
     private static bool _startPending;
+    private static bool _pendingSingle;
     private static CombatSolverStatus _combatSolver = CombatSolverStatus.Ok;
     private static double _stoppedAt = double.NegativeInfinity;
 
@@ -41,7 +42,7 @@ internal static class AutoPilotControl
         _unavailable = unavailable;
     }
 
-    public static void Toggle()
+    public static void Toggle(bool singleStep = false)
     {
         if (IsRunning)
             Stop(StopReason.Hotkey, null);
@@ -49,13 +50,21 @@ internal static class AutoPilotControl
         {
             // The previous run has not finished stopping: start when it has (a further press cancels that).
             _startPending = !_startPending;
+            _pendingSingle = singleStep;
             ModLog.Info(_startPending ? "autopilot: previous run still stopping, will start when it has" : "autopilot: pending start cancelled");
         }
         else
-            Start();
+            Start(singleStep);
     }
 
-    private static void Start(bool previousRunDone = false)
+    /// <summary>A panel button: Step / Auto start that mode; Stop stops whichever runs.</summary>
+    public static void Press(PanelAction action)
+    {
+        if (action == PanelAction.Stop) Stop(StopReason.Hotkey, null);
+        else Toggle(singleStep: action == PanelAction.Step);
+    }
+
+    private static void Start(bool singleStep, bool previousRunDone = false)
     {
         if (ApiMismatch || _unavailable != null || _loc == null || _advisor == null)
         {
@@ -68,12 +77,12 @@ internal static class AutoPilotControl
             ModLog.Info("autopilot: previous run still stopping");
             return;
         }
-        if (!Session.Start())
+        if (!Session.Start(singleStep))
             return;
         _combatSolver = CombatSolverSettings.Read(Path.Combine(_gameUserDir, CombatSolverSettings.FileName));
         var cts = new CancellationTokenSource();
         _cts = cts;
-        ModLog.Info($"autopilot: started (CombatSolver {_combatSolver})");
+        ModLog.Info($"autopilot: started ({(singleStep ? "single step" : "full auto")}, CombatSolver {_combatSolver})");
         var loop = new AutoPilotLoop(_advisor, _loc, _trace, Session, _now);
         _runTask = RunAsync(loop, cts);
     }
@@ -94,7 +103,7 @@ internal static class AutoPilotControl
             if (_startPending)
             {
                 _startPending = false;
-                try { Start(previousRunDone: true); }
+                try { Start(_pendingSingle, previousRunDone: true); }
                 catch (Exception e) { ModLog.Error($"autopilot: pending start failed: {e}"); }
             }
         }
@@ -126,12 +135,12 @@ internal static class AutoPilotControl
         }
     }
 
-    public static IReadOnlyList<PanelLine> RunningLines(string hotkey, bool zh) =>
-        AutoPilotText.Running(Session, hotkey, _combatSolver, zh);
+    public static IReadOnlyList<PanelLine> RunningLines(string autoKey, string stepKey, bool zh) =>
+        AutoPilotText.Running(Session, autoKey, stepKey, _combatSolver, zh);
 
     /// <summary>The last stop, for 15 s after it (prepended to the advice panel).</summary>
-    public static PanelLine? Banner(string hotkey, bool zh) =>
+    public static PanelLine? Banner(string autoKey, string stepKey, bool zh) =>
         !IsRunning && Session.LastStop is { } reason && _now() - _stoppedAt < BannerSeconds
-            ? AutoPilotText.StopBanner(reason, Session.LastStopDetail, hotkey, zh)
+            ? AutoPilotText.StopBanner(reason, Session.LastStopDetail, autoKey, stepKey, zh)
             : null;
 }

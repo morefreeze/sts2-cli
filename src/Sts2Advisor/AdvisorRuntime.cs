@@ -13,7 +13,8 @@ namespace Sts2Advisor;
 /// <summary>Per-frame driver (SceneTree.ProcessFrame, main thread). Every 0.3 s: read the screen,
 /// and when its fingerprint changed, serialize it (main thread) and ask the advisor (background).
 /// Replies are applied on a later frame, only if the screen has not changed meanwhile.
-/// The autopilot hotkey (F9) hands the run to AutoPilot; while it runs, the panel shows its steps and the advice requests here pause.</summary>
+/// The autopilot hotkey (F9) hands the run to AutoPilot; while it runs, the panel shows its steps and the advice requests here pause.
+/// F10 (step_hotkey) or the panel's "do this step" button runs a single step: one advised choice, then stop at the next decision.</summary>
 internal static class AdvisorRuntime
 {
     private const double PollSeconds = 0.3;
@@ -62,6 +63,9 @@ internal static class AdvisorRuntime
     private static Key _autoKey = Key.F9;
     private static string _autoKeyName = "F9";
     private static bool _autoKeyDown;
+    private static Key _stepKey = Key.F10;
+    private static string _stepKeyName = "F10";
+    private static bool _stepKeyDown;
 
     private static bool Zh => GameText.IsChinese;
 
@@ -74,6 +78,11 @@ internal static class AdvisorRuntime
         if (!Enum.TryParse(config.AutopilotHotkey, ignoreCase: true, out _autoKey))
             _autoKey = Key.F9;
         _autoKeyName = _autoKey.ToString();
+        if (!Enum.TryParse(config.StepHotkey, ignoreCase: true, out _stepKey))
+            _stepKey = Key.F10;
+        _stepKeyName = _stepKey.ToString();
+        if (_stepKey == _hotkey || _stepKey == _autoKey)
+            autopilotProblem ??= $"step_hotkey {_stepKeyName} clashes with hotkey/autopilot_hotkey ({configPath})";
         if (_autoKey == _hotkey)  // one press would both hide the panel and start the autopilot
             autopilotProblem ??= $"hotkey and autopilot_hotkey are both {_autoKeyName} ({configPath})";
         _loc = string.IsNullOrWhiteSpace(config.RepoPath) ? null : new LocLookup(config.RepoPath);
@@ -164,7 +173,7 @@ internal static class AdvisorRuntime
             // The autopilot asks for its own advice; the advice panel would only ask twice.
             _requested = null;
             _lastSeenFingerprint = null;
-            Show(AutoPilotControl.RunningLines(_autoKeyName, Zh));
+            Show(AutoPilotControl.RunningLines(_autoKeyName, _stepKeyName, Zh));
             return;
         }
 
@@ -367,22 +376,52 @@ internal static class AdvisorRuntime
             if (!_visible) _panel?.Hide();
         }
         _hotkeyDown = down;
-        if (_autoKey == _hotkey)  // the clash is logged at start; the panel toggle wins
-            return;
-        bool autoDown = Input.IsKeyPressed(_autoKey);
-        if (autoDown && !_autoKeyDown)
+        // A clash is logged at start and disables the autopilot; the panel toggle wins, and a key shared by
+        // the autopilot and the step is not polled twice (one press must not act twice).
+        if (_autoKey != _hotkey)
         {
-            AutoPilotControl.Toggle();
-            _requested = null;
+            bool autoDown = Input.IsKeyPressed(_autoKey);
+            if (autoDown && !_autoKeyDown)
+            {
+                AutoPilotControl.Toggle();
+                _requested = null;
+            }
+            _autoKeyDown = autoDown;
         }
-        _autoKeyDown = autoDown;
+        if (_stepKey != _hotkey && _stepKey != _autoKey)
+        {
+            bool stepDown = Input.IsKeyPressed(_stepKey);
+            if (stepDown && !_stepKeyDown)
+            {
+                AutoPilotControl.Toggle(singleStep: true);
+                _requested = null;
+            }
+            _stepKeyDown = stepDown;
+        }
     }
 
     /// <summary>Nothing is shown while the player has the panel hidden (F8): a reply that lands late must not undo that.</summary>
     private static void Show(IReadOnlyList<PanelLine> lines)
     {
         if (!_visible) return;
-        var banner = AutoPilotControl.Banner(_autoKeyName, Zh);
-        _panel?.Show(banner == null ? lines : lines.Prepend(banner).ToList(), _language);
+        var banner = AutoPilotControl.Banner(_autoKeyName, _stepKeyName, Zh);
+        // No buttons while the mod cannot act (config missing, game version unsupported).
+        var buttons = _configProblem != null || _disabled
+            ? Array.Empty<PanelButton>()
+            : AutoPilotText.Buttons(AutoPilotControl.IsRunning, _stepKeyName, _autoKeyName, Zh);
+        _panel?.Show(banner == null ? lines : lines.Prepend(banner).ToList(), _language, buttons, OnPanelButton);
+    }
+
+    private static void OnPanelButton(PanelAction action)
+    {
+        try
+        {
+            AutoPilotControl.Press(action);
+            _requested = null;
+        }
+        catch (Exception ex)
+        {
+            LogTickFailure(ex);  // a Godot signal callback must not throw
+        }
     }
 }

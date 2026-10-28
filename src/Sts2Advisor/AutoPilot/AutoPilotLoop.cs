@@ -185,6 +185,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         if (!_screens.TryGetValue(overlay.GetType(), out var handler))
         {
             // No advice exists for it (choose a relic, crystal sphere, ...): the player does this one screen.
+            if (_session.StepDone)  // that is a decision too: a single step ends here
+                throw new AutoPilotStopException(StopReason.StepDone, null);
             await HandBackAsync(overlay.GetType().Name, () => NOverlayStack.Instance?.Peek() == overlay, ct);
             return;
         }
@@ -316,6 +318,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
 
     public async Task<CachedAdvice> FetchAdviceAsync(CancellationToken ct)
     {
+        if (_session.StepDone)  // a single step stops at the next decision
+            throw new AutoPilotStopException(StopReason.StepDone, null);
         string? last = null;
         double deadline = _now() + FetchSeconds;
         while (true)
