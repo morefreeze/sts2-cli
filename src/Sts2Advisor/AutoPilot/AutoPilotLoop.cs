@@ -67,11 +67,12 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         {
             [typeof(NRewardsScreen)] = new RewardsHandler(),
             [typeof(NCardRewardSelectionScreen)] = new CardRewardHandler(this),
-            [typeof(NDeckUpgradeSelectScreen)] = new DeckUpgradeScreenHandler(),
-            [typeof(NDeckTransformSelectScreen)] = new DeckTransformScreenHandler(),
-            [typeof(NDeckEnchantSelectScreen)] = new DeckEnchantScreenHandler(),
-            [typeof(NDeckCardSelectScreen)] = new DeckCardSelectScreenHandler(),
-            [typeof(NSimpleCardSelectScreen)] = new SimpleCardSelectScreenHandler(),
+            // The grid handlers' own random picks are replaced by the advised cards (GridSelectHandler).
+            [typeof(NDeckUpgradeSelectScreen)] = new GridSelectHandler(this, new DeckUpgradeScreenHandler(), GridPress.Holder),
+            [typeof(NDeckTransformSelectScreen)] = new GridSelectHandler(this, new DeckTransformScreenHandler(), GridPress.Grid),
+            [typeof(NDeckEnchantSelectScreen)] = new GridSelectHandler(this, new DeckEnchantScreenHandler(), GridPress.Holder),
+            [typeof(NDeckCardSelectScreen)] = new GridSelectHandler(this, new DeckCardSelectScreenHandler(), GridPress.Holder),
+            [typeof(NSimpleCardSelectScreen)] = new GridSelectHandler(this, new SimpleCardSelectScreenHandler(), GridPress.Grid),
             [typeof(NChooseACardSelectionScreen)] = new ChooseACardScreenHandler(),
             [typeof(NChooseABundleSelectionScreen)] = new ChooseABundleScreenHandler(),
         };
@@ -123,13 +124,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         var overlay = NOverlayStack.Instance?.Peek();
         if (overlay is NGameOverScreen)
             throw new AutoPilotStopException(StopReason.GameOver, null);
-        if (overlay != null)
-        {
-            await HandleOverlayAsync(overlay, ct);
-            return;
-        }
-        _sameOverlay = 0;
-
+        // Combat first: an overlay in combat (a pile select, say) belongs to CombatSolver or the player.
         if (CombatManager.Instance?.IsInProgress == true)
         {
             _session.InCombat = true;
@@ -138,6 +133,13 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             MarkProgress();
             return;
         }
+        if (overlay != null)
+        {
+            await HandleOverlayAsync(overlay, ct);
+            return;
+        }
+        _sameOverlay = 0;
+
         if (NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true })
         {
             await RunHandlerAsync(_map, _map.Timeout, ct);
@@ -202,7 +204,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     }
 
     /// <summary>Runs a handler; when it stops for want of advice, asks for it and runs the handler again.</summary>
-    private async Task RunHandlerAsync(IHandler handler, TimeSpan timeout, CancellationToken ct)
+    /// <summary>False when the handler yielded to the loop (an overlay is open) instead of finishing.</summary>
+    private async Task<bool> RunHandlerAsync(IHandler handler, TimeSpan timeout, CancellationToken ct)
     {
         while (true)
         {
@@ -210,7 +213,11 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             {
                 await WaitHelper.WithTimeout(t => handler.HandleAsync(_rng, t), timeout, ct);
                 AutoPilotChoice.WarnUnusedPicks(handler.GetType().Name);
-                return;
+                return true;
+            }
+            catch (YieldToLoopException)
+            {
+                return false;
             }
             catch (NeedAdviceException e)
             {
@@ -342,7 +349,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         {
             ct.ThrowIfCancellationRequested();
             var overlay = NOverlayStack.Instance?.Peek();
-            if (overlay != null && overlay is not NGameOverScreen)
+            if (overlay != null && overlay is not NGameOverScreen && CombatManager.Instance?.IsInProgress != true)
                 await HandleOverlayAsync(overlay, ct);
             await Task.Delay(50, ct);
         }

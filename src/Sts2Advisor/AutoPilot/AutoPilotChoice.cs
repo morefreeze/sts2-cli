@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Events;
 using MegaCrit.Sts2.Core.Nodes.RestSite;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Random;
@@ -32,6 +33,10 @@ internal sealed class AutoPilotStopException(StopReason reason, string? detail)
     public StopReason Reason { get; } = reason;
     public string? Detail { get; } = detail;
 }
+
+/// <summary>Thrown out of a room handler that is about to pick while an overlay is open (an event combat's
+/// rewards, say): the loop deals with the overlay first and reruns the room handler later.</summary>
+internal sealed class YieldToLoopException() : Exception("autopilot: an overlay is open, the loop handles it first");
 
 /// <summary>What the handlers call back into (implemented by AutoPilotLoop).</summary>
 internal interface IAutoPilotHost
@@ -96,6 +101,14 @@ internal static class AutoPilotChoice
         _stepRecorded = false;
     }
 
+    /// <summary>A handler that acted on the whole advice itself (GridSelectHandler): nothing is left of it, but the
+    /// advice stays, so a later pick fails with "more picks than the advice has".</summary>
+    public static void Consume()
+    {
+        Remaining.Clear();
+        _stepRecorded = true;
+    }
+
     private static void Clear()
     {
         _advice = null;
@@ -117,6 +130,9 @@ internal static class AutoPilotChoice
         // A finished event offers one synthetic Proceed option, and the screen no longer reads as a decision.
         if (list.Count > 0 && list.All(n => n is NEventOptionButton { Option.IsProceed: true }))
             return list[0];
+        if ((typeof(T) == typeof(NEventOptionButton) || typeof(T) == typeof(NRestSiteButton))
+            && NOverlayStack.Instance?.Peek() != null)
+            throw new YieldToLoopException();
         var cap = DecisionCapture.Detect(_loc!);
         if (cap is not { Kind: CaptureKind.Advise })
             throw new AutoPilotException($"a handler picks among {list.Count} {typeof(T).Name} but the screen reads as {cap?.Screen ?? "nothing"}");

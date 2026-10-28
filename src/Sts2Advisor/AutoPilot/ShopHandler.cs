@@ -17,7 +17,9 @@ internal sealed class ShopHandler(IAutoPilotHost host) : IHandler
 {
     private const int MaxSteps = 30;
 
-    public TimeSpan Timeout => TimeSpan.FromMinutes(5);
+    /// <summary>Long on purpose: a removal can hand a screen back to the player, who may take a while. Every
+    /// step has its own deadline (advice 20 s, the purchase drain), so a stuck shop still ends.</summary>
+    public TimeSpan Timeout => TimeSpan.FromHours(4);
 
     public async Task HandleAsync(Rng random, CancellationToken ct)
     {
