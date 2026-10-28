@@ -57,9 +57,9 @@ internal static class AutoPilotControl
 
     private static void Start(bool previousRunDone = false)
     {
-        if (_unavailable != null || _loc == null || _advisor == null)
+        if (ApiMismatch || _unavailable != null || _loc == null || _advisor == null)
         {
-            Session.Stop(StopReason.Disabled, _unavailable ?? "no localization");
+            Session.Stop(StopReason.Disabled, _unavailable ?? (ApiMismatch ? "game API mismatch" : "no localization"));
             _stoppedAt = _now();
             return;
         }

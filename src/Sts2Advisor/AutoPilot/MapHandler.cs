@@ -13,7 +13,8 @@ namespace Sts2Advisor.AutoPilot;
 /// <summary>Travels to the advised map node.</summary>
 internal sealed class MapHandler(IAutoPilotHost host) : IHandler
 {
-    public TimeSpan Timeout => TimeSpan.FromSeconds(60);
+    /// <summary>Generous: a first-time tip (modal) inside this screen is handed to the player, and their time counts here.</summary>
+    public TimeSpan Timeout => TimeSpan.FromMinutes(10);
 
     public async Task HandleAsync(Rng random, CancellationToken ct)
     {
