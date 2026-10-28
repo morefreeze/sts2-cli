@@ -20,7 +20,7 @@ internal static class AdvisorRuntime
     private const string DetectScreen = "detect";
 
     // Same options as src/Sts2Headless/Program.cs's JsonOpts, so the JSON matches the headless engine's.
-    private static readonly JsonSerializerOptions JsonOpts = new()
+    internal static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
