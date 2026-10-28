@@ -37,11 +37,13 @@ public sealed class AdvisorTraceLog
     /// <summary>Lines dropped so far (invalid JSON or a failed write).</summary>
     public int Dropped => Volatile.Read(ref _dropped);
 
-    public void Append(string decision, string stateJson, string? replyJson, string? error)
+    /// <summary><paramref name="autopilotJson"/>: set when the autopilot executed this advice
+    /// ({"executed": true, "step": n}); written as an "autopilot" object.</summary>
+    public void Append(string decision, string stateJson, string? replyJson, string? error, string? autopilotJson = null)
     {
         try
         {
-            var line = BuildLine(decision, stateJson, replyJson, error);
+            var line = BuildLine(decision, stateJson, replyJson, error, autopilotJson);
             lock (_gate)
             {
                 EnsureDirectory();
@@ -83,7 +85,7 @@ public sealed class AdvisorTraceLog
     /// <summary>One compact line. The state and reply are parsed and re-written rather than pasted
     /// in raw, so invalid JSON throws here (before anything reaches the file) and a pretty-printed
     /// input still stays on one line.</summary>
-    private static string BuildLine(string decision, string stateJson, string? replyJson, string? error)
+    private static string BuildLine(string decision, string stateJson, string? replyJson, string? error, string? autopilotJson)
     {
         using var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer, WriterOptions))
@@ -96,6 +98,11 @@ public sealed class AdvisorTraceLog
             w.WritePropertyName("reply");
             if (replyJson == null) w.WriteNullValue(); else WriteJson(w, replyJson);
             if (error != null) w.WriteString("error", error);
+            if (autopilotJson != null)
+            {
+                w.WritePropertyName("autopilot");
+                WriteJson(w, autopilotJson);
+            }
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(buffer.ToArray()) + "\n";

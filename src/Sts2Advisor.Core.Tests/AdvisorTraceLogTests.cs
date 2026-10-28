@@ -196,4 +196,20 @@ public class AdvisorTraceLogTests
         Assert.Equal(Enumerable.Range(0, 5), File.ReadAllLines(path).Select(Number));
         Assert.Equal(0, log.Dropped);
     }
+
+    [Fact]
+    public void AutopilotStepsCarryTheirMarker()
+    {
+        var path = NewPath();
+        var log = new AdvisorTraceLog(path);
+        log.Append("shop", """{"decision": "shop"}""", """{"action": null}""", null, """{"executed": true, "step": 3}""");
+        log.Append("shop", """{"decision": "shop"}""", """{"action": null}""", null);
+        var lines = File.ReadAllLines(path);
+        using var first = JsonDocument.Parse(lines[0]);
+        var ap = first.RootElement.GetProperty("autopilot");
+        Assert.True(ap.GetProperty("executed").GetBoolean());
+        Assert.Equal(3, ap.GetProperty("step").GetInt32());
+        using var second = JsonDocument.Parse(lines[1]);
+        Assert.False(second.RootElement.TryGetProperty("autopilot", out _));
+    }
 }
