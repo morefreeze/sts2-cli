@@ -65,6 +65,17 @@ internal sealed class GridSelectHandler(IAutoPilotHost host, IScreenHandler inne
             await Task.Delay(200, ct);
         }
         AutoPilotChoice.Consume();
+        // A fixed-count select closes itself on the last press (NSimpleCardSelectScreen.CheckIfSelectionComplete);
+        // the delegated handler would then throw for want of a screen.
+        if (!OnTop())
+            return;
         await inner.HandleAsync(random, ct);
+        // Still there: the loop must not rerun this handler, whose presses would toggle the same cards off.
+        for (int i = 0; i < 20 && OnTop(); i++)
+            await Task.Delay(100, ct);
+        if (OnTop())
+            throw new AutoPilotException($"{ScreenType.Name} did not close after the advised picks");
+
+        bool OnTop() => GodotObject.IsInstanceValid(screen) && NOverlayStack.Instance?.Peek() == (object)screen;
     }
 }

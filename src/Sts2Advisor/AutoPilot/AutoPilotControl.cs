@@ -19,6 +19,7 @@ internal static class AutoPilotControl
     private static string? _unavailable;
     private static CancellationTokenSource? _cts;
     private static Task? _runTask;
+    private static bool _startPending;
     private static CombatSolverStatus _combatSolver = CombatSolverStatus.Ok;
     private static double _stoppedAt = double.NegativeInfinity;
 
@@ -42,11 +43,19 @@ internal static class AutoPilotControl
 
     public static void Toggle()
     {
-        if (IsRunning) Stop(StopReason.Hotkey, null);
-        else Start();
+        if (IsRunning)
+            Stop(StopReason.Hotkey, null);
+        else if (_runTask is { IsCompleted: false })
+        {
+            // The previous run has not finished stopping: start when it has (a further press cancels that).
+            _startPending = !_startPending;
+            ModLog.Info(_startPending ? "autopilot: previous run still stopping, will start when it has" : "autopilot: pending start cancelled");
+        }
+        else
+            Start();
     }
 
-    private static void Start()
+    private static void Start(bool previousRunDone = false)
     {
         if (_unavailable != null || _loc == null || _advisor == null)
         {
@@ -54,7 +63,7 @@ internal static class AutoPilotControl
             _stoppedAt = _now();
             return;
         }
-        if (_runTask is { IsCompleted: false })
+        if (!previousRunDone && _runTask is { IsCompleted: false })
         {
             ModLog.Info("autopilot: previous run still stopping");
             return;
@@ -82,6 +91,12 @@ internal static class AutoPilotControl
         finally
         {
             cts.Dispose();
+            if (_startPending)
+            {
+                _startPending = false;
+                try { Start(previousRunDone: true); }
+                catch (Exception e) { ModLog.Error($"autopilot: pending start failed: {e}"); }
+            }
         }
     }
 

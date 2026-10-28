@@ -130,9 +130,9 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         if (overlay is NGameOverScreen)
             throw new AutoPilotStopException(StopReason.GameOver, null);
         // A blocking popup (a first-time tip, say) is the player's, like an overlay without advice.
-        if (NModalContainer.Instance?.OpenModal != null)
+        if (ModalOpen())
         {
-            await HandBackAsync("modal", () => NModalContainer.Instance?.OpenModal != null, ct);
+            await HandBackAsync("modal", ModalOpen, ct);
             return;
         }
         // Combat first: an overlay in combat (a pile select, say) belongs to CombatSolver or the player.
@@ -163,16 +163,16 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         switch (room)
         {
             case EventRoom er when !er.LocalMutableEvent.IsFinished && er.LocalMutableEvent.CurrentOptions.Any(o => !o.IsLocked):
-                await RunRoomAsync(_event, EventTimeout, roomKey, once: false, ct);
+                await RunRoomAsync(_event, EventTimeout, roomKey, RoomDone.Never, ct);
                 return;
             case RestSiteRoom rr when rr.Options.Any(o => o.IsEnabled) && !_doneRooms.Contains(roomKey):
-                await RunRoomAsync(_rest, _rest.Timeout, roomKey, once: true, ct);
+                await RunRoomAsync(_rest, _rest.Timeout, roomKey, RoomDone.OnProgress, ct);
                 return;
             case MerchantRoom when !_doneRooms.Contains(roomKey):
-                await RunRoomAsync(_shop, _shop.Timeout, roomKey, once: true, ct);
+                await RunRoomAsync(_shop, _shop.Timeout, roomKey, RoomDone.OnProgress, ct);
                 return;
             case TreasureRoom when !_doneRooms.Contains(roomKey):
-                await RunRoomAsync(_treasure, _treasure.Timeout, roomKey, once: true, ct);
+                await RunRoomAsync(_treasure, _treasure.Timeout, roomKey, RoomDone.OnReturn, ct);
                 return;
         }
         if (await ClickProceedAsync(ct))
@@ -204,6 +204,10 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         await Task.Delay(100, ct);
     }
 
+    /// <summary>A popup is open and still alive (a freed or detached one must not park the autopilot).</summary>
+    private static bool ModalOpen() =>
+        NModalContainer.Instance?.OpenModal is GodotObject o && GodotObject.IsInstanceValid(o) && (o as Node)?.IsInsideTree() != false;
+
     private async Task HandBackAsync(string name, Func<bool> stillOpen, CancellationToken ct)
     {
         _session.HandBack(name);
@@ -214,18 +218,24 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         MarkProgress();
     }
 
-    /// <summary>Runs a room's handler. A room done once (rest site, shop, treasure) is not run again; a handler that
-    /// returns again and again without a step or an overlay is not getting anywhere.</summary>
-    private async Task RunRoomAsync(IHandler handler, TimeSpan timeout, string roomKey, bool once, CancellationToken ct)
+    /// <summary>When a room's handler has done its job: never (an event runs until it is finished), on its first
+    /// step or overlay (rest site, shop: an early return with nothing done, such as "no clickable rest site
+    /// buttons", is retried), or whenever it returns (treasure clicks proceed itself and records no step).</summary>
+    private enum RoomDone { Never, OnProgress, OnReturn }
+
+    /// <summary>Runs a room's handler. A room that is done is not run again; a handler that returns again and again
+    /// without a step or an overlay is not getting anywhere.</summary>
+    private async Task RunRoomAsync(IHandler handler, TimeSpan timeout, string roomKey, RoomDone done, CancellationToken ct)
     {
         int stepsBefore = _session.StepCount;
         bool finished = await RunHandlerAsync(handler, timeout, ct);
         MarkProgress();
         if (!finished)
             return;
-        if (once)
+        bool progressed = _session.StepCount != stepsBefore || NOverlayStack.Instance?.Peek() != null;
+        if (done == RoomDone.OnReturn || (done == RoomDone.OnProgress && progressed))
             _doneRooms.Add(roomKey);
-        if (_session.StepCount != stepsBefore || NOverlayStack.Instance?.Peek() != null)
+        if (progressed || done == RoomDone.OnReturn)
         {
             _noProgressCount = 0;
             return;
@@ -311,6 +321,13 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+            if (ModalOpen())  // a tip popup opened over the screen: the screen does not read as a decision until it is closed
+            {
+                await HandBackAsync("modal", ModalOpen, ct);
+                last = null;
+                deadline = _now() + FetchSeconds;  // the player's time does not count
+                continue;
+            }
             var cap = DecisionCapture.Detect(_loc);
             bool advisable = cap is { Kind: CaptureKind.Advise };
             // Screens animate in: ask only about a fingerprint seen on two polls in a row (as the advice panel does).
