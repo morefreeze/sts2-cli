@@ -23,7 +23,8 @@ if [ ! -f "$USER_DIR/config.json" ]; then
   "port": 8767,
   "autostart": true,
   "hotkey": "F8",
-  "autopilot_hotkey": "F9"
+  "autopilot_hotkey": "F9",
+  "step_hotkey": "F10"
 }
 EOCFG
   echo "wrote $USER_DIR/config.json"
