@@ -22,6 +22,9 @@ internal static class AutoPilotControl
     private static CombatSolverStatus _combatSolver = CombatSolverStatus.Ok;
     private static double _stoppedAt = double.NegativeInfinity;
 
+    /// <summary>The loop hit a TypeLoad/MissingMember: the game changed, and the whole mod must go quiet.</summary>
+    public static bool ApiMismatch { get; private set; }
+
     public static bool IsRunning => Session.Mode == AutoPilotMode.Running;
 
     /// <summary><paramref name="unavailable"/>: why the autopilot cannot run (handlers not patched, no
@@ -71,6 +74,8 @@ internal static class AutoPilotControl
         try
         {
             var (reason, detail) = await loop.RunAsync(cts.Token);
+            if (reason == StopReason.Unsupported)
+                ApiMismatch = true;
             if (ReferenceEquals(cts, _cts))  // a hotkey Stop has already finished this session
                 Finish(reason, detail);
         }

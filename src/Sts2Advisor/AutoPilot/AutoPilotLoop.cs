@@ -34,6 +34,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     private const double StuckSeconds = 30;
     private const double FetchSeconds = 20;
     private const int MaxSameOverlay = 3;
+    private const int MaxNoProgress = 3;
     /// <summary>An event can start a combat; CombatSolver may need minutes per turn.</summary>
     private static readonly TimeSpan EventTimeout = TimeSpan.FromHours(4);
 
@@ -53,6 +54,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     private string _progressKey = "";
     private double _progressAt;
     private int _sameOverlay;
+    private string _noProgressRoom = "";
+    private int _noProgressCount;
 
     public AutoPilotLoop(IAdvisor advisor, LocLookup loc, AdvisorTraceLog? trace, AutoPilotSession session, Func<double> now)
     {
@@ -77,6 +80,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             [typeof(NChooseABundleSelectionScreen)] = new ChooseABundleScreenHandler(),
         };
     }
+
+    public bool InCombat { set => _session.InCombat = value; }
 
     /// <summary>Runs until something stops it; never throws.</summary>
     public async Task<(StopReason Reason, string? Detail)> RunAsync(CancellationToken ct)
@@ -124,6 +129,12 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         var overlay = NOverlayStack.Instance?.Peek();
         if (overlay is NGameOverScreen)
             throw new AutoPilotStopException(StopReason.GameOver, null);
+        // A blocking popup (a first-time tip, say) is the player's, like an overlay without advice.
+        if (NModalContainer.Instance?.OpenModal != null)
+        {
+            await HandBackAsync("modal", () => NModalContainer.Instance?.OpenModal != null, ct);
+            return;
+        }
         // Combat first: an overlay in combat (a pile select, say) belongs to CombatSolver or the player.
         if (CombatManager.Instance?.IsInProgress == true)
         {
@@ -152,20 +163,16 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         switch (room)
         {
             case EventRoom er when !er.LocalMutableEvent.IsFinished && er.LocalMutableEvent.CurrentOptions.Any(o => !o.IsLocked):
-                await RunHandlerAsync(_event, EventTimeout, ct);
-                MarkProgress();
+                await RunRoomAsync(_event, EventTimeout, roomKey, once: false, ct);
                 return;
-            case RestSiteRoom rr when rr.Options.Any(o => o.IsEnabled) && _doneRooms.Add(roomKey):
-                await RunHandlerAsync(_rest, _rest.Timeout, ct);
-                MarkProgress();
+            case RestSiteRoom rr when rr.Options.Any(o => o.IsEnabled) && !_doneRooms.Contains(roomKey):
+                await RunRoomAsync(_rest, _rest.Timeout, roomKey, once: true, ct);
                 return;
-            case MerchantRoom when _doneRooms.Add(roomKey):
-                await RunHandlerAsync(_shop, _shop.Timeout, ct);
-                MarkProgress();
+            case MerchantRoom when !_doneRooms.Contains(roomKey):
+                await RunRoomAsync(_shop, _shop.Timeout, roomKey, once: true, ct);
                 return;
-            case TreasureRoom when _doneRooms.Add(roomKey):
-                await RunHandlerAsync(_treasure, _treasure.Timeout, ct);
-                MarkProgress();
+            case TreasureRoom when !_doneRooms.Contains(roomKey):
+                await RunRoomAsync(_treasure, _treasure.Timeout, roomKey, once: true, ct);
                 return;
         }
         if (await ClickProceedAsync(ct))
@@ -178,13 +185,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         if (!_screens.TryGetValue(overlay.GetType(), out var handler))
         {
             // No advice exists for it (choose a relic, crystal sphere, ...): the player does this one screen.
-            string name = overlay.GetType().Name;
-            _session.HandBack(name);
-            ModLog.Info($"autopilot: handing {name} back to the player");
-            while (NOverlayStack.Instance?.Peek() == overlay)
-                await Task.Delay(200, ct);  // no timeout: the player takes as long as they like
-            _session.ClearHandBack();
-            MarkProgress();
+            await HandBackAsync(overlay.GetType().Name, () => NOverlayStack.Instance?.Peek() == overlay, ct);
             return;
         }
         int countBefore = NOverlayStack.Instance!.ScreenCount;
@@ -201,6 +202,41 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         }
         MarkProgress();
         await Task.Delay(100, ct);
+    }
+
+    private async Task HandBackAsync(string name, Func<bool> stillOpen, CancellationToken ct)
+    {
+        _session.HandBack(name);
+        ModLog.Info($"autopilot: handing {name} back to the player");
+        while (stillOpen())
+            await Task.Delay(200, ct);  // no timeout: the player takes as long as they like
+        _session.ClearHandBack();
+        MarkProgress();
+    }
+
+    /// <summary>Runs a room's handler. A room done once (rest site, shop, treasure) is not run again; a handler that
+    /// returns again and again without a step or an overlay is not getting anywhere.</summary>
+    private async Task RunRoomAsync(IHandler handler, TimeSpan timeout, string roomKey, bool once, CancellationToken ct)
+    {
+        int stepsBefore = _session.StepCount;
+        bool finished = await RunHandlerAsync(handler, timeout, ct);
+        MarkProgress();
+        if (!finished)
+            return;
+        if (once)
+            _doneRooms.Add(roomKey);
+        if (_session.StepCount != stepsBefore || NOverlayStack.Instance?.Peek() != null)
+        {
+            _noProgressCount = 0;
+            return;
+        }
+        if (roomKey != _noProgressRoom)
+        {
+            _noProgressRoom = roomKey;
+            _noProgressCount = 0;
+        }
+        if (++_noProgressCount >= MaxNoProgress)
+            throw new AutoPilotStopException(StopReason.Stuck, $"{roomKey}: {handler.GetType().Name} made no progress");
     }
 
     /// <summary>Runs a handler; when it stops for want of advice, asks for it and runs the handler again.</summary>

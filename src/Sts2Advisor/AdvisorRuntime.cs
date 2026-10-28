@@ -94,23 +94,18 @@ internal static class AdvisorRuntime
     public static void Tick()
     {
         if (_disabled) return;
+        if (AutoPilotControl.ApiMismatch)
+        {
+            DisableForApiMismatch("the autopilot hit a game API mismatch", null);
+            return;
+        }
         try
         {
             TickInner();
         }
         catch (Exception ex) when (ex is TypeLoadException or MissingMemberException)
         {
-            _disabled = true;
-            ModLog.Error($"game API mismatch, advisor disabled: {ex}");
-            try { AutoPilotControl.Stop(StopReason.Unsupported, ex.GetType().Name); } catch (Exception) { }
-            // The missing member may be LocManager itself: fall back to English, never throw out of the tick.
-            try
-            {
-                bool zh = false;
-                try { zh = Zh; } catch (Exception) { }
-                Show(PanelText.Status(null, StatusKind.Unsupported, null, zh));
-            }
-            catch (Exception) { }
+            DisableForApiMismatch("game API mismatch", ex);
         }
         catch (Exception ex)
         {
@@ -118,11 +113,27 @@ internal static class AdvisorRuntime
         }
     }
 
+    private static void DisableForApiMismatch(string why, Exception? ex)
+    {
+        _disabled = true;
+        ModLog.Error($"{why}, advisor disabled{(ex == null ? "" : $": {ex}")}");
+        try { AutoPilotControl.Stop(StopReason.Unsupported, ex?.GetType().Name); } catch (Exception) { }
+        // The missing member may be LocManager itself: fall back to English, never throw out of the tick.
+        try
+        {
+            bool zh = false;
+            try { zh = Zh; } catch (Exception) { }
+            Show(PanelText.Status(null, StatusKind.Unsupported, null, zh));
+        }
+        catch (Exception) { }
+    }
+
     private static void TickInner()
     {
         double now = Clock.Elapsed.TotalSeconds;
         PollHotkey();
-        DrainResults(now);
+        // While the autopilot runs a late advice reply must not paint over its panel: drop them.
+        DrainResults(now, discard: AutoPilotControl.IsRunning);
         if (now < _nextPoll) return;
         _nextPoll = now + PollSeconds;
 
@@ -245,7 +256,7 @@ internal static class AdvisorRuntime
         });
     }
 
-    private static void DrainResults(double now)
+    private static void DrainResults(double now, bool discard)
     {
         int dropped = _trace?.Dropped ?? 0;
         if (dropped > _loggedDropped)
@@ -255,6 +266,8 @@ internal static class AdvisorRuntime
         }
         while (Results.TryDequeue(out var result))
         {
+            if (discard)
+                continue;
             if (_current == null || result.Fingerprint != _current.Fingerprint)
                 continue;  // the screen moved on; the next poll asks again
             if (result.Outcome == Outcome.Offline)
@@ -354,6 +367,8 @@ internal static class AdvisorRuntime
             if (!_visible) _panel?.Hide();
         }
         _hotkeyDown = down;
+        if (_autoKey == _hotkey)  // the clash is logged at start; the panel toggle wins
+            return;
         bool autoDown = Input.IsKeyPressed(_autoKey);
         if (autoDown && !_autoKeyDown)
         {

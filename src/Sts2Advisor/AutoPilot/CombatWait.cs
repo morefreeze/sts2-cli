@@ -26,7 +26,18 @@ internal static class CombatWait
             await handler.HandleEventCombat(ct);
             return;
         }
-        await WaitHelper.Until(() => CombatManager.Instance.IsInProgress, ct, AutoSlayConfig.nodeWaitTimeout, "Event combat not started");
-        await UntilOverAsync(ct);
+        var host = AutoPilotChoice.Host;
+        if (host != null)
+            host.InCombat = true;
+        try
+        {
+            await WaitHelper.Until(() => CombatManager.Instance.IsInProgress, ct, AutoSlayConfig.nodeWaitTimeout, "Event combat not started");
+            await UntilOverAsync(ct);
+        }
+        finally
+        {
+            if (host != null)
+                host.InCombat = false;
+        }
     }
 }

@@ -45,7 +45,10 @@ internal sealed class ShopHandler(IAutoPilotHost host) : IHandler
             var entry = EntryFor(advice);
             var inventory = room.Inventory.Inventory ?? throw new AutoPilotException("shop: no inventory");
             host.StepTaken(advice);
-            var purchase = entry.OnTryPurchaseWrapper(inventory);
+            // The removal entry has its own wrapper (its price rises and the purchase can be cancelled).
+            var purchase = entry is MerchantCardRemovalEntry removal
+                ? removal.OnTryPurchaseWrapper(inventory)
+                : entry.OnTryPurchaseWrapper(inventory);
             await host.DrainUntilAsync(purchase, ct);
             if (!await purchase)
                 throw new AutoPilotException($"shop: {advice.Plan.Kind} was refused");

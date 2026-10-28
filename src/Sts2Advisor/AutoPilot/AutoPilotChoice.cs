@@ -41,6 +41,9 @@ internal sealed class YieldToLoopException() : Exception("autopilot: an overlay 
 /// <summary>What the handlers call back into (implemented by AutoPilotLoop).</summary>
 internal interface IAutoPilotHost
 {
+    /// <summary>Whether the panel should say "combat" (an event's combat runs inside a room handler).</summary>
+    bool InCombat { set; }
+
     Task<CachedAdvice> FetchAdviceAsync(CancellationToken ct);
     void StepTaken(CachedAdvice advice);
     Task DrainUntilAsync(Task pending, CancellationToken ct);
@@ -76,6 +79,8 @@ internal static class AutoPilotChoice
     private static bool _stepRecorded;
 
     public static bool Active => _host != null;
+
+    internal static IAutoPilotHost? Host => _host;
 
     public static void Begin(LocLookup loc, IAutoPilotHost host)
     {
@@ -165,7 +170,8 @@ internal static class AutoPilotChoice
         }
         throw new AutoPilotException(Remaining.Count == 0
             ? $"{cap.Screen}: the handler wants more picks than the advice has ({_advice.Plan.Indices.Count})"
-            : $"{cap.Screen}: no advised option ({string.Join(",", Remaining)}) is among the {list.Count} the screen offers");
+            : $"{cap.Screen}: no advised option ({string.Join(",", Remaining)}) is among the {list.Count} the screen offers"
+              + (typeof(T) == typeof(NEventOptionButton) ? " (the handler drops locked options and options that would kill the player)" : ""));
     }
 
     /// <summary>After a handler returns: advised picks it never asked for (a screen that confirmed early).</summary>
