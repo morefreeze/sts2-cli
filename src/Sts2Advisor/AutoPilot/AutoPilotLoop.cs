@@ -36,6 +36,10 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     private const double FetchSeconds = 20;
     private const int MaxSameOverlay = 3;
     private const int MaxNoProgress = 3;
+    /// <summary>How long an open map may take to enable travel (it animates in after Proceed) before it is taken for
+    /// one the player opened to look at.</summary>
+    private const int MapTravelWaitMs = 2000;
+    private const int MapTravelPollMs = 100;
     /// <summary>An event can start a combat; CombatSolver may need minutes per turn.</summary>
     private static readonly TimeSpan EventTimeout = TimeSpan.FromHours(4);
 
@@ -129,36 +133,31 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             throw new AutoPilotStopException(StopReason.Multiplayer, null);
 
         var overlay = NOverlayStack.Instance?.Peek();
-        if (overlay is NGameOverScreen)
-            throw new AutoPilotStopException(StopReason.GameOver, null);
-        // A blocking popup (a first-time tip, say) is the player's, like an overlay without advice.
-        if (ModalOpen())
+        // The order is the game's own (ActiveScreenContext): the open map comes before the overlay stack.
+        switch (AutoPilotScreenOrder.Next(overlay is NGameOverScreen, ModalOpen(), CombatManager.Instance?.IsInProgress == true,
+                                          NMapScreen.Instance is { IsOpen: true }, overlay != null))
         {
-            await HandBackAsync("modal", ModalOpen, ct);
-            return;
-        }
-        // Combat first: an overlay in combat (a pile select, say) belongs to CombatSolver or the player.
-        if (CombatManager.Instance?.IsInProgress == true)
-        {
-            _session.InCombat = true;
-            try { await CombatWait.UntilOverAsync(ct); }
-            finally { _session.InCombat = false; }
-            MarkProgress();
-            return;
-        }
-        if (overlay != null)
-        {
-            await HandleOverlayAsync(overlay, ct);
-            return;
+            case AutoPilotScreen.GameOver:
+                throw new AutoPilotStopException(StopReason.GameOver, null);
+            case AutoPilotScreen.Modal:
+                // A blocking popup (a first-time tip, say) is the player's, like an overlay without advice.
+                await HandBackAsync("modal", ModalOpen, ct);
+                return;
+            case AutoPilotScreen.Combat:
+                // An overlay in combat (a pile select, say) belongs to CombatSolver or the player.
+                _session.InCombat = true;
+                try { await CombatWait.UntilOverAsync(ct); }
+                finally { _session.InCombat = false; }
+                MarkProgress();
+                return;
+            case AutoPilotScreen.Map:
+                await HandleMapAsync(ct);
+                return;
+            case AutoPilotScreen.Overlay:
+                await HandleOverlayAsync(overlay!, ct);
+                return;
         }
         _sameOverlay = 0;
-
-        if (NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true })
-        {
-            await RunHandlerAsync(_map, _map.Timeout, ct);
-            MarkProgress();
-            return;
-        }
 
         var room = rs.CurrentRoom;
         string roomKey = $"{rs.CurrentActIndex}/{rs.TotalFloor}/{room?.RoomType}";
@@ -185,6 +184,29 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             return;
         await IdleAsync(rs, room, ct);
     }
+
+    /// <summary>The map is open, so it is the screen in front -- whatever the overlay stack still holds (the rewards
+    /// screen stays in it after Proceed). Travel is usually enabled at once; right after Proceed the map may still be
+    /// animating in, so give it a moment. A map that stays closed to travel is one the player opened to look at.</summary>
+    private async Task HandleMapAsync(CancellationToken ct)
+    {
+        _sameOverlay = 0;  // the overlay under the map is not being retried
+        for (int waited = 0; waited < MapTravelWaitMs && MapOpenWithoutTravel(); waited += MapTravelPollMs)
+            await Task.Delay(MapTravelPollMs, ct);
+        if (NMapScreen.Instance is not { IsOpen: true })
+            return;  // closed in the meantime: the next step looks again
+        if (MapOpenWithoutTravel())
+        {
+            if (_session.StepDone)  // a decision for the player, like an overlay without advice
+                throw new AutoPilotStopException(StopReason.StepDone, null);
+            await HandBackAsync(nameof(NMapScreen), MapOpenWithoutTravel, ct);
+            return;
+        }
+        await RunHandlerAsync(_map, _map.Timeout, ct);
+        MarkProgress();
+    }
+
+    private static bool MapOpenWithoutTravel() => NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: false };
 
     private async Task HandleOverlayAsync(IOverlayScreen overlay, CancellationToken ct)
     {
@@ -438,7 +460,9 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         {
             ct.ThrowIfCancellationRequested();
             var overlay = NOverlayStack.Instance?.Peek();
-            if (overlay != null && overlay is not NGameOverScreen && CombatManager.Instance?.IsInProgress != true)
+            // modal: false -- a tip popup is answered by the overlay's own handler (FetchAdviceAsync hands it back).
+            if (overlay != null && AutoPilotScreenOrder.Next(overlay is NGameOverScreen, false, CombatManager.Instance?.IsInProgress == true,
+                                                             NMapScreen.Instance is { IsOpen: true }, true) == AutoPilotScreen.Overlay)
                 await HandleOverlayAsync(overlay, ct);
             await Task.Delay(50, ct);
         }
