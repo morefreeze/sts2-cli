@@ -116,4 +116,86 @@ public class AutoPilotSessionTests
         s.Record("x", null);
         Assert.False(s.StepDone);
     }
+
+    [Fact]
+    public void RecordKeepsTheDetailsOfEachStep()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("a", null);
+        s.Record("b", "why", new[] { "line 1", "line 2" });
+        Assert.Equal(new[] { "line 1", "line 2" }, s.Steps[0].Details);
+        Assert.Empty(s.Steps[1].Details);
+    }
+
+    [Fact]
+    public void NoStepYetMeansNothingToHold()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        Assert.Equal(0, s.HoldRemaining(100, 2.5));
+    }
+
+    [Fact]
+    public void AStepIsHeldForThePauseAfterItsTime()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("a", null, null, at: 100);
+        Assert.Equal(2.5, s.HoldRemaining(100, 2.5), 6);
+        Assert.Equal(1.0, s.HoldRemaining(101.5, 2.5), 6);
+        Assert.Equal(0, s.HoldRemaining(102.5, 2.5));
+        Assert.Equal(0, s.HoldRemaining(200, 2.5));
+    }
+
+    [Fact]
+    public void ThePauseOfTheNewestStepCounts()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("a", null, null, at: 100);
+        s.Record("b", null, null, at: 110);
+        Assert.Equal(2.0, s.HoldRemaining(110.5, 2.5), 6);
+    }
+
+    [Fact]
+    public void AZeroOrNegativePauseNeverHolds()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("a", null, null, at: 100);
+        Assert.Equal(0, s.HoldRemaining(100, 0));
+        Assert.Equal(0, s.HoldRemaining(100, -3));
+    }
+
+    [Fact]
+    public void ASingleStepIsNeverHeld()
+    {
+        var s = new AutoPilotSession();
+        s.Start(singleStep: true);
+        s.Record("a", null, null, at: 100);
+        Assert.Equal(0, s.HoldRemaining(100, 2.5));
+    }
+
+    [Fact]
+    public void AnUntimedStepIsNeverHeldAndStartForgetsTheLastRun()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("a", null);
+        Assert.Equal(0, s.HoldRemaining(100, 2.5));
+        s.Record("b", null, null, at: 100);
+        s.Stop(StopReason.Hotkey, null);
+        s.Start();
+        Assert.Equal(0, s.HoldRemaining(100, 2.5));
+    }
+
+    [Fact]
+    public void TheHoldNeverExceedsThePauseEvenIfTheClockMovesBack()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("a", null, null, at: 100);
+        Assert.Equal(2.5, s.HoldRemaining(50, 2.5), 6);
+    }
 }

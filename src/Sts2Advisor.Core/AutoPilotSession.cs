@@ -12,7 +12,9 @@ public enum AutoPilotMode { Advice, Running }
 /// StepDone: a single step executed its one advised choice and reached the next decision.</summary>
 public enum StopReason { Hotkey, GameOver, LeftRun, Multiplayer, HandlerFailed, Stuck, Offline, BadReply, Unsupported, Disabled, StepDone }
 
-public sealed record AutoPilotStep(int Number, string Text, string? Reason);
+/// <summary><paramref name="Details"/>: what the choice was, in the game's words (a card's or relic's description),
+/// one panel line each; shown under the newest step only.</summary>
+public sealed record AutoPilotStep(int Number, string Text, string? Reason, IReadOnlyList<string> Details);
 
 /// <summary>The autopilot's state, kept apart from the game so it can be tested. Main thread only.</summary>
 public sealed class AutoPilotSession
@@ -37,6 +39,10 @@ public sealed class AutoPilotSession
     public IReadOnlyList<AutoPilotStep> Steps => _steps;
     public int StepCount { get; private set; }
 
+    /// <summary>When (seconds on the caller's clock) the newest step was taken; null before the first, or when
+    /// the step was recorded without a time.</summary>
+    public double? LastStepAt { get; private set; }
+
     /// <summary>Started as a single step: stop at the next decision once one advised choice is executed.</summary>
     public bool SingleStep { get; private set; }
 
@@ -52,6 +58,7 @@ public sealed class AutoPilotSession
         SingleStep = singleStep;
         _steps.Clear();
         StepCount = 0;
+        LastStepAt = null;
         LastStop = null;
         LastStopDetail = null;
         HandBackScreen = null;
@@ -72,17 +79,29 @@ public sealed class AutoPilotSession
         InCombat = false;
     }
 
-    /// <summary>Records an executed step; returns its number (1-based, over the whole session).</summary>
-    public int Record(string text, string? reason)
+    /// <summary>Records an executed step taken at <paramref name="at"/> seconds; returns its number (1-based, over
+    /// the whole session).</summary>
+    public int Record(string text, string? reason, IReadOnlyList<string>? details = null, double? at = null)
     {
         StepCount++;
-        _steps.Insert(0, new AutoPilotStep(StepCount, text, reason));
+        LastStepAt = at;
+        _steps.Insert(0, new AutoPilotStep(StepCount, text, reason, details ?? Array.Empty<string>()));
         if (_steps.Count > MaxSteps)
             _steps.RemoveAt(_steps.Count - 1);
         _retryFingerprint = null;
         _retries = 0;
         _totalRetries = 0;
         return StepCount;
+    }
+
+    /// <summary>Seconds still to wait before acting on the next screen, so the newest step stays on the panel for
+    /// <paramref name="pauseSeconds"/> after it was taken. Zero for a single step (it stops at the next decision and
+    /// the panel keeps showing the step), without a timed step, or without a pause.</summary>
+    public double HoldRemaining(double now, double pauseSeconds)
+    {
+        if (SingleStep || LastStepAt is not { } at || !(pauseSeconds > 0))
+            return 0;
+        return Math.Clamp(at + pauseSeconds - now, 0, pauseSeconds);
     }
 
     public void HandBack(string screen) => HandBackScreen = screen;

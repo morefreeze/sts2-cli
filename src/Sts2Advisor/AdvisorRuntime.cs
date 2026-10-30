@@ -89,7 +89,7 @@ internal static class AdvisorRuntime
         bool locOk = _loc is { IsLoaded: true };
         string gameUserDir = System.IO.Path.GetDirectoryName(userDir) ?? userDir;
         AutoPilotControl.Init(_advisor, locOk ? _loc : null, _trace, gameUserDir, () => Clock.Elapsed.TotalSeconds,
-                   autopilotProblem ?? (locOk ? null : $"repo_path ({configPath})"));
+                   config.StepPauseSeconds, autopilotProblem ?? (locOk ? null : $"repo_path ({configPath})"));
         if (!locOk)
         {
             _configProblem = $"repo_path ({configPath})";

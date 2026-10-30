@@ -6,12 +6,15 @@ namespace Sts2Advisor.Core;
 /// (written by tools/install_advisor_mod.sh). Missing or unusable keys take the defaults.</summary>
 public sealed record AdvisorConfig(string RepoPath, string Python, int Port, bool Autostart, string Hotkey,
                                    string AutopilotHotkey = AdvisorConfig.DefaultAutopilotHotkey,
-                                   string StepHotkey = AdvisorConfig.DefaultStepHotkey)
+                                   string StepHotkey = AdvisorConfig.DefaultStepHotkey,
+                                   double StepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds)
 {
     public const int DefaultPort = 8767;
     public const string DefaultHotkey = "F8";
     public const string DefaultAutopilotHotkey = "F9";
     public const string DefaultStepHotkey = "F10";
+    public const double DefaultStepPauseSeconds = 2.5;
+    public const double MaxStepPauseSeconds = 10;
 
     public static AdvisorConfig Defaults { get; } = new("", "", DefaultPort, true, DefaultHotkey);
 
@@ -26,7 +29,9 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
     /// inner one), not JSON, or JSON whose root is not an object. Inside a usable file, a key with
     /// the wrong type takes its default; "port" must be a JSON number in 1..65535 (else 8767) and
     /// "autostart" a boolean or the string "true"/"false" in any case (else true).
-    /// "autopilot_hotkey" is a Godot Key name like "hotkey" (else "F9"); "step_hotkey" likewise (else "F10").</summary>
+    /// "autopilot_hotkey" is a Godot Key name like "hotkey" (else "F9"); "step_hotkey" likewise (else "F10").
+    /// "step_pause_seconds" -- how long the autopilot leaves a step on the panel before acting on the next screen --
+    /// must be a JSON number, clamped to 0..10 (0 = no pause), else 2.5.</summary>
     public static AdvisorConfig Load(string path)
     {
         try
@@ -44,7 +49,8 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                 ReadAutostart(root),
                 Str(root, "hotkey") ?? DefaultHotkey,
                 Str(root, "autopilot_hotkey") ?? DefaultAutopilotHotkey,
-                Str(root, "step_hotkey") ?? DefaultStepHotkey);
+                Str(root, "step_hotkey") ?? DefaultStepHotkey,
+                ReadStepPause(root));
         }
         catch (Exception e)
         {
@@ -56,6 +62,11 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
         root.TryGetProperty("port", out var p) && p.ValueKind == JsonValueKind.Number
         && p.TryGetInt32(out var port) && port is >= 1 and <= 65535
             ? port : DefaultPort;
+
+    private static double ReadStepPause(JsonElement root) =>
+        root.TryGetProperty("step_pause_seconds", out var p) && p.ValueKind == JsonValueKind.Number
+        && p.TryGetDouble(out var seconds) && double.IsFinite(seconds)
+            ? Math.Clamp(seconds, 0, MaxStepPauseSeconds) : DefaultStepPauseSeconds;
 
     private static bool ReadAutostart(JsonElement root)
     {

@@ -5,6 +5,11 @@ public enum PanelAction { Step, Auto, Stop }
 
 public sealed record PanelButton(PanelAction Action, string Text);
 
+/// <summary>One thing a step chose, for the panel's description line: its name, the game's raw description text
+/// (BBCode and all; <see cref="DescriptionText"/> makes it plain) and whether that is the card as it will be after
+/// the upgrade being picked.</summary>
+public sealed record DetailItem(string Name, string Raw, bool AfterUpgrade = false);
+
 /// <summary>The panel while the autopilot runs, and the one-line banner after it stops.</summary>
 public static class AutoPilotText
 {
@@ -18,6 +23,32 @@ public static class AutoPilotText
     public static string? Reason(AdviceReply reply, bool zh) =>
         reply.Rules.FirstOrDefault(r => r.Outcome == "fired" && !TraceText.IsHidden(r)) is { } rule
             ? TraceText.Rule(rule, zh) : null;
+
+    /// <summary>Items shown at most: a deck select or a bundle holds a few cards, never a screenful.</summary>
+    public const int MaxDetailItems = 4;
+
+    /// <summary>The newest step's description lines: the plain description when one thing was chosen (its name is
+    /// already in the step text), "name: description" for each of several. Nothing when there is no description.</summary>
+    public static IReadOnlyList<string> DetailLines(IReadOnlyList<DetailItem> items, bool zh)
+    {
+        var lines = new List<string>();
+        foreach (var item in items.Take(MaxDetailItems))
+        {
+            string text = DescriptionText.Plain(item.Raw, zh);
+            if (text != "" && item.AfterUpgrade)
+                text = T(zh, "升级后：", "After upgrade: ") + text;
+            if (items.Count == 1)
+            {
+                if (text != "")
+                    lines.Add(text);
+            }
+            else
+            {
+                lines.Add(text == "" ? item.Name : item.Name + T(zh, "：", ": ") + text);
+            }
+        }
+        return lines;
+    }
 
     public static IReadOnlyList<PanelLine> Running(AutoPilotSession s, string autoKey, string stepKey, CombatSolverStatus combat, bool zh)
     {
@@ -38,6 +69,8 @@ public static class AutoPilotText
         {
             var step = s.Steps[i];
             lines.Add(new PanelLine(step.Text, i == 0 ? LineStyle.Pick : LineStyle.Normal));
+            if (i == 0)  // what was chosen, in the game's words; earlier steps keep the short form
+                lines.AddRange(step.Details.Select(d => new PanelLine("  " + d, LineStyle.Muted)));
             if (step.Reason != null)
                 lines.Add(new PanelLine("  " + step.Reason, LineStyle.Muted));
         }

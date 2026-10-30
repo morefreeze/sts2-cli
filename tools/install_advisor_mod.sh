@@ -24,7 +24,8 @@ if [ ! -f "$USER_DIR/config.json" ]; then
   "autostart": true,
   "hotkey": "F8",
   "autopilot_hotkey": "F9",
-  "step_hotkey": "F10"
+  "step_hotkey": "F10",
+  "step_pause_seconds": 2.5
 }
 EOCFG
   echo "wrote $USER_DIR/config.json"

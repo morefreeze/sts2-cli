@@ -16,6 +16,7 @@ internal static class AutoPilotControl
     private static AdvisorTraceLog? _trace;
     private static string _gameUserDir = "";
     private static Func<double> _now = () => 0;
+    private static double _stepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds;
     private static string? _unavailable;
     private static CancellationTokenSource? _cts;
     private static Task? _runTask;
@@ -35,13 +36,14 @@ internal static class AutoPilotControl
     /// <summary><paramref name="unavailable"/>: why the autopilot cannot run (handlers not patched, no
     /// localization); null when it can.</summary>
     public static void Init(IAdvisor advisor, LocLookup? loc, AdvisorTraceLog? trace, string gameUserDir,
-                            Func<double> now, string? unavailable)
+                            Func<double> now, double stepPauseSeconds, string? unavailable)
     {
         _advisor = advisor;
         _loc = loc;
         _trace = trace;
         _gameUserDir = gameUserDir;
         _now = now;
+        _stepPauseSeconds = stepPauseSeconds;
         _unavailable = unavailable;
     }
 
@@ -94,7 +96,7 @@ internal static class AutoPilotControl
         var cts = new CancellationTokenSource();
         _cts = cts;
         ModLog.Info($"autopilot: started ({(singleStep ? "single step" : "full auto")}, CombatSolver {_combatSolver})");
-        var loop = new AutoPilotLoop(_advisor, _loc, _trace, Session, _now);
+        var loop = new AutoPilotLoop(_advisor, _loc, _trace, Session, _now, _stepPauseSeconds);
         _runTask = RunAsync(loop, cts);
     }
 

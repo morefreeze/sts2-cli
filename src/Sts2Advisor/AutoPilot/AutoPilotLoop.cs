@@ -48,6 +48,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     private readonly AdvisorTraceLog? _trace;
     private readonly AutoPilotSession _session;
     private readonly Func<double> _now;
+    private readonly double _stepPauseSeconds;
     private readonly Rng _rng = new(0uL);  // never drawn from: every NextItem in the handlers is redirected
     private readonly Dictionary<Type, IScreenHandler> _screens;
     private readonly EventRoomHandler _event = new();
@@ -63,13 +64,17 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     private int _noProgressCount;
     private (int Act, int Floor) _stepFloor;
 
-    public AutoPilotLoop(IAdvisor advisor, LocLookup loc, AdvisorTraceLog? trace, AutoPilotSession session, Func<double> now)
+    /// <param name="stepPauseSeconds">How long a step stays on the panel before the next screen is acted on
+    /// (config step_pause_seconds); a single step is never held.</param>
+    public AutoPilotLoop(IAdvisor advisor, LocLookup loc, AdvisorTraceLog? trace, AutoPilotSession session, Func<double> now,
+                         double stepPauseSeconds)
     {
         _advisor = advisor;
         _loc = loc;
         _trace = trace;
         _session = session;
         _now = now;
+        _stepPauseSeconds = stepPauseSeconds;
         _map = new MapHandler(this);
         _shop = new ShopHandler(this);
         _screens = new Dictionary<Type, IScreenHandler>
@@ -128,6 +133,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
 
     private async Task StepAsync(CancellationToken ct)
     {
+        await HoldAsync(ct);
         var rs = RunManager.Instance?.DebugOnlyGetState() ?? throw new AutoPilotStopException(StopReason.LeftRun, null);
         if (rs.Players.Count != 1)
             throw new AutoPilotStopException(StopReason.Multiplayer, null);
@@ -183,6 +189,19 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         if (await ClickProceedAsync(ct))
             return;
         await IdleAsync(rs, room, ct);
+    }
+
+    /// <summary>Lets the newest step stay on the panel for step_pause_seconds after it was taken, before anything
+    /// is done on the next screen. Cancelled by F9 / Stop like every wait here.</summary>
+    private async Task HoldAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            double left = _session.HoldRemaining(_now(), _stepPauseSeconds);
+            if (left <= 0)
+                return;
+            await Task.Delay(TimeSpan.FromSeconds(Math.Min(left, 0.1)), ct);
+        }
     }
 
     /// <summary>The map is open, so it is the screen in front -- whatever the overlay stack still holds (the rewards
@@ -355,6 +374,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         // (shop removal, smith, an event's "remove a card"): that is the second half of the same step.
         if (_session.StepDone && !OpenedByTheStep())
             throw new AutoPilotStopException(StopReason.StepDone, null);
+        // Handlers that decide several times in a row (shop purchases, an event's pages) come back here, not to StepAsync.
+        await HoldAsync(ct);
         string? last = null;
         double deadline = _now() + FetchSeconds;
         while (true)
@@ -448,7 +469,9 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         _stepFloor = CurrentFloor();
         bool zh = GameText.IsChinese;
         int n = _session.Record(AutoPilotText.StepText(a.Capture.Header.Decision, a.Reply, a.Capture.Labels, zh),
-                                AutoPilotText.Reason(a.Reply, zh));
+                                AutoPilotText.Reason(a.Reply, zh),
+                                AutoPilotText.DetailLines(StepDetails.Of(a), zh),
+                                _now());
         _trace?.Append(a.Capture.Header.Decision, a.Json, a.Reply.Raw, null, autopilotStep: n);
         ModLog.Info($"autopilot step {n}: {a.Capture.Header.Decision} {a.Reply.ActionName}");
     }

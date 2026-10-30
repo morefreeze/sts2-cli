@@ -120,4 +120,102 @@ public class AutoPilotTextTests
         Assert.Equal(PanelAction.Stop, Assert.Single(running).Action);
         Assert.Equal("Stop", running[0].Text);
     }
+
+    private static readonly string EnergyIcon = "[img]res://images/packed/sprite_fonts/ironclad_energy_icon.png[/img]";
+
+    [Fact]
+    public void ADetailLineIsTheCardsPlainDescriptionWhenOneCardWasChosen()
+    {
+        var lines = AutoPilotText.DetailLines(new[] { new DetailItem("Bash", "Deal [blue]8[/blue] damage.\nApply [gold]2[/gold] [gold]Vulnerable[/gold].") }, zh: false);
+        Assert.Equal(new[] { "Deal 8 damage. Apply 2 Vulnerable." }, lines);
+    }
+
+    [Fact]
+    public void ADetailLineSaysWhenItIsTheCardAfterTheUpgrade()
+    {
+        var item = new DetailItem("痛击", "造成[green]10[/green]点伤害。", AfterUpgrade: true);
+        Assert.Equal(new[] { "升级后：造成10点伤害。" }, AutoPilotText.DetailLines(new[] { item }, zh: true));
+        Assert.Equal(new[] { "After upgrade: 造成10点伤害。" }, AutoPilotText.DetailLines(new[] { item }, zh: false));
+    }
+
+    [Fact]
+    public void SeveralChosenItemsEachNameThemselves()
+    {
+        var items = new[]
+        {
+            new DetailItem("打击", "造成6点伤害。"),
+            new DetailItem("防御", "获得5点[gold]格挡[/gold]。"),
+        };
+        Assert.Equal(new[] { "打击：造成6点伤害。", "防御：获得5点格挡。" }, AutoPilotText.DetailLines(items, zh: true));
+        Assert.Equal(new[] { "Strike: Deal 6 damage.", "Defend: Gain 5 Block." },
+            AutoPilotText.DetailLines(new[] { new DetailItem("Strike", "Deal 6 damage."), new DetailItem("Defend", "Gain 5 [gold]Block[/gold].") }, zh: false));
+    }
+
+    [Fact]
+    public void AnItemWithoutADescriptionAddsNoLineWhenAlone()
+    {
+        Assert.Empty(AutoPilotText.DetailLines(new[] { new DetailItem("Bash", "") }, zh: false));
+        Assert.Empty(AutoPilotText.DetailLines(Array.Empty<DetailItem>(), zh: false));
+    }
+
+    [Fact]
+    public void AnItemWithoutADescriptionStillNamesItselfAmongSeveral()
+    {
+        var items = new[] { new DetailItem("A", ""), new DetailItem("B", "text") };
+        Assert.Equal(new[] { "A", "B: text" }, AutoPilotText.DetailLines(items, zh: false));
+    }
+
+    [Fact]
+    public void OnlyTheFirstFewItemsGetALine()
+    {
+        var items = Enumerable.Range(1, AutoPilotText.MaxDetailItems + 3).Select(i => new DetailItem($"c{i}", $"d{i}")).ToList();
+        var lines = AutoPilotText.DetailLines(items, zh: false);
+        Assert.Equal(AutoPilotText.MaxDetailItems, lines.Count);
+        Assert.Equal("c1: d1", lines[0]);
+    }
+
+    [Fact]
+    public void ALongDescriptionIsCutInTheDetailLine()
+    {
+        var line = Assert.Single(AutoPilotText.DetailLines(new[] { new DetailItem("x", new string('a', 300)) }, zh: false));
+        Assert.Equal(DescriptionText.DefaultMaxChars, line.Length);
+        Assert.EndsWith("…", line);
+    }
+
+    [Fact]
+    public void EnergyIconsInADetailLineBecomeText()
+    {
+        var line = Assert.Single(AutoPilotText.DetailLines(new[] { new DetailItem("Offering", $"Gain {EnergyIcon}{EnergyIcon}.") }, zh: false));
+        Assert.Equal("Gain 2 Energy.", line);
+    }
+
+    [Fact]
+    public void TheLatestStepShowsItsDetailsOnMutedLinesUnderItAndEarlierStepsDoNot()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("地图：问号", null, new[] { "ignored: this is not the newest step" });
+        s.Record("卡牌奖励：痛击", "因为", new[] { "造成8点伤害。", "施加2层易伤。" });
+        var lines = AutoPilotText.Running(s, "F9", "F10", CombatSolverStatus.Ok, zh: true);
+        Assert.Equal(new PanelLine("全托管中 · F9 接管", LineStyle.Title), lines[0]);
+        Assert.Equal(new PanelLine("卡牌奖励：痛击", LineStyle.Pick), lines[1]);
+        Assert.Equal(new PanelLine("  造成8点伤害。", LineStyle.Muted), lines[2]);
+        Assert.Equal(new PanelLine("  施加2层易伤。", LineStyle.Muted), lines[3]);
+        Assert.Equal(new PanelLine("  因为", LineStyle.Muted), lines[4]);
+        Assert.Equal(new PanelLine("地图：问号", LineStyle.Normal), lines[5]);
+        Assert.Equal(6, lines.Count);
+        Assert.DoesNotContain(lines, l => l.Text.Contains("ignored"));
+    }
+
+    [Fact]
+    public void AStepWithoutDetailsRendersAsBefore()
+    {
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("事件：离开", "因为");
+        var lines = AutoPilotText.Running(s, "F9", "F10", CombatSolverStatus.Ok, zh: true);
+        Assert.Equal(new PanelLine("事件：离开", LineStyle.Pick), lines[1]);
+        Assert.Equal(new PanelLine("  因为", LineStyle.Muted), lines[2]);
+        Assert.Equal(3, lines.Count);
+    }
 }

@@ -171,4 +171,39 @@ public class AdvisorConfigTests
         Assert.Equal("F11", AdvisorConfig.Load(Write("""{"step_hotkey": "F11"}""")).StepHotkey);
         Assert.Equal("F10", AdvisorConfig.Load(Write("""{"step_hotkey": 11}""")).StepHotkey);
     }
+
+    [Fact]
+    public void StepPauseDefaultsTo2_5SecondsAndIsRead()
+    {
+        Assert.Equal(2.5, AdvisorConfig.Defaults.StepPauseSeconds);
+        Assert.Equal(2.5, AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).StepPauseSeconds);
+        Assert.Equal(4, AdvisorConfig.Load(Write("""{"step_pause_seconds": 4}""")).StepPauseSeconds);
+        Assert.Equal(0.75, AdvisorConfig.Load(Write("""{"step_pause_seconds": 0.75}""")).StepPauseSeconds);
+        Assert.Equal(0, AdvisorConfig.Load(Write("""{"step_pause_seconds": 0}""")).StepPauseSeconds);
+    }
+
+    [Theory]
+    [InlineData("-1", 0)]
+    [InlineData("-0.5", 0)]
+    [InlineData("10", 10)]
+    [InlineData("10.5", 10)]
+    [InlineData("999", 10)]
+    [InlineData("1e9", 10)]
+    [InlineData("1e400", 2.5)]
+    public void StepPauseIsClampedToZeroToTen(string json, double expected)
+    {
+        Assert.Equal(expected, AdvisorConfig.Load(Write($$"""{"step_pause_seconds": {{json}}}""")).StepPauseSeconds);
+    }
+
+    [Theory]
+    [InlineData("\"3\"")]
+    [InlineData("true")]
+    [InlineData("null")]
+    [InlineData("[3]")]
+    [InlineData("{}")]
+    [InlineData("\"\"")]
+    public void AnUnusableStepPauseTakesTheDefault(string json)
+    {
+        Assert.Equal(2.5, AdvisorConfig.Load(Write($$"""{"step_pause_seconds": {{json}}}""")).StepPauseSeconds);
+    }
 }
