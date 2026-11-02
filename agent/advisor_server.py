@@ -3,6 +3,10 @@
 
   POST /advise  body: one decision JSON (the headless engine's shape)
                 reply: {"action", "options", "rules", "warnings", "unverified", "policy"}
+  POST /potion_swap  body: {"state": a decision (player.potions, player.potion_slots),
+                           "offered": [potion dicts, as in player.potions]}
+                reply: {"discard", "take", "discard_id", "take_id", "held_scores",
+                        "offered_scores", "margin", "reason"} -- see agent/potion_swap.py
   GET  /health  reply: {"ok", "policy", "commit", "warnings"}
 
 `action` is exactly what play_full_run's greedy policy plays (same import path,
@@ -43,6 +47,7 @@ for _p in (ROOT, os.path.join(ROOT, "python")):
         sys.path.insert(0, _p)
 
 import play_full_run  # noqa: E402
+from agent.potion_swap import choose_potion_swap  # noqa: E402
 from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, GreedyTrace,  # noqa: E402
                                 behavior_env_is_default, reset_greedy_context)
 
@@ -137,6 +142,17 @@ def advise(state: dict, greedy, warnings: list) -> dict:
     return advice
 
 
+def potion_swap(request: dict):
+    """(reply, None) or (None, error message) for a /potion_swap body."""
+    state, offered = request.get("state"), request.get("offered")
+    player = state.get("player") if isinstance(state, dict) else None
+    if not isinstance(player, dict):
+        return None, "state.player must be an object"
+    if not isinstance(offered, list) or not all(isinstance(p, dict) for p in offered):
+        return None, "offered must be a list of potion objects"
+    return choose_potion_swap(player, offered), None
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "Sts2Advisor/1"
     timeout = CLIENT_TIMEOUT  # socket timeout for every read on a connection
@@ -161,7 +177,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            if self.path != "/advise":
+            if self.path not in ("/advise", "/potion_swap"):
                 return self._send(404, {"error": "not found"})
             body, error = self._read_body()
             if error:
@@ -172,6 +188,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "body is not JSON"})
             if not isinstance(state, dict):
                 return self._send(400, {"error": "body must be a decision object"})
+            if self.path == "/potion_swap":
+                reply, problem = potion_swap(state)
+                if problem:
+                    return self._send(400, {"error": problem})
+                return self._send(200, reply)
             self._send(200, advise(state, self.server.greedy, self.server.warnings))
         except Exception as exc:
             self._fail(exc)

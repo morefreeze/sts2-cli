@@ -28,6 +28,10 @@ internal static class StepDetails
         }
     }
 
+    /// <summary>The descriptions of potions a swap names (the one discarded, the one taken), as the game shows them.</summary>
+    public static IReadOnlyList<DetailItem> OfPotions(params PotionModel[] potions) =>
+        potions.Select(p => Item(GameText.Potion(p), () => p.DynamicDescription.GetFormattedText(), false)).ToList();
+
     private static List<DetailItem> Collect(CachedAdvice a)
     {
         var cap = a.Capture;

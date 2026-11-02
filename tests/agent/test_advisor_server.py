@@ -427,3 +427,67 @@ def test_service_process_exits_when_its_stdin_closes(tmp_path):
             proc.kill()
             proc.wait()
         log.close()
+
+
+def _post_json(port, path, body):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+
+
+_FAIRY = {"id": "POTION.FAIRY_IN_A_BOTTLE", "name": {"en": "Fairy in a Bottle"},
+          "description": {"en": "When your HP would be reduced to 0, instead this potion is "
+                                "discarded and you heal to 30% of your Max HP."}}
+_STRENGTH = {"id": "POTION.STRENGTH_POTION", "name": {"en": "Strength Potion"},
+             "description": {"en": "Gain 2 Strength."}}
+_FIRE = {"id": "POTION.FIRE_POTION", "name": {"en": "Fire Potion"},
+         "description": {"en": "Deal 20 damage."}}
+
+
+def _belt(*potions, slots=3):
+    return {"decision": "potion_swap",
+            "player": {"potions": [dict(p, index=i) for i, p in enumerate(potions)],
+                       "potion_slots": slots}}
+
+
+def test_potion_swap_full_belt_trades_the_weakest_for_a_fairy(live_server):
+    _server, port = live_server
+    reply = _post_json(port, "/potion_swap",
+                       {"state": _belt(_STRENGTH, _FIRE, _STRENGTH), "offered": [_FAIRY]})
+    assert reply["reason"] == "swap"
+    assert reply["discard"] == 1 and reply["discard_id"] == "POTION.FIRE_POTION"
+    assert reply["take"] == 0 and reply["take_id"] == "POTION.FAIRY_IN_A_BOTTLE"
+
+
+def test_potion_swap_keeps_the_belt_against_a_worse_potion(live_server):
+    _server, port = live_server
+    reply = _post_json(port, "/potion_swap",
+                       {"state": _belt(_STRENGTH, _STRENGTH, _STRENGTH), "offered": [_FIRE]})
+    assert reply["reason"] == "not_better" and reply["discard"] is None and reply["take"] is None
+
+
+def test_potion_swap_with_a_free_slot_just_takes(live_server):
+    _server, port = live_server
+    reply = _post_json(port, "/potion_swap", {"state": _belt(_STRENGTH), "offered": [_FIRE]})
+    assert reply["reason"] == "free_slot" and reply["discard"] is None and reply["take"] == 0
+
+
+@pytest.mark.parametrize("body", [
+    {"offered": []},                                        # no state
+    {"state": {"decision": "x"}, "offered": []},            # no player
+    {"state": {"player": {}}},                              # no offered
+    {"state": {"player": {}}, "offered": ["Fairy"]},        # not potion objects
+])
+def test_potion_swap_rejects_malformed_bodies(live_server, body):
+    _server, port = live_server
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post_json(port, "/potion_swap", body)
+    assert err.value.code == 400
+
+
+def test_potion_swap_leaves_advise_alone(live_server):
+    _server, port = live_server
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post_json(port, "/nope", {})
+    assert err.value.code == 404

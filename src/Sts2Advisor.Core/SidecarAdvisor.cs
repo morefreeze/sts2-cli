@@ -36,6 +36,16 @@ public sealed class SidecarAdvisor : IAdvisor, IDisposable
         return AdviceReply.Parse(body);
     }
 
+    public async Task<PotionSwapReply> PotionSwapAsync(string requestJson, CancellationToken ct)
+    {
+        using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
+        using var response = await _http.PostAsync("potion_swap", content, ct).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            throw new AdviceServiceException((int)response.StatusCode, ErrorText(body, response));
+        return PotionSwapReply.Parse(body);
+    }
+
     /// <summary>True only for a 2xx {"ok": true}. Any other answer, an unreachable service and a
     /// timeout are false. A cancellation requested through <paramref name="ct"/> is rethrown.</summary>
     public async Task<bool> IsHealthyAsync(CancellationToken ct)

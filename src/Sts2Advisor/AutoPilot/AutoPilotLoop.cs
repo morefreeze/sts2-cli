@@ -6,6 +6,9 @@ using MegaCrit.Sts2.Core.AutoSlay.Handlers.Rooms;
 using MegaCrit.Sts2.Core.AutoSlay.Handlers.Screens;
 using MegaCrit.Sts2.Core.AutoSlay.Helpers;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Events;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom;
@@ -79,7 +82,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         _shop = new ShopHandler(this);
         _screens = new Dictionary<Type, IScreenHandler>
         {
-            [typeof(NRewardsScreen)] = new RewardsHandler(),
+            [typeof(NRewardsScreen)] = new RewardsHandler(this),
             [typeof(NCardRewardSelectionScreen)] = new CardRewardHandler(this),
             // The grid handlers' own random picks are replaced by the advised cards (GridSelectHandler).
             [typeof(NDeckUpgradeSelectScreen)] = new GridSelectHandler(this, new DeckUpgradeScreenHandler(), GridPress.Holder),
@@ -474,6 +477,81 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
                                 _now());
         _trace?.Append(a.Capture.Header.Decision, a.Json, a.Reply.Raw, null, autopilotStep: n);
         ModLog.Info($"autopilot step {n}: {a.Capture.Header.Decision} {a.Reply.ActionName}");
+    }
+
+    private const double PotionDiscardSeconds = 5;
+    private bool _potionSwapFailureLogged;
+
+    public async Task<bool> MakeRoomForPotionAsync(Player me, PotionReward reward, CancellationToken ct)
+    {
+        string request = "";
+        try
+        {
+            if (reward.Potion is not { } offered)
+                return false;
+            var held = me.Potions.ToList();
+            // The same potion dicts the decision JSON carries (Sts2Shared), in a minimal state: greedy's scorer
+            // reads player.potions / potion_slots only.
+            var state = new Dictionary<string, object?>
+            {
+                ["decision"] = "potion_swap",
+                ["player"] = new Dictionary<string, object?>
+                {
+                    ["potions"] = held.Select((p, i) => DecisionSerializer.PotionDict(p, i, _loc)).ToList(),
+                    ["potion_slots"] = me.MaxPotionCount,
+                },
+            };
+            var offeredList = new List<Dictionary<string, object?>> { DecisionSerializer.PotionDict(offered, 0, _loc) };
+            request = JsonSerializer.Serialize(new Dictionary<string, object?> { ["state"] = state, ["offered"] = offeredList },
+                                               AdvisorRuntime.JsonOpts);
+            var reply = await _advisor.PotionSwapAsync(request, ct);
+            _trace?.Append("potion_swap", request, reply.Raw, null);
+            if (reply.Reason != "swap")
+            {
+                // "free_slot" cannot happen on a full belt; anything but a swap leaves things as they were.
+                ModLog.Info($"autopilot: potion swap: keeping the belt ({reply.Reason}) over {GameText.Potion(offered)}");
+                return false;
+            }
+            if (reply.Discard is not { } d || reply.Take != 0 || d >= held.Count
+                || (reply.DiscardId != null && reply.DiscardId != held[d].Id.ToString())
+                || (reply.TakeId != null && reply.TakeId != offered.Id.ToString()))
+                throw new AutoPilotException($"potion_swap reply does not match the belt: {reply.Raw}");
+            var doomed = held[d];
+            int slot = -1;
+            for (int i = 0; i < me.PotionSlots.Count; i++)
+                if (ReferenceEquals(me.PotionSlots[i], doomed))
+                    slot = i;
+            if (slot < 0)
+                throw new AutoPilotException("the potion to discard is not in the belt");
+
+            bool zh = GameText.IsChinese;
+            string doomedName = GameText.Potion(doomed), takenName = GameText.Potion(offered);
+            int n = _session.Record(AutoPilotText.PotionSwapText(doomedName, takenName, zh),
+                                    reply.DiscardScore is { } ds && reply.TakeScore is { } ts
+                                        ? AutoPilotText.PotionSwapReason(ds, ts, reply.Margin, zh) : null,
+                                    AutoPilotText.DetailLines(StepDetails.OfPotions(doomed, offered), zh), _now());
+            _trace?.Append("potion_swap", request, reply.Raw, null, autopilotStep: n);
+            ModLog.Info($"autopilot: potion swap: discard {doomedName}, take {takenName}");
+
+            // The game's own discard (NPotionPopup.OnDiscardButtonPressed): an action in the queue.
+            RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
+                new DiscardPotionGameAction(me, (uint)slot, CombatManager.Instance?.IsInProgress == true));
+            await WaitHelper.Until(() => me.HasOpenPotionSlots, ct, TimeSpan.FromSeconds(PotionDiscardSeconds),
+                                   $"the belt still has no free slot {PotionDiscardSeconds:0} s after discarding {doomedName}");
+            await Task.Delay(200, ct);
+            return true;
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            // Never stops the autopilot: the reward is skipped, as it was before swaps existed.
+            if (!_potionSwapFailureLogged)
+            {
+                _potionSwapFailureLogged = true;
+                ModLog.Error($"autopilot: potion swap failed, skipping the potion reward (logged once): {e}");
+            }
+            _trace?.Append("potion_swap", request == "" ? "{}" : request, null, e.GetType().Name);
+            return false;
+        }
     }
 
     /// <summary>Answers the screens a pending action opens (AutoSlayer.DrainOverlayScreensUntilAsync).</summary>

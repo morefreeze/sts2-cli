@@ -19,6 +19,20 @@ public static class AutoPilotText
     public static string StepText(string decision, AdviceReply reply, IReadOnlyDictionary<string, string> labels, bool zh) =>
         PanelText.DecisionName(decision, zh) + T(zh, "：", ": ") + PanelText.PickText(decision, reply, labels, zh);
 
+    /// <summary>"换药水：丢弃 力量药水，拿 瓶中精灵" -- a full belt traded one potion for a better one.</summary>
+    public static string PotionSwapText(string discarded, string taken, bool zh) =>
+        T(zh, $"换药水：丢弃 {discarded}，拿 {taken}", $"Swap potion: discard {discarded}, take {taken}");
+
+    /// <summary>The panel's reason line for a swap: the scores that decided it.</summary>
+    public static string PotionSwapReason(double discardScore, double takeScore, double margin, bool zh)
+    {
+        string take = Num(takeScore), held = Num(discardScore), min = Num(margin);
+        return T(zh, $"药水栏已满：新药水评分 {take}，比最差的已持有药水（{held}）高出至少 {min}",
+                     $"Belt full: the offered potion scores {take}, at least {min} above the worst held one ({held})");
+    }
+
+    private static string Num(double v) => v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+
     /// <summary>The first fired, shown rule of the same reply; null when none fired.</summary>
     public static string? Reason(AdviceReply reply, bool zh) =>
         reply.Rules.FirstOrDefault(r => r.Outcome == "fired" && !TraceText.IsHidden(r)) is { } rule

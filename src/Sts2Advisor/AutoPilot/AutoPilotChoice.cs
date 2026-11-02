@@ -1,5 +1,7 @@
 // src/Sts2Advisor/AutoPilot/AutoPilotChoice.cs
 using MegaCrit.Sts2.Core.AutoSlay;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
@@ -50,6 +52,12 @@ internal interface IAutoPilotHost
     Task<CachedAdvice> FetchAdviceAsync(CancellationToken ct);
     void StepTaken(CachedAdvice advice);
     Task DrainUntilAsync(Task pending, CancellationToken ct);
+
+    /// <summary>The belt is full and a potion reward is on the rewards screen: asks the service whether a held potion
+    /// should make room for it and, when it says so, discards that one (the game's own potion-popup path), waits for
+    /// the slot to open and records the step. True when a slot is free for the reward now; false (belt untouched, the
+    /// reward skipped as before) for "keep the belt" and for every failure.</summary>
+    Task<bool> MakeRoomForPotionAsync(Player me, PotionReward reward, CancellationToken ct);
 }
 
 /// <summary>The game object a UI node stands for, as Capture.Choices holds it.</summary>
