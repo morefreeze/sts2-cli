@@ -14,7 +14,7 @@ const state = {
   sources: [],
   batches: [],              // /api/batches rows; decides the default tab
   batchesNow: null,
-  tab: 'training',          // 'training' | 'regression'
+  tab: 'training',          // 'training' | 'regression' | 'advisor-play'
   tabResolved: false,       // the default tab is picked once, on the first `#/`
   selectedCohortId: '',
   currentMetrics: null,
@@ -35,6 +35,8 @@ const state = {
 //   #/regression/batch/<batch_id>/lane/<lane>
 //   #/regression/game/<source id>          one game in detail (game-detail.js);
 //                                          `run:<run id>` addresses it by run id
+// Advisor Play tab (the Advisor mod's real-game runs; advisor-play-view.js):
+//   #/advisor-play  |  #/advisor-play/<character>      (the character filter)
 // The map view of a game opened from a lane uses the training run route with
 // the placeholder cohort `-` (`runRoute('', ref)`): it belongs to no training
 // cohort.
@@ -46,6 +48,10 @@ function cohortRoute(cohortId) {
 
 function regressionRoute() {
   return '#/regression';
+}
+
+function advisorPlayRoute(character) {
+  return character ? `#/advisor-play/${encodeURIComponent(character)}` : '#/advisor-play';
 }
 
 function batchRoute(batchId) {
@@ -76,6 +82,10 @@ function parseRoute(hash) {
   if (!raw || raw === '/') return { view: 'root' };
   // `#/training` is `#/` that must not bounce to the 回归/评测 tab.
   if (raw === '/training') return { view: 'root', tab: 'training' };
+  const advisorPlay = raw.match(/^\/advisor-play(?:\/([^/]+))?$/);
+  if (advisorPlay) {
+    return { view: 'advisor-play', character: advisorPlay[1] === undefined ? '' : decodeURIComponent(advisorPlay[1]) };
+  }
   const game = raw.match(/^\/regression\/game\/([^/]+)$/);
   if (game) return { view: 'regression-game', source: decodeURIComponent(game[1]) };
   const regression = raw.match(/^\/regression(?:\/batch\/([^/]+)(?:\/lane\/([^/]+))?)?$/);
@@ -122,6 +132,7 @@ function showBatchView() {
   byId('batchView').hidden = false;
   byId('catalogView').hidden = true;
   byId('regressionView').hidden = true;
+  byId('advisorPlayView').hidden = true;
 }
 
 function showRegressionView() {
@@ -130,6 +141,16 @@ function showRegressionView() {
   byId('batchView').hidden = true;
   byId('catalogView').hidden = true;
   byId('regressionView').hidden = false;
+  byId('advisorPlayView').hidden = true;
+}
+
+function showAdvisorPlayView() {
+  state.catalogOpen = false;
+  byId('catalogToggle').setAttribute('aria-pressed', 'false');
+  byId('batchView').hidden = true;
+  byId('catalogView').hidden = true;
+  byId('regressionView').hidden = true;
+  byId('advisorPlayView').hidden = false;
 }
 
 function showCatalogView() {
@@ -138,19 +159,25 @@ function showCatalogView() {
   byId('batchView').hidden = true;
   byId('catalogView').hidden = false;
   byId('regressionView').hidden = true;
+  byId('advisorPlayView').hidden = true;
 }
 
-// The two tabs share one content pane.  Training keeps the left tree; the
-// 回归/评测 pages use the full width.
+// The three tabs share one content pane.  Training keeps the left tree; the
+// 回归/评测 and Advisor Play pages use the full width.
 function setActiveTab(tab) {
-  state.tab = tab === 'regression' ? 'regression' : 'training';
+  state.tab = tab === 'regression' || tab === 'advisor-play' ? tab : 'training';
   const training = state.tab === 'training';
+  const regression = state.tab === 'regression';
+  const advisorPlay = state.tab === 'advisor-play';
   const trainingTab = byId('tabTraining');
   const regressionTab = byId('tabRegression');
+  const advisorPlayTab = byId('tabAdvisorPlay');
   trainingTab.setAttribute('aria-selected', String(training));
   trainingTab.setAttribute('tabindex', training ? '0' : '-1');
-  regressionTab.setAttribute('aria-selected', String(!training));
-  regressionTab.setAttribute('tabindex', training ? '-1' : '0');
+  regressionTab.setAttribute('aria-selected', String(regression));
+  regressionTab.setAttribute('tabindex', regression ? '0' : '-1');
+  advisorPlayTab.setAttribute('aria-selected', String(advisorPlay));
+  advisorPlayTab.setAttribute('tabindex', advisorPlay ? '0' : '-1');
   byId('cohortTree').hidden = !training;
   byId('workbenchBody').dataset.tab = state.tab;
 }
@@ -189,6 +216,17 @@ async function applyRoute(route) {
   }
   if (route.view !== 'regression-game' && window.GameDetail && typeof window.GameDetail.stop === 'function') {
     window.GameDetail.stop();
+  }
+  // Advisor Play re-reads itself every minute while it is open; any other route ends that.
+  if (route.view !== 'advisor-play' && window.AdvisorPlayView && typeof window.AdvisorPlayView.stop === 'function') {
+    window.AdvisorPlayView.stop();
+  }
+  if (route.view === 'advisor-play') {
+    state.tabResolved = true;
+    setActiveTab('advisor-play');
+    showAdvisorPlayView();
+    await AdvisorPlayView.render(route);
+    return;
   }
   if (route.view === 'regression-game') {
     state.tabResolved = true;
@@ -642,6 +680,7 @@ async function reloadAll() {
 byId('catalogToggle').addEventListener('click', () => {
   if (state.catalogOpen) {
     if (state.tab === 'regression') showRegressionView();
+    else if (state.tab === 'advisor-play') showAdvisorPlayView();
     else showBatchView();
     setStatus('已返回批次视图');
   } else {
@@ -653,10 +692,16 @@ byId('tabTraining').addEventListener('click', () => {
   navigate(state.selectedCohortId ? cohortRoute(state.selectedCohortId) : '#/training');
 });
 byId('tabRegression').addEventListener('click', () => navigate(regressionRoute()));
+byId('tabAdvisorPlay').addEventListener('click', () => navigate(advisorPlayRoute()));
 byId('workbenchTabs').addEventListener('keydown', (event) => {
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
   event.preventDefault();
-  const next = state.tab === 'training' ? byId('tabRegression') : byId('tabTraining');
+  // Right moves to the next tab, Left to the previous one; both wrap around.
+  const order = ['training', 'regression', 'advisor-play'];
+  const tabs = { training: 'tabTraining', regression: 'tabRegression', 'advisor-play': 'tabAdvisorPlay' };
+  const at = Math.max(0, order.indexOf(state.tab));
+  const step = event.key === 'ArrowRight' ? 1 : order.length - 1;
+  const next = byId(tabs[order[(at + step) % order.length]]);
   next.focus();
   next.click();
 });

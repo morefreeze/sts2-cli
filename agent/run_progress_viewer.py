@@ -35,6 +35,7 @@ from agent.run_workbench.catalog import (
     GameLogRef,
     RunCatalog,
 )
+from agent.run_workbench import advisor_play
 from agent.run_workbench.game_detail import build_game_detail, load_game_records
 from agent.run_workbench.localization import Localizer
 from agent.run_workbench.assets import InvalidNodeArtModelError, NodeArtResolver
@@ -88,6 +89,7 @@ STATIC_ASSETS = {
     "/static/runs-table.js": ("runs-table.js", "text/javascript; charset=utf-8"),
     "/static/run-view.js": ("run-view.js", "text/javascript; charset=utf-8"),
     "/static/batches-view.js": ("batches-view.js", "text/javascript; charset=utf-8"),
+    "/static/advisor-play-view.js": ("advisor-play-view.js", "text/javascript; charset=utf-8"),
     "/static/game-detail.js": ("game-detail.js", "text/javascript; charset=utf-8"),
     "/static/map.js": ("map.js", "text/javascript; charset=utf-8"),
     # Single-run replay, loaded by URL: /replay?log=<file>.jsonl
@@ -1404,6 +1406,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
     )
     node_art_resolver = NodeArtResolver()
     map_service = MapService()
+    # None: the real game's modded profile, resolved on every request (the Advisor Play tab).
+    advisor_play_paths: advisor_play.AdvisorPlayPaths | None = None
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
@@ -1509,6 +1513,18 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     else:
                         lane = _single_query_value(query, "lane", "lane")
                         self._send_json(_lane_payload(self.catalog, batch_id, lane))
+            elif parsed.path == "/api/advisor-play":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                unexpected = sorted(set(query) - {"character", "shown"})
+                if unexpected:
+                    self._send_error(f"unexpected advisor-play query parameter: {unexpected[0]}")
+                    return
+                values = {name: query[name][-1] for name in ("character", "shown") if name in query}
+                try:
+                    # A broken input is the payload's own `error` field; only the filter can be wrong.
+                    self._send_json(advisor_play.build_payload(self.advisor_play_paths, **values))
+                except ValueError as exc:
+                    self._send_error(str(exc))
             elif parsed.path == "/api/game-detail":
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 unexpected = sorted(set(query) - {"source", "run"})
@@ -1748,6 +1764,7 @@ def make_viewer_handler(
     *,
     art_resolver: NodeArtResolver | None = None,
     map_service: MapService | None = None,
+    advisor_play_paths: advisor_play.AdvisorPlayPaths | None = None,
 ) -> type[ViewerHandler]:
     """Bind one catalog to an isolated handler class for a server instance."""
 
@@ -1759,6 +1776,8 @@ def make_viewer_handler(
         BoundViewerHandler.node_art_resolver = art_resolver
     if map_service is not None:
         BoundViewerHandler.map_service = map_service
+    if advisor_play_paths is not None:
+        BoundViewerHandler.advisor_play_paths = advisor_play_paths
     return BoundViewerHandler
 
 

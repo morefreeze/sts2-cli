@@ -3777,7 +3777,8 @@ def test_shell_has_tab_bar_above_the_tree_and_a_regression_pane():
     order = ["workbenchTabs", "cohortTree", "contentPane", "regressionView", "regressionBody"]
     assert [parser.ids.index(item) for item in order] == sorted(parser.ids.index(item) for item in order)
     assert '<nav id="workbenchTabs" class="workbench-tabs" role="tablist"' in html
-    assert html.count('role="tab"') == 2
+    # 训练, 回归/评测 and Advisor Play (test_advisor_play_static.py covers the third)
+    assert html.count('role="tab"') == 3
     assert "回归/评测" in html and ">训练<" in html
     # the training tab is the shipped default until the router decides otherwise
     assert re.search(r'id="tabTraining"[^>]*aria-selected="true"', html)
