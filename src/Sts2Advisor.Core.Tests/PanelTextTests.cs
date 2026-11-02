@@ -200,6 +200,29 @@ public class PanelTextTests
     }
 
     [Fact]
+    public void LookaheadMapRulesAndComponentsRead()
+    {
+        var best = Rule("map.la_best_path", "fired", """
+            {"best_index": 1, "tied_best": [1], "n_choices": 2, "n_paths": 14, "path": "MRMR", "elites": 0,
+             "rests": 2, "hp_boss_ratio": 0.92, "decider": "elite_danger", "margin": 41.3}
+            """);
+        Assert.Equal("整条路线评估（共 14 条路线）：MRMR，0 个精英，到 Boss 时 HP 92%；差别主要在精英战死亡风险",
+                     TraceText.Rule(best, zh: true));
+        Assert.Equal("Whole-path lookahead (14 routes): MRMR, 0 elites, HP at the boss 92%; decided by elite fight death risk",
+                     TraceText.Rule(best, zh: false));
+        var tied = Rule("map.la_best_path", "fired", """{"n_paths": 3, "path": "M", "elites": 0, "hp_boss_ratio": 1, "decider": "tied"}""");
+        Assert.EndsWith("差别主要在并列（按优先级）", TraceText.Rule(tied, zh: true));
+
+        var fallback = Rule("map.la_fallback", "fired", """{"reason": "no_map"}""");
+        Assert.Equal("无法按整条路线评估（没有地图数据），改用优先级规则", TraceText.Rule(fallback, zh: true));
+        Assert.Equal("Cannot look ahead (no map data); using the priority rules", TraceText.Rule(fallback, zh: false));
+
+        // costs: a reward is negative, a risk positive (lower is better on the map panel)
+        Assert.Equal("精英遗物收益 -11.8", TraceText.Component(Comp("map.la_elite_reward", -11.8), zh: true));
+        Assert.Equal("Boss entry death risk +30.8", TraceText.Component(Comp("map.la_boss_danger", 30.8), zh: false));
+    }
+
+    [Fact]
     public void CardRewardPanel()
     {
         var reply = AdviceReply.Parse(AdviceReplyTests.CardRewardJson);

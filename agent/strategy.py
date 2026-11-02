@@ -3,9 +3,11 @@
 Each strategy implements the same interface: choose(state, choices) -> command dict.
 Swap strategies globally via set_map_strategy() or pass directly.
 """
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from agent.card_scoring import SMITH_PRIORITY_THRESHOLD, best_smith_target
+from agent.route_planner import enumerate_paths, node_index, node_key
 
 
 class MapStrategy(Protocol):
@@ -151,6 +153,272 @@ class HpAwareMapStrategy(Act1SafeStrategy):
                        hp_ratio=hp_ratio, gold=gold, floor=floor, in_act2=in_act2)
         return {"cmd": "action", "action": "select_map_node",
                 "args": {"col": best["col"], "row": best["row"]}}
+
+
+def _interp(curve: tuple, x: float) -> float:
+    """Piecewise-linear y at x on a curve of ascending (x, y) knots; flat outside."""
+    if x <= curve[0][0]:
+        return curve[0][1]
+    for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return curve[-1][1]
+
+
+@dataclass(frozen=True)
+class PathEval:
+    """One scored route. ``value`` is higher-is-better and is the sum of ``parts``
+    (LookaheadMapStrategy.PART_KEYS -> contribution, zero parts omitted)."""
+    value: float
+    parts: dict = field(default_factory=dict)
+    types: str = ""          # one letter per room, see LookaheadMapStrategy.LETTERS
+    hp_boss: float = 0.0     # projected HP on entering the boss
+    elites: int = 0
+    rests: int = 0
+    p_boss: float = 1.0      # projected chance of reaching the boss alive
+
+
+class LookaheadMapStrategy:
+    """Whole-path map routing: score every route from each offered node to the
+    boss and take the first step of the best one.
+
+    HpAwareMapStrategy scores only the NEXT node, so it walks into corridors
+    whose only continuation is an elite at low HP (live Regent a3: A3F9 only
+    child Elite at 67/75 -> 40/75, then A3F11 only child Elite at 40/75; two of
+    three live losses were set up that way). Here each route is simulated room
+    by room with EXPECTED HP (rests heal, fights cost), and every combat adds the
+    chance of dying in it at the HP the route arrives with. Value is in points,
+    1 point ~ 1 HP of healing; the points are a judgement call, tune them only
+    with a paired A/B (STS2_ROUTE_POLICY=hpaware vs =lookahead).
+
+    A map is required (``state["map"]`` -- the engine's get_map reply -- or
+    ``map_json=``). Without one, or when an offered node is not on it, the choice
+    is made by ``fallback`` (HpAwareMapStrategy) exactly as before.
+
+    Trace (agent.greedy_trace): the map_select panel sorts LOWER-is-better, like
+    HpAware's priority, so each option's score is the route's COST (minus its
+    value) and its components are the negated parts: a reward shows negative.
+    """
+
+    # ---- expected HP lost entering a room; index = act - 1 (acts 4+ use act 3) ----
+    # Evidence: agent/data/route_model_a1.json, 191 headless a1 games, survivors'
+    # mean HP lost: Monster 1.7 / 3.7 / 4.7, Elite 6.9 / 12.2 / 14.1 (pooled 3.1 /
+    # 10.5), Unknown 0.8 / 0.3 / 1.1. Live a3-a10 runs: Monster 3.2, Elite 13,
+    # Boss 29, Unknown/event 1.5 (pooled over acts); Act-3 elites ran 26-59 HP
+    # (Soul Nexus). Elites are therefore the headless numbers x ~1.2 for Acts 1-2
+    # and 22 for Act 3; the Boss split by act is a guess around the live mean 29.
+    MONSTER_COST = (2.0, 4.0, 5.0)
+    ELITE_COST = (8.0, 15.0, 22.0)
+    BOSS_COST = (25.0, 30.0, 35.0)
+    UNKNOWN_COST = 1.5
+
+    # ---- chance of dying in a combat, by (HP on entering) / (that fight's cost) ----
+    # Evidence: the same cells, deaths / (deaths + survivors) binned by pre-room
+    # HP / the act's mean cost. Elite: <1.5: 50%, 1.5-2.5: 22%, 2.5-3.5: 9.3%,
+    # 3.5-4.5: 3.4%, >=4.5: 0.6% (n = 20 / 45 / 75 / 118 / 675). Monster: <3: 25%,
+    # 3-6: 11%, 6-10: 1.2%, 10-15: 0.5%, 15-25: 0.3%, >=25: 0 (n = 28 / 28 / 84 /
+    # 380 / 1120 / 1112). The boss uses the elite curve. Knots are bin centres.
+    ELITE_DEATH = ((0.0, 1.0), (1.0, 0.50), (2.0, 0.22), (3.0, 0.09), (4.0, 0.034), (5.0, 0.008))
+    MONSTER_DEATH = ((0.0, 1.0), (2.0, 0.25), (4.5, 0.11), (8.0, 0.012), (12.0, 0.005),
+                     (20.0, 0.003), (30.0, 0.0))
+    BOSS_DEATH = ELITE_DEATH
+
+    # ---- points (1 point ~ 1 HP of healing) ----
+    # A dead run forfeits the rest of it: ~20 floors x ~20 points a floor. An
+    # elite's relic (+ gold, potion) is worth ~12: with these costs and death
+    # curves that sends a healthy Act 1 route through ~2.2 elites and Act 2
+    # ~1.5 (a uniformly random route over the same six real a5 maps: 2.1 an act;
+    # HpAware ~1.2), measured by walking them with sampled losses. 12 is a judgement call -- the 3b route A/B
+    # showed that skipping elites for rests LOSES floors, so it is not set lower.
+    # The reward is paid in full from ELITE_COMFORT_FRAC of max HP (HpAware's
+    # HP_STRONG: "runs at 75-85% HP shouldn't seek elites") and not at all at
+    # ELITE_DANGER_FRAC. HP is worth little by itself (a rest refunds ~22 of it);
+    # it matters through the death curves and HP_VALUE per HP on entering the boss.
+    DEATH_PENALTY = 400.0
+    ELITE_REWARD = 12.0
+    ELITE_DANGER_FRAC = 0.55
+    ELITE_COMFORT_FRAC = 0.85
+    MONSTER_REWARD = 4.0      # card reward + ~16 gold
+    UNKNOWN_REWARD = 4.0      # events: upgrade / relic / gold on average
+    TREASURE_REWARD = 15.0    # a relic
+    SMITH_REWARD = 8.0        # a rest taken as an upgrade (HP above the heal line)
+    SHOP_REWARD = 10.0        # a shop reached with enough gold
+    HP_VALUE = 0.3            # per HP on entering the boss
+
+    # ---- rest sites ----
+    REST_HEAL_FRAC = 0.30     # of max HP, as the engine's Rest option heals
+    # gold the route is projected to pick up (cells' mean gold change), spent at a shop
+    GOLD_GAIN = {"Monster": 16.0, "Elite": 44.0, "Treasure": 55.0}
+    SHOP_GOLD = HpAwareMapStrategy.SHOP_GOLD_THRESHOLD   # HpAware's own thresholds
+    SHOP_GOLD_ACT2 = 75
+
+    MAX_ACT = 3
+    TIE_EPS = 1e-9
+
+    # one letter per room in PathEval.types / the trace
+    LETTERS = {"Monster": "M", "Elite": "E", "RestSite": "R", "Shop": "$",
+               "Unknown": "?", "Treasure": "T", "Ancient": "A"}
+    # PathEval.parts keys -> the trace component each becomes (negated)
+    PART_KEYS = {"room_reward": "map.la_room_reward", "elite_reward": "map.la_elite_reward",
+                 "elite_danger": "map.la_elite_danger", "fight_danger": "map.la_fight_danger",
+                 "boss_danger": "map.la_boss_danger", "hp_end": "map.la_hp_end"}
+
+    def __init__(self, fallback=None):
+        self.fallback = fallback if fallback is not None else HpAwareMapStrategy()
+
+    @staticmethod
+    def rest_heal_below(floor: int) -> float:
+        """HP fraction under which rest_site_action heals rather than smiths
+        (its heal_threshold by act-local floor; the must-upgrade override is not
+        modelled)."""
+        if floor >= 16:
+            return 0.95
+        if floor >= 11:
+            return 0.85
+        if floor >= 6:
+            return 0.80
+        return 0.75
+
+    def evaluate_path(self, path: list, hp: float, max_hp: float, gold: float,
+                      act: int) -> PathEval:
+        """Walk ``path`` (map nodes, first = the room entered next) from ``hp``
+        and return its value. Expected HP is deterministic; the chance of dying
+        is carried along (``p``) so a risky room discounts everything after it."""
+        a = min(max(act, 1), self.MAX_ACT) - 1
+        max_hp = max(float(max_hp), 1.0)
+        hp = min(max(float(hp), 1.0), max_hp)
+        p = 1.0
+        parts = dict.fromkeys(self.PART_KEYS, 0.0)
+        elites = rests = 0
+        letters = []
+        for node in path:
+            kind = node.get("type")
+            floor = int(node["row"]) + 1
+            letters.append(self.LETTERS.get(kind, "?"))
+            if kind in ("Monster", "Elite"):
+                elite = kind == "Elite"
+                cost = self.ELITE_COST[a] if elite else self.MONSTER_COST[a]
+                death = _interp(self.ELITE_DEATH if elite else self.MONSTER_DEATH, hp / cost)
+                parts["elite_danger" if elite else "fight_danger"] -= p * death * self.DEATH_PENALTY
+                if elite:
+                    elites += 1
+                    gate = min(max((hp / max_hp - self.ELITE_DANGER_FRAC)
+                                   / (self.ELITE_COMFORT_FRAC - self.ELITE_DANGER_FRAC), 0.0), 1.0)
+                    reward_key, reward = "elite_reward", self.ELITE_REWARD * gate
+                else:
+                    reward_key, reward = "room_reward", self.MONSTER_REWARD
+                p *= 1.0 - death
+                parts[reward_key] += p * reward
+                hp = max(hp - cost, 1.0)
+                gold += self.GOLD_GAIN[kind]
+            elif kind == "RestSite":
+                rests += 1
+                if hp / max_hp < self.rest_heal_below(floor):
+                    hp = min(hp + self.REST_HEAL_FRAC * max_hp, max_hp)
+                else:
+                    parts["room_reward"] += p * self.SMITH_REWARD
+            elif kind == "Shop":
+                if gold >= (self.SHOP_GOLD_ACT2 if act >= 2 else self.SHOP_GOLD):
+                    parts["room_reward"] += p * self.SHOP_REWARD
+                    gold = 0.0
+            elif kind == "Treasure":
+                parts["room_reward"] += p * self.TREASURE_REWARD
+                gold += self.GOLD_GAIN["Treasure"]
+            else:  # Unknown, and any type this table does not know (HpAware: priority 4)
+                hp = max(hp - self.UNKNOWN_COST, 1.0)
+                parts["room_reward"] += p * self.UNKNOWN_REWARD
+        boss_death = _interp(self.BOSS_DEATH, hp / self.BOSS_COST[a])
+        parts["boss_danger"] -= p * boss_death * self.DEATH_PENALTY
+        parts["hp_end"] += p * self.HP_VALUE * hp
+        parts = {k: v for k, v in parts.items() if abs(v) > 1e-12}
+        return PathEval(value=sum(parts.values()), parts=parts, types="".join(letters),
+                        hp_boss=hp, elites=elites, rests=rests, p_boss=p)
+
+    def _best_paths(self, state: dict, choices: list, map_json) -> list | str:
+        """[(best PathEval, paths scored)] per choice, or the reason the map cannot
+        be used."""
+        if not isinstance(map_json, dict) or not map_json.get("rows"):
+            return "no_map"
+        index = node_index(map_json)
+        player = state.get("player") or {}
+        hp, max_hp = player.get("hp", 80), max(player.get("max_hp", 80), 1)
+        gold = player.get("gold", 0)
+        act = state.get("act") or (state.get("context") or {}).get("act")
+        act = act if isinstance(act, int) and not isinstance(act, bool) else 1
+        out = []
+        for choice in choices:
+            key = node_key(choice)
+            if key not in index:
+                return "choice_not_on_map"
+            try:
+                paths = enumerate_paths(map_json, key)
+            except ValueError:
+                return "too_many_paths"
+            best = None
+            for path in paths:
+                scored = self.evaluate_path(path, hp, max_hp, gold, act)
+                if best is None or scored.value > best.value + self.TIE_EPS:
+                    best = scored
+            out.append((best, len(paths)))
+        return out
+
+    def choose(self, state: dict, choices: list[dict], trace=None, map_json=None) -> dict:
+        if len(choices) < 2:  # nothing to plan: HpAware takes the only node
+            return self._fallback(state, choices, trace, None)
+        if map_json is None:
+            map_json = state.get("map")
+        planned = self._best_paths(state, choices, map_json)
+        if isinstance(planned, str):
+            return self._fallback(state, choices, trace, planned)
+
+        best_value = max(ev.value for ev, _ in planned)
+        tied = [i for i, (ev, _) in enumerate(planned) if ev.value >= best_value - self.TIE_EPS]
+        pick = tied[0]
+        if len(tied) > 1:
+            # Equal routes: HpAware's priority, then (col, row) order -- not the
+            # engine's list order, so the pick does not depend on how it lists them.
+            tied.sort(key=lambda i: node_key(choices[i]))
+            cmd = self.fallback.choose(state, [choices[i] for i in tied])
+            args = cmd["args"]
+            pick = next(i for i in tied if node_key(choices[i]) == (args["col"], args["row"]))
+        best = choices[pick]
+
+        if trace is not None:
+            player = state.get("player") or {}
+            max_hp = max(player.get("max_hp", 80), 1)
+            for i, (ev, n_paths) in enumerate(planned):
+                trace.option(
+                    i, kind="node", score=-ev.value,
+                    components=[(self.PART_KEYS[k], -v, None) for k, v in ev.parts.items()],
+                    detail={"col": choices[i].get("col"), "row": choices[i].get("row"),
+                            "type": choices[i].get("type"), "path": ev.types,
+                            "hp_boss": round(ev.hp_boss, 1), "elites": ev.elites,
+                            "rests": ev.rests, "paths": n_paths})
+            ev = planned[pick][0]
+            others = [e for i, (e, _) in enumerate(planned) if i != pick]
+            runner = max(others, key=lambda e: e.value)
+            if len(tied) > 1:
+                decider = "tied"
+            else:
+                gap = {k: ev.parts.get(k, 0.0) - runner.parts.get(k, 0.0) for k in self.PART_KEYS}
+                decider = max(gap, key=gap.get)
+                if gap[decider] <= self.TIE_EPS:
+                    decider = "no_gap"
+            trace.rule("map.la_best_path", "fired", best_index=pick, tied_best=tied,
+                       n_choices=len(choices), n_paths=sum(n for _, n in planned),
+                       path=ev.types, elites=ev.elites, rests=ev.rests,
+                       hp_ratio=player.get("hp", 80) / max_hp,
+                       hp_boss_ratio=ev.hp_boss / max_hp,
+                       margin=ev.value - runner.value, decider=decider,
+                       act=state.get("act") or (state.get("context") or {}).get("act"),
+                       floor=state.get("floor") or (state.get("context") or {}).get("floor"))
+        return {"cmd": "action", "action": "select_map_node",
+                "args": {"col": best["col"], "row": best["row"]}}
+
+    def _fallback(self, state, choices, trace, reason):
+        if trace is not None and reason is not None:
+            trace.rule("map.la_fallback", "fired", reason=reason)
+        return self.fallback.choose(state, choices, trace=trace)
 
 
 def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:

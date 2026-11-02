@@ -28,6 +28,12 @@ def _nodes(map_json: dict) -> dict[tuple[int, int], dict]:
     return {node_key(node): node for row in map_json.get("rows") or [] for node in row}
 
 
+def node_index(map_json: dict) -> dict[tuple[int, int], dict]:
+    """{(col, row): node} for every node in ``map_json["rows"]`` (the boss is not
+    one). Public name for ``_nodes``, shared with agent.strategy's lookahead."""
+    return _nodes(map_json)
+
+
 def fixed_rows(map_json: dict) -> dict[int, str]:
     """{row: room type} for every row with at least one node whose nodes all
     share one type (every path crosses that room type on that row)."""

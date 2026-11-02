@@ -16,7 +16,8 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
 from agent.state_encoder import StateEncoder
-from agent.strategy import Act1SafeStrategy, HpAwareMapStrategy, MapStrategy, rest_site_action
+from agent.strategy import (Act1SafeStrategy, HpAwareMapStrategy, LookaheadMapStrategy,
+                            MapStrategy, rest_site_action)
 from agent.card_scoring import (score_card, score_card_in_deck, pick_best_card,
                                   pick_worst_card, deck_quality_score,
                                   is_act1_card_reward_eligible, _card_id_norm)
@@ -25,6 +26,10 @@ from agent.run_decisions import append_run_decision, capture_run_decision
 
 # Swappable map strategy — change globally via set_map_strategy()
 _map_strategy: MapStrategy = HpAwareMapStrategy()
+# STS2_MAP_POLICY=lookahead routes map_select with the whole path to the boss
+# (needs state["map"]); hpaware (default) is _map_strategy, byte for byte.
+_lookahead_strategy = LookaheadMapStrategy()
+MAP_POLICIES = ("hpaware", "lookahead")
 _decision_advisor = DecisionAdvisor()
 
 _RUN_DECISION_REPLY_MAX_KEYS = 256
@@ -57,6 +62,19 @@ def set_map_strategy(strategy: MapStrategy):
     """Replace the global map strategy. Call before training or evaluation."""
     global _map_strategy
     _map_strategy = strategy
+
+
+def _map_policy(explicit=None) -> str:
+    """Which map routing greedy_action uses: `explicit` (greedy_action's map_policy
+    argument) if given, else STS2_MAP_POLICY. Blank/unset = "hpaware"; an unknown
+    value raises rather than quietly routing with the wrong policy."""
+    raw = explicit if explicit is not None else os.environ.get("STS2_MAP_POLICY", "")
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return "hpaware"
+    if raw not in MAP_POLICIES:
+        raise ValueError(f"STS2_MAP_POLICY={raw!r} is not one of {MAP_POLICIES}")
+    return raw
 
 def _find_dotnet():
     """Return a command prefix list for .NET SDK. On Apple Silicon, prefers ARM64 dotnet."""
@@ -468,12 +486,17 @@ def _random_choice_for(state: dict) -> dict | None:
     return None
 
 
-def greedy_action(state: dict, trace=None) -> dict:
+def greedy_action(state: dict, trace=None, *, map_policy=None) -> dict:
     """Greedy heuristic for non-combat decisions. Used during training and by coordinator.
 
     trace: optional agent.greedy_trace.GreedyTrace that records the evidence each
     decision was made with (the in-game advisor's reasons). None records nothing
-    and takes the same code path."""
+    and takes the same code path.
+
+    map_policy: "hpaware" | "lookahead" overrides STS2_MAP_POLICY for map_select
+    (play_full_run's route arms pass it so an arm never depends on the
+    environment). "lookahead" routes by the whole path to the boss and reads the
+    engine's get_map reply from state["map"]; without it, it is HpAware's pick."""
     decision = state.get("decision", "")
     if _RANDOMIZE_DECISIONS:
         _rnd = _random_choice_for(state)
@@ -491,9 +514,11 @@ def greedy_action(state: dict, trace=None) -> dict:
     if decision == "map_select":
         choices = state.get("choices", [])
         if choices:
+            strategy = (_lookahead_strategy if _map_policy(map_policy) == "lookahead"
+                        else _map_strategy)
             if trace is not None:
-                return _map_strategy.choose(state, choices, trace=trace)
-            return _map_strategy.choose(state, choices)
+                return strategy.choose(state, choices, trace=trace)
+            return strategy.choose(state, choices)
 
     elif decision == "card_reward":
         cards = state.get("cards", [])

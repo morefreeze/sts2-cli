@@ -83,6 +83,7 @@ print(json.dumps({
     "override_delta_cap": cs._OVERRIDE_DELTA_CAP,
     "predictor_target": cs.PREDICTOR_TARGET,
     "mc_smart_thresh": cs._MC_SMART_THRESHOLD,
+    "map_policy": ce._map_policy(),
 }))
 """
 
@@ -128,7 +129,8 @@ def test_behavior_defaults_match_what_the_reading_code_resolves():
                     "STS2_CARD_THRESHOLD_LIFT": "1.5", "STS2_CARD_QUALITY_GATE": "0",
                     "STS2_MC_ROLLOUT": "smart", "STS2_ARCHETYPE": "orbs",
                     "STS2_CTX_WEIGHTS": "legacy", "STS2_OVERRIDE_DELTA_CAP": "3",
-                    "STS2_PREDICTOR_TARGET": "hp", "STS2_MC_SMART_THRESH": "0.5"})
+                    "STS2_PREDICTOR_TARGET": "hp", "STS2_MC_SMART_THRESH": "0.5",
+                    "STS2_MAP_POLICY": "lookahead"})
     assert {k for k in unset if moved[k] != unset[k]} == set(unset)
 
 

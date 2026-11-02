@@ -254,12 +254,13 @@ def experiment_label(batch, policy, route="random"):
     """What the workbench's `experiment` axis shows: `<batch>:ooc=<policy>`.
     The batch keeps two batches under the same policy from landing in one cohort.
 
-    Under the value route policy (Phase 3b) `,route=value` is appended;
+    Under every route policy but random (value, hpaware, lookahead) `,route=<policy>`
+    is appended, so the arms of an A/B are separate cohorts;
     agent/fit_route_model.py skips logs carrying it (it fits the route model from
     random-route games only). The random arm's label is exactly the one above.
     """
     label = f"{batch}:ooc={policy}" if batch else f"ooc={policy}"
-    return f"{label},route=value" if route == "value" else label
+    return label if route in (None, "random") else f"{label},route={route}"
 
 
 def new_run_id():
@@ -383,9 +384,17 @@ def ooc_escape_command(state: dict) -> dict:
 # the seeded random route every phase before 3b measured; "value" asks
 # agent.route_planner to pick the child whose best path to the boss has the
 # highest expected final floor under the model fitted by agent.fit_route_model.
+# "hpaware" and "lookahead" route map_select through agent.combat_env.greedy_action
+# -- what the in-game Sts2Advisor autopilot does: "hpaware" is its default
+# HpAwareMapStrategy (scores only the next node); "lookahead" fetches the engine's
+# get_map like "value" does, passes it as state["map"] and scores every path to
+# the boss (agent.strategy.LookaheadMapStrategy). Both pass the map policy to
+# greedy_action explicitly, so an arm never depends on STS2_MAP_POLICY.
 # Under "random" the map_select branch is exactly the old one: no get_map is
 # sent and no route module is imported.
-ROUTE_POLICIES = ("random", "value")
+ROUTE_POLICIES = ("random", "value", "hpaware", "lookahead")
+# the policies played through greedy_action (the map policy they pass = their name)
+MAP_ROUTE_POLICIES = ("hpaware", "lookahead")
 ROUTE_POLICY_DEFAULT = "random"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROUTE_MODEL_DEFAULT = os.path.join(REPO_ROOT, "agent", "data", "route_model_a1.json")
@@ -393,7 +402,8 @@ _ROUTE_MODEL_CACHE: dict = {}
 
 
 def route_policy(env=None) -> str:
-    """Resolve STS2_ROUTE_POLICY ("random" | "value"; blank/unset = default).
+    """Resolve STS2_ROUTE_POLICY ("random" | "value" | "hpaware" | "lookahead";
+    blank/unset = default).
 
     An unknown value raises instead of silently running the default, for the
     same reason ooc_policy() does: an A/B arm that quietly measured the wrong
@@ -444,6 +454,37 @@ def _route_choose(map_reply: dict, state: dict, character: str, model):
     planner's answers. The attribute is read at call time, so patching
     agent.route_planner.choose_node works too."""
     return _load_route_planner().choose_node(map_reply, state, character, model)
+
+
+def _route_via_greedy(greedy, state: dict, policy: str, map_reply=None):
+    """One map_select played through greedy_action under the map policy `policy`
+    ("hpaware" | "lookahead"). `map_reply` (the engine's get_map reply) is attached
+    to a COPY of the pending decision as state["map"]; the decision itself is
+    untouched. Returns (command, trace) where trace is the GreedyTrace
+    greedy_action filled in -- its rules say whether the lookahead planned the
+    route (`map.la_best_path`) or handed it to HpAware (`map.la_fallback`).
+    Raises whatever greedy_action raises."""
+    _repo_root_on_path()
+    from agent.greedy_trace import GreedyTrace
+    trace = GreedyTrace()
+    map_state = state if map_reply is None else dict(state, map=map_reply)
+    return greedy(map_state, trace=trace, map_policy=policy), trace
+
+
+def _route_trace_line(policy: str, state: dict, choice: dict, trace, engaged: bool) -> str:
+    """The one-line `[route]` log of a greedy-routed map_select: the choice, whether
+    the policy engaged, the deciding rule, and for each offered node its score
+    (lower is better) and, under lookahead, the best path, its HP at the boss."""
+    context = state.get("context") or {}
+    rules = {r["key"]: r["values"] for r in trace.rules if r["outcome"] == "fired"}
+    options = [{"col": (o.get("detail") or {}).get("col"), "row": (o.get("detail") or {}).get("row"),
+                "type": (o.get("detail") or {}).get("type"), "score": o.get("score"),
+                **{k: (o.get("detail") or {}).get(k) for k in ("path", "hp_boss", "elites")
+                   if k in (o.get("detail") or {})}}
+               for o in trace.to_dict()["options"]]
+    return json.dumps({"policy": policy, "act": context.get("act"), "floor": context.get("floor"),
+                       "choice": {"col": choice["col"], "row": choice["row"]},
+                       "engaged": engaged, "rules": rules, "options": options}, default=str)
 
 
 def _find_dotnet():
@@ -676,6 +717,10 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         # Phase 3b: the route model under STS2_ROUTE_POLICY=value; None = seeded random.
         route_model = (_load_route_model(route_model_path())
                        if stats["route_policy"] == "value" else None)
+        # hpaware / lookahead: map_select goes to greedy_action too (whatever the
+        # out-of-combat policy is -- the naive arm's other decisions stay naive).
+        route_greedy = (_load_greedy_action()
+                        if stats["route_policy"] in MAP_ROUTE_POLICIES else None)
         route_raise_printed = False
         shop_visit = None
         shop_actions = 0
@@ -802,7 +847,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if not choices:
                     print("  No map choices available!")
                     break
-                if route_model is None:
+                if route_model is None and route_greedy is None:
                     # Random selection
                     choice = rng.choice(choices)
                 elif len(choices) == 1:
@@ -810,6 +855,52 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                     # to plan, so no get_map and not counted as a planned decision.
                     stats["route_forced"] += 1
                     choice = choices[0]
+                elif route_greedy is not None:
+                    route_mode = stats["route_policy"]
+                    map_reply = None
+                    if route_mode == "lookahead":
+                        # read-only query; the reply is attached to a copy of the
+                        # decision and must NOT replace `state`
+                        reply = send({"cmd": "get_map"})
+                        map_reply = reply if reply.get("type") == "map" else None
+                    pick = None
+                    engaged = False
+                    why = "greedy_action returned no node"
+                    try:
+                        cmd, route_trace = _route_via_greedy(route_greedy, state, route_mode,
+                                                             map_reply)
+                        args = (cmd or {}).get("args") or {}
+                        offered = {(c["col"], c["row"]) for c in choices}
+                        if (args.get("col"), args.get("row")) not in offered:
+                            why = f"greedy_action picked a node not offered: {cmd}"
+                        else:
+                            pick = {"col": args["col"], "row": args["row"]}
+                            fired = {r["key"]: r["values"] for r in route_trace.rules
+                                     if r["outcome"] == "fired"}
+                            engaged = (route_mode == "hpaware"
+                                       or "map.la_best_path" in fired)
+                            if not engaged:
+                                why = ("lookahead fell back to HpAware: "
+                                       + str((fired.get("map.la_fallback") or {}).get("reason")))
+                    except Exception as exc:
+                        pick = None
+                        why = f"greedy_action raised {exc!r}"
+                        if not route_raise_printed:
+                            route_raise_printed = True
+                            print(traceback.format_exc())
+                    if pick is None:
+                        print(f"  !! {route_mode} route fallback ({why}) -- random pick")
+                        stats["route_fallbacks"] += 1
+                        choice = rng.choice(choices)
+                    else:
+                        choice = pick
+                        if engaged:
+                            stats["route_plans"] += 1
+                        else:
+                            print(f"  !! {route_mode} route fallback ({why})")
+                            stats["route_fallbacks"] += 1
+                        print("  [route] " + _route_trace_line(route_mode, state, pick,
+                                                               route_trace, engaged))
                 else:
                     # get_map is a read-only query: its reply must NOT replace
                     # `state`, which is still the pending map_select decision.
@@ -1443,6 +1534,16 @@ def summarize(results, num_runs, character="Ironclad", solver_chars=None):
         if "value" in route_policies and route_fallbacks:
             lines.append(f"!! route planner fell back {route_fallbacks} times -- those map "
                          f"choices were random; see the '!! route planner' lines in this log")
+        # ... and a lookahead arm whose planner never engaged is the hpaware arm.
+        if route_policies == ["lookahead"] and planned == 0:
+            lines.append("!! LOOKAHEAD NEVER ENGAGED -- STS2_ROUTE_POLICY=lookahead but no map "
+                         "choice was planned; these results measure the HpAware route")
+        for greedy_route in MAP_ROUTE_POLICIES:
+            if greedy_route in route_policies and route_fallbacks:
+                lines.append(f"!! {greedy_route} route fell back {route_fallbacks} times -- "
+                             f"HpAware's pick (lookahead without a usable map) or a random one "
+                             f"(greedy_action raised); see the '!! {greedy_route} route "
+                             f"fallback' lines in this log")
     unkept = sum(1 for r in results if r and r.get("game_log_error"))
     if unkept:
         lines.append(f"!! {unkept} game log(s) could not be kept -- their game_log points "
@@ -1554,6 +1655,10 @@ def main():
         print(f"Route policy: value (model {model_path}, "
               f"n_games {(model_data.get('meta') or {}).get('n_games')}, "
               f"value {(model_data.get('validation') or {}).get('chosen')})")
+    elif route in MAP_ROUTE_POLICIES:
+        _load_greedy_action()  # map_select goes through greedy_action: a broken import aborts now
+        print(f"Route policy: {route} (map_select via greedy_action, map policy {route}"
+              + (", get_map attached as state['map']" if route == "lookahead" else "") + ")")
 
     num_runs = args.num_runs
     character = args.character

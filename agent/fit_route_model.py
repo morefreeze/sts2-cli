@@ -8,8 +8,8 @@
 Reads the JSONL game logs (python/game_log.py) of one ascension, fits the value
 model (agent.route_model.fit_value_model) and the per-room transition cells
 (fit_transition_model), saves them as a RouteModel JSON and prints a validation
-report. Games played under STS2_ROUTE_POLICY=value are skipped unless
---allow-value-logs: their routes depend on the state, so a refit on them would
+report. Games played under STS2_ROUTE_POLICY=value (or hpaware / lookahead) are
+skipped unless --allow-value-logs: their routes depend on the state, so a refit on them would
 train on the planner's own choices. See
 docs/superpowers/plans/2026-09-30-phase3b-route-value-planner.md.
 """
@@ -55,10 +55,18 @@ def _mean_se(values: list[float]) -> tuple[float, float]:
     return mean, se
 
 
+# play_full_run's experiment tag suffix for every route policy but random: their
+# routes depend on the state, so they are not random-route training data.
+_STATE_DEPENDENT_ROUTES = ("route=value", "route=hpaware", "route=lookahead")
+
+
 def is_value_log(game: dict) -> bool:
-    """True for a game played under STS2_ROUTE_POLICY=value: its run_meta
-    experiment tag says so, or its log holds a get_map reply."""
-    return "route=value" in (game.get("experiment") or "") or bool(game.get("has_map_state"))
+    """True for a game whose route depended on the state: played under
+    STS2_ROUTE_POLICY=value / hpaware / lookahead (its run_meta experiment tag
+    says so), or its log holds a get_map reply."""
+    experiment = game.get("experiment") or ""
+    return any(tag in experiment for tag in _STATE_DEPENDENT_ROUTES) \
+        or bool(game.get("has_map_state"))
 
 
 def dedupe_games(games: list[dict]) -> list[dict]:

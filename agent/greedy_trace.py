@@ -18,8 +18,10 @@ import os
 # three it does not stamp (STS2_CARD_PICK_TEMP, STS2_MC_ROLLOUT,
 # STS2_VANTOM_REST_HEAL) and six that agent/card_scoring.py reads
 # (STS2_ARCHETYPE, STS2_BOSS_READINESS_LIFT, STS2_CTX_WEIGHTS,
-# STS2_OVERRIDE_DELTA_CAP, STS2_PREDICTOR_TARGET, STS2_MC_SMART_THRESH). Several
-# of those are read at import time, so they must be set before `agent` is
+# STS2_OVERRIDE_DELTA_CAP, STS2_PREDICTOR_TARGET, STS2_MC_SMART_THRESH) plus
+# STS2_MAP_POLICY (combat_env: HpAware vs lookahead map routing, read per call;
+# play_full_run does not stamp it -- its route arms pass the policy explicitly).
+# Several of those are read at import time, so they must be set before `agent` is
 # imported. STS2_MC_DIAG and the CombatEnv-only vars (STS2_MAP_PLANNER,
 # STS2_RUN_EPISODE, STS2_STUCK_DUMP, ...) were reviewed and are not on
 # greedy_action's path. The advisor warns when any is set to a non-default value
@@ -30,6 +32,7 @@ GREEDY_BEHAVIOR_ENV = (
     "STS2_CARD_PICK_TEMP", "STS2_MC_ROLLOUT", "STS2_VANTOM_REST_HEAL",
     "STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
     "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET", "STS2_MC_SMART_THRESH",
+    "STS2_MAP_POLICY",
 )
 
 # What each GREEDY_BEHAVIOR_ENV variable means when it is NOT set: the string the
@@ -53,6 +56,7 @@ GREEDY_BEHAVIOR_DEFAULTS = {
     "STS2_OVERRIDE_DELTA_CAP": "2.0",  # card_scoring._OVERRIDE_DELTA_CAP_DEFAULT
     "STS2_PREDICTOR_TARGET": "floor",  # card_scoring.PREDICTOR_TARGET
     "STS2_MC_SMART_THRESH": "0.15",  # card_scoring._MC_SMART_THRESHOLD
+    "STS2_MAP_POLICY": "",           # combat_env._map_policy: hpaware (HpAwareMapStrategy)
 }
 
 
@@ -165,6 +169,10 @@ TRACE_KEYS = frozenset({
     "map.elite_early_floor", "map.elite_hp_danger", "map.elite_hp_low",
     "map.elite_act2_healthy", "map.elite_act2", "map.elite_strong_midgame",
     "map.elite_pre_boss", "map.elite_act2_boss_zone",
+    # map_select under STS2_MAP_POLICY=lookahead (LookaheadMapStrategy): its rules
+    # and the cost components of a route (the option score is their sum)
+    "map.la_best_path", "map.la_fallback", "map.la_room_reward", "map.la_elite_reward",
+    "map.la_elite_danger", "map.la_fight_danger", "map.la_boss_danger", "map.la_hp_end",
 })
 
 RULE_OUTCOMES = ("fired", "skipped")

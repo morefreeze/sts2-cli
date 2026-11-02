@@ -109,6 +109,14 @@ public static class TraceText
         ["map.elite_strong_midgame"] = ("HP ≥ 85% 且第 7–12 层", "HP >= 85%, floors 7-12"),
         ["map.elite_pre_boss"] = ("第 13 层起（Boss 前）", "Floor 13+ (pre-boss)"),
         ["map.elite_act2_boss_zone"] = ("阶段2起，第 13 层起", "Act 2+, floor 13+"),
+        ["map.la_best_path"] = ("整条路线评估（共 {n_paths} 条路线）：{path}，{elites} 个精英，到 Boss 时 HP {hp_boss_ratio:%}；差别主要在{decider}", "Whole-path lookahead ({n_paths} routes): {path}, {elites} elites, HP at the boss {hp_boss_ratio:%}; decided by {decider}"),
+        ["map.la_fallback"] = ("无法按整条路线评估（{reason}），改用优先级规则", "Cannot look ahead ({reason}); using the priority rules"),
+        ["map.la_room_reward"] = ("房间收益", "Room rewards"),
+        ["map.la_elite_reward"] = ("精英遗物收益", "Elite relic reward"),
+        ["map.la_elite_danger"] = ("精英战死亡风险", "Elite fight death risk"),
+        ["map.la_fight_danger"] = ("普通战斗死亡风险", "Normal fight death risk"),
+        ["map.la_boss_danger"] = ("进 Boss 时 HP 不足的风险", "Boss entry death risk"),
+        ["map.la_hp_end"] = ("到 Boss 时的 HP", "HP at the boss"),
     };
 
     /// <summary>Rule values that are words, not numbers.</summary>
@@ -116,6 +124,19 @@ public static class TraceText
     {
         ["ironclad_only"] = ("只统计铁甲战士的打击和防御，实测配置", "Ironclad's Strike/Defend only, the measured config"),
         ["all"] = ("统计全部角色的打击和防御", "every character's Strike/Defend"),
+        // map.la_best_path `decider` (the route score term that separates the pick from the runner-up)
+        ["room_reward"] = ("房间收益", "room rewards"),
+        ["elite_reward"] = ("精英遗物收益", "the elite relic reward"),
+        ["elite_danger"] = ("精英战死亡风险", "elite fight death risk"),
+        ["fight_danger"] = ("普通战斗死亡风险", "normal fight death risk"),
+        ["boss_danger"] = ("进 Boss 时 HP 不足的风险", "boss entry death risk"),
+        ["hp_end"] = ("到 Boss 时的 HP", "HP at the boss"),
+        ["no_gap"] = ("没有明显差别", "no clear gap"),
+        ["tied"] = ("并列（按优先级）", "a tie (priority decides)"),
+        // map.la_fallback `reason`
+        ["no_map"] = ("没有地图数据", "no map data"),
+        ["choice_not_on_map"] = ("选项不在地图上", "choice not on the map"),
+        ["too_many_paths"] = ("路线太多", "too many routes"),
     };
 
     /// <summary>Components shown without a sign: they are a score, not an adjustment.</summary>
