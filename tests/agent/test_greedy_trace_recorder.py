@@ -71,7 +71,7 @@ def test_behavior_env_covers_play_full_run_knobs():
 # variable but the ones a test passes.
 _PROBE = """
 import json
-from agent import card_scoring as cs, combat_env as ce
+from agent import card_scoring as cs, combat_env as ce, strategy as st
 print(json.dumps({
     "randomize": sorted(ce._RANDOMIZE_DECISIONS),
     "decision_advisor": ce._decision_advisor_enabled(),
@@ -84,6 +84,7 @@ print(json.dumps({
     "predictor_target": cs.PREDICTOR_TARGET,
     "mc_smart_thresh": cs._MC_SMART_THRESHOLD,
     "map_policy": ce._map_policy(),
+    "pre_boss_heal": st.pre_boss_heal_threshold(),
 }))
 """
 
@@ -121,6 +122,7 @@ def test_behavior_defaults_match_what_the_reading_code_resolves():
     assert unset["override_delta_cap"] == 2.0
     assert unset["predictor_target"] == "floor"
     assert unset["mc_smart_thresh"] == 0.15
+    assert unset["pre_boss_heal"] == 0.85
     # every variable set to its default (blank defaults: set but blank) resolves
     # exactly as the same variable unset
     assert _probe(dict(GREEDY_BEHAVIOR_DEFAULTS)) == unset
@@ -130,7 +132,8 @@ def test_behavior_defaults_match_what_the_reading_code_resolves():
                     "STS2_MC_ROLLOUT": "smart", "STS2_ARCHETYPE": "orbs",
                     "STS2_CTX_WEIGHTS": "legacy", "STS2_OVERRIDE_DELTA_CAP": "3",
                     "STS2_PREDICTOR_TARGET": "hp", "STS2_MC_SMART_THRESH": "0.5",
-                    "STS2_MAP_POLICY": "lookahead"})
+                    "STS2_MAP_POLICY": "lookahead",
+                    "STS2_PRE_BOSS_HEAL": "legacy"})
     assert {k for k in unset if moved[k] != unset[k]} == set(unset)
 
 

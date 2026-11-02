@@ -981,3 +981,105 @@ def test_map_evidence_matches_choice():
         n += 1
     assert n > 0
     assert unhandled > 0  # the corpus' empty-choices row
+
+
+# ---- rest.pre_boss_heal: its own threshold (STS2_PRE_BOSS_HEAL) -------------------------------------
+
+def _pre_boss_rest(monkeypatch, *, hp, floor=16, max_hp=100, must_upgrade=True):
+    """A pre-boss rest-site state; best_smith_target is pinned so the outcome
+    depends only on the heal-vs-smith rules, not on the corpus deck."""
+    from agent import strategy
+    monkeypatch.setattr(strategy, "best_smith_target",
+                        lambda deck: 0 if must_upgrade else None)
+    return _rest_state(floor=floor, hp=hp, max_hp=max_hp)
+
+
+def _rest_choice(state):
+    trace = GreedyTrace()
+    action = greedy_action(state, trace=trace)
+    assert action == greedy_action(state)
+    name = "heal" if action["args"]["option_index"] == _option_index(state, "heal") else "smith"
+    return name, trace
+
+
+@pytest.mark.parametrize("floor", [14, 15, 16])
+def test_pre_boss_rest_above_85_percent_smiths(monkeypatch, floor):
+    monkeypatch.delenv("STS2_PRE_BOSS_HEAL", raising=False)
+    name, trace = _rest_choice(_pre_boss_rest(monkeypatch, hp=90, floor=floor))
+    assert name == "smith"
+    by_key = {r["key"]: r for r in trace.rules}
+    assert by_key["rest.pre_boss_heal"]["outcome"] == "skipped"
+    # the recorded threshold is the one the rule actually used
+    assert by_key["rest.pre_boss_heal"]["values"]["threshold"] == 0.85
+    assert trace.fired()[0]["key"] == "rest.must_upgrade"
+
+
+def test_pre_boss_rest_below_85_percent_heals(monkeypatch):
+    monkeypatch.delenv("STS2_PRE_BOSS_HEAL", raising=False)
+    name, trace = _rest_choice(_pre_boss_rest(monkeypatch, hp=80))
+    assert name == "heal"
+    fired = trace.fired()[0]
+    assert fired["key"] == "rest.pre_boss_heal"
+    assert fired["values"]["threshold"] == 0.85
+
+
+def test_pre_boss_rest_85_percent_exactly_smiths(monkeypatch):
+    monkeypatch.delenv("STS2_PRE_BOSS_HEAL", raising=False)
+    assert _rest_choice(_pre_boss_rest(monkeypatch, hp=85))[0] == "smith"
+
+
+def test_pre_boss_rest_85_to_95_percent_without_must_upgrade_falls_to_heal_threshold(monkeypatch):
+    """Rule 5 uses the floor-graduated 0.95 at floor 16; with nothing to upgrade
+    first 90% HP falls through to rest.heal_threshold, unchanged."""
+    monkeypatch.delenv("STS2_PRE_BOSS_HEAL", raising=False)
+    name, trace = _rest_choice(_pre_boss_rest(monkeypatch, hp=90, must_upgrade=False))
+    assert name == "heal"
+    fired = trace.fired()[0]
+    assert fired["key"] == "rest.heal_threshold"
+    assert fired["values"]["threshold"] == 0.95
+
+
+def test_pre_boss_rest_legacy_knob_keeps_the_old_threshold(monkeypatch):
+    monkeypatch.setenv("STS2_PRE_BOSS_HEAL", "legacy")
+    name, trace = _rest_choice(_pre_boss_rest(monkeypatch, hp=90))   # floor 16: 0.95
+    assert name == "heal"
+    fired = trace.fired()[0]
+    assert fired["key"] == "rest.pre_boss_heal"
+    assert fired["values"]["threshold"] == 0.95
+    # floor 14-15 legacy threshold is 0.85
+    monkeypatch.setenv("STS2_PRE_BOSS_HEAL", "legacy")
+    state = _pre_boss_rest(monkeypatch, hp=84, floor=15)
+    assert _rest_choice(state)[1].fired()[0]["values"]["threshold"] == 0.85
+
+
+def test_pre_boss_rest_knob_takes_a_ratio(monkeypatch):
+    monkeypatch.setenv("STS2_PRE_BOSS_HEAL", "0.95")
+    assert _rest_choice(_pre_boss_rest(monkeypatch, hp=90))[0] == "heal"
+    monkeypatch.setenv("STS2_PRE_BOSS_HEAL", "0.5")
+    assert _rest_choice(_pre_boss_rest(monkeypatch, hp=60))[0] == "smith"
+    monkeypatch.setenv("STS2_PRE_BOSS_HEAL", " ")      # blank = unset
+    assert _rest_choice(_pre_boss_rest(monkeypatch, hp=80))[0] == "heal"
+    assert _rest_choice(_pre_boss_rest(monkeypatch, hp=90))[0] == "smith"
+
+
+@pytest.mark.parametrize("bad", ["0", "-0.5", "1.5", "abc", "nan"])
+def test_pre_boss_rest_knob_rejects_bad_values(monkeypatch, bad):
+    monkeypatch.setenv("STS2_PRE_BOSS_HEAL", bad)
+    state = _pre_boss_rest(monkeypatch, hp=90)
+    with pytest.raises(ValueError):
+        greedy_action(state)
+
+
+def test_critical_heal_ignores_the_pre_boss_knob(monkeypatch):
+    monkeypatch.delenv("STS2_PRE_BOSS_HEAL", raising=False)
+    name, trace = _rest_choice(_pre_boss_rest(monkeypatch, hp=25))   # < 0.30
+    assert name == "heal"
+    assert trace.fired()[0]["key"] == "rest.critical_heal"
+    assert _rest_choice(_pre_boss_rest(monkeypatch, hp=45))[1].fired()[0]["key"] == "rest.pre_boss_heal"
+
+
+def test_below_the_pre_boss_zone_the_knob_changes_nothing(monkeypatch):
+    for value in ("legacy", "0.85", "1"):
+        monkeypatch.setenv("STS2_PRE_BOSS_HEAL", value)
+        state = _pre_boss_rest(monkeypatch, hp=90, floor=12)
+        assert _rest_choice(state)[0] == "smith"

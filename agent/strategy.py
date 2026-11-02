@@ -421,6 +421,30 @@ class LookaheadMapStrategy:
         return self.fallback.choose(state, choices, trace=trace)
 
 
+PRE_BOSS_HEAL_THRESHOLD = 0.85
+
+
+def pre_boss_heal_threshold():
+    """STS2_PRE_BOSS_HEAL: HP ratio below which the pre-boss zone rests instead of
+    smithing. Unset / blank = PRE_BOSS_HEAL_THRESHOLD; a float in (0, 1] = that
+    ratio; `legacy` = None, i.e. the floor-graduated heal_threshold (0.95 at floor
+    16+). Anything else raises ValueError."""
+    import os
+    raw = os.environ.get("STS2_PRE_BOSS_HEAL", "").strip().lower()
+    if not raw:
+        return PRE_BOSS_HEAL_THRESHOLD
+    if raw == "legacy":
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not 0.0 < value <= 1.0:     # also rejects NaN
+        raise ValueError(
+            f"STS2_PRE_BOSS_HEAL={raw!r}: want a float in (0, 1], 'legacy', or blank")
+    return value
+
+
 def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
     """Decide heal vs upgrade at a rest site.
 
@@ -429,7 +453,10 @@ def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
       1. rest.critical_heal    HP < CRITICAL_HEAL ratio → heal, no exceptions
       2. rest.vantom_mid_boss  STS2_VANTOM_REST_HEAL on, Vantom boss, floors 11-13,
                                HP < 70% → heal
-      3. rest.pre_boss_heal    floor ≥ 14 and HP < the heal threshold → heal
+      3. rest.pre_boss_heal    floor ≥ 14 and HP < PRE_BOSS_HEAL_THRESHOLD (0.85;
+                               STS2_PRE_BOSS_HEAL, `legacy` = the floor-graduated
+                               heal threshold) → heal. Above it the rest's 30% is
+                               mostly wasted and rule 4 smiths instead.
       4. rest.must_upgrade     deck has an un-upgraded high-value card
                                (score ≥ SMITH_PRIORITY_THRESHOLD) → SMITH that card
                                (a +1 upgrade pays off every remaining combat, while
@@ -500,6 +527,9 @@ def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
     # Floor 14+ = pre-boss zone (boss at 17, max 2 fights remain), so HEAL wins.
     # Earlier scope (10+) regressed -1.0 floor by removing too many good SMITHs.
     pre_boss_zone = isinstance(floor, int) and floor >= 14
+    pre_boss_threshold = pre_boss_heal_threshold()
+    if pre_boss_threshold is None:       # STS2_PRE_BOSS_HEAL=legacy
+        pre_boss_threshold = heal_threshold
     import os
     vantom_rest_heal_enabled = os.environ.get(
         "STS2_VANTOM_REST_HEAL", "") in ("1", "true", "on")
@@ -521,8 +551,8 @@ def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
          {"enabled": vantom_rest_heal_enabled, "is_vantom": is_vantom,
           "hp_ratio": hp_ratio, "floor": floor, "available": heal_ok}),
         ("rest.pre_boss_heal",
-         pre_boss_zone and hp_ratio < heal_threshold and heal_ok, heal,
-         {"hp_ratio": hp_ratio, "threshold": heal_threshold, "floor": floor,
+         pre_boss_zone and hp_ratio < pre_boss_threshold and heal_ok, heal,
+         {"hp_ratio": hp_ratio, "threshold": pre_boss_threshold, "floor": floor,
           "available": heal_ok}),
         ("rest.must_upgrade", has_must_upgrade, smith,
          {"deck_index": smith_target, "threshold": SMITH_PRIORITY_THRESHOLD,

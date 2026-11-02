@@ -160,8 +160,8 @@ public static class TraceText
         "best_score", "best_card_score", "removal_value", "best_relic_score", "best_potion_score", "threshold",
     };
 
-    /// <summary>rest.pre_boss_heal below its floor: the recorded threshold is the current floor's, not the
-    /// pre-boss one, so the numbers are left out.</summary>
+    /// <summary>rest.pre_boss_heal below its floor: the rule cannot apply there, so the numbers are left out
+    /// (under STS2_PRE_BOSS_HEAL=legacy the recorded threshold is also the current floor's, not the pre-boss one).</summary>
     private const int PreBossFloor = 14;
 
     /// <summary>Rule values an older greedy did not record. Before `potion_slots` greedy assumed a belt of 3, so a
