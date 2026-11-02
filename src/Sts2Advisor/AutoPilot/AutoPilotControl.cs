@@ -33,6 +33,35 @@ internal static class AutoPilotControl
 
     public static bool IsRunning => Session.Mode == AutoPilotMode.Running;
 
+    /// <summary>The screen the running autopilot has handed to the player, if any ("modal" for a popup).</summary>
+    public static string? HandBackScreen => IsRunning ? Session.HandBackScreen : null;
+
+    /// <summary>Why <see cref="Available"/> is false.</summary>
+    public static string WhyUnavailable =>
+        _unavailable ?? (ApiMismatch ? "game API mismatch" : _loc == null ? "no localization" : _advisor == null ? "no advice service" : "available");
+
+    /// <summary>How many times the autopilot has stopped since the game started (the campaign tells new stops from old).</summary>
+    public static int StopCount { get; private set; }
+
+    /// <summary>Why it last stopped; null before the first stop and while a start is running.</summary>
+    public static StopReason? LastStop => Session.LastStop;
+
+    public static string? LastStopDetail => Session.LastStopDetail;
+
+    public static double SecondsSinceStop => _now() - _stoppedAt;
+
+    /// <summary>Starts full auto (as the hotkey does) unless it runs already. False when it cannot run: the autopilot
+    /// is unavailable, or the previous run has not finished stopping.</summary>
+    public static bool StartFullAuto()
+    {
+        if (IsRunning)
+            return true;
+        if (!Available || _runTask is { IsCompleted: false })
+            return false;
+        Start(singleStep: false);
+        return IsRunning;
+    }
+
     /// <summary><paramref name="unavailable"/>: why the autopilot cannot run (handlers not patched, no
     /// localization); null when it can.</summary>
     public static void Init(IAdvisor advisor, LocLookup? loc, AdvisorTraceLog? trace, string gameUserDir,
@@ -134,6 +163,7 @@ internal static class AutoPilotControl
 
     private static void Finish(StopReason reason, string? detail)
     {
+        StopCount++;
         _cts = null;
         Session.Stop(reason, detail);
         _stoppedAt = _now();

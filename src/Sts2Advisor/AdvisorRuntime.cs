@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Godot;
 using Sts2Advisor.AutoPilot;
+using Sts2Advisor.Campaign;
 using Sts2Advisor.Core;
 using Sts2Shared;
 
@@ -90,6 +91,7 @@ internal static class AdvisorRuntime
         string gameUserDir = System.IO.Path.GetDirectoryName(userDir) ?? userDir;
         AutoPilotControl.Init(_advisor, locOk ? _loc : null, _trace, gameUserDir, () => Clock.Elapsed.TotalSeconds,
                    config.StepPauseSeconds, autopilotProblem ?? (locOk ? null : $"repo_path ({configPath})"));
+        CampaignControl.Init(userDir, _trace, () => Clock.Elapsed.TotalSeconds);
         if (!locOk)
         {
             _configProblem = $"repo_path ({configPath})";
@@ -143,6 +145,7 @@ internal static class AdvisorRuntime
         PollHotkey();
         // While the autopilot runs a late advice reply must not paint over its panel: drop them.
         DrainResults(now, discard: AutoPilotControl.IsRunning);
+        CampaignControl.Tick();  // throttled to once a second inside; works with the panel hidden
         if (now < _nextPoll) return;
         _nextPoll = now + PollSeconds;
 
@@ -196,7 +199,11 @@ internal static class AdvisorRuntime
         {
             _requested = null;
             _lastSeenFingerprint = null;
-            _panel.Hide();
+            // Outside a run there is no advice, but a campaign has things to say (main menu, between runs).
+            if (CampaignControl.Active && CampaignControl.StatusLine(Zh) is { } campaign)
+                Show(new[] { campaign }, buttons: false);
+            else
+                _panel.Hide();
             return;
         }
         if (cap.Kind != CaptureKind.Advise)
@@ -401,15 +408,18 @@ internal static class AdvisorRuntime
     }
 
     /// <summary>Nothing is shown while the player has the panel hidden (F8): a reply that lands late must not undo that.</summary>
-    private static void Show(IReadOnlyList<PanelLine> lines)
+    private static void Show(IReadOnlyList<PanelLine> lines, bool buttons = true)
     {
         if (!_visible) return;
         var banner = AutoPilotControl.Banner(_autoKeyName, _stepKeyName, Zh);
-        // No buttons while the mod cannot act (config missing, game version unsupported).
-        var buttons = _configProblem != null || _disabled || !AutoPilotControl.Available
+        // No buttons while the mod cannot act (config missing, game version unsupported) or when there is no run.
+        var panelButtons = !buttons || _configProblem != null || _disabled || !AutoPilotControl.Available
             ? Array.Empty<PanelButton>()
             : AutoPilotText.Buttons(AutoPilotControl.IsRunning, _stepKeyName, _autoKeyName, Zh);
-        _panel?.Show(banner == null ? lines : lines.Prepend(banner).ToList(), _language, buttons, OnPanelButton);
+        var all = banner == null ? lines : lines.Prepend(banner).ToList();
+        if (CampaignControl.StatusLine(Zh) is { } campaign && !all.Contains(campaign))
+            all = all.Append(campaign).ToList();
+        _panel?.Show(all, _language, panelButtons, OnPanelButton);
     }
 
     private static void OnPanelButton(PanelAction action)
