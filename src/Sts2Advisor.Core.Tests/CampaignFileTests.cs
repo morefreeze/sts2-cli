@@ -124,6 +124,94 @@ public class CampaignFileTests
         Assert.False(string.IsNullOrEmpty(r.Problem));
     }
 
+    // -- rotation ----------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void ReadsARotationOfObjectsAndPlainCharacterNames()
+    {
+        var r = Parse("""
+            {"enabled": true, "rotation": [
+                {"character": "REGENT", "ascension": "max"},
+                "silent",
+                {"character": "defect", "ascension": 4},
+                "CHARACTER.NECROBINDER"]}
+            """);
+        Assert.Null(r.Problem);
+        var rotation = r.Settings!.Rotation!;
+        Assert.Equal(new[]
+        {
+            new CampaignTarget("REGENT", AscensionSpec.Max),
+            new CampaignTarget("SILENT", AscensionSpec.Max),     // a plain name means max
+            new CampaignTarget("DEFECT", AscensionSpec.Of(4)),
+            new CampaignTarget("NECROBINDER", AscensionSpec.Max),
+        }, rotation);
+        Assert.Null(r.Settings.Character);  // "next" is a separate thing
+    }
+
+    [Fact]
+    public void AnObjectEntryWithoutAnAscensionMeansMax()
+    {
+        var s = Parse("""{"enabled": true, "rotation": [{"character": "REGENT"}]}""").Settings!;
+        Assert.Equal(new CampaignTarget("REGENT", AscensionSpec.Max), Assert.Single(s.Rotation!));
+    }
+
+    [Fact]
+    public void RotationAndNextAreBothKept()
+    {
+        var s = Parse("""
+            {"enabled": true, "next": {"character": "IRONCLAD", "ascension": 2}, "rotation": ["SILENT"]}
+            """).Settings!;
+        Assert.Equal("IRONCLAD", s.Character);
+        Assert.Equal(new CampaignTarget("SILENT", AscensionSpec.Max), Assert.Single(s.Rotation!));
+    }
+
+    [Theory]
+    [InlineData("""{"enabled": true, "rotation": []}""")]
+    [InlineData("""{"enabled": true, "rotation": null}""")]
+    [InlineData("""{"enabled": true}""")]
+    public void AnEmptyNullOrMissingRotationIsNoRotation(string json)
+    {
+        var r = Parse(json);
+        Assert.Null(r.Problem);
+        Assert.Null(r.Settings!.Rotation);
+    }
+
+    [Theory]
+    [InlineData("""{"enabled": true, "rotation": "IRONCLAD"}""")]
+    [InlineData("""{"enabled": true, "rotation": {"character": "IRONCLAD"}}""")]
+    [InlineData("""{"enabled": true, "rotation": ["IRON CLAD"]}""")]
+    [InlineData("""{"enabled": true, "rotation": [7]}""")]
+    [InlineData("""{"enabled": true, "rotation": [{"ascension": 3}]}""")]
+    [InlineData("""{"enabled": true, "rotation": [{"character": "IRONCLAD", "ascension": -1}]}""")]
+    [InlineData("""{"enabled": true, "rotation": [{"character": "IRONCLAD", "ascension": "high"}]}""")]
+    [InlineData("""{"enabled": true, "rotation": ["IRONCLAD", null]}""")]
+    public void ABadRotationMakesTheFileInvalid(string json)
+    {
+        var r = Parse(json);
+        Assert.Null(r.Settings);
+        Assert.Contains("rotation", r.Problem);
+    }
+
+    [Fact]
+    public void ADisabledFileIgnoresARotation()
+    {
+        var r = Parse("""{"enabled": false, "rotation": 5}""");
+        Assert.Null(r.Problem);
+        Assert.False(r.Settings!.Enabled);
+    }
+
+    [Fact]
+    public void ClearCommandKeepsTheRotation()
+    {
+        var path = TempPath();
+        File.WriteAllText(path, """{"enabled": true, "rotation": ["REGENT", {"character": "SILENT", "ascension": 3}], "command": "quit"}""");
+        Assert.True(CampaignFile.ClearCommand(path));
+        var r = CampaignFile.Load(path);
+        Assert.Equal(CampaignCommand.None, r.Settings!.Command);
+        Assert.Equal(2, r.Settings.Rotation!.Count);
+        Assert.Equal(AscensionSpec.Of(3), r.Settings.Rotation[1].Ascension);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]

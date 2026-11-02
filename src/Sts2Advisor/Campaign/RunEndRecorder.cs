@@ -45,9 +45,24 @@ internal static class RunEndRecorder
             }
         }
 
-        // The Architect's WinRun kills the player to end the run: after a victory the live HP reads 0. The map point history
-        // was updated (RunManager.UpdatePlayerStatsInMapPointHistory) just before that.
-        var stats = victory ? Read("final stats", () => rs.CurrentMapPointHistoryEntry?.GetEntry(player.NetId), null) : null;
+        // After a victory the live player is dead: the Architect's WinRun calls RunManager.OnEnded(true) (which fills the
+        // last map point history entry and saves <start_time>.run) and then kills the player, and killing the last
+        // player calls OnEnded(false), whose UpdatePlayerStatsInMapPointHistory overwrites that same in-memory entry with
+        // HP 0 (the entry objects are shared with RunManager.History). So the victory's HP is only in the saved history
+        // file; the in-memory entry is the second choice (it has the HP if a game version stops overwriting it).
+        var live = new RunVitals(Read("hp", () => player.Creature?.CurrentHp ?? 0, 0),
+                                 Read("max hp", () => player.Creature?.MaxHp ?? 0, 0),
+                                 Read("gold", () => player.Gold, 0));
+        RunVitals? fromFile = null, fromEntry = null;
+        if (victory)
+        {
+            fromFile = startTime == 0 ? null : Read<RunVitals?>("history file", () => CampaignVitals.FromHistoryFile(HistoryPath(startTime), player.NetId), null);
+            fromEntry = Read<RunVitals?>("last map point entry",
+                () => rs.CurrentMapPointHistoryEntry?.GetEntry(player.NetId) is { } e ? new RunVitals(e.CurrentHp, e.MaxHp, e.CurrentGold) : null, null);
+        }
+        var vitals = CampaignVitals.Pick(victory, live, fromFile, fromEntry);
+        if (victory && vitals.Hp <= 0)
+            ModLog.Error($"campaign: run record: a victory whose HP could not be recovered (history file {fromFile?.Hp.ToString() ?? "unreadable"}, last map point entry {fromEntry?.Hp.ToString() ?? "unreadable"}): HP is logged as 0");
 
         return new CampaignRunRecord(
             Character: Read("character", () => player.Character.Id.Entry, "?")!,
@@ -56,9 +71,9 @@ internal static class RunEndRecorder
             Act: Read("act", () => rs.CurrentActIndex + 1, 0),
             Floor: Read("floor", () => rs.ActFloor, 0),
             TotalFloor: Read("total floor", () => rs.TotalFloor, 0),
-            Hp: stats?.CurrentHp ?? Read("hp", () => player.Creature?.CurrentHp ?? 0, 0),
-            MaxHp: stats?.MaxHp ?? Read("max hp", () => player.Creature?.MaxHp ?? 0, 0),
-            Gold: stats?.CurrentGold ?? Read("gold", () => player.Gold, 0),
+            Hp: vitals.Hp,
+            MaxHp: vitals.MaxHp,
+            Gold: vitals.Gold,
             Deck: Read("deck", () => player.Deck.Cards.Select(c => CampaignRunLog.CardId(c.Id.ToString(), c.CurrentUpgradeLevel)).ToList(),
                        new List<string>())!,
             Relics: Read("relics", () => player.Relics.Select(r => r.Id.ToString()).ToList(), new List<string>())!,

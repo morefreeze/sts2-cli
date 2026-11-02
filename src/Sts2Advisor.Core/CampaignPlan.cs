@@ -18,6 +18,8 @@ public enum CampaignStop { None, Player, Retriable, Service, Fatal }
 /// <param name="Floor">"A2F5": the key of the once-per-floor restart.</param>
 /// <param name="HandBackScreen">The screen the running autopilot has handed to the player (it has no advice for it:
 /// choose a relic, crystal sphere ...), and for how long (<paramref name="HandBackSeconds"/>).</param>
+/// <param name="LastRunCharacter">The character of the run that ended last (this session, else the last line of
+/// campaign_runs.jsonl); where the file's "rotation" goes on from.</param>
 public sealed record CampaignFacts(
     CampaignScreen Screen,
     bool AutopilotRunning = false,
@@ -32,21 +34,24 @@ public sealed record CampaignFacts(
     string ModalKey = "",
     double SubmenuSeconds = 0,
     string? HandBackScreen = null,
-    double HandBackSeconds = 0);
+    double HandBackSeconds = 0,
+    string? LastRunCharacter = null);
 
 public enum CampaignStepKind { Idle, StartAutopilot, FinishRun, ContinueRun, StartRun, CloseModal, LeaveSubmenu, HandleScreen, Quit, StopAutopilot }
 
 /// <param name="Why">What the step is for, or why there is nothing to do; goes to the log and the panel.</param>
 /// <param name="Key">Identifies what a step acts on: repeating the same kind and key without effect is retried with
 /// a growing delay and then given up (<see cref="CampaignAttempts"/>); a new key starts afresh.</param>
-public sealed record CampaignStep(CampaignStepKind Kind, string Why, string Key = "");
+/// <param name="Target">StartRun: the run to start (from "rotation", else "next").</param>
+public sealed record CampaignStep(CampaignStepKind Kind, string Why, string Key = "", CampaignTarget? Target = null);
 
 public readonly record struct ResolvedAscension(int Level, bool Clamped);
 
 /// <summary>The campaign's brain, apart from the game: the control file, a snapshot of the game and the autopilot's
 /// last stop in; the next thing to do out. A run that has just ended is the GameOver screen: FinishRun records it
-/// and clicks through to the main menu, where the next step is StartRun with the file's "next" -- or ContinueRun
-/// when a saved run exists (a run is never abandoned for a new one).</summary>
+/// and clicks through to the main menu, where the next step is StartRun with the file's "rotation" entry after the
+/// run that ended, else its "next" -- or ContinueRun when a saved run exists (a run is never abandoned for a new one).
+/// Everything is read from the settings handed in, every time: an edit of the file is seen by the next plan.</summary>
 public static class CampaignPlan
 {
     /// <summary>A popup (a first-time tip, say) is the player's for this long before the campaign closes it.</summary>
@@ -70,9 +75,9 @@ public static class CampaignPlan
         if (s is not { Enabled: true })
             return Idle("campaign off");
 
-        // The commands come first: "quit" still lets an ended run be recorded (the run's data is on the game-over
-        // screen and gone after it), "stop" works on any screen.
-        if (s.Command == CampaignCommand.Quit && f.Screen != CampaignScreen.GameOver)
+        // The commands come first, on any screen: "quit" on the game-over screen too (the quit step records the ended
+        // run first -- its data is on that screen -- and does not click through), "stop" likewise.
+        if (s.Command == CampaignCommand.Quit)
             return new CampaignStep(CampaignStepKind.Quit, "command: quit", "quit");
         if (s.Command == CampaignCommand.Stop)
             return new CampaignStep(CampaignStepKind.StopAutopilot, "command: stop", "stop");
@@ -93,10 +98,11 @@ public static class CampaignPlan
             case CampaignScreen.MainMenu:
                 if (f.HasSavedRun)
                     return new CampaignStep(CampaignStepKind.ContinueRun, "a saved run exists", "continue");
-                if (s.Character == null || s.Ascension == null)
-                    return Idle("no run in progress and campaign.json has no \"next\" to start");
-                return new CampaignStep(CampaignStepKind.StartRun, $"no run in progress: start {s.Character} {CampaignText.Level(s.Ascension)}",
-                                        $"{s.Character}/{s.Ascension}");
+                if (NextTarget(s, f.LastRunCharacter) is not { } target)
+                    return Idle("no run in progress and campaign.json has no \"rotation\" or \"next\" to start");
+                return new CampaignStep(CampaignStepKind.StartRun,
+                                        $"no run in progress: start {target.Character} {CampaignText.Level(target.Ascension)}",
+                                        $"{target.Character}/{target.Ascension}", target);
 
             case CampaignScreen.Submenu:
                 return f.SubmenuSeconds >= SubmenuGraceSeconds
@@ -135,6 +141,30 @@ public static class CampaignPlan
             default:
                 return new CampaignStep(CampaignStepKind.StartAutopilot, "a run is in progress", f.Floor);
         }
+    }
+
+    /// <summary>The run the campaign starts next: the "rotation" entry after <paramref name="lastRunCharacter"/> when
+    /// the file has a rotation, else "next", else none.</summary>
+    public static CampaignTarget? NextTarget(CampaignSettings? s, string? lastRunCharacter)
+    {
+        if (s == null)
+            return null;
+        if (CampaignRotation.Next(s.Rotation, lastRunCharacter) is { } fromRotation)
+            return fromRotation;
+        return s.Character != null && s.Ascension != null ? new CampaignTarget(s.Character, s.Ascension.Value) : null;
+    }
+
+    /// <summary>Whether this reading of campaign.json interrupts a flow that is under way (finish run, start run,
+    /// continue ...): only switching the campaign off and the "stop" and "quit" commands do. A new "next" or
+    /// "rotation" does not: the flow finishes and the new values are read when they are needed. A half-written file
+    /// interrupts nothing. The quit flow itself is not interrupted by a command (it started with one).</summary>
+    public static bool InterruptsFlow(CampaignRead read, bool flowIsQuit)
+    {
+        if (read.Problem != null)
+            return false;
+        if (read.Settings is not { Enabled: true } s)
+            return true;
+        return !flowIsQuit && s.Command is CampaignCommand.Quit or CampaignCommand.Stop;
     }
 
     /// <summary>"max" is the highest ascension the character has unlocked; a level above that is clamped down to it

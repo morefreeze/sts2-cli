@@ -113,4 +113,35 @@ public class CampaignRunLogTests
         Assert.False(CampaignRunLog.Append(path, "{\"a\":1}\n{\"b\":2}"));
         Assert.False(File.Exists(path));
     }
+
+    // -- the character of the last recorded run (the rotation's starting point after a restart) -------------------
+
+    [Fact]
+    public void LastCharacterIsTheLastRecordedRuns()
+    {
+        string path = TempPath();
+        Assert.True(CampaignRunLog.Append(path, CampaignRunLog.ToJson(Sample() with { Character = "DEFECT" }, DateTime.UtcNow)));
+        Assert.True(CampaignRunLog.Append(path, CampaignRunLog.ToJson(Sample() with { Character = "SILENT" }, DateTime.UtcNow)));
+        Assert.Equal("SILENT", CampaignRunLog.LastCharacter(path));
+    }
+
+    [Fact]
+    public void LastCharacterSkipsAHalfWrittenOrForeignLastLine()
+    {
+        string path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, CampaignRunLog.ToJson(Sample() with { Character = "REGENT" }, DateTime.UtcNow) + "\n{\"other\":1}\n{\"character\":\"NECRO\n\n");
+        Assert.Equal("REGENT", CampaignRunLog.LastCharacter(path));
+    }
+
+    [Fact]
+    public void LastCharacterOfAMissingEmptyOrUnreadableFileIsNull()
+    {
+        Assert.Null(CampaignRunLog.LastCharacter(TempPath()));
+        string path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "");
+        Assert.Null(CampaignRunLog.LastCharacter(path));
+        Assert.Null(CampaignRunLog.LastCharacter(Path.GetTempPath()));  // a directory
+    }
 }

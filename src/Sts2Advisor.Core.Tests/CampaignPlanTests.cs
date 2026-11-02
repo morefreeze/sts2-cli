@@ -202,19 +202,22 @@ public class CampaignPlanTests
 
     [Theory]
     [InlineData(CampaignScreen.Run)]
+    [InlineData(CampaignScreen.GameOver)]
     [InlineData(CampaignScreen.MainMenu)]
     [InlineData(CampaignScreen.Modal)]
     [InlineData(CampaignScreen.Submenu)]
     [InlineData(CampaignScreen.Unknown)]
-    public void QuitComesBeforeEverythingButAnUnrecordedGameOver(CampaignScreen screen)
+    public void QuitComesBeforeEverythingOnAnyScreen(CampaignScreen screen)
     {
+        // Including the game-over screen: the control records the run (its data is on that screen) as part of the quit step.
         Assert.Equal(CampaignStepKind.Quit, Next(On(CampaignCommand.Quit), At(screen)).Kind);
     }
 
     [Fact]
-    public void AGameOverScreenIsRecordedBeforeTheGameQuits()
+    public void QuitBeatsAnAutopilotThatIsStillRunningAndASavedRun()
     {
-        Assert.Equal(CampaignStepKind.FinishRun, Next(On(CampaignCommand.Quit), At(CampaignScreen.GameOver)).Kind);
+        Assert.Equal(CampaignStepKind.Quit,
+            Next(On(CampaignCommand.Quit), new CampaignFacts(CampaignScreen.MainMenu, AutopilotRunning: true, HasSavedRun: true)).Kind);
     }
 
     [Theory]
@@ -225,6 +228,46 @@ public class CampaignPlanTests
     public void StopComesBeforeEverything(CampaignScreen screen)
     {
         Assert.Equal(CampaignStepKind.StopAutopilot, Next(On(CampaignCommand.Stop), At(screen)).Kind);
+    }
+
+    // -- what interrupts a flow that is under way ----------------------------------------------------------------
+
+    private static CampaignRead Read(string json) => CampaignFile.Parse(json);
+
+    [Theory]
+    [InlineData("""{"enabled": true, "next": {"character": "REGENT", "ascension": "max"}}""")]
+    [InlineData("""{"enabled": true, "next": {"character": "NECROBINDER", "ascension": 3}, "command": null}""")]
+    [InlineData("""{"enabled": true, "rotation": ["REGENT", "SILENT"]}""")]
+    [InlineData("""{"enabled": true, "rotation": [], "next": {"character": "DEFECT", "ascension": 1}}""")]
+    public void ChangingNextOrRotationNeverInterruptsAFlow(string json)
+    {
+        Assert.False(CampaignPlan.InterruptsFlow(Read(json), flowIsQuit: false));
+    }
+
+    [Theory]
+    [InlineData("""{"enabled": true, "command": "quit"}""")]
+    [InlineData("""{"enabled": true, "next": {"character": "REGENT", "ascension": "max"}, "command": "stop"}""")]
+    [InlineData("""{"enabled": false}""")]
+    [InlineData("")]
+    public void QuitStopAndSwitchingTheCampaignOffInterruptAFlow(string json)
+    {
+        Assert.True(CampaignPlan.InterruptsFlow(Read(json), flowIsQuit: false));
+    }
+
+    [Fact]
+    public void AHalfWrittenFileDoesNotInterruptAFlow()
+    {
+        var half = Read("{\"enabled\": true,");
+        Assert.NotNull(half.Problem);
+        Assert.False(CampaignPlan.InterruptsFlow(half, flowIsQuit: false));
+    }
+
+    [Fact]
+    public void TheQuitFlowIsNotInterruptedByTheCommandThatStartedIt()
+    {
+        Assert.False(CampaignPlan.InterruptsFlow(Read("""{"enabled": true, "command": "quit"}"""), flowIsQuit: true));
+        Assert.False(CampaignPlan.InterruptsFlow(Read("""{"enabled": true, "command": "stop"}"""), flowIsQuit: true));
+        Assert.True(CampaignPlan.InterruptsFlow(Read("""{"enabled": false}"""), flowIsQuit: true));  // switched off: no quit after all
     }
 
     // -- ascension ---------------------------------------------------------------------------------------------

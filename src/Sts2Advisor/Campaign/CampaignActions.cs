@@ -14,6 +14,7 @@ using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere;
 using MegaCrit.Sts2.Core.Nodes.Ftue;
 using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.GameOverScreen;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.Timeline;
@@ -34,20 +35,75 @@ internal sealed class CampaignStuckException(string why) : Exception(why);
 /// the run, writes unlocks to the save and quits. Main thread only.</summary>
 internal static class CampaignActions
 {
-    private static readonly TimeSpan GameOverTimeout = TimeSpan.FromMinutes(4);
+    /// <summary>The game-over screen offers no button for this long: the attempt is given up (and retried with backoff).
+    /// Restarted after every click, so a long victory summary (score lines, badges) is fine as long as it ends.</summary>
+    private static readonly TimeSpan GameOverStageTimeout = TimeSpan.FromSeconds(120);
+    private const int GameOverPollMs = 250;
+    private static readonly TimeSpan GameOverReclickDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan TimelineTimeout = TimeSpan.FromSeconds(100);
 
     // -- game over -> main menu -------------------------------------------------------------------------------
 
-    /// <summary>The game-over screen's two buttons (continue to the summary, then return to the main menu): AutoSlay's
-    /// own GameOverScreenHandler. The game then goes to the timeline if the run discovered epochs, else to the main
-    /// menu (NGameOverScreen.OnMainMenuButtonPressed).</summary>
-    public static Task LeaveGameOverAsync(CancellationToken ct)
+    /// <summary>The game-over screen's two buttons -- Continue (to the run summary, NGameOverContinueButton), then the
+    /// return to the main menu (NReturnToMainMenuButton, shown and enabled once the summary has played) -- pressed the
+    /// way AutoSlay's GameOverScreenHandler presses them, but as a loop that looks at the screen every time instead of
+    /// a script that waits for the buttons in order: whichever button is usable is pressed, a button that an earlier
+    /// (interrupted) attempt already pressed is simply not there to wait for, and the flow ends when the screen is
+    /// gone. The game then goes to the timeline if the run discovered epochs, else to the main menu
+    /// (NGameOverScreen.OnMainMenuButtonPressed). The decision itself is <see cref="CampaignGameOver"/>.</summary>
+    public static async Task LeaveGameOverAsync(CancellationToken ct)
     {
-        var handler = new GameOverScreenHandler();
-        var rng = new Rng(0uL);  // the handler draws nothing
-        return WaitHelper.WithTimeout(t => handler.HandleAsync(rng, t), GameOverTimeout, ct);
+        var deadline = DateTime.UtcNow + GameOverStageTimeout;
+        GameOverAction? logged = null, lastClick = null;
+        var lastClickAt = DateTime.MinValue;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var screen = CampaignObserver.GameOver();
+            bool open = screen != null && GodotObject.IsInstanceValid(screen);
+            var view = new GameOverView(open, open && ContinueEnabled(screen!), open && MainMenuReady(screen!));
+            var action = CampaignGameOver.Next(view);
+            // A pressed button disables itself at once; one that is still enabled a moment later was not pressed after
+            // all, but it is not hammered every poll either.
+            if (action is GameOverAction.ClickContinue or GameOverAction.ClickMainMenu && action == lastClick
+                && DateTime.UtcNow - lastClickAt < GameOverReclickDelay)
+                action = GameOverAction.Wait;
+            if (action != logged)
+            {
+                logged = action;
+                ModLog.Info($"campaign: game over screen: {action} (continue enabled {view.ContinueEnabled}, main menu button ready {view.MainMenuReady})");
+            }
+            switch (action)
+            {
+                case GameOverAction.Done:
+                    return;
+                case GameOverAction.ClickContinue:
+                    await UiHelper.Click(screen!._continueButton);
+                    lastClick = action;
+                    lastClickAt = DateTime.UtcNow;
+                    deadline = lastClickAt + GameOverStageTimeout;
+                    logged = null;  // say what comes after the click
+                    break;
+                case GameOverAction.ClickMainMenu:
+                    await UiHelper.Click(screen!._mainMenuButton);
+                    lastClick = action;
+                    lastClickAt = DateTime.UtcNow;
+                    deadline = lastClickAt + GameOverStageTimeout;
+                    logged = null;
+                    break;
+            }
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"the game-over screen offered no button for {GameOverStageTimeout.TotalSeconds:0} s");
+            await Task.Delay(GameOverPollMs, ct);
+        }
     }
+
+    private static bool ContinueEnabled(NGameOverScreen screen) =>
+        GodotObject.IsInstanceValid(screen._continueButton) && screen._continueButton.IsEnabled;
+
+    /// <summary>What the handler waits for before pressing the main menu button: it exists, is shown and is enabled.</summary>
+    private static bool MainMenuReady(NGameOverScreen screen) =>
+        GodotObject.IsInstanceValid(screen._mainMenuButton) && screen._mainMenuButton.Visible && screen._mainMenuButton.IsEnabled;
 
     // -- main menu -> new run ---------------------------------------------------------------------------------
 

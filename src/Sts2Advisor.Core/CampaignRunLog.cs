@@ -95,6 +95,42 @@ public static class CampaignRunLog
         }
     }
 
+    /// <summary>The "character" of the last line that has one; null when the file is missing, empty or unreadable.
+    /// Where a rotation goes on from after the game was restarted.</summary>
+    public static string? LastCharacter(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+                return null;
+            string? last = null;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            while (reader.ReadLine() is { } line)
+            {
+                if (line.Length == 0)
+                    continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object
+                        && doc.RootElement.TryGetProperty("character", out var c) && c.ValueKind == JsonValueKind.String
+                        && c.GetString() is { Length: > 0 } name)
+                        last = name;
+                }
+                catch (JsonException)
+                {
+                    // a half-written or foreign line
+                }
+            }
+            return last;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     private static void Text(Utf8JsonWriter w, string name, string? value)
     {
         if (value == null) w.WriteNull(name); else w.WriteString(name, value);

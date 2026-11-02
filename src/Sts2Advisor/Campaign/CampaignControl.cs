@@ -41,8 +41,7 @@ internal static class CampaignControl
     private static string _flowName = "";
     private static int _busyTicks, _unknownTicks;
     private static CancellationTokenSource? _cts;
-    private static string _flowRaw = "";
-    private static bool _flowCancellable;
+    private static bool _flowIsQuit;
 
     private static string? _stuck;             // gave up; stays so until campaign.json changes
     private static bool _stopped;              // "command": "stop"; likewise
@@ -52,6 +51,7 @@ internal static class CampaignControl
     private static int _stopBaseline;          // autopilot stops up to here are not about the current run / file
     private static RunState? _trackedRun;
     private static RunState? _recordedRun;
+    private static string? _lastRunCharacter;  // the run that ended last: where campaign.json's "rotation" goes on from
     private static string _modalKey = "";
     private static double _modalSince;
     private static double _submenuSince = -1;
@@ -71,7 +71,8 @@ internal static class CampaignControl
         _trace = trace;
         _now = now;
         _initialized = true;
-        ModLog.Info($"campaign: control file {_filePath}, run log {_runsPath}");
+        _lastRunCharacter = CampaignRunLog.LastCharacter(_runsPath);
+        ModLog.Info($"campaign: control file {_filePath}, run log {_runsPath}; last recorded run {_lastRunCharacter ?? "none"}");
     }
 
     /// <summary>The panel's campaign line; null when there is no campaign.</summary>
@@ -81,7 +82,8 @@ internal static class CampaignControl
             return null;
         var s = _read.Settings;
         string? note = _stopped ? "stopped by \"command\": \"stop\" until campaign.json changes" : _note;
-        return CampaignText.Status(new CampaignView(s is { Enabled: true }, s?.Character, s?.Ascension, Stats.Runs, Stats.Wins,
+        var next = CampaignPlan.NextTarget(s, _lastRunCharacter);
+        return CampaignText.Status(new CampaignView(s is { Enabled: true }, next?.Character, next?.Ascension, Stats.Runs, Stats.Wins,
                                                     note, _read.Problem, _stuck), zh);
     }
 
@@ -117,7 +119,7 @@ internal static class CampaignControl
         if (read.Settings is not { Enabled: true } settings)
         {
             _note = null;
-            if (read.Problem == null)  // a half-written file must not interrupt a flow that is under way
+            if (CampaignPlan.InterruptsFlow(read, _flowIsQuit))  // switched off; a half-written file does not count
                 CancelFlow();
             return;
         }
@@ -130,9 +132,11 @@ internal static class CampaignControl
                 _cts = null;
                 _busy = false;  // the orphaned flow can still finish; the stuck latch keeps the campaign from acting on it
             }
-            else if (_flowCancellable && read.Raw != _flowRaw)
+            else if (CampaignPlan.InterruptsFlow(read, _flowIsQuit))
             {
-                CancelFlow();  // the file changed under a flow (a "quit" arrived, say): look again
+                // "quit" and "stop" preempt a flow; a new "next" or "rotation" does not (it is read when it is needed).
+                // A cancelled flow ends at its next await; the tick after that acts on the command.
+                CancelFlow();
             }
             return;
         }
@@ -170,7 +174,7 @@ internal static class CampaignControl
         }
         _lastIdleWhy = null;
         _note = step.Why;
-        Execute(step, settings, facts, attempt.Attempt);
+        Execute(step, facts, attempt.Attempt);
     }
 
     // -- the file -----------------------------------------------------------------------------------------
@@ -190,7 +194,10 @@ internal static class CampaignControl
         else
         {
             var s = read.Settings;
-            ModLog.Info($"campaign: enabled; next {(s.Character == null ? "none" : $"{s.Character} {CampaignText.Level(s.Ascension)}")}; command {s.Command}");
+            string rotation = s.Rotation is { Count: > 0 } r
+                ? $"; rotation {string.Join(", ", r.Select(t => $"{t.Character} {CampaignText.Level(t.Ascension)}"))} (next {CampaignPlan.NextTarget(s, _lastRunCharacter)?.Character})"
+                : "";
+            ModLog.Info($"campaign: enabled; next {(s.Character == null ? "none" : $"{s.Character} {CampaignText.Level(s.Ascension)}")}{rotation}; command {s.Command}");
         }
     }
 
@@ -266,12 +273,13 @@ internal static class CampaignControl
             ModalKey: obs.ModalKey,
             SubmenuSeconds: _submenuSince < 0 ? 0 : now - _submenuSince,
             HandBackScreen: handBack,
-            HandBackSeconds: handBack == null ? 0 : now - _handBackSince);
+            HandBackSeconds: handBack == null ? 0 : now - _handBackSince,
+            LastRunCharacter: _lastRunCharacter);
     }
 
     // -- doing --------------------------------------------------------------------------------------------
 
-    private static void Execute(CampaignStep step, CampaignSettings settings, CampaignFacts facts, int attempt)
+    private static void Execute(CampaignStep step, CampaignFacts facts, int attempt)
     {
         switch (step.Kind)
         {
@@ -311,37 +319,55 @@ internal static class CampaignControl
                 break;
 
             case CampaignStepKind.FinishRun:
-                StartFlow("finish run", FinishRunAsync, cancellable: true);
+                StartFlow("finish run", FinishRunAsync);
                 break;
             case CampaignStepKind.ContinueRun:
-                StartFlow("continue run", CampaignActions.ContinueRunAsync, cancellable: true);
+                StartFlow("continue run", CampaignActions.ContinueRunAsync);
                 break;
             case CampaignStepKind.StartRun:
-                string character = settings.Character!;
-                var ascension = settings.Ascension!.Value;
-                StartFlow("start run", ct => CampaignActions.StartRunAsync(character, ascension, ct), cancellable: false);
+                var target = step.Target!.Value;  // "rotation"'s entry after the run that ended, else "next"
+                StartFlow("start run", ct => CampaignActions.StartRunAsync(target.Character, target.Ascension, ct));
                 break;
             case CampaignStepKind.LeaveSubmenu:
-                StartFlow("leave menu screen", CampaignActions.LeaveSubmenuAsync, cancellable: true);
+                StartFlow("leave menu screen", CampaignActions.LeaveSubmenuAsync);
                 break;
             case CampaignStepKind.HandleScreen:
-                StartFlow("handle a screen nobody answered", CampaignActions.HandleScreenAsync, cancellable: true);
+                StartFlow("handle a screen nobody answered", CampaignActions.HandleScreenAsync);
                 break;
             case CampaignStepKind.Quit:
+                // On the game-over screen the ended run is recorded first (its data is gone once the screen is left);
+                // the quit itself needs no click-through.
+                try
+                {
+                    RecordEndedRun();
+                }
+                catch (Exception e) when (e is not (TypeLoadException or MissingMemberException))
+                {
+                    ModLog.Error($"campaign: could not record the ended run before quitting: {e.Message}");  // never blocks the quit
+                }
                 AutoPilotControl.Stop(StopReason.Hotkey, "campaign.json: quit");
-                StartFlow("quit", ct => CampaignActions.QuitAsync(_filePath, ct), cancellable: false);
+                StartFlow("quit", ct => CampaignActions.QuitAsync(_filePath, ct), isQuit: true);
                 break;
         }
     }
 
+    /// <summary>Resumable: the run is recorded once (a later attempt finds it recorded), and the click-through looks at
+    /// the screen each time (<see cref="CampaignActions.LeaveGameOverAsync"/>), so an attempt that follows an
+    /// interrupted one carries on from wherever the screen is.</summary>
     private static async Task FinishRunAsync(CancellationToken ct)
     {
-        var obs = CampaignObserver.Observe();
-        if (obs.Run != null && !ReferenceEquals(obs.Run, _recordedRun))
-            RecordRun(obs.Run);
+        RecordEndedRun();
         if (AutoPilotControl.IsRunning)
             AutoPilotControl.Stop(StopReason.GameOver, null);
         await CampaignActions.LeaveGameOverAsync(ct);
+    }
+
+    /// <summary>Records the run on the game-over screen, if it is up and the run was not recorded yet.</summary>
+    private static void RecordEndedRun()
+    {
+        var obs = CampaignObserver.Observe();
+        if (obs.Run != null && CampaignObserver.GameOver() != null && !ReferenceEquals(obs.Run, _recordedRun))
+            RecordRun(obs.Run);
     }
 
     /// <summary>One line in campaign_runs.jsonl and a run_end line in the advisor trace, once per run. The run's data
@@ -360,6 +386,7 @@ internal static class CampaignControl
             return;
         }
         Stats.Record(record.Victory);
+        _lastRunCharacter = record.Character;
         string json = CampaignRunLog.ToJson(record, DateTime.UtcNow);
         bool written = CampaignRunLog.Append(_runsPath, json);
         _trace?.Append("run_end", json, null, written ? null : "campaign_runs_append_failed");
@@ -368,13 +395,12 @@ internal static class CampaignControl
                     (written ? "" : $"; WRITING {_runsPath} FAILED"));
     }
 
-    private static void StartFlow(string name, Func<CancellationToken, Task> flow, bool cancellable)
+    private static void StartFlow(string name, Func<CancellationToken, Task> flow, bool isQuit = false)
     {
         _busy = true;
         _busyTicks = 0;
         _flowName = name;
-        _flowRaw = _read.Raw;
-        _flowCancellable = cancellable;
+        _flowIsQuit = isQuit;
         var cts = new CancellationTokenSource();
         _cts = cts;
         _ = RunFlowAsync(name, flow, cts);

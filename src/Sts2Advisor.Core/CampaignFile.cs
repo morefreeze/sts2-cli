@@ -19,9 +19,15 @@ public readonly record struct AscensionSpec(bool IsMax, int Level)
     public override string ToString() => IsMax ? "max" : Level.ToString();
 }
 
-/// <param name="Character">The game's CharacterModel id without the CHARACTER. prefix, upper case
-/// (IRONCLAD, SILENT, DEFECT, REGENT, NECROBINDER); null when the file has no "next".</param>
-public sealed record CampaignSettings(bool Enabled, string? Character, AscensionSpec? Ascension, CampaignCommand Command);
+/// <summary>A run the campaign can start: the game's CharacterModel id without the CHARACTER. prefix, upper case
+/// (IRONCLAD, SILENT, DEFECT, REGENT, NECROBINDER), and the ascension to start it at.</summary>
+public readonly record struct CampaignTarget(string Character, AscensionSpec Ascension);
+
+/// <param name="Character">"next".character; null when the file has no "next".</param>
+/// <param name="Rotation">The "rotation" list; null when absent or empty. When present it decides the next run
+/// (<see cref="CampaignRotation"/>) and "next" is not used.</param>
+public sealed record CampaignSettings(bool Enabled, string? Character, AscensionSpec? Ascension, CampaignCommand Command,
+                                      IReadOnlyList<CampaignTarget>? Rotation = null);
 
 /// <param name="Settings">Null: no campaign (no file, an empty file, or an unusable one).</param>
 /// <param name="Problem">Why an existing file is unusable; null when the file is fine or absent.</param>
@@ -29,11 +35,13 @@ public sealed record CampaignSettings(bool Enabled, string? Character, Ascension
 public sealed record CampaignRead(CampaignSettings? Settings, string? Problem, string Raw);
 
 /// <summary>&lt;user dir&gt;/campaign.json -- the control file of the campaign mode:
-/// <c>{"enabled": true, "next": {"character": "IRONCLAD", "ascension": "max" | 6}, "command": null | "quit" | "stop"}</c>.
+/// <c>{"enabled": true, "next": {"character": "IRONCLAD", "ascension": "max" | 6}, "rotation": [...], "command": null | "quit" | "stop"}</c>.
 /// It is re-read whenever the mod needs it, so everything here is cheap and never throws: a missing, empty,
 /// half-written or unusable file is "no campaign". A disabled file (enabled false or absent) is not validated
 /// further. "next" may be absent (the campaign then cannot start a run, but still plays the one in progress and
-/// obeys "command"); when present it must be complete.</summary>
+/// obeys "command"); when present it must be complete. "rotation" is an optional list of characters, each either a
+/// plain name (ascension max) or <c>{"character": ..., "ascension": "max" | n}</c> (ascension optional, max); when it
+/// has entries it decides the next run instead of "next".</summary>
 public static class CampaignFile
 {
     public const string FileName = "campaign.json";
@@ -96,6 +104,22 @@ public static class CampaignFile
                     return Invalid(text, problem);
             }
 
+            IReadOnlyList<CampaignTarget>? rotation = null;
+            if (root.TryGetProperty("rotation", out var rot) && rot.ValueKind != JsonValueKind.Null)
+            {
+                if (rot.ValueKind != JsonValueKind.Array)
+                    return Invalid(text, "\"rotation\" must be a list of characters, e.g. [\"IRONCLAD\", {\"character\": \"SILENT\", \"ascension\": 5}]");
+                var entries = new List<CampaignTarget>();
+                foreach (var item in rot.EnumerateArray())
+                {
+                    if (!TryTarget(item, out var target, out string? why))
+                        return Invalid(text, $"\"rotation\" entry {entries.Count + 1}: {why}");
+                    entries.Add(target);
+                }
+                if (entries.Count > 0)
+                    rotation = entries;
+            }
+
             var command = CampaignCommand.None;
             if (root.TryGetProperty("command", out var cmd) && cmd.ValueKind != JsonValueKind.Null)
             {
@@ -109,7 +133,7 @@ public static class CampaignFile
                     default: return Invalid(text, $"unknown \"command\" '{cmd.GetString()}' (null, \"quit\" or \"stop\")");
                 }
             }
-            return new CampaignRead(new CampaignSettings(true, character, ascension, command), null, text);
+            return new CampaignRead(new CampaignSettings(true, character, ascension, command, rotation), null, text);
         }
         catch (JsonException e)
         {
@@ -140,6 +164,38 @@ public static class CampaignFile
     }
 
     private static CampaignRead Invalid(string text, string why) => new(null, $"{FileName}: {why}", text);
+
+    private static bool TryTarget(JsonElement e, out CampaignTarget target, out string? why)
+    {
+        target = default;
+        why = null;
+        string? character;
+        var ascension = AscensionSpec.Max;
+        switch (e.ValueKind)
+        {
+            case JsonValueKind.String:
+                if (!TryCharacter(e, out character))
+                    why = "the character must be an id such as IRONCLAD";
+                break;
+            case JsonValueKind.Object:
+                character = null;
+                if (!e.TryGetProperty("character", out var c))
+                    why = "\"character\" is missing";
+                else if (!TryCharacter(c, out character))
+                    why = "\"character\" must be a character id such as IRONCLAD";
+                else if (e.TryGetProperty("ascension", out var a) && a.ValueKind != JsonValueKind.Null && !TryAscension(a, out ascension))
+                    why = "\"ascension\" must be \"max\" or a whole number from 0";
+                break;
+            default:
+                character = null;
+                why = "an entry is a character id or {\"character\": ..., \"ascension\": ...}";
+                break;
+        }
+        if (why != null)
+            return false;
+        target = new CampaignTarget(character!, ascension);
+        return true;
+    }
 
     private static bool TryCharacter(JsonElement e, out string? character)
     {
