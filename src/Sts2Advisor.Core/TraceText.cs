@@ -87,13 +87,13 @@ public static class TraceText
         ["card_select.no_cards"] = ("没有可选的卡 → 跳过", "No cards -> skip"),
 
         // "needs X (now Y)": a skipped rule must not read as a true comparison.
-        ["shop.heal_potion"] = ("回复药水：需 HP < 50%（现 {hp_ratio:%}）且持有药水 < 3（现 {held_potions}/3）", "Heal potion: needs HP < 50% (now {hp_ratio:%}) and potions < 3 (now {held_potions}/3)"),
+        ["shop.heal_potion"] = ("回复药水：需 HP < 50%（现 {hp_ratio:%}）且持有药水 < {potion_slots}（现 {held_potions}/{potion_slots}）", "Heal potion: needs HP < 50% (now {hp_ratio:%}) and potions < {potion_slots} (now {held_potions}/{potion_slots})"),
         ["shop.remove_basic"] = ("移除基础牌：{n_basic} 张，需要 ≥ 3 张（{basic_scope}）", "Remove a basic card: {n_basic}, needs >= 3 ({basic_scope})"),
         ["shop.remove_value"] = ("移除卡牌价值 {removal_value}，最佳卡 {best_card_score}", "Card removal value {removal_value}, best card {best_card_score}"),
         ["shop.card_must_buy"] = ("最佳卡 {best_card_score}，必买线 {threshold}", "Best card {best_card_score}, must-buy line {threshold}"),
         ["shop.card_threshold"] = ("最佳卡 {best_card_score}，买卡阈值 {threshold}（阶段{act}）", "Best card {best_card_score}, buy threshold {threshold} (act {act})"),
         ["shop.relic"] = ("最佳遗物 {best_relic_score}，阈值 {threshold}，至少留 {gold_reserve} 金币", "Best relic {best_relic_score}, threshold {threshold}, keep {gold_reserve} gold"),
-        ["shop.potion"] = ("最佳药水 {best_potion_score}，阈值 {threshold}，持有药水 {held_potions}/3", "Best potion {best_potion_score}, threshold {threshold}, held potions {held_potions}/3"),
+        ["shop.potion"] = ("最佳药水 {best_potion_score}，阈值 {threshold}，持有药水 {held_potions}/{potion_slots}", "Best potion {best_potion_score}, threshold {threshold}, held potions {held_potions}/{potion_slots}"),
         ["shop.leave"] = ("没有值得买的 → 离开", "Nothing worth buying -> leave"),
         ["shop.relic_score"] = ("遗物分", "Relic score"),
         ["shop.potion_score"] = ("药水分", "Potion score"),
@@ -143,6 +143,10 @@ public static class TraceText
     /// pre-boss one, so the numbers are left out.</summary>
     private const int PreBossFloor = 14;
 
+    /// <summary>Rule values an older greedy did not record. Before `potion_slots` greedy assumed a belt of 3, so a
+    /// trace without it (a sidecar started before the change) still reads right.</summary>
+    private static readonly Dictionary<string, double> ValueDefaults = new() { ["potion_slots"] = 3 };
+
     private static readonly Regex Placeholder = new(@"\{(\w+)(:%)?\}");
 
     public static string Rule(TraceRule rule, bool zh)
@@ -156,7 +160,9 @@ public static class TraceText
                 ? rule.Key
                 : rule.Key + " " + string.Join(" ", rule.Values.Select(kv => $"{kv.Key}={Value(kv.Key, kv.Value, false, zh)}"));
         return Placeholder.Replace(zh ? t.Zh : t.En, m =>
-            rule.Values.TryGetValue(m.Groups[1].Value, out var v) ? Value(m.Groups[1].Value, v, m.Groups[2].Success, zh) : "—")
+            rule.Values.TryGetValue(m.Groups[1].Value, out var v) ? Value(m.Groups[1].Value, v, m.Groups[2].Success, zh)
+            : ValueDefaults.TryGetValue(m.Groups[1].Value, out var d) ? d.ToString("0.##", CultureInfo.InvariantCulture)
+            : "—")
             + RuleSuffix(rule, zh);
     }
 

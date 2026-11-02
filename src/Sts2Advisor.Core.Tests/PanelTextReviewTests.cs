@@ -131,6 +131,26 @@ public class PanelTextReviewTests
     }
 
     [Fact]
+    public void PotionRulesShowThePlayersBeltSize()
+    {
+        var heal = ParsedRule("shop.heal_potion", "skipped", new { hp_ratio = 0.3, held_potions = 2, potion_slots = 2, slots_free = false, available = false });
+        Assert.Equal("回复药水：需 HP < 50%（现 30%）且持有药水 < 2（现 2/2）", TraceText.Rule(heal, zh: true));
+        Assert.Equal("Heal potion: needs HP < 50% (now 30%) and potions < 2 (now 2/2)", TraceText.Rule(heal, zh: false));
+
+        var potion = ParsedRule("shop.potion", "skipped", new { threshold = 4.5, held_potions = 2, potion_slots = 2 });
+        Assert.Equal("最佳药水 —，阈值 4.5，持有药水 2/2", TraceText.Rule(potion, zh: true));
+        Assert.Equal("Best potion —, threshold 4.5, held potions 2/2", TraceText.Rule(potion, zh: false));
+    }
+
+    [Fact]
+    public void PotionRulesWithoutABeltSizeReadAsTheOldThree()
+    {
+        // A sidecar started before greedy recorded potion_slots: it assumed 3.
+        var potion = ParsedRule("shop.potion", "skipped", new { threshold = 4.5, held_potions = 1, best_potion_score = 4.0 });
+        Assert.Equal("Best potion 4.0, threshold 4.5, held potions 1/3", TraceText.Rule(potion, zh: false));
+    }
+
+    [Fact]
     public void NoTemplateComparesAPlaceholderWithALiteral()
     {
         // "HP {hp_ratio:%} < 50%" is false whenever the rule was skipped. A requirement is worded as

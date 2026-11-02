@@ -199,6 +199,19 @@ def _score_shop_relic(relic: dict) -> float:
     return score + tier_bonus
 
 
+DEFAULT_POTION_SLOTS = 3
+
+
+def _potion_slots(player: dict) -> int:
+    """The player's potion belt size. The in-game advisor sends `potion_slots`
+    (Player.MaxPotionCount: fewer at higher ascensions); the headless engine does
+    not yet, and a decision without the field keeps the old 3 slots."""
+    slots = player.get("potion_slots")
+    if isinstance(slots, int) and not isinstance(slots, bool) and slots >= 0:
+        return slots
+    return DEFAULT_POTION_SLOTS
+
+
 def _score_shop_potion(potion: dict) -> float:
     """Score a shop potion for purchase desirability."""
     name_raw = potion.get("name") or {}
@@ -722,6 +735,7 @@ def greedy_action(state: dict, trace=None) -> dict:
         player = state.get("player", {})
         hp_ratio = player.get("hp", 80) / max(player.get("max_hp", 80), 1)
         held_potions = len(player.get("potions", []))
+        potion_slots = _potion_slots(player)
         floor = state.get("floor") or state.get("context", {}).get("floor", 0)
         removal_cost = state.get("card_removal_cost")
         pre_boss = isinstance(floor, int) and floor >= 11
@@ -738,7 +752,7 @@ def greedy_action(state: dict, trace=None) -> dict:
         # Emergency: buy health potion first when HP is critically low (< 50%)
         # Jun 10 attempted "buy proactive at floor≥6 HP<85%" regressed → reverted.
         heal_potion = None
-        if hp_ratio < 0.50 and held_potions < 3:
+        if hp_ratio < 0.50 and held_potions < potion_slots:
             shop_potions = [p for p in state.get("potions", [])
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
             for sp in shop_potions:
@@ -750,7 +764,8 @@ def greedy_action(state: dict, trace=None) -> dict:
                     heal_potion = sp
                     break
         heal_values = {"hp_ratio": hp_ratio, "held_potions": held_potions,
-                       "slots_free": held_potions < 3,
+                       "potion_slots": potion_slots,
+                       "slots_free": held_potions < potion_slots,
                        "available": heal_potion is not None}
         if heal_potion is not None:
             return _fire("shop.heal_potion",
@@ -910,8 +925,9 @@ def greedy_action(state: dict, trace=None) -> dict:
                              **relic_values)
         _skip("shop.relic", **relic_values)
         # Buy a potion if we have empty slots and it's affordable
-        potion_values = {"threshold": 4.5, "held_potions": held_potions}
-        if held_potions < 3:
+        potion_values = {"threshold": 4.5, "held_potions": held_potions,
+                         "potion_slots": potion_slots}
+        if held_potions < potion_slots:
             shop_potions = [p for p in state.get("potions", [])
                             if p.get("is_stocked") and p.get("cost", 999) <= gold]
             if shop_potions:

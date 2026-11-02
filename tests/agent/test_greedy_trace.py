@@ -808,6 +808,101 @@ def test_shop_heal_potion_rule_says_whether_a_heal_potion_is_for_sale():
     assert heal["values"]["available"] is False
 
 
+def _slot_potion(index, name, description, cost=40):
+    return {"index": index, "id": "POTION.T", "name": name,
+            "description": description, "cost": cost, "is_stocked": True}
+
+
+def _with_slots(state, slots):
+    """`potion_slots` as the in-game advisor sends it; None leaves the field out
+    (the headless engine's decisions)."""
+    if slots is None:
+        state["player"].pop("potion_slots", None)
+    else:
+        state["player"]["potion_slots"] = slots
+    return state
+
+
+def test_shop_potion_rule_respects_the_players_potion_slots():
+    """Live failure: an A6 player with 2 slots, both full, was told to buy a
+    potion (greedy assumed 3 slots) and the game refused: autopilot stopped."""
+    def shop(held, slots):
+        state = _shop_probe_state(hp_ratio=1.0, held_potions=held, shop_potions=[
+            _slot_potion(0, "Strength Potion", "Gain 2 Strength.")])
+        state["relics"] = []
+        return _with_slots(state, slots)
+
+    buy = {"cmd": "action", "action": "buy_potion", "args": {"potion_index": 0}}
+    leave = {"cmd": "action", "action": "leave_room"}
+
+    # field absent: the old belt of 3 -- two held potions still leave a slot
+    action, trace = _traced_and_untraced(shop(2, None))
+    assert action == buy
+    potion = next(r for r in trace.rules if r["key"] == "shop.potion")
+    assert potion["outcome"] == "fired" and potion["values"]["potion_slots"] == 3
+    action, _trace = _traced_and_untraced(shop(3, None))
+    assert action == leave
+
+    # two slots, both held: no potion is bought, traced or not, and the rule says why
+    action, trace = _traced_and_untraced(shop(2, 2))
+    assert action == leave
+    potion = next(r for r in trace.rules if r["key"] == "shop.potion")
+    assert potion["outcome"] == "skipped"
+    assert potion["values"]["held_potions"] == 2 and potion["values"]["potion_slots"] == 2
+    assert "best_potion_index" not in potion["values"]
+    assert all(o["kind"] != "potion" for o in trace.to_dict()["options"])
+
+    # a free slot below the belt size still buys; a bigger belt than 3 is honoured
+    assert _traced_and_untraced(shop(1, 2))[0] == buy
+    assert _traced_and_untraced(shop(3, 4))[0] == buy
+    assert _traced_and_untraced(shop(4, 4))[0] == leave
+    # no belt at all
+    assert _traced_and_untraced(shop(0, 0))[0] == leave
+
+
+def test_shop_heal_potion_rule_respects_the_players_potion_slots():
+    def shop(held, slots, hp_ratio=0.30):
+        state = _shop_probe_state(hp_ratio=hp_ratio, held_potions=held, shop_potions=[
+            _slot_potion(0, "Blood Potion", "Heal 20% of your Max HP.")])
+        state["relics"] = []
+        return _with_slots(state, slots)
+
+    buy = {"cmd": "action", "action": "buy_potion", "args": {"potion_index": 0}}
+
+    # field absent: 3 slots as before, so 2 held potions still buy the heal potion
+    action, trace = _traced_and_untraced(shop(2, None))
+    assert action == buy
+    heal = trace.rules[0]
+    assert heal["key"] == "shop.heal_potion" and heal["outcome"] == "fired"
+    assert heal["values"]["potion_slots"] == 3 and heal["values"]["slots_free"] is True
+
+    # two slots, both held: the heal rule is skipped (slots_free False) and so is
+    # the plain potion rule (the same Blood Potion would score >= 4.5)
+    action, trace = _traced_and_untraced(shop(2, 2))
+    assert action != buy
+    heal = trace.rules[0]
+    assert heal["key"] == "shop.heal_potion" and heal["outcome"] == "skipped"
+    assert heal["values"]["slots_free"] is False and heal["values"]["available"] is False
+    assert heal["values"]["held_potions"] == 2 and heal["values"]["potion_slots"] == 2
+    assert not any(r["key"] == "shop.potion" and r["outcome"] == "fired" for r in trace.rules)
+
+    # one free slot of two: bought
+    action, trace = _traced_and_untraced(shop(1, 2))
+    assert action == buy and trace.rules[0]["values"]["slots_free"] is True
+
+
+@pytest.mark.parametrize("bad", [True, False, -1, 2.0, "2", None, [2]])
+def test_potion_slots_that_is_not_a_count_means_the_old_three(bad):
+    state = _shop_probe_state(hp_ratio=1.0, held_potions=2, shop_potions=[
+        _slot_potion(0, "Strength Potion", "Gain 2 Strength.")])
+    state["relics"] = []
+    state["player"]["potion_slots"] = bad
+    action, trace = _traced_and_untraced(state)
+    assert action == {"cmd": "action", "action": "buy_potion", "args": {"potion_index": 0}}
+    potion = next(r for r in trace.rules if r["key"] == "shop.potion")
+    assert potion["values"]["potion_slots"] == 3
+
+
 def test_shop_best_card_score_is_none_when_no_card_is_affordable():
     state = _shop_probe_state(gold=10)
     for c in state["cards"]:
