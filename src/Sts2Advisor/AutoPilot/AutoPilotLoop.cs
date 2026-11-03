@@ -14,6 +14,7 @@ using MegaCrit.Sts2.Core.Nodes.Events;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.Capstones;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.GameOverScreen;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
@@ -141,6 +142,13 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         if (rs.Players.Count != 1)
             throw new AutoPilotStopException(StopReason.Multiplayer, null);
 
+        if (CombatManager.Instance?.IsInProgress != true && CloseViewOnlyCards())
+        {
+            MarkProgress();
+            await Task.Delay(300, ct);
+            return;
+        }
+
         var overlay = NOverlayStack.Instance?.Peek();
         // The order is the game's own (ActiveScreenContext): the open map comes before the overlay stack.
         switch (AutoPilotScreenOrder.Next(overlay is NGameOverScreen, ModalOpen(), CombatManager.Instance?.IsInProgress == true,
@@ -254,6 +262,25 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         }
         MarkProgress();
         await Task.Delay(100, ct);
+    }
+
+    private object? _closedViewScreen;
+
+    /// <summary>NSimpleCardsViewScreen (Darv's Pandora's Box shows the transformed cards in it) is a view-only capstone: its
+    /// ConfirmButton and the disabled BackButton both end in NCapstoneContainer.Close(), and ShowScreen takes no selection
+    /// callback, so there is no decision on it. Closing it is what the confirm button does. Returns true when it was open.</summary>
+    private bool CloseViewOnlyCards()
+    {
+        var container = NCapstoneContainer.Instance;
+        if (container?.CurrentCapstoneScreen is not NSimpleCardsViewScreen screen || !GodotObject.IsInstanceValid(screen))
+            return false;
+        if (!ReferenceEquals(_closedViewScreen, screen))
+        {
+            _closedViewScreen = screen;
+            ModLog.Info("autopilot: closing NSimpleCardsViewScreen (view-only cards)");
+        }
+        container.Close();
+        return true;
     }
 
     /// <summary>A popup is open and still alive (a freed or detached one must not park the autopilot).</summary>
@@ -384,6 +411,13 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+            if (CombatManager.Instance?.IsInProgress != true && CloseViewOnlyCards())
+            {
+                last = null;
+                deadline = _now() + FetchSeconds;
+                await Task.Delay(300, ct);
+                continue;
+            }
             if (ModalOpen())  // a tip popup opened over the screen: the screen does not read as a decision until it is closed
             {
                 await HandBackAsync("modal", ModalOpen, ct);
