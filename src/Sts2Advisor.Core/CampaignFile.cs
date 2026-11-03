@@ -26,8 +26,11 @@ public readonly record struct CampaignTarget(string Character, AscensionSpec Asc
 /// <param name="Character">"next".character; null when the file has no "next".</param>
 /// <param name="Rotation">The "rotation" list; null when absent or empty. When present it decides the next run
 /// (<see cref="CampaignRotation"/>) and "next" is not used.</param>
+/// <param name="Ladder">The "characters" of <c>"strategy": "ladder"</c> (<see cref="CampaignLadder"/>, in tie-break
+/// order); null for any other strategy. When set it decides the next run and "next" and "rotation" are not used.</param>
 public sealed record CampaignSettings(bool Enabled, string? Character, AscensionSpec? Ascension, CampaignCommand Command,
-                                      IReadOnlyList<CampaignTarget>? Rotation = null);
+                                      IReadOnlyList<CampaignTarget>? Rotation = null,
+                                      IReadOnlyList<string>? Ladder = null);
 
 /// <param name="Settings">Null: no campaign (no file, an empty file, or an unusable one).</param>
 /// <param name="Problem">Why an existing file is unusable; null when the file is fine or absent.</param>
@@ -41,7 +44,8 @@ public sealed record CampaignRead(CampaignSettings? Settings, string? Problem, s
 /// further. "next" may be absent (the campaign then cannot start a run, but still plays the one in progress and
 /// obeys "command"); when present it must be complete. "rotation" is an optional list of characters, each either a
 /// plain name (ascension max) or <c>{"character": ..., "ascension": "max" | n}</c> (ascension optional, max); when it
-/// has entries it decides the next run instead of "next".</summary>
+/// has entries it decides the next run instead of "next". <c>"strategy": "ladder"</c> with <c>"characters": [...]</c>
+/// (known character ids, each once, in tie-break order) decides it instead of both.</summary>
 public static class CampaignFile
 {
     public const string FileName = "campaign.json";
@@ -120,6 +124,29 @@ public static class CampaignFile
                     rotation = entries;
             }
 
+            IReadOnlyList<string>? ladder = null;
+            if (root.TryGetProperty("strategy", out var strat) && strat.ValueKind != JsonValueKind.Null)
+            {
+                string? name = strat.ValueKind == JsonValueKind.String ? strat.GetString()!.Trim().ToLowerInvariant() : null;
+                if (name == CampaignLadder.Name)
+                {
+                    if (!root.TryGetProperty("characters", out var chars) || chars.ValueKind != JsonValueKind.Array || chars.GetArrayLength() == 0)
+                        return Invalid(text, "\"strategy\": \"ladder\" needs \"characters\": a list such as [\"NECROBINDER\", \"REGENT\", \"IRONCLAD\"]");
+                    var list = new List<string>();
+                    foreach (var item in chars.EnumerateArray())
+                    {
+                        if (!TryCharacter(item, out var who) || !CampaignLadder.KnownCharacters.Contains(who!))
+                            return Invalid(text, $"\"characters\" entry {list.Count + 1}: unknown character {Describe(item)} (one of {string.Join(", ", CampaignLadder.KnownCharacters)})");
+                        if (list.Contains(who!))
+                            return Invalid(text, $"\"characters\": {who} is listed twice");
+                        list.Add(who!);
+                    }
+                    ladder = list;
+                }
+                else if (name != "" && name != "rotation")
+                    return Invalid(text, $"unknown \"strategy\" {Describe(strat)} (\"ladder\", or leave it out)");
+            }
+
             var command = CampaignCommand.None;
             if (root.TryGetProperty("command", out var cmd) && cmd.ValueKind != JsonValueKind.Null)
             {
@@ -133,7 +160,7 @@ public static class CampaignFile
                     default: return Invalid(text, $"unknown \"command\" '{cmd.GetString()}' (null, \"quit\" or \"stop\")");
                 }
             }
-            return new CampaignRead(new CampaignSettings(true, character, ascension, command, rotation), null, text);
+            return new CampaignRead(new CampaignSettings(true, character, ascension, command, rotation, ladder), null, text);
         }
         catch (JsonException e)
         {
@@ -162,6 +189,8 @@ public static class CampaignFile
             return false;
         }
     }
+
+    private static string Describe(JsonElement e) => e.ValueKind == JsonValueKind.String ? $"'{e.GetString()}'" : e.GetRawText();
 
     private static CampaignRead Invalid(string text, string why) => new(null, $"{FileName}: {why}", text);
 

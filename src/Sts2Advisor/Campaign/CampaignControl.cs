@@ -52,6 +52,9 @@ internal static class CampaignControl
     private static RunState? _trackedRun;
     private static RunState? _recordedRun;
     private static string? _lastRunCharacter;  // the run that ended last: where campaign.json's "rotation" goes on from
+    private static LastRun? _lastRun;          // ... and whether it was won (the ladder repeats a character after a loss)
+    private static readonly CampaignHistoryScan History = new();
+    private static LadderState? _ladder;       // the ladder strategy's input, refreshed every tick while it is the strategy
     private static string _modalKey = "";
     private static double _modalSince;
     private static double _submenuSince = -1;
@@ -71,7 +74,8 @@ internal static class CampaignControl
         _trace = trace;
         _now = now;
         _initialized = true;
-        _lastRunCharacter = CampaignRunLog.LastCharacter(_runsPath);
+        _lastRun = CampaignRunLog.LastRunOf(_runsPath);
+        _lastRunCharacter = _lastRun?.Character;
         ModLog.Info($"campaign: control file {_filePath}, run log {_runsPath}; last recorded run {_lastRunCharacter ?? "none"}");
     }
 
@@ -82,9 +86,14 @@ internal static class CampaignControl
             return null;
         var s = _read.Settings;
         string? note = _stopped ? "stopped by \"command\": \"stop\" until campaign.json changes" : _note;
-        var next = CampaignPlan.NextTarget(s, _lastRunCharacter);
+        var next = CampaignPlan.NextTarget(s, _lastRunCharacter, _ladder);
+        string? ladder = null;
+        if (s is { Enabled: true, Ladder: { } characters } && _ladder != null)
+            ladder = CampaignLadder.Pick(characters, _ladder).Complete ? "complete" : CampaignLadder.Summary(characters, _ladder);
+        if (next != null && s?.Ladder != null && _ladder != null)  // the ladder starts at the character's level: say which
+            next = next.Value with { Ascension = AscensionSpec.Of(CampaignLadder.LevelOf(_ladder.Levels, next.Value.Character)) };
         return CampaignText.Status(new CampaignView(s is { Enabled: true }, next == null ? null : GameText.Character(next.Value.Character), next?.Ascension, Stats.Runs, Stats.Wins,
-                                                    note, _read.Problem, _stuck), zh);
+                                                    note, _read.Problem, _stuck, ladder), zh);
     }
 
     /// <summary>Called every frame; acts about once a second.</summary>
@@ -119,10 +128,12 @@ internal static class CampaignControl
         if (read.Settings is not { Enabled: true } settings)
         {
             _note = null;
+            _ladder = null;
             if (CampaignPlan.InterruptsFlow(read, _flowIsQuit))  // switched off; a half-written file does not count
                 CancelFlow();
             return;
         }
+        RefreshLadder(settings);
         if (_busy)
         {
             if (++_busyTicks > FlowWatchdogTicks)
@@ -177,6 +188,26 @@ internal static class CampaignControl
         Execute(step, facts, attempt.Attempt);
     }
 
+    /// <summary>The ladder strategy's input: the levels and the characters that already won at ascension 10 (from the
+    /// game's run histories). A failure leaves it null, and the plan then waits rather than guessing.</summary>
+    private static void RefreshLadder(CampaignSettings settings)
+    {
+        if (settings.Ladder is not { } characters)
+        {
+            _ladder = null;
+            return;
+        }
+        try
+        {
+            _ladder = new LadderState(CampaignActions.LadderLevels(characters), History.Cleared(CampaignActions.HistoryDirectory()), _lastRun);
+        }
+        catch (Exception e) when (e is not (TypeLoadException or MissingMemberException))
+        {
+            _ladder = null;
+            LogTickError(e, _now());
+        }
+    }
+
     // -- the file -----------------------------------------------------------------------------------------
 
     private static void FileChanged(CampaignRead read)
@@ -194,6 +225,11 @@ internal static class CampaignControl
         else
         {
             var s = read.Settings;
+            if (s.Ladder is { } ladder)
+            {
+                ModLog.Info($"campaign: enabled; strategy ladder over {string.Join(", ", ladder)} (\"next\" and \"rotation\" are ignored); command {s.Command}");
+                return;
+            }
             string rotation = s.Rotation is { Count: > 0 } r
                 ? $"; rotation {string.Join(", ", r.Select(t => $"{t.Character} {CampaignText.Level(t.Ascension)}"))} (next {CampaignPlan.NextTarget(s, _lastRunCharacter)?.Character})"
                 : "";
@@ -274,7 +310,8 @@ internal static class CampaignControl
             SubmenuSeconds: _submenuSince < 0 ? 0 : now - _submenuSince,
             HandBackScreen: handBack,
             HandBackSeconds: handBack == null ? 0 : now - _handBackSince,
-            LastRunCharacter: _lastRunCharacter);
+            LastRunCharacter: _lastRunCharacter,
+            Ladder: _ladder);
     }
 
     // -- doing --------------------------------------------------------------------------------------------
@@ -326,6 +363,8 @@ internal static class CampaignControl
                 break;
             case CampaignStepKind.StartRun:
                 var target = step.Target!.Value;  // "rotation"'s entry after the run that ended, else "next"
+                if (step.Why.StartsWith("ladder pick", StringComparison.Ordinal))
+                    ModLog.Info($"campaign: {step.Why}");
                 StartFlow("start run", ct => CampaignActions.StartRunAsync(target.Character, target.Ascension, ct));
                 break;
             case CampaignStepKind.LeaveSubmenu:
@@ -387,6 +426,7 @@ internal static class CampaignControl
         }
         Stats.Record(record.Victory);
         _lastRunCharacter = record.Character;
+        _lastRun = new LastRun(record.Character, record.Victory);
         string json = CampaignRunLog.ToJson(record, DateTime.UtcNow);
         bool written = CampaignRunLog.Append(_runsPath, json);
         _trace?.Append("run_end", json, null, written ? null : "campaign_runs_append_failed");
@@ -453,7 +493,7 @@ internal static class CampaignControl
         if (why == _lastIdleWhy)
             return;
         _lastIdleWhy = why;
-        ModLog.Info(why.StartsWith("needs attention", StringComparison.Ordinal) ? $"campaign: {why}" : $"campaign: waiting: {why}");
+        ModLog.Info(why.StartsWith("needs attention", StringComparison.Ordinal) || why == "ladder complete" ? $"campaign: {why}" : $"campaign: waiting: {why}");
     }
 
     private static void Stuck(string why)

@@ -160,6 +160,24 @@ internal static class CampaignActions
         return AscensionEpochRevealed(character) ? stats.MaxAscension : 0;
     }
 
+    /// <summary>The ladder's levels: each character's unlocked max ascension, capped at the game's 10. A character this
+    /// game does not have reads 0 (starting it then fails with a clear message).</summary>
+    public static Dictionary<string, int> LadderLevels(IEnumerable<string> characters)
+    {
+        var levels = new Dictionary<string, int>();
+        foreach (var id in characters)
+        {
+            var model = ModelDb.AllCharacters.FirstOrDefault(c => string.Equals(c.Id.Entry, id, StringComparison.OrdinalIgnoreCase));
+            levels[id] = model == null ? 0 : Math.Clamp(UnlockedMaxAscension(model), 0, CampaignPlan.GameMaxAscension);
+        }
+        return levels;
+    }
+
+    /// <summary>The run history folder of the current profile (the modded one while mods are loaded): where the game
+    /// saved every finished run, the ladder's source of truth for "won at ascension 10".</summary>
+    public static string HistoryDirectory() =>
+        ProjectSettings.GlobalizePath(SaveManager.Instance.GetProfileScopedPath("saves/history"));
+
     private static bool AscensionEpochRevealed(CharacterModel c)
     {
         var save = SaveManager.Instance;

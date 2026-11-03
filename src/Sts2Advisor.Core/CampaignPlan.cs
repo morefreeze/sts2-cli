@@ -20,6 +20,8 @@ public enum CampaignStop { None, Player, Retriable, Service, Fatal }
 /// choose a relic, crystal sphere ...), and for how long (<paramref name="HandBackSeconds"/>).</param>
 /// <param name="LastRunCharacter">The character of the run that ended last (this session, else the last line of
 /// campaign_runs.jsonl); where the file's "rotation" goes on from.</param>
+/// <param name="Ladder">The ladder strategy's input (levels, done characters, the last run); only read when the file's
+/// strategy is "ladder".</param>
 public sealed record CampaignFacts(
     CampaignScreen Screen,
     bool AutopilotRunning = false,
@@ -35,7 +37,8 @@ public sealed record CampaignFacts(
     double SubmenuSeconds = 0,
     string? HandBackScreen = null,
     double HandBackSeconds = 0,
-    string? LastRunCharacter = null);
+    string? LastRunCharacter = null,
+    LadderState? Ladder = null);
 
 public enum CampaignStepKind { Idle, StartAutopilot, FinishRun, ContinueRun, StartRun, CloseModal, LeaveSubmenu, HandleScreen, Quit, StopAutopilot }
 
@@ -98,6 +101,8 @@ public static class CampaignPlan
             case CampaignScreen.MainMenu:
                 if (f.HasSavedRun)
                     return new CampaignStep(CampaignStepKind.ContinueRun, "a saved run exists", "continue");
+                if (s.Ladder != null)
+                    return NextLadder(s.Ladder, f.Ladder);
                 if (NextTarget(s, f.LastRunCharacter) is not { } target)
                     return Idle("no run in progress and campaign.json has no \"rotation\" or \"next\" to start");
                 return new CampaignStep(CampaignStepKind.StartRun,
@@ -112,6 +117,20 @@ public static class CampaignPlan
             default:
                 return Idle("the game is loading");
         }
+    }
+
+    /// <summary>The ladder's pick (<see cref="CampaignLadder"/>), started at its level ("max"); "ladder complete" when
+    /// every listed character has won at ascension 10.</summary>
+    private static CampaignStep NextLadder(IReadOnlyList<string> characters, LadderState? state)
+    {
+        if (state == null)
+            return Idle("the ladder has no game state to pick from");
+        var pick = CampaignLadder.Pick(characters, state);
+        if (pick.Character == null)
+            return Idle("ladder complete");
+        var target = new CampaignTarget(pick.Character, AscensionSpec.Max);
+        return new CampaignStep(CampaignStepKind.StartRun, CampaignLadder.Describe(pick, characters, state),
+                                $"{target.Character}/{target.Ascension}", target);
     }
 
     private static CampaignStep NextInRun(CampaignFacts f)
@@ -144,11 +163,13 @@ public static class CampaignPlan
     }
 
     /// <summary>The run the campaign starts next: the "rotation" entry after <paramref name="lastRunCharacter"/> when
-    /// the file has a rotation, else "next", else none.</summary>
-    public static CampaignTarget? NextTarget(CampaignSettings? s, string? lastRunCharacter)
+    /// the file has a rotation, else "next", else none. With the ladder strategy: the ladder's pick.</summary>
+    public static CampaignTarget? NextTarget(CampaignSettings? s, string? lastRunCharacter, LadderState? ladder = null)
     {
         if (s == null)
             return null;
+        if (s.Ladder != null)
+            return ladder != null && CampaignLadder.Pick(s.Ladder, ladder).Character is { } who ? new CampaignTarget(who, AscensionSpec.Max) : null;
         if (CampaignRotation.Next(s.Rotation, lastRunCharacter) is { } fromRotation)
             return fromRotation;
         return s.Character != null && s.Ascension != null ? new CampaignTarget(s.Character, s.Ascension.Value) : null;

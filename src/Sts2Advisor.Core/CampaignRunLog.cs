@@ -97,13 +97,17 @@ public static class CampaignRunLog
 
     /// <summary>The "character" of the last line that has one; null when the file is missing, empty or unreadable.
     /// Where a rotation goes on from after the game was restarted.</summary>
-    public static string? LastCharacter(string path)
+    public static string? LastCharacter(string path) => LastRunOf(path)?.Character;
+
+    /// <summary>The character and result ("victory") of the last line that has a character; null when the file is
+    /// missing, empty or unreadable. A line without a boolean "victory" counts as a loss.</summary>
+    public static LastRun? LastRunOf(string path)
     {
         try
         {
             if (!File.Exists(path))
                 return null;
-            string? last = null;
+            LastRun? last = null;
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var reader = new StreamReader(stream, Encoding.UTF8);
             while (reader.ReadLine() is { } line)
@@ -116,7 +120,7 @@ public static class CampaignRunLog
                     if (doc.RootElement.ValueKind == JsonValueKind.Object
                         && doc.RootElement.TryGetProperty("character", out var c) && c.ValueKind == JsonValueKind.String
                         && c.GetString() is { Length: > 0 } name)
-                        last = name;
+                        last = new LastRun(name, doc.RootElement.TryGetProperty("victory", out var v) && v.ValueKind == JsonValueKind.True);
                 }
                 catch (JsonException)
                 {

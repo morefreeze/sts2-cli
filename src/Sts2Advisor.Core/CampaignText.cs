@@ -5,8 +5,9 @@ namespace Sts2Advisor.Core;
 /// <param name="Note">What the campaign is doing or waiting for right now (the plan's reason).</param>
 /// <param name="FileProblem">Why campaign.json is unusable; shown even though no campaign runs.</param>
 /// <param name="Stuck">Why the campaign gave up; it stays stopped until the file changes.</param>
+/// <param name="Ladder">The ladder strategy's state ("N9 R9 I10 done"), null for any other strategy.</param>
 public sealed record CampaignView(bool Enabled, string? Character, AscensionSpec? Ascension, int Runs, int Wins,
-                                  string? Note, string? FileProblem, string? Stuck);
+                                  string? Note, string? FileProblem, string? Stuck, string? Ladder = null);
 
 /// <summary>The one panel line of the campaign mode.</summary>
 public static class CampaignText
@@ -33,6 +34,8 @@ public static class CampaignText
         string session = T(zh, $"本次 {v.Runs} 局 {v.Wins} 胜",
                                $"{v.Runs} run{(v.Runs == 1 ? "" : "s")}, {v.Wins} win{(v.Wins == 1 ? "" : "s")}");
         string text = T(zh, "战役", "Campaign") + " · " + next + " · " + session;
+        if (!string.IsNullOrEmpty(v.Ladder))
+            text += " · " + (v.Ladder == "complete" ? T(zh, "天梯已完成", "ladder complete") : T(zh, "天梯 ", "ladder ") + v.Ladder);
         if (!string.IsNullOrEmpty(v.Note))
             text += " · " + v.Note;
         bool warn = v.Note != null && v.Note.StartsWith("needs attention", StringComparison.OrdinalIgnoreCase);
