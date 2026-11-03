@@ -262,4 +262,37 @@ public class AdvisorConfigTests
         Assert.Equal(9000, c.Port);
         Assert.True(c.InstantMode);
     }
+
+    [Fact]
+    public void MapPolicyDefaultsToHpAware()
+    {
+        Assert.Equal("hpaware", AdvisorConfig.Defaults.MapPolicy);
+        Assert.Equal("hpaware", AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).MapPolicy);
+    }
+
+    [Theory]
+    [InlineData("\"lookahead\"", "lookahead")]
+    [InlineData("\" LookAhead \"", "lookahead")]
+    [InlineData("\"look-ahead\"", "lookahead")]
+    [InlineData("\"hpaware\"", "hpaware")]
+    [InlineData("\"HpAware\"", "hpaware")]
+    [InlineData("\"value\"", "hpaware")]
+    [InlineData("\"\"", "hpaware")]
+    [InlineData("true", "hpaware")]
+    [InlineData("1", "hpaware")]
+    [InlineData("null", "hpaware")]
+    [InlineData("[\"lookahead\"]", "hpaware")]
+    public void MapPolicyIsReadLeniently(string json, string expected)
+    {
+        Assert.Equal(expected, AdvisorConfig.Load(Write($$"""{"map_policy": {{json}}}""")).MapPolicy);
+    }
+
+    [Fact]
+    public void ABadMapPolicyDoesNotSpoilTheOtherKeys()
+    {
+        var c = AdvisorConfig.Load(Write("""{"map_policy": 7, "port": 9000, "instant_mode": true}"""));
+        Assert.Equal("hpaware", c.MapPolicy);
+        Assert.Equal(9000, c.Port);
+        Assert.True(c.InstantMode);
+    }
 }

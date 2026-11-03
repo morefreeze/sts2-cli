@@ -121,6 +121,24 @@ def test_knob_warnings_ignores_values_equal_to_the_default():
         server.server_close()
 
 
+def test_knob_warnings_accepts_the_configured_lookahead_map_policy():
+    """config.json map_policy=lookahead reaches the sidecar as STS2_MAP_POLICY=lookahead: the
+    advisor's own, A/B-measured setting, not a deviation from the measured policy."""
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "lookahead"}) == []
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": " Lookahead "}) == []
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "hpaware"}) == ["STS2_MAP_POLICY=hpaware"]
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "value"}) == ["STS2_MAP_POLICY=value"]
+    # only that one value of that one variable is exempt
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "lookahead", "STS2_MC_ROLLOUT": "1"}) == [
+        "STS2_MC_ROLLOUT=1"]
+    assert advisor_server.knob_warnings({"STS2_RANDOMIZE": "lookahead"}) == ["STS2_RANDOMIZE=lookahead"]
+    server = advisor_server.make_server(0, env={"STS2_MAP_POLICY": "lookahead"}, warm=False)
+    try:
+        assert server.warnings == []
+    finally:
+        server.server_close()
+
+
 def test_http_round_trip():
     server = advisor_server.make_server(0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -9,8 +9,12 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                                    string StepHotkey = AdvisorConfig.DefaultStepHotkey,
                                    double StepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds,
                                    bool InstantMode = false,
-                                   PanelLanguage PanelLanguage = PanelLanguage.Auto)
+                                   PanelLanguage PanelLanguage = PanelLanguage.Auto,
+                                   string MapPolicy = AdvisorConfig.DefaultMapPolicy)
 {
+    public const string DefaultMapPolicy = "hpaware";
+    public const string LookaheadMapPolicy = "lookahead";
+
     public const int DefaultPort = 8767;
     public const string DefaultHotkey = "F8";
     public const string DefaultAutopilotHotkey = "F9";
@@ -36,7 +40,9 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
     /// must be a JSON number, clamped to 0..10 (0 = no pause), else 2.5.
     /// "instant_mode" (apply the game's Instant speed once it has started) is read like "autostart" but defaults to false.
     /// "panel_language" is "auto" (follow the game's language; the default), "zh" or "en" -- see <see cref="PanelLanguageRules.Parse"/>;
-    /// anything else, or a non-string, is "auto".</summary>
+    /// anything else, or a non-string, is "auto".
+    /// "map_policy" is "hpaware" (the default: route one step ahead) or "lookahead" (plan the whole path to the boss;
+    /// the sidecar gets it as STS2_MAP_POLICY) -- see <see cref="ParseMapPolicy"/>; anything else, or a non-string, is "hpaware".</summary>
     public static AdvisorConfig Load(string path)
     {
         try
@@ -57,13 +63,20 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                 Str(root, "step_hotkey") ?? DefaultStepHotkey,
                 ReadStepPause(root),
                 ReadBool(root, "instant_mode", false),
-                PanelLanguageRules.Parse(Str(root, "panel_language")));
+                PanelLanguageRules.Parse(Str(root, "panel_language")),
+                ParseMapPolicy(Str(root, "map_policy")));
         }
         catch (Exception e)
         {
             throw new JsonException($"unusable config file {path}: {e.Message}", e);
         }
     }
+
+    /// <summary>"lookahead" (case-insensitive, trimmed; "look-ahead"/"look_ahead" too) is the whole-path policy; anything
+    /// else, null included, is the default "hpaware". Never throws: a typo must not switch the routing on or break the mod.</summary>
+    public static string ParseMapPolicy(string? raw) =>
+        raw?.Trim().ToLowerInvariant() is "lookahead" or "look-ahead" or "look_ahead"
+            ? LookaheadMapPolicy : DefaultMapPolicy;
 
     private static int ReadPort(JsonElement root) =>
         root.TryGetProperty("port", out var p) && p.ValueKind == JsonValueKind.Number

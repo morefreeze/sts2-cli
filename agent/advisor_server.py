@@ -57,11 +57,22 @@ CLIENT_TIMEOUT = 5  # seconds; requests are served one at a time, so a stalled c
 ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 
 
+# Settings the advisor itself chooses (config.json -> SidecarProcess sets the env), so they are
+# not "the measured policy differs" warnings: {env var: value that is expected}. The panel
+# states the active map policy itself (its footer reads "whole-path lookahead (A/B: ...)").
+# STS2_MAP_POLICY=lookahead won its paired A/B (a5, 43 pairs, +5.42 floors, t 2.84); a value
+# nobody measured, or any other variable, still warns.
+EXPECTED_SETTINGS = {"STS2_MAP_POLICY": "lookahead"}
+
+
 def knob_warnings(env) -> list:
     """`KEY=value` for every greedy behaviour env var set to something other than
-    its default (STS2_CARD_QUALITY_GATE=1 is the default, so it is not listed)."""
+    its default (STS2_CARD_QUALITY_GATE=1 is the default, so it is not listed) --
+    except an EXPECTED_SETTINGS value (STS2_MAP_POLICY=lookahead, the config's
+    map_policy)."""
     return [f"{k}={env[k].strip()}" for k in GREEDY_BEHAVIOR_ENV
-            if not behavior_env_is_default(k, env.get(k))]
+            if not behavior_env_is_default(k, env.get(k))
+            and env[k].strip().lower() != EXPECTED_SETTINGS.get(k)]
 
 
 def _warmup_state() -> dict:

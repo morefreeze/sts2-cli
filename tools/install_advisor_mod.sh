@@ -26,7 +26,8 @@ if [ ! -f "$USER_DIR/config.json" ]; then
   "autopilot_hotkey": "F9",
   "step_hotkey": "F10",
   "step_pause_seconds": 2.5,
-  "panel_language": "auto"
+  "panel_language": "auto",
+  "map_policy": "hpaware"
 }
 EOCFG
   echo "wrote $USER_DIR/config.json"

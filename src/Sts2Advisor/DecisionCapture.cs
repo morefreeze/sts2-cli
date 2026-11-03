@@ -99,6 +99,76 @@ internal static class DecisionCapture
             return decision;
         };
 
+    /// <summary>Adds <c>decision["map"]</c>: the whole act map in the shape of the headless engine's
+    /// <c>get_map</c> reply (RunSimulator.GetFullMap), because the shared map_select decision carries only the
+    /// next nodes and the lookahead map policy (STS2_MAP_POLICY=lookahead) plans the path to the boss.
+    /// Mod-only on purpose (src/Sts2Shared stays byte-identical for the headless replay). A map that cannot be
+    /// read just leaves the key out: the advisor then routes one step ahead, as before.</summary>
+    private static Func<Dictionary<string, object?>> WithFullMap(RunState rs, LocLookup loc, Func<Dictionary<string, object?>> build) =>
+        () =>
+        {
+            var decision = build();
+            try
+            {
+                decision["map"] = FullMap(rs, loc);
+            }
+            catch (Exception e)
+            {
+                ModLog.Error($"reading the full map failed ({e.GetType().Name}: {e.Message}); advising one step ahead");
+            }
+            return decision;
+        };
+
+    private static Dictionary<string, object?> FullMap(RunState rs, LocLookup loc)
+    {
+        var map = rs.Map;
+        var current = rs.CurrentMapCoord;
+        var visited = rs.VisitedMapCoords;
+        var rows = new List<List<Dictionary<string, object?>>>();
+        for (int row = 0; row < map.GetRowCount(); row++)
+        {
+            var rowNodes = new List<Dictionary<string, object?>>();
+            foreach (var point in map.GetPointsInRow(row))
+            {
+                if (point == null) continue;
+                rowNodes.Add(new Dictionary<string, object?>
+                {
+                    ["col"] = (int)point.coord.col,
+                    ["row"] = (int)point.coord.row,
+                    ["type"] = point.PointType.ToString(),
+                    ["children"] = point.Children?.Select(ch => new Dictionary<string, object?>
+                    {
+                        ["col"] = (int)ch.coord.col,
+                        ["row"] = (int)ch.coord.row,
+                    }).ToList(),
+                    ["visited"] = visited?.Any(v => v.col == point.coord.col && v.row == point.coord.row) ?? false,
+                    ["current"] = current.HasValue && current.Value.col == point.coord.col && current.Value.row == point.coord.row,
+                });
+            }
+            if (rowNodes.Count > 0)
+                rows.Add(rowNodes);
+        }
+        var boss = new Dictionary<string, object?>
+        {
+            ["col"] = (int)map.BossMapPoint.coord.col,
+            ["row"] = (int)map.BossMapPoint.coord.row,
+            ["type"] = map.BossMapPoint.PointType.ToString(),
+        };
+        var bossId = rs.Act?.BossEncounter?.Id?.Entry;
+        if (!string.IsNullOrEmpty(bossId))
+            boss["id"] = bossId;
+        return new Dictionary<string, object?>
+        {
+            ["type"] = "map",
+            ["context"] = DecisionSerializer.RunContext(rs, loc),
+            ["rows"] = rows,
+            ["boss"] = boss,
+            ["current_coord"] = current.HasValue
+                ? new Dictionary<string, object?> { ["col"] = (int)current.Value.col, ["row"] = (int)current.Value.row }
+                : null,
+        };
+    }
+
     private static string CardKey(CardModel c) => c.Id.Entry + (c.IsUpgraded ? "+" + c.CurrentUpgradeLevel : "");
 
     private static Capture Simple(CaptureKind kind, string screen, RunState rs, Player p) =>
@@ -119,7 +189,8 @@ internal static class DecisionCapture
             Labels = labels,
             Fingerprint = Fingerprint.Of("map_select",
                 new object?[] { Common(rs, player) }.Concat(points.Select(p => $"{p.coord.col},{p.coord.row}"))),
-            Build = WithPotionSlots(player, () => DecisionSerializer.MapSelect(rs, points.Select(DecisionSerializer.MapChoice).ToList(), loc)),
+            Build = WithFullMap(rs, loc, WithPotionSlots(player,
+                () => DecisionSerializer.MapSelect(rs, points.Select(DecisionSerializer.MapChoice).ToList(), loc))),
             Choices = points.Cast<object>().ToList(),
         };
     }

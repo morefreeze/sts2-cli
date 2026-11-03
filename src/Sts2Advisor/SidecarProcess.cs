@@ -42,6 +42,9 @@ internal static class SidecarProcess
                 // the service sees EOF on it and exits instead of lingering as an orphan.
                 RedirectStandardInput = true,
             };
+            // The advisor's routing policy: the env var greedy_action reads per call. Always set (also for the
+            // default), so a STS2_MAP_POLICY left in the game's own environment cannot override the config.
+            info.Environment["STS2_MAP_POLICY"] = config.MapPolicy;
             info.ArgumentList.Add(script);
             info.ArgumentList.Add("--port");
             info.ArgumentList.Add(config.Port.ToString());

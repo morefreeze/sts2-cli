@@ -128,12 +128,20 @@ public static class PanelText
             lines.Add(new PanelLine(T(zh, "按选项英文描述的关键词打分", "Scored by keywords in the option's English text"), LineStyle.Muted));
         if (h.Decision == "shop")
             lines.Add(new PanelLine(T(zh, "买完会重新评估下一步", "Re-evaluated after every purchase"), LineStyle.Muted));
-        lines.Add(new PanelLine(reply.Unverified
+        lines.Add(new PanelLine(IsLookaheadMapAdvice(reply)
+            ? T(zh, "整条路线前瞻（A/B：a5 43 局 +5.4 层）", "whole-path lookahead (A/B: a5, 43 pairs, +5.4 floors)")
+            : reply.Unverified
             ? T(zh, "启发式，只看下一步，未经 A/B 验证", "Heuristic, next step only, not A/B tested")
             : T(zh, "greedy 启发式打分，不是概率", "greedy heuristic scores, not probabilities"), LineStyle.Muted));
         lines.AddRange(reply.Warnings.Select(w => new PanelLine(w, LineStyle.Warning)));
         return lines;
     }
+
+    /// <summary>Did the map advice come from the whole-path lookahead policy (the sidecar's STS2_MAP_POLICY=lookahead)?
+    /// Its trace carries map.la_best_path; map.la_fallback (no map, or an offered node not on it) means the
+    /// one-step HpAware rules decided, so that stays the "next step only" text.</summary>
+    private static bool IsLookaheadMapAdvice(AdviceReply reply) =>
+        reply.Rules.Any(r => r.Key == "map.la_best_path" && r.Outcome == "fired");
 
     /// <summary>The scored options to list: per kind the best few (lowest few when ascending), plus every
     /// option the advice picks wherever it ranks. Cards first, then relics, potions, the rest.</summary>

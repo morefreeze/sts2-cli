@@ -325,6 +325,39 @@ public class PanelTextTests
         Assert.Equal(new PanelLine("启发式，只看下一步，未经 A/B 验证", LineStyle.Muted), lines[^1]);
     }
 
+    private static AdviceReply LookaheadMapReply(string ruleKey) => AdviceReply.Parse("""
+        {"action": {"cmd": "action", "action": "select_map_node", "args": {"col": 3, "row": 4}},
+         "options": [
+           {"kind": "node", "index": 0, "score": -30.5, "status": "ok", "detail": {"col": 1, "row": 4, "type": "Monster"},
+            "components": [{"key": "map.la_room_reward", "value": -20.5}]},
+           {"kind": "node", "index": 1, "score": -41.1, "status": "ok", "detail": {"col": 3, "row": 4, "type": "Elite"},
+            "components": [{"key": "map.la_elite_reward", "value": -11.8}]}],
+         "rules": [{"key": "RULE", "outcome": "fired",
+                    "values": {"n_paths": 12, "path": "MRE", "elites": 1, "hp_boss_ratio": 0.8, "decider": "elite_reward",
+                               "reason": "no_map"}}],
+         "warnings": [], "unverified": true, "policy": "greedy"}
+        """.Replace("RULE", ruleKey));
+
+    [Fact]
+    public void LookaheadMapPanelSaysWholePathLookaheadWithTheMeasuredGain()
+    {
+        var header = new DecisionHeader("map_select", 1, 8, 1, 75, 80, 40);
+        var labels = new Dictionary<string, string> { ["node:0"] = "敌人 (1,4)", ["node:1"] = "精英 (3,4)" };
+        var reply = LookaheadMapReply("map.la_best_path");
+        Assert.Equal(new PanelLine("整条路线前瞻（A/B：a5 43 局 +5.4 层）", LineStyle.Muted),
+                     PanelText.Render(header, reply, labels, zh: true)[^1]);
+        Assert.Equal(new PanelLine("whole-path lookahead (A/B: a5, 43 pairs, +5.4 floors)", LineStyle.Muted),
+                     PanelText.Render(header, reply, labels, zh: false)[^1]);
+    }
+
+    [Fact]
+    public void LookaheadFallbackKeepsTheNextStepOnlyText()
+    {
+        var header = new DecisionHeader("map_select", 1, 8, 1, 75, 80, 40);
+        var lines = PanelText.Render(header, LookaheadMapReply("map.la_fallback"), new Dictionary<string, string>(), zh: false);
+        Assert.Equal(new PanelLine("Heuristic, next step only, not A/B tested", LineStyle.Muted), lines[^1]);
+    }
+
     [Fact]
     public void NoActionShowsNoAdviceAndWarnings()
     {
