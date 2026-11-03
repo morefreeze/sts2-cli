@@ -212,6 +212,45 @@ class LookaheadMapStrategy:
     BOSS_COST = (25.0, 30.0, 35.0)
     UNKNOWN_COST = 1.5
 
+    # ---- the same costs by ascension (the tables above are the "base" band) ----
+    # Real-game autopilot campaign (history files), mean damage_taken per room,
+    # survivors only (n in brackets), acts 1/2/3:
+    #              a1-4                     a5-7                      a8-10
+    #   monster  1.3(49) 3.0(40) 3.1(26) | 1.7(93) 3.0(79) 5.6(58) | 3.8(122) 6.3(88) 8.2(46)
+    #   elite    2.5(10) 8.5(10) 13.3(11)| 9.2(27) 10.8(20) 13.7(13)| 14.9(30) 25.1(30) 27.6(8)
+    #   boss    27.8(8)  16.9(7) 31.4(7) | 22.7(17) 33.5(16) 45.3(14)| 32.6(22) 43.1(17) 39.9(9)
+    # Ascension <= 5 keeps the base table EXACTLY (the a5 A/B and the golden corpus
+    # were measured with it). "a6-7" is the a5-7 column, but a cell with n < 15 is
+    # smoothed with the base value: max(base, data) for elites and bosses (elite A3
+    # 13.7(13) -> 22; boss A3 45.3(14) stays 45.3 because it is above 35); monsters
+    # take the data. "a8+" is the a8-10 column, elite A3 n=8 -> max(27.6, 22).
+    # The death curves (keyed on HP / cost) turn these survivor means into the tail.
+    COST_BANDS = {
+        "base": (MONSTER_COST, ELITE_COST, BOSS_COST),
+        "a6-7": ((1.7, 3.0, 5.6), (9.2, 10.8, max(13.7, 22.0)), (22.7, 33.5, max(45.3, 35.0))),
+        "a8+": ((3.8, 6.3, 8.2), (14.9, 25.1, max(27.6, 22.0)), (32.6, 43.1, max(39.9, 35.0))),
+    }
+
+    @staticmethod
+    def cost_band(ascension) -> str:
+        """Cost table name for a run's ascension; unknown / non-int -> "base"."""
+        if not isinstance(ascension, int) or isinstance(ascension, bool) or ascension <= 5:
+            return "base"
+        return "a6-7" if ascension <= 7 else "a8+"
+
+    @staticmethod
+    def state_ascension(state: dict, map_json=None):
+        """The run's ascension from a decision: top-level ``ascension`` (the mod adds
+        it to map_select), else ``context.ascension``, else the map's context; None
+        when the decision carries none (the headless engine's does not)."""
+        for src in (state, state.get("context"),
+                    (map_json or {}).get("context") if isinstance(map_json, dict) else None):
+            if isinstance(src, dict):
+                v = src.get("ascension")
+                if isinstance(v, int) and not isinstance(v, bool):
+                    return v
+        return None
+
     # ---- chance of dying in a combat, by (HP on entering) / (that fight's cost) ----
     # Evidence: the same cells, deaths / (deaths + survivors) binned by pre-room
     # HP / the act's mean cost. Elite: <1.5: 50%, 1.5-2.5: 22%, 2.5-3.5: 9.3%,
@@ -280,11 +319,12 @@ class LookaheadMapStrategy:
         return 0.75
 
     def evaluate_path(self, path: list, hp: float, max_hp: float, gold: float,
-                      act: int) -> PathEval:
+                      act: int, ascension=None) -> PathEval:
         """Walk ``path`` (map nodes, first = the room entered next) from ``hp``
         and return its value. Expected HP is deterministic; the chance of dying
         is carried along (``p``) so a risky room discounts everything after it."""
         a = min(max(act, 1), self.MAX_ACT) - 1
+        monster_cost, elite_cost, boss_cost = self.COST_BANDS[self.cost_band(ascension)]
         max_hp = max(float(max_hp), 1.0)
         hp = min(max(float(hp), 1.0), max_hp)
         p = 1.0
@@ -297,7 +337,7 @@ class LookaheadMapStrategy:
             letters.append(self.LETTERS.get(kind, "?"))
             if kind in ("Monster", "Elite"):
                 elite = kind == "Elite"
-                cost = self.ELITE_COST[a] if elite else self.MONSTER_COST[a]
+                cost = elite_cost[a] if elite else monster_cost[a]
                 death = _interp(self.ELITE_DEATH if elite else self.MONSTER_DEATH, hp / cost)
                 parts["elite_danger" if elite else "fight_danger"] -= p * death * self.DEATH_PENALTY
                 if elite:
@@ -327,7 +367,7 @@ class LookaheadMapStrategy:
             else:  # Unknown, and any type this table does not know (HpAware: priority 4)
                 hp = max(hp - self.UNKNOWN_COST, 1.0)
                 parts["room_reward"] += p * self.UNKNOWN_REWARD
-        boss_death = _interp(self.BOSS_DEATH, hp / self.BOSS_COST[a])
+        boss_death = _interp(self.BOSS_DEATH, hp / boss_cost[a])
         parts["boss_danger"] -= p * boss_death * self.DEATH_PENALTY
         parts["hp_end"] += p * self.HP_VALUE * hp
         parts = {k: v for k, v in parts.items() if abs(v) > 1e-12}
@@ -345,6 +385,7 @@ class LookaheadMapStrategy:
         gold = player.get("gold", 0)
         act = state.get("act") or (state.get("context") or {}).get("act")
         act = act if isinstance(act, int) and not isinstance(act, bool) else 1
+        ascension = self.state_ascension(state, map_json)
         out = []
         for choice in choices:
             key = node_key(choice)
@@ -356,7 +397,7 @@ class LookaheadMapStrategy:
                 return "too_many_paths"
             best = None
             for path in paths:
-                scored = self.evaluate_path(path, hp, max_hp, gold, act)
+                scored = self.evaluate_path(path, hp, max_hp, gold, act, ascension)
                 if best is None or scored.value > best.value + self.TIE_EPS:
                     best = scored
             out.append((best, len(paths)))
@@ -410,6 +451,7 @@ class LookaheadMapStrategy:
                        hp_ratio=player.get("hp", 80) / max_hp,
                        hp_boss_ratio=ev.hp_boss / max_hp,
                        margin=ev.value - runner.value, decider=decider,
+                       cost_band=self.cost_band(self.state_ascension(state, map_json)),
                        act=state.get("act") or (state.get("context") or {}).get("act"),
                        floor=state.get("floor") or (state.get("context") or {}).get("floor"))
         return {"cmd": "action", "action": "select_map_node",

@@ -424,3 +424,87 @@ def test_other_decisions_do_not_read_the_map_policy(monkeypatch):
              "floor": 5, "options": [{"index": 0, "option_id": "HEAL", "is_enabled": True},
                                      {"index": 1, "option_id": "SMITH", "is_enabled": True}]}
     assert combat_env.greedy_action(state)["action"] == "choose_option"
+
+
+# ---- cost tables by ascension (LookaheadMapStrategy.COST_BANDS) ----
+
+@pytest.mark.parametrize("ascension, band", [
+    (None, "base"), (0, "base"), (4, "base"), (5, "base"), (6, "a6-7"), (7, "a6-7"),
+    (8, "a8+"), (9, "a8+"), (10, "a8+"), (True, "base"), ("9", "base"),
+])
+def test_cost_band_by_ascension(ascension, band):
+    assert LookaheadMapStrategy.cost_band(ascension) == band
+
+
+def test_the_base_band_is_the_class_constants_and_the_bands_only_rise():
+    c = LookaheadMapStrategy
+    assert c.COST_BANDS["base"] == (c.MONSTER_COST, c.ELITE_COST, c.BOSS_COST)
+    assert c.COST_BANDS["base"] == ((2.0, 4.0, 5.0), (8.0, 15.0, 22.0), (25.0, 30.0, 35.0))
+    # smoothed cells: n < 15 never drops below today's table
+    assert c.COST_BANDS["a6-7"][1][2] == 22.0 and c.COST_BANDS["a6-7"][2][2] == 45.3
+    assert c.COST_BANDS["a8+"][1][2] == 27.6
+    # a8+ costs more than a6-7 for every room kind in acts 1-2 (and the elite/monster in act 3)
+    for kind in (0, 1):
+        for act in range(3):
+            assert c.COST_BANDS["a8+"][kind][act] > c.COST_BANDS["a6-7"][kind][act]
+
+
+def test_state_ascension_is_read_from_the_decision_the_context_or_the_map():
+    f = LookaheadMapStrategy.state_ascension
+    assert f({}) is None
+    assert f({"ascension": 9}) == 9
+    assert f({"context": {"ascension": 7}}) == 7
+    assert f({"context": {}}, {"context": {"ascension": 8}}) == 8
+    assert f({"ascension": "9"}) is None and f({"ascension": True}) is None
+
+
+def test_evaluate_path_costs_follow_the_band():
+    s = LookaheadMapStrategy()
+    elite = [{"col": 0, "row": 5, "type": "Elite"}]
+    base = s.evaluate_path(elite, 60, 80, 0, 2)
+    for a in (0, 5, None):
+        assert s.evaluate_path(elite, 60, 80, 0, 2, a) == base
+    assert base.hp_boss == pytest.approx(60 - 15.0)
+    assert s.evaluate_path(elite, 60, 80, 0, 2, 6).hp_boss == pytest.approx(60 - 10.8)
+    assert s.evaluate_path(elite, 60, 80, 0, 2, 9).hp_boss == pytest.approx(60 - 25.1)
+    mon = [{"col": 0, "row": 5, "type": "Monster"}]
+    assert s.evaluate_path(mon, 60, 80, 0, 3, 8).hp_boss == pytest.approx(60 - 8.2)
+
+
+_ACT2_ELITE_OR_MONSTER = _map({
+    (0, 1): ("Monster", [(0, 2)]), (1, 1): ("Monster", [(1, 2)]),
+    (0, 2): ("Elite", [(0, 3)]),   (1, 2): ("Monster", [(1, 3)]),
+    (0, 3): ("RestSite", [(9, 9)]), (1, 3): ("RestSite", [(9, 9)]),
+})
+
+
+def test_ascension_5_and_below_pick_exactly_as_before():
+    cases = [(CORRIDOR, [(0, 1), (1, 1)], 40, 75, 3), (CORRIDOR, [(0, 1), (1, 1)], 75, 75, 1),
+             (_ACT2_ELITE_OR_MONSTER, [(0, 1), (1, 1)], 75, 80, 2),
+             (_ACT2_ELITE_OR_MONSTER, [(0, 1), (1, 1)], 60, 80, 2)]
+    for m, choices, hp, max_hp, act in cases:
+        plain = _state(m, choices, hp=hp, max_hp=max_hp, act=act)
+        want = _pick(plain)
+        for a in (0, 1, 3, 5):
+            assert _pick({**plain, "ascension": a}) == want
+
+
+def test_a_healthy_act_2_elite_route_that_a5_takes_is_avoided_at_a9():
+    state = _state(_ACT2_ELITE_OR_MONSTER, [(0, 1), (1, 1)], hp=75, max_hp=80, act=2)
+    assert _pick({**state, "ascension": 5}) == (0, 1)        # the elite: 15 HP costs little
+    assert _pick({**state, "ascension": 6}) == (0, 1)        # a6-7 elite is ~11
+    assert _pick({**state, "ascension": 9}) == (1, 1)        # 25 HP: not at 94% for one relic
+    assert _pick({**state, "ascension": 8}) == (1, 1)
+    # the ascension may also ride in the context
+    assert _pick({**state, "context": {**state["context"], "ascension": 9}}) == (1, 1)
+
+
+def test_the_trace_records_the_cost_band():
+    for asc, band in ((None, "base"), (5, "base"), (7, "a6-7"), (10, "a8+")):
+        state = _state(CORRIDOR, [(0, 1), (1, 1)], hp=40, act=3)
+        if asc is not None:
+            state["ascension"] = asc
+        t = GreedyTrace()
+        _pick(state, trace=t)
+        rule = next(r for r in t.rules if r["key"] == "map.la_best_path")
+        assert rule["values"]["cost_band"] == band

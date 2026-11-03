@@ -111,6 +111,9 @@ internal static class DecisionCapture
             try
             {
                 decision["map"] = FullMap(rs, loc);
+                // The lookahead map policy scales its expected HP costs by ascension (agent/strategy.py
+                // LookaheadMapStrategy.COST_BANDS); the shared serializer carries no ascension.
+                decision["ascension"] = (int)rs.AscensionLevel;
             }
             catch (Exception e)
             {
