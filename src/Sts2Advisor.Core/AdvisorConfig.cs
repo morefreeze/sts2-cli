@@ -8,7 +8,8 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                                    string AutopilotHotkey = AdvisorConfig.DefaultAutopilotHotkey,
                                    string StepHotkey = AdvisorConfig.DefaultStepHotkey,
                                    double StepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds,
-                                   bool InstantMode = false)
+                                   bool InstantMode = false,
+                                   PanelLanguage PanelLanguage = PanelLanguage.Auto)
 {
     public const int DefaultPort = 8767;
     public const string DefaultHotkey = "F8";
@@ -33,7 +34,9 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
     /// "autopilot_hotkey" is a Godot Key name like "hotkey" (else "F9"); "step_hotkey" likewise (else "F10").
     /// "step_pause_seconds" -- how long the autopilot leaves a step on the panel before acting on the next screen --
     /// must be a JSON number, clamped to 0..10 (0 = no pause), else 2.5.
-    /// "instant_mode" (apply the game's Instant speed once it has started) is read like "autostart" but defaults to false.</summary>
+    /// "instant_mode" (apply the game's Instant speed once it has started) is read like "autostart" but defaults to false.
+    /// "panel_language" is "auto" (follow the game's language; the default), "zh" or "en" -- see <see cref="PanelLanguageRules.Parse"/>;
+    /// anything else, or a non-string, is "auto".</summary>
     public static AdvisorConfig Load(string path)
     {
         try
@@ -53,7 +56,8 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                 Str(root, "autopilot_hotkey") ?? DefaultAutopilotHotkey,
                 Str(root, "step_hotkey") ?? DefaultStepHotkey,
                 ReadStepPause(root),
-                ReadBool(root, "instant_mode", false));
+                ReadBool(root, "instant_mode", false),
+                PanelLanguageRules.Parse(Str(root, "panel_language")));
         }
         catch (Exception e)
         {

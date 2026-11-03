@@ -68,7 +68,7 @@ internal static class AdvisorRuntime
     private static string _stepKeyName = "F10";
     private static bool _stepKeyDown;
 
-    private static bool Zh => GameText.IsChinese;
+    private static bool Zh => GameText.Zh;
 
     public static void Start(AdvisorConfig config, string configPath, string userDir, string? autopilotProblem)
     {
@@ -87,6 +87,9 @@ internal static class AdvisorRuntime
         if (_autoKey == _hotkey)  // one press would both hide the panel and start the autopilot
             autopilotProblem ??= $"hotkey and autopilot_hotkey are both {_autoKeyName} ({configPath})";
         _loc = string.IsNullOrWhiteSpace(config.RepoPath) ? null : new LocLookup(config.RepoPath);
+        // Names and descriptions in the panel's language; the repo's localization_zhs is only the fallback for a title
+        // when the game's own tables cannot be swapped in. The decision JSON stays English (_loc.Lang is never changed).
+        GameText.Configure(config.PanelLanguage, _loc);
         bool locOk = _loc is { IsLoaded: true };
         string gameUserDir = System.IO.Path.GetDirectoryName(userDir) ?? userDir;
         AutoPilotControl.Init(_advisor, locOk ? _loc : null, _trace, gameUserDir, () => Clock.Elapsed.TotalSeconds,
@@ -161,7 +164,7 @@ internal static class AdvisorRuntime
             _panel.Hide();
             return;
         }
-        var language = GameText.Language;
+        var language = GameText.FontLanguage;
         if (language != _language)
         {
             _language = language;

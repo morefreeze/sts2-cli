@@ -228,4 +228,38 @@ public class AdvisorConfigTests
     {
         Assert.False(AdvisorConfig.Load(Write($$"""{"instant_mode": {{json}}}""")).InstantMode);
     }
+
+    [Fact]
+    public void PanelLanguageDefaultsToAuto()
+    {
+        Assert.Equal(PanelLanguage.Auto, AdvisorConfig.Defaults.PanelLanguage);
+        Assert.Equal(PanelLanguage.Auto, AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).PanelLanguage);
+    }
+
+    [Theory]
+    [InlineData("\"zh\"", PanelLanguage.Zh)]
+    [InlineData("\"ZH-cn\"", PanelLanguage.Zh)]
+    [InlineData("\"en\"", PanelLanguage.En)]
+    [InlineData("\"English\"", PanelLanguage.En)]
+    [InlineData("\"auto\"", PanelLanguage.Auto)]
+    [InlineData("\"\"", PanelLanguage.Auto)]
+    [InlineData("\"fr\"", PanelLanguage.Auto)]
+    [InlineData("1", PanelLanguage.Auto)]
+    [InlineData("true", PanelLanguage.Auto)]
+    [InlineData("null", PanelLanguage.Auto)]
+    [InlineData("[\"zh\"]", PanelLanguage.Auto)]
+    [InlineData("{\"zh\": 1}", PanelLanguage.Auto)]
+    public void PanelLanguageIsReadLeniently(string json, PanelLanguage expected)
+    {
+        Assert.Equal(expected, AdvisorConfig.Load(Write($$"""{"panel_language": {{json}}}""")).PanelLanguage);
+    }
+
+    [Fact]
+    public void ABadPanelLanguageDoesNotSpoilTheOtherKeys()
+    {
+        var c = AdvisorConfig.Load(Write("""{"panel_language": 7, "port": 9000, "instant_mode": true}"""));
+        Assert.Equal(PanelLanguage.Auto, c.PanelLanguage);
+        Assert.Equal(9000, c.Port);
+        Assert.True(c.InstantMode);
+    }
 }

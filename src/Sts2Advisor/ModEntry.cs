@@ -30,7 +30,7 @@ public static class ModEntry
             ModLog.Error($"bad {configPath}: {ex.Message}; using defaults");
             config = AdvisorConfig.Defaults;
         }
-        ModLog.Info($"loaded; config {configPath}: repo={config.RepoPath} port={config.Port} autostart={config.Autostart} hotkey={config.Hotkey} autopilot_hotkey={config.AutopilotHotkey} step_hotkey={config.StepHotkey} instant_mode={config.InstantMode}");
+        ModLog.Info($"loaded; config {configPath}: repo={config.RepoPath} port={config.Port} autostart={config.Autostart} hotkey={config.Hotkey} autopilot_hotkey={config.AutopilotHotkey} step_hotkey={config.StepHotkey} instant_mode={config.InstantMode} panel_language={config.PanelLanguage}");
         string? patchProblem;
         try
         {

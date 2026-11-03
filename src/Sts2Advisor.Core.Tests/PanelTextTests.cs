@@ -27,7 +27,7 @@ public class PanelTextTests
     public void RuleTemplatesFormatPercentagesAndNumbers()
     {
         var r = Rule("rest.heal_threshold", "fired", """{"hp_ratio": 0.5125, "threshold": 0.85, "floor": 11}""");
-        Assert.Equal("HP 51.2%，本层休息阈值 85%", TraceText.Rule(r, zh: true));
+        Assert.Equal("生命值 51.2%，当前楼层休息阈值 85%", TraceText.Rule(r, zh: true));
         Assert.Equal("HP 51.2%, rest threshold here 85%", TraceText.Rule(r, zh: false));
     }
 
@@ -115,7 +115,7 @@ public class PanelTextTests
     public void RestRuleSuffixIsAppendedToTheFormattedLine()
     {
         var r = Rule("rest.heal_threshold", "skipped", """{"hp_ratio": 0.5, "threshold": 0.85, "floor": 11, "available": false}""");
-        Assert.Equal("HP 50%，本层休息阈值 85%（没有该选项）", TraceText.Rule(r, zh: true));
+        Assert.Equal("生命值 50%，当前楼层休息阈值 85%（没有该选项）", TraceText.Rule(r, zh: true));
         Assert.Equal("HP 50%, rest threshold here 85% (option unavailable)", TraceText.Rule(r, zh: false));
     }
 
@@ -124,7 +124,7 @@ public class PanelTextTests
     {
         var r = Rule("shop.heal_potion", "skipped",
             """{"hp_ratio": 0.3, "held_potions": 1, "slots_free": true, "available": false}""");
-        Assert.Equal("回复药水：需 HP < 50%（现 30%）且持有药水 < 3（现 1/3）（没有可买的回复药水）", TraceText.Rule(r, zh: true));
+        Assert.Equal("回复药水：需生命值 < 50%（现 30%）且持有药水 < 3（现 1/3）（没有可买的回复药水）", TraceText.Rule(r, zh: true));
         Assert.Equal("Heal potion: needs HP < 50% (now 30%) and potions < 3 (now 1/3) (no heal potion for sale)", TraceText.Rule(r, zh: false));
 
         // Each condition is needed: HP not low, no free slot, or a potion on sale.
@@ -206,7 +206,7 @@ public class PanelTextTests
             {"best_index": 1, "tied_best": [1], "n_choices": 2, "n_paths": 14, "path": "MRMR", "elites": 0,
              "rests": 2, "hp_boss_ratio": 0.92, "decider": "elite_danger", "margin": 41.3}
             """);
-        Assert.Equal("整条路线评估（共 14 条路线）：MRMR，0 个精英，到 Boss 时 HP 92%；差别主要在精英战死亡风险",
+        Assert.Equal("整条路线评估（共 14 条路线）：MRMR，0 个精英，到 Boss 时生命值 92%；差别主要在精英战死亡风险",
                      TraceText.Rule(best, zh: true));
         Assert.Equal("Whole-path lookahead (14 routes): MRMR, 0 elites, HP at the boss 92%; decided by elite fight death risk",
                      TraceText.Rule(best, zh: false));
@@ -228,7 +228,7 @@ public class PanelTextTests
         var reply = AdviceReply.Parse(AdviceReplyTests.CardRewardJson);
         var labels = new Dictionary<string, string> { ["card:0"] = "打击", ["card:1"] = "燃烧" };
         var lines = PanelText.Render(CardHeader, reply, labels, zh: true);
-        Assert.Equal(new PanelLine("卡牌奖励 · A1F13a1 · HP 52/80 · 金币 99", LineStyle.Title), lines[0]);
+        Assert.Equal(new PanelLine("卡牌奖励 · A1F13a1 · 生命值 52/80 · 金币 99", LineStyle.Title), lines[0]);
         Assert.Equal(new PanelLine("建议：燃烧", LineStyle.Pick), lines[1]);
         Assert.Contains(new PanelLine("燃烧  7.4", LineStyle.Fired), lines);
         Assert.Contains(new PanelLine("  卡牌分（评级 A） 6.8 · 格挡缺口 +0.6", LineStyle.Muted), lines);
@@ -321,7 +321,7 @@ public class PanelTextTests
         Assert.Equal("建议：精英 (3,4)", lines[1].Text);
         Assert.Equal(new PanelLine("精英 (3,4)  4.1", LineStyle.Fired), lines[2]);
         Assert.Equal("敌人 (1,4)  5.0", lines.First(l => l.Text.StartsWith("敌人")).Text);
-        Assert.Contains(new PanelLine("  房间类型 6.0 · HP ≥ 85% 且第 7–12 层 -1.9", LineStyle.Muted), lines);
+        Assert.Contains(new PanelLine("  房间类型 6.0 · 生命值 ≥ 85% 且楼层 7–12 -1.9", LineStyle.Muted), lines);
         Assert.Equal(new PanelLine("启发式，只看下一步，未经 A/B 验证", LineStyle.Muted), lines[^1]);
     }
 
@@ -342,10 +342,10 @@ public class PanelTextTests
     public void TheTitleOmitsTheNameOfAScreenThatIsNotADecision(string screen)
     {
         var h = new DecisionHeader(screen, 1, 7, 1, 65, 80, 168);
-        Assert.Equal("A1F7a1 · HP 65/80 · 金币 168", PanelText.Header(h, zh: true));
+        Assert.Equal("A1F7a1 · 生命值 65/80 · 金币 168", PanelText.Header(h, zh: true));
         Assert.Equal("A1F7a1 · HP 65/80 · Gold 168", PanelText.Header(h, zh: false));
         var status = PanelText.Status(h, StatusKind.NoAdvice, null, zh: true);
-        Assert.Equal(new PanelLine("A1F7a1 · HP 65/80 · 金币 168", LineStyle.Title), status[0]);
+        Assert.Equal(new PanelLine("A1F7a1 · 生命值 65/80 · 金币 168", LineStyle.Title), status[0]);
         Assert.DoesNotContain(screen, status[0].Text);
     }
 
@@ -353,7 +353,7 @@ public class PanelTextTests
     public void TheTitleNamesTheMultiplayerRun()
     {
         var h = new DecisionHeader("multiplayer", 2, 4, 0, 50, 90, 12);
-        Assert.Equal("联机 · A2F4a0 · HP 50/90 · 金币 12", PanelText.Header(h, zh: true));
+        Assert.Equal("多人模式 · A2F4a0 · 生命值 50/90 · 金币 12", PanelText.Header(h, zh: true));
         Assert.Equal("Multiplayer · A2F4a0 · HP 50/90 · Gold 12", PanelText.Header(h, zh: false));
     }
 
@@ -364,7 +364,7 @@ public class PanelTextTests
         {
             ["card_reward"] = ("卡牌奖励", "Card reward"), ["rest_site"] = ("休息处", "Rest site"),
             ["event_choice"] = ("事件", "Event"), ["shop"] = ("商店", "Shop"),
-            ["bundle_select"] = ("卡包选择", "Bundle choice"), ["card_select"] = ("选牌", "Card select"),
+            ["bundle_select"] = ("选择一组", "Bundle choice"), ["card_select"] = ("选牌", "Card select"),
             ["map_select"] = ("地图", "Map"), ["combat"] = ("战斗", "Combat"),
         };
         foreach (var (decision, names) in expected)

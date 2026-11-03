@@ -19,6 +19,7 @@ internal static class StepDetails
     {
         try
         {
+            using var _ = GameText.Names();  // one swap for all the names and descriptions of the step
             return Collect(advice);
         }
         catch (Exception e)  // also a missing member: this is only text
@@ -29,8 +30,19 @@ internal static class StepDetails
     }
 
     /// <summary>The descriptions of potions a swap names (the one discarded, the one taken), as the game shows them.</summary>
-    public static IReadOnlyList<DetailItem> OfPotions(params PotionModel[] potions) =>
-        potions.Select(p => Item(GameText.Potion(p), () => p.DynamicDescription.GetFormattedText(), false)).ToList();
+    public static IReadOnlyList<DetailItem> OfPotions(params PotionModel[] potions)
+    {
+        using var _ = GameText.Names();
+        return potions.Select(p => PotionItem(p)).ToList();
+    }
+
+    private static DetailItem PotionItem(PotionModel p) =>
+        Item(GameText.Potion(p), () => GameText.Description("potions", p.Id.Entry + ".description",
+                                                            () => p.DynamicDescription.GetFormattedText()), false);
+
+    private static DetailItem RelicItem(RelicModel r) =>
+        Item(GameText.Relic(r), () => GameText.Description("relics", r.Id.Entry + ".description",
+                                                           () => r.DynamicDescription.GetFormattedText()), false);
 
     private static List<DetailItem> Collect(CachedAdvice a)
     {
@@ -57,12 +69,12 @@ internal static class StepDetails
             case PlanKind.BuyRelic:
                 if (a.Plan.Indices.Count > 0 && cap.Inventory is { } ri && a.Plan.Indices[0] < ri.RelicEntries.Count
                     && ri.RelicEntries[a.Plan.Indices[0]].Model is { } relic)
-                    items.Add(Item(GameText.Relic(relic), () => relic.DynamicDescription.GetFormattedText(), false));
+                    items.Add(RelicItem(relic));
                 break;
             case PlanKind.BuyPotion:
                 if (a.Plan.Indices.Count > 0 && cap.Inventory is { } pi && a.Plan.Indices[0] < pi.PotionEntries.Count
                     && pi.PotionEntries[a.Plan.Indices[0]].Model is { } potion)
-                    items.Add(Item(GameText.Potion(potion), () => potion.DynamicDescription.GetFormattedText(), false));
+                    items.Add(PotionItem(potion));
                 break;
         }
         return items;
@@ -72,7 +84,9 @@ internal static class StepDetails
     {
         // A card that cannot be upgraded stays as it is.
         bool upgraded = afterUpgrade && card.IsUpgradable;
-        return Item(GameText.Card(card), () => CardDescription(card, upgraded), upgraded);
+        return Item(GameText.Card(card),
+                    () => GameText.Description("cards", card.Id.Entry + ".description", () => CardDescription(card, upgraded)),
+                    upgraded);
     }
 
     /// <summary>The recipe of the game's own card library (NCardLibrary): the live card's description for the

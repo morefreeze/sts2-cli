@@ -184,7 +184,7 @@ internal static class DecisionCapture
         var labels = new Dictionary<string, string>();
         for (int i = 0; i < bundles.Count; i++)
         {
-            labels[$"bundle:{i}"] = GameText.IsChinese ? $"第 {i + 1} 包" : $"Bundle {i + 1}";
+            labels[$"bundle:{i}"] = GameText.Bundle(i + 1);
             for (int j = 0; j < bundles[i].Count; j++)
                 labels[$"bundle_card:{i}:{j}"] = GameText.Card(bundles[i][j]);
         }

@@ -19,13 +19,21 @@ public static class DescriptionText
     private static readonly Regex Tag = new(@"\[/?[a-zA-Z_][^\[\]]*\]", RegexOptions.CultureInvariant);
     private static readonly Regex Spaces = new(@"\s+", RegexOptions.CultureInvariant);
 
+    // A template variable the game's formatter left in ("{Damage:diff()}", also a nested "{Skills:choose(1):a|{:diff()}}"):
+    // it returns the raw template when it fails.
+    private static readonly Regex Unresolved = new(@"\{[A-Za-z_]", RegexOptions.CultureInvariant);
+
+    /// <summary>The text still holds a template variable, i.e. the game could not format it.</summary>
+    public static bool HasUnresolvedVariable(string? text) => !string.IsNullOrEmpty(text) && Unresolved.IsMatch(text);
+
     private enum IconKind { Unknown, Energy, Star }
 
     /// <summary>"Deal [blue]8[/blue] damage.\nExhaust." -> "Deal 8 damage. Exhaust."; at most
-    /// <paramref name="maxChars"/> characters of visible text, an ellipsis in place of the cut part.</summary>
+    /// <paramref name="maxChars"/> characters of visible text, an ellipsis in place of the cut part. Text that still
+    /// holds a raw "{Var}" is dropped (empty): half a template is worse than none.</summary>
     public static string Plain(string? raw, bool zh, int maxChars = DefaultMaxChars)
     {
-        if (string.IsNullOrWhiteSpace(raw) || maxChars < 1)
+        if (string.IsNullOrWhiteSpace(raw) || maxChars < 1 || HasUnresolvedVariable(raw))
             return "";
         string s = IconRun.Replace(raw, m => IconText(m, zh));
         // [lb] / [rb] are BBCode's escaped brackets: literal in the result, so they are put back after the tags go.

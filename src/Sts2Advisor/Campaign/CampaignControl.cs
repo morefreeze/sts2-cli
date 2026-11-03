@@ -83,7 +83,7 @@ internal static class CampaignControl
         var s = _read.Settings;
         string? note = _stopped ? "stopped by \"command\": \"stop\" until campaign.json changes" : _note;
         var next = CampaignPlan.NextTarget(s, _lastRunCharacter);
-        return CampaignText.Status(new CampaignView(s is { Enabled: true }, next?.Character, next?.Ascension, Stats.Runs, Stats.Wins,
+        return CampaignText.Status(new CampaignView(s is { Enabled: true }, next == null ? null : GameText.Character(next.Value.Character), next?.Ascension, Stats.Runs, Stats.Wins,
                                                     note, _read.Problem, _stuck), zh);
     }
 

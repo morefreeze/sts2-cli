@@ -29,11 +29,11 @@ public static class PanelText
         ["rest_site"] = ("休息处", "Rest site"),
         ["event_choice"] = ("事件", "Event"),
         ["shop"] = ("商店", "Shop"),
-        ["bundle_select"] = ("卡包选择", "Bundle choice"),
+        ["bundle_select"] = ("选择一组", "Bundle choice"),
         ["card_select"] = ("选牌", "Card select"),
         ["map_select"] = ("地图", "Map"),
         ["combat"] = ("战斗", "Combat"),
-        ["multiplayer"] = ("联机", "Multiplayer"),
+        ["multiplayer"] = ("多人模式", "Multiplayer"),
     };
 
     private static readonly Dictionary<string, (string Zh, string En)> StatusNames = new()
@@ -52,11 +52,11 @@ public static class PanelText
     public static string DecisionName(string decision, bool zh) =>
         DecisionNames.TryGetValue(decision, out var n) ? (zh ? n.Zh : n.En) : decision;
 
-    /// <summary>"卡牌奖励 · A1F13a1 · HP 52/80 · 金币 99". For a screen that is not a decision (the mod passes the
+    /// <summary>"卡牌奖励 · A1F13a1 · 生命值 52/80 · 金币 99". For a screen that is not a decision (the mod passes the
     /// screen class name, "event_finished", ...) there is no name to show, so the title starts at "A1F7a1".</summary>
     public static string Header(DecisionHeader h, bool zh)
     {
-        var position = $"A{h.Act}F{h.Floor}a{h.Ascension} · HP {h.Hp}/{h.MaxHp} · {T(zh, "金币", "Gold")} {h.Gold}";
+        var position = $"A{h.Act}F{h.Floor}a{h.Ascension} · {T(zh, "生命值", "HP")} {h.Hp}/{h.MaxHp} · {T(zh, "金币", "Gold")} {h.Gold}";
         return DecisionNames.TryGetValue(h.Decision, out var n) ? $"{(zh ? n.Zh : n.En)} · {position}" : position;
     }
 
@@ -170,7 +170,7 @@ public static class PanelText
 
     private static string MoreNotShown(string kind, int n, bool zh) => kind switch
     {
-        "card" => zh ? $"另有 {n} 张卡未列出" : $"{n} more {(n == 1 ? "card" : "cards")} not shown",
+        "card" => zh ? $"另有 {n} 张牌未列出" : $"{n} more {(n == 1 ? "card" : "cards")} not shown",
         "relic" => zh ? $"另有 {n} 件遗物未列出" : $"{n} more {(n == 1 ? "relic" : "relics")} not shown",
         "potion" => zh ? $"另有 {n} 瓶药水未列出" : $"{n} more {(n == 1 ? "potion" : "potions")} not shown",
         _ => zh ? $"另有 {n} 个未列出" : $"{n} more not shown",
@@ -247,7 +247,7 @@ public static class PanelText
             case "buy_potion":
                 return Label(labels, $"potion:{Index("potion_index")}", "?");
             case "remove_card":
-                return T(zh, "移除卡牌", "Remove a card");
+                return T(zh, "卡牌移除服务", "Remove a card");
             case "leave_room":
                 return T(zh, "离开", "Leave");
             case "select_bundle":

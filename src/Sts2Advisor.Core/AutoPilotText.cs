@@ -27,7 +27,7 @@ public static class AutoPilotText
     public static string PotionSwapReason(double discardScore, double takeScore, double margin, bool zh)
     {
         string take = Num(takeScore), held = Num(discardScore), min = Num(margin);
-        return T(zh, $"药水栏已满：新药水评分 {take}，比最差的已持有药水（{held}）高出至少 {min}",
+        return T(zh, $"药水栏位已满：新药水评分 {take}，比最差的已持有药水（{held}）高出至少 {min}",
                      $"Belt full: the offered potion scores {take}, at least {min} above the worst held one ({held})");
     }
 
@@ -109,7 +109,7 @@ public static class AutoPilotText
         StopReason.Hotkey => T(zh, "玩家接管", "taken over by the player"),
         StopReason.GameOver => T(zh, "本局结束", "the run is over"),
         StopReason.LeftRun => T(zh, "已离开本局", "left the run"),
-        StopReason.Multiplayer => T(zh, "联机不支持", "multiplayer is not supported"),
+        StopReason.Multiplayer => T(zh, "不支持多人模式", "multiplayer is not supported"),
         StopReason.HandlerFailed => T(zh, "执行失败", "an action failed"),
         StopReason.Stuck => T(zh, "界面卡住", "the screen is stuck"),
         StopReason.Offline => T(zh, "建议服务离线超过 10 秒", "advice service offline for over 10 s"),

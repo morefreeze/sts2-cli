@@ -76,9 +76,10 @@ internal sealed class AdvisorPanel
         if (language != _fontLanguage)
         {
             _fontLanguage = language;
-            // The game's CJK substitute font; a no-op for languages that need none.
-            _text.ApplyLocaleFontSubstitution(FontType.Regular, "normal_font");
-            _text.ApplyLocaleFontSubstitution(FontType.Bold, "bold_font");
+            // The game's CJK substitute font; none for languages that need none. By the PANEL's language: a Chinese
+            // panel over an English game still needs the Chinese glyphs.
+            ApplyFont(_text, language, FontType.Regular, "normal_font");
+            ApplyFont(_text, language, FontType.Bold, "bold_font");
             _shownText = null;
         }
         // Status lines are re-shown on every 0.3 s poll; only touch the label when the text changed.
@@ -104,7 +105,7 @@ internal sealed class AdvisorPanel
                 var button = new Button { Text = b.Text, FocusMode = Control.FocusModeEnum.None,
                                           MouseFilter = Control.MouseFilterEnum.Stop };
                 button.AddThemeFontSizeOverride("font_size", 14);
-                button.ApplyLocaleFontSubstitution(FontType.Regular, "font");
+                ApplyFont(button, _fontLanguage, FontType.Regular, "font");
                 button.Pressed += () => onPress(action);
                 _buttons.AddChild(button);
             }
@@ -112,6 +113,17 @@ internal sealed class AdvisorPanel
         }
         _buttons.Visible = buttons.Count > 0;
         _panel.Visible = true;
+    }
+
+    /// <summary>ApplyLocaleFontSubstitution, but for the given language instead of the game's current one.</summary>
+    private static void ApplyFont(Control control, string? language, FontType type, StringName themeFontName)
+    {
+        var font = language != null && FontManager.NeedsFontSubstitution(language)
+            ? FontManager.GetSubstituteFont(language, type) : null;
+        if (font != null)
+            control.AddThemeFontOverride(themeFontName, font);
+        else
+            control.RemoveThemeFontOverride(themeFontName);
     }
 
     public void Hide()

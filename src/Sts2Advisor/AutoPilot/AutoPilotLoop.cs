@@ -470,7 +470,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
     public void StepTaken(CachedAdvice a)
     {
         _stepFloor = CurrentFloor();
-        bool zh = GameText.IsChinese;
+        bool zh = GameText.Zh;
         int n = _session.Record(AutoPilotText.StepText(a.Capture.Header.Decision, a.Reply, a.Capture.Labels, zh),
                                 AutoPilotText.Reason(a.Reply, zh),
                                 AutoPilotText.DetailLines(StepDetails.Of(a), zh),
@@ -524,7 +524,7 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             if (slot < 0)
                 throw new AutoPilotException("the potion to discard is not in the belt");
 
-            bool zh = GameText.IsChinese;
+            bool zh = GameText.Zh;
             string doomedName = GameText.Potion(doomed), takenName = GameText.Potion(offered);
             int n = _session.Record(AutoPilotText.PotionSwapText(doomedName, takenName, zh),
                                     reply.DiscardScore is { } ds && reply.TakeScore is { } ts

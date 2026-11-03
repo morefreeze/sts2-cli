@@ -35,11 +35,11 @@ public static class TraceText
         ["card.score"] = ("卡牌分（不含牌组）", "Card score (deck-free)"),
         ["card.in_deck_score"] = ("卡牌分（含牌组协同）", "Card score (with deck synergy)"),
 
-        ["rest.critical_heal"] = ("HP {hp_ratio:%}，必须休息线 {threshold:%}", "HP {hp_ratio:%}, must-rest line {threshold:%}"),
-        ["rest.vantom_mid_boss"] = ("墨影幻灵规则：第 11–13 层且 HP < 70% 时休息（现第 {floor} 层，HP {hp_ratio:%}）", "Vantom rule: rest on floors 11-13 when HP < 70% (now floor {floor}, HP {hp_ratio:%})"),
-        ["rest.pre_boss_heal"] = ("第 14 层起（Boss 前）：HP {hp_ratio:%}，休息阈值 {threshold:%}", "Floor 14+ (pre-boss): HP {hp_ratio:%}, rest threshold {threshold:%}"),
+        ["rest.critical_heal"] = ("生命值 {hp_ratio:%}，必须休息线 {threshold:%}", "HP {hp_ratio:%}, must-rest line {threshold:%}"),
+        ["rest.vantom_mid_boss"] = ("墨影幻灵规则：楼层 11–13 且生命值 < 70% 时休息（现为楼层 {floor}，生命值 {hp_ratio:%}）", "Vantom rule: rest on floors 11-13 when HP < 70% (now floor {floor}, HP {hp_ratio:%})"),
+        ["rest.pre_boss_heal"] = ("楼层 14 起（Boss 前）：生命值 {hp_ratio:%}，休息阈值 {threshold:%}", "Floor 14+ (pre-boss): HP {hp_ratio:%}, rest threshold {threshold:%}"),
         ["rest.must_upgrade"] = ("有分数 ≥ {threshold} 的未升级卡时锻造", "Smith when an unupgraded card scores >= {threshold}"),
-        ["rest.heal_threshold"] = ("HP {hp_ratio:%}，本层休息阈值 {threshold:%}", "HP {hp_ratio:%}, rest threshold here {threshold:%}"),
+        ["rest.heal_threshold"] = ("生命值 {hp_ratio:%}，当前楼层休息阈值 {threshold:%}", "HP {hp_ratio:%}, rest threshold here {threshold:%}"),
         ["rest.default_smith"] = ("默认：能锻造就锻造", "Default: Smith if available"),
         ["rest.fallback"] = ("没有适用的规则：能休息就休息，否则选第一个可用项", "No rule applied: Rest if possible, else the first available option"),
         ["rest.no_choice"] = ("没有可选项", "Nothing to choose"),
@@ -55,8 +55,8 @@ public static class TraceText
         ["event.kw.lose_hp"] = ("失去生命", "Lose HP"),
         ["event.kw.downgrade"] = ("降级卡牌", "Downgrade a card"),
         ["event.kw.add_basic"] = ("加入打击或防御", "Add a Strike or Defend"),
-        ["event.kw.rare_card"] = ("稀有卡", "Rare card"),
-        ["event.kw.uncommon_card"] = ("罕见卡", "Uncommon card"),
+        ["event.kw.rare_card"] = ("稀有牌", "Rare card"),
+        ["event.kw.uncommon_card"] = ("罕见牌", "Uncommon card"),
         ["event.kw.card_reward"] = ("获得卡牌", "Card reward"),
         ["event.kw.remove_card"] = ("移除卡牌", "Remove a card"),
         ["event.kw.remove_card_hp_cost"] = ("移除卡牌要失去生命", "Removal costs HP"),
@@ -68,16 +68,16 @@ public static class TraceText
         ["event.kw.gain_max_hp"] = ("获得最大生命值", "Gain Max HP"),
         ["event.kw.potion"] = ("药水", "Potion"),
         ["event.kw.heal"] = ("回复生命", "Heal"),
-        ["event.kw.colorless_card"] = ("无色卡", "Colorless card"),
+        ["event.kw.colorless_card"] = ("无色牌", "Colorless card"),
         ["event.kw.gain_strength"] = ("获得力量", "Gain Strength"),
         ["event.kw.enemy_strength"] = ("敌人获得力量", "Enemies gain Strength"),
         ["event.kw.gain_dexterity"] = ("获得敏捷", "Gain Dexterity"),
         ["event.kw.energy_each_turn"] = ("每回合能量", "Energy every turn"),
         ["event.kw.energy_once"] = ("一次性能量", "One-time energy"),
 
-        ["bundle.single"] = ("只有一包", "Only one bundle"),
-        ["bundle.pick_best"] = ("选总分最高的一包", "Highest total score"),
-        ["bundle.card"] = ("包内卡", "Card"),
+        ["bundle.single"] = ("只有一组", "Only one bundle"),
+        ["bundle.pick_best"] = ("选总分最高的一组", "Highest total score"),
+        ["bundle.card"] = ("组内牌", "Card"),
 
         // rest_best / combat_best always select exactly one card, whatever max_select says.
         ["card_select.rest_best"] = ("休息处锻造：选分数最高的卡", "Rest site Smith: highest-scoring card"),
@@ -87,7 +87,7 @@ public static class TraceText
         ["card_select.no_cards"] = ("没有可选的卡 → 跳过", "No cards -> skip"),
 
         // "needs X (now Y)": a skipped rule must not read as a true comparison.
-        ["shop.heal_potion"] = ("回复药水：需 HP < 50%（现 {hp_ratio:%}）且持有药水 < {potion_slots}（现 {held_potions}/{potion_slots}）", "Heal potion: needs HP < 50% (now {hp_ratio:%}) and potions < {potion_slots} (now {held_potions}/{potion_slots})"),
+        ["shop.heal_potion"] = ("回复药水：需生命值 < 50%（现 {hp_ratio:%}）且持有药水 < {potion_slots}（现 {held_potions}/{potion_slots}）", "Heal potion: needs HP < 50% (now {hp_ratio:%}) and potions < {potion_slots} (now {held_potions}/{potion_slots})"),
         ["shop.remove_basic"] = ("移除基础牌：{n_basic} 张，需要 ≥ 3 张（{basic_scope}）", "Remove a basic card: {n_basic}, needs >= 3 ({basic_scope})"),
         ["shop.remove_value"] = ("移除卡牌价值 {removal_value}，最佳卡 {best_card_score}", "Card removal value {removal_value}, best card {best_card_score}"),
         ["shop.card_must_buy"] = ("最佳卡 {best_card_score}，必买线 {threshold}", "Best card {best_card_score}, must-buy line {threshold}"),
@@ -101,22 +101,22 @@ public static class TraceText
         ["map.pick_min_priority"] = ("选优先级数值最小的节点（越小越好）", "Lowest priority number wins (lower is better)"),
         ["map.base_priority"] = ("房间类型", "Room type"),
         ["map.shop_low_gold"] = ("金币不够", "Not enough gold"),
-        ["map.elite_early_floor"] = ("本阶段前两层", "First two floors of the act"),
-        ["map.elite_hp_danger"] = ("HP < 40%", "HP < 40%"),
-        ["map.elite_hp_low"] = ("HP < 60%", "HP < 60%"),
-        ["map.elite_act2_healthy"] = ("阶段2起 HP ≥ 90%", "Act 2+, HP >= 90%"),
+        ["map.elite_early_floor"] = ("本阶段前两个楼层", "First two floors of the act"),
+        ["map.elite_hp_danger"] = ("生命值 < 40%", "HP < 40%"),
+        ["map.elite_hp_low"] = ("生命值 < 60%", "HP < 60%"),
+        ["map.elite_act2_healthy"] = ("阶段2起生命值 ≥ 90%", "Act 2+, HP >= 90%"),
         ["map.elite_act2"] = ("阶段2起的精英", "Act 2+ elite"),
-        ["map.elite_strong_midgame"] = ("HP ≥ 85% 且第 7–12 层", "HP >= 85%, floors 7-12"),
-        ["map.elite_pre_boss"] = ("第 13 层起（Boss 前）", "Floor 13+ (pre-boss)"),
-        ["map.elite_act2_boss_zone"] = ("阶段2起，第 13 层起", "Act 2+, floor 13+"),
-        ["map.la_best_path"] = ("整条路线评估（共 {n_paths} 条路线）：{path}，{elites} 个精英，到 Boss 时 HP {hp_boss_ratio:%}；差别主要在{decider}", "Whole-path lookahead ({n_paths} routes): {path}, {elites} elites, HP at the boss {hp_boss_ratio:%}; decided by {decider}"),
+        ["map.elite_strong_midgame"] = ("生命值 ≥ 85% 且楼层 7–12", "HP >= 85%, floors 7-12"),
+        ["map.elite_pre_boss"] = ("楼层 13 起（Boss 前）", "Floor 13+ (pre-boss)"),
+        ["map.elite_act2_boss_zone"] = ("阶段2起，楼层 13 起", "Act 2+, floor 13+"),
+        ["map.la_best_path"] = ("整条路线评估（共 {n_paths} 条路线）：{path}，{elites} 个精英，到 Boss 时生命值 {hp_boss_ratio:%}；差别主要在{decider}", "Whole-path lookahead ({n_paths} routes): {path}, {elites} elites, HP at the boss {hp_boss_ratio:%}; decided by {decider}"),
         ["map.la_fallback"] = ("无法按整条路线评估（{reason}），改用优先级规则", "Cannot look ahead ({reason}); using the priority rules"),
         ["map.la_room_reward"] = ("房间收益", "Room rewards"),
         ["map.la_elite_reward"] = ("精英遗物收益", "Elite relic reward"),
         ["map.la_elite_danger"] = ("精英战死亡风险", "Elite fight death risk"),
         ["map.la_fight_danger"] = ("普通战斗死亡风险", "Normal fight death risk"),
-        ["map.la_boss_danger"] = ("进 Boss 时 HP 不足的风险", "Boss entry death risk"),
-        ["map.la_hp_end"] = ("到 Boss 时的 HP", "HP at the boss"),
+        ["map.la_boss_danger"] = ("进 Boss 时生命值不足的风险", "Boss entry death risk"),
+        ["map.la_hp_end"] = ("到 Boss 时的生命值", "HP at the boss"),
     };
 
     /// <summary>Rule values that are words, not numbers.</summary>
@@ -129,8 +129,8 @@ public static class TraceText
         ["elite_reward"] = ("精英遗物收益", "the elite relic reward"),
         ["elite_danger"] = ("精英战死亡风险", "elite fight death risk"),
         ["fight_danger"] = ("普通战斗死亡风险", "normal fight death risk"),
-        ["boss_danger"] = ("进 Boss 时 HP 不足的风险", "boss entry death risk"),
-        ["hp_end"] = ("到 Boss 时的 HP", "HP at the boss"),
+        ["boss_danger"] = ("进 Boss 时生命值不足的风险", "boss entry death risk"),
+        ["hp_end"] = ("到 Boss 时的生命值", "HP at the boss"),
         ["no_gap"] = ("没有明显差别", "no clear gap"),
         ["tied"] = ("并列（按优先级）", "a tie (priority decides)"),
         // map.la_fallback `reason`
@@ -175,7 +175,7 @@ public static class TraceText
         if (rule.Key == "rest.pre_boss_heal"
             && rule.Values.TryGetValue("floor", out var floor) && floor.ValueKind == JsonValueKind.Number
             && floor.GetDouble() < PreBossFloor)
-            return (zh ? "第 14 层起（Boss 前）休息" : "Floor 14+ (pre-boss): rest") + RuleSuffix(rule, zh);
+            return (zh ? "楼层 14 起（Boss 前）休息" : "Floor 14+ (pre-boss): rest") + RuleSuffix(rule, zh);
         if (!Templates.TryGetValue(rule.Key, out var t))
             return rule.Values.Count == 0
                 ? rule.Key

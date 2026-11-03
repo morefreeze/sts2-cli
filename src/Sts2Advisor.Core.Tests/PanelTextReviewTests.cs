@@ -126,7 +126,7 @@ public class PanelTextReviewTests
     public void HealPotionStatesTheRequirementNextToTheCurrentValues()
     {
         var r = ParsedRule("shop.heal_potion", "skipped", new { hp_ratio = 1.0, held_potions = 2, slots_free = true, available = false });
-        Assert.Equal("回复药水：需 HP < 50%（现 100%）且持有药水 < 3（现 2/3）", TraceText.Rule(r, zh: true));
+        Assert.Equal("回复药水：需生命值 < 50%（现 100%）且持有药水 < 3（现 2/3）", TraceText.Rule(r, zh: true));
         Assert.Equal("Heal potion: needs HP < 50% (now 100%) and potions < 3 (now 2/3)", TraceText.Rule(r, zh: false));
     }
 
@@ -134,7 +134,7 @@ public class PanelTextReviewTests
     public void PotionRulesShowThePlayersBeltSize()
     {
         var heal = ParsedRule("shop.heal_potion", "skipped", new { hp_ratio = 0.3, held_potions = 2, potion_slots = 2, slots_free = false, available = false });
-        Assert.Equal("回复药水：需 HP < 50%（现 30%）且持有药水 < 2（现 2/2）", TraceText.Rule(heal, zh: true));
+        Assert.Equal("回复药水：需生命值 < 50%（现 30%）且持有药水 < 2（现 2/2）", TraceText.Rule(heal, zh: true));
         Assert.Equal("Heal potion: needs HP < 50% (now 30%) and potions < 2 (now 2/2)", TraceText.Rule(heal, zh: false));
 
         var potion = ParsedRule("shop.potion", "skipped", new { threshold = 4.5, held_potions = 2, potion_slots = 2 });
@@ -190,7 +190,7 @@ public class PanelTextReviewTests
     public void PreBossHealShowsItsNumbersOnceTheFloorIsReached(int floor)
     {
         var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 1.0, threshold = 0.95, floor, available = true });
-        Assert.Equal("第 14 层起（Boss 前）：HP 100%，休息阈值 95%", TraceText.Rule(r, zh: true));
+        Assert.Equal("楼层 14 起（Boss 前）：生命值 100%，休息阈值 95%", TraceText.Rule(r, zh: true));
         Assert.Equal("Floor 14+ (pre-boss): HP 100%, rest threshold 95%", TraceText.Rule(r, zh: false));
     }
 
@@ -202,18 +202,18 @@ public class PanelTextReviewTests
     {
         // Below floor 14 the recorded threshold is the current floor's, not the pre-boss one.
         var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 0.8125, threshold = 0.8, floor, available = true });
-        Assert.Equal("第 14 层起（Boss 前）休息", TraceText.Rule(r, zh: true));
+        Assert.Equal("楼层 14 起（Boss 前）休息", TraceText.Rule(r, zh: true));
         Assert.Equal("Floor 14+ (pre-boss): rest", TraceText.Rule(r, zh: false));
 
         var missingOption = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 0.8125, threshold = 0.8, floor, available = false });
-        Assert.Equal("第 14 层起（Boss 前）休息（没有该选项）", TraceText.Rule(missingOption, zh: true));
+        Assert.Equal("楼层 14 起（Boss 前）休息（没有该选项）", TraceText.Rule(missingOption, zh: true));
     }
 
     [Fact]
     public void PreBossHealWithoutAFloorKeepsTheFullLine()
     {
         var r = ParsedRule("rest.pre_boss_heal", "skipped", new { hp_ratio = 1.0, threshold = 0.95 });
-        Assert.Equal("第 14 层起（Boss 前）：HP 100%，休息阈值 95%", TraceText.Rule(r, zh: true));
+        Assert.Equal("楼层 14 起（Boss 前）：生命值 100%，休息阈值 95%", TraceText.Rule(r, zh: true));
     }
 
     // ---- 6. removal rules say why they were skipped when gold is short --------------------------------------
@@ -326,7 +326,7 @@ public class PanelTextReviewTests
     public void AHpJustUnderTheThresholdNeverReadsAsTheThreshold()
     {
         var r = ParsedRule("rest.critical_heal", "skipped", new { hp_ratio = 0.4999, threshold = 0.5, floor = 5, available = true });
-        Assert.Equal("HP 49.9%，必须休息线 50%", TraceText.Rule(r, zh: true));
+        Assert.Equal("生命值 49.9%，必须休息线 50%", TraceText.Rule(r, zh: true));
     }
 
     // ---- 9. official zh names ---------------------------------------------------------------------------------
@@ -342,7 +342,7 @@ public class PanelTextReviewTests
             new { enabled = true, is_vantom = true, hp_ratio = 0.8, floor = 7, available = true }), zh: true));
         var removal = Reply(new { cmd = "action", action = "remove_card" }, Array.Empty<object>(), Array.Empty<object>());
         var header = new DecisionHeader("shop", 1, 6, 1, 70, 80, 400);
-        Assert.Equal("建议：移除卡牌", PanelText.Render(header, removal, new Dictionary<string, string>(), zh: true)[1].Text);
+        Assert.Equal("建议：卡牌移除服务", PanelText.Render(header, removal, new Dictionary<string, string>(), zh: true)[1].Text);
         Assert.Equal("Pick: Remove a card", PanelText.Render(header, removal, new Dictionary<string, string>(), zh: false)[1].Text);
     }
 
@@ -379,7 +379,7 @@ public class PanelTextReviewTests
         var off = PanelText.Render(header, Reply(new { cmd = "action", action = "proceed" }, Array.Empty<object>(), (IEnumerable<object>)Rules(false)),
                                    new Dictionary<string, string>(), zh: true);
         Assert.DoesNotContain(off, l => l.Text.Contains("墨影幻灵"));
-        Assert.Contains(off, l => l.Text.StartsWith("HP 100%，必须休息线"));
+        Assert.Contains(off, l => l.Text.StartsWith("生命值 100%，必须休息线"));
         var on = PanelText.Render(header, Reply(new { cmd = "action", action = "proceed" }, Array.Empty<object>(), (IEnumerable<object>)Rules(true)),
                                   new Dictionary<string, string>(), zh: true);
         Assert.Contains(on, l => l.Text.Contains("墨影幻灵"));
@@ -401,7 +401,7 @@ public class PanelTextReviewTests
                                      Reply(new { cmd = "action", action = "proceed" }, Array.Empty<object>(), rules),
                                      new Dictionary<string, string>(), zh: true);
         Assert.Equal(hidden, lines.All(l => !l.Text.Contains("墨影幻灵")));
-        Assert.Contains(lines, l => l.Text.StartsWith("HP 100%，必须休息线"));
+        Assert.Contains(lines, l => l.Text.StartsWith("生命值 100%，必须休息线"));
     }
 
     [Fact]
@@ -422,14 +422,14 @@ public class PanelTextReviewTests
         var reply = Reply(SelectCards("0"), options, rules);
         var header = new DecisionHeader("card_select", 1, 5, 1, 60, 80, 99);
         var zh = PanelText.Render(header, reply, Labels("card", 8), zh: true);
-        Assert.Contains(new PanelLine("另有 5 张卡未列出", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("另有 5 张牌未列出", LineStyle.Muted), zh);
         var en = PanelText.Render(header, reply, Labels("card", 8), zh: false);
         Assert.Contains(new PanelLine("5 more cards not shown", LineStyle.Muted), en);
 
         // It comes right after the listed options and before the rule lines.
         var texts = Texts(zh);
         var lastOption = texts.FindLastIndex(t => Regex.IsMatch(t, @"^C\d  "));
-        Assert.Equal("另有 5 张卡未列出", texts[lastOption + 1]);
+        Assert.Equal("另有 5 张牌未列出", texts[lastOption + 1]);
         Assert.Equal(1, zh.Count(l => l.Text.StartsWith("另有")));
     }
 
@@ -440,7 +440,7 @@ public class PanelTextReviewTests
         var rules = new object[] { RuleObj("card_select.top_scores", "fired", new { has_junk = false, picked = new[] { 0, 7 }, n_cards = 8, max_select = 2 }) };
         var lines = PanelText.Render(new DecisionHeader("card_select", 1, 5, 1, 60, 80, 99),
                                      Reply(SelectCards("0,7"), options, rules), Labels("card", 8), zh: true);
-        Assert.Contains(new PanelLine("另有 4 张卡未列出", LineStyle.Muted), lines);   // 8 scored, 4 listed
+        Assert.Contains(new PanelLine("另有 4 张牌未列出", LineStyle.Muted), lines);   // 8 scored, 4 listed
     }
 
     [Fact]
@@ -455,7 +455,7 @@ public class PanelTextReviewTests
             .ToDictionary(kv => kv.Key, kv => kv.Value);
         var header = new DecisionHeader("shop", 1, 6, 1, 70, 80, 400);
         var zh = PanelText.Render(header, Reply(action, options, Array.Empty<object>()), labels, zh: true);
-        Assert.Contains(new PanelLine("另有 1 张卡未列出", LineStyle.Muted), zh);
+        Assert.Contains(new PanelLine("另有 1 张牌未列出", LineStyle.Muted), zh);
         Assert.Contains(new PanelLine("另有 2 件遗物未列出", LineStyle.Muted), zh);
         Assert.Contains(new PanelLine("另有 1 瓶药水未列出", LineStyle.Muted), zh);
         var en = PanelText.Render(header, Reply(action, options, Array.Empty<object>()), labels, zh: false);
@@ -464,7 +464,7 @@ public class PanelTextReviewTests
         Assert.Contains(new PanelLine("1 more potion not shown", LineStyle.Muted), en);
         // Cards, then relics, then potions.
         var texts = Texts(zh);
-        Assert.True(texts.IndexOf("另有 1 张卡未列出") < texts.IndexOf("另有 2 件遗物未列出"));
+        Assert.True(texts.IndexOf("另有 1 张牌未列出") < texts.IndexOf("另有 2 件遗物未列出"));
         Assert.True(texts.IndexOf("另有 2 件遗物未列出") < texts.IndexOf("另有 1 瓶药水未列出"));
     }
 
