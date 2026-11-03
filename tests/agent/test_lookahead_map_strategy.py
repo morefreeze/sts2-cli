@@ -508,3 +508,93 @@ def test_the_trace_records_the_cost_band():
         _pick(state, trace=t)
         rule = next(r for r in t.rules if r["key"] == "map.la_best_path")
         assert rule["values"]["cost_band"] == band
+
+
+# ---- high-ascension elite reward: act-scaled, wider HP window ----
+
+_ELITE_OR_MONSTER_THEN_REST = _map({
+    (0, 1): ("Monster", [(0, 2)]), (1, 1): ("Monster", [(1, 2)]),
+    (0, 2): ("Elite", [(0, 3)]),   (1, 2): ("Monster", [(1, 3)]),
+    (0, 3): ("RestSite", [(9, 9)]), (1, 3): ("RestSite", [(9, 9)]),
+})
+
+
+def test_elite_reward_tables_keep_the_base_band_and_scale_the_high_bands():
+    c = LookaheadMapStrategy
+    assert c.ELITE_ACT_FACTOR["base"] == (1.0, 1.0, 1.0)
+    assert c.ELITE_WINDOW["base"] == (0.55, 0.85)
+    for band in ("a6-7", "a8+"):
+        assert c.ELITE_ACT_FACTOR[band] == (1.5, 1.0, 0.6)
+        assert c.ELITE_WINDOW[band] == (0.45, 0.75)
+
+
+def test_high_ascension_elite_reward_is_act_scaled_and_paid_from_75_percent():
+    s = LookaheadMapStrategy()
+    elite = [{"col": 0, "row": 5, "type": "Elite"}]
+    def paid(hp, act):  # the reward before the survival discount
+        ev = s.evaluate_path(elite, hp, 80, 0, act, 9)
+        return ev.parts.get("elite_reward", 0.0) / (1.0 + ev.parts["elite_danger"] / 400.0)
+    assert paid(80, 1) == pytest.approx(18.0) and paid(80, 2) == pytest.approx(12.0)
+    assert paid(80, 3) == pytest.approx(7.2)
+    assert paid(60, 2) == pytest.approx(12.0)               # 75%: the window's full end
+    assert paid(36, 2) == 0.0                               # 45%: its zero end
+    assert paid(48, 2) == pytest.approx(6.0)                # 60%: halfway
+    at = lambda frac: paid(frac * 80, 1)
+    # the base band is untouched: 12 points, 85% / 55%
+    base = lambda frac: s.evaluate_path(elite, frac * 80, 80, 0, 1, 3).parts.get("elite_reward", 0.0)
+    assert base(0.85) > base(0.75) > base(0.60) > base(0.55) == 0.0
+
+
+@pytest.mark.parametrize("asc", [None, 0, 3, 5])
+def test_base_band_elite_reward_is_twelve_times_the_gate(asc):
+    s = LookaheadMapStrategy()
+    elite = [{"col": 0, "row": 5, "type": "Elite"}]
+    ev = s.evaluate_path(elite, 65, 80, 0, 1, asc)
+    gate = (65 / 80 - 0.55) / (0.85 - 0.55)
+    p = 1.0 - (-ev.parts["elite_danger"] / 400.0)
+    assert ev.parts["elite_reward"] == pytest.approx(p * 12.0 * gate, rel=1e-12)
+
+
+def test_a9_act_1_at_75_percent_hp_now_takes_the_elite_path():
+    # A fork with a rest on both branches before the boss (the map adds the pre-boss
+    # rest); 75/100 HP. The 12-point reward in the 85%/55% window dodged it.
+    m = _ELITE_OR_MONSTER_THEN_REST
+    for asc in (7, 9):
+        state = {**_state(m, [(0, 1), (1, 1)], hp=75, max_hp=100, act=1), "ascension": asc}
+        assert _pick(state) == (0, 1)
+
+
+def test_the_old_flat_reward_dodged_that_fork():
+    s = LookaheadMapStrategy()
+    m = _ELITE_OR_MONSTER_THEN_REST
+    state = {**_state(m, [(0, 1), (1, 1)], hp=75, max_hp=100, act=1), "ascension": 9}
+    old = {b: (1.0, 1.0, 1.0) for b in ("a6-7", "a8+")}
+    s2 = LookaheadMapStrategy()
+    s2.ELITE_ACT_FACTOR = old
+    s2.ELITE_WINDOW = {**LookaheadMapStrategy.ELITE_WINDOW, "a6-7": (0.55, 0.85), "a8+": (0.55, 0.85)}
+    assert _pick(state, s2) == (1, 1)
+
+
+def test_a9_act_3_at_75_percent_hp_still_avoids_a_27_cost_elite_when_a_safe_path_exists():
+    m = _ELITE_OR_MONSTER_THEN_REST
+    assert LookaheadMapStrategy.COST_BANDS["a8+"][1][2] == 27.6
+    for max_hp in (80, 100):
+        state = {**_state(m, [(0, 1), (1, 1)], hp=0.75 * max_hp, max_hp=max_hp, act=3), "ascension": 9}
+        assert _pick(state) == (1, 1)
+
+
+def test_the_trace_records_the_elite_reward_factor_and_window():
+    for asc, factor, window in ((None, 1.0, [0.55, 0.85]), (5, 1.0, [0.55, 0.85]),
+                                (7, 1.5, [0.45, 0.75]), (10, 1.5, [0.45, 0.75])):
+        state = _state(_ELITE_OR_MONSTER_THEN_REST, [(0, 1), (1, 1)], hp=60, max_hp=80, act=1)
+        if asc is not None:
+            state["ascension"] = asc
+        t = GreedyTrace()
+        _pick(state, trace=t)
+        values = next(r for r in t.rules if r["key"] == "map.la_best_path")["values"]
+        assert values["elite_reward_factor"] == factor
+        assert values["elite_window"] == window
+    state = {**_state(_ELITE_OR_MONSTER_THEN_REST, [(0, 1), (1, 1)], act=3), "ascension": 9}
+    t = GreedyTrace()
+    _pick(state, trace=t)
+    assert next(r for r in t.rules if r["key"] == "map.la_best_path")["values"]["elite_reward_factor"] == 0.6

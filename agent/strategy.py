@@ -277,6 +277,19 @@ class LookaheadMapStrategy:
     ELITE_REWARD = 12.0
     ELITE_DANGER_FRAC = 0.55
     ELITE_COMFORT_FRAC = 0.85
+    # The high-ascension bands (a6-7, a8+) pay the elite relic differently, because
+    # their elite costs are real data (act-1 elite 9.2 / 14.9 HP) and the flat
+    # 12 points x the 85%/55% window made the planner skip EVERY act-1 elite whenever
+    # HP was below ~85% (live Regent a9: 58-64 of 75-81 HP all act 1 -> act-1 boss
+    # with 3 relics and a 15-card deck, lost; Necrobinder a9 the same, 5 relics).
+    #  * act factor: a relic found in act 1 serves ~45 floors, in act 2 ~28, in
+    #    act 3 ~10, so the 12 points scale 1.5 / 1.0 / 0.6 (acts 4+ use act 3);
+    #  * window: paid in full from 75% HP and not at all at 45% (a rest refunds
+    #    ~22 HP, so an elite at 75% is recoverable).
+    # Ascension <= 5 ("base") keeps factor 1 and 85%/55% exactly (the a5 A/B).
+    ELITE_ACT_FACTOR = {"base": (1.0, 1.0, 1.0), "a6-7": (1.5, 1.0, 0.6), "a8+": (1.5, 1.0, 0.6)}
+    ELITE_WINDOW = {"base": (ELITE_DANGER_FRAC, ELITE_COMFORT_FRAC),
+                    "a6-7": (0.45, 0.75), "a8+": (0.45, 0.75)}
     MONSTER_REWARD = 4.0      # card reward + ~16 gold
     UNKNOWN_REWARD = 4.0      # events: upgrade / relic / gold on average
     TREASURE_REWARD = 15.0    # a relic
@@ -324,7 +337,10 @@ class LookaheadMapStrategy:
         and return its value. Expected HP is deterministic; the chance of dying
         is carried along (``p``) so a risky room discounts everything after it."""
         a = min(max(act, 1), self.MAX_ACT) - 1
-        monster_cost, elite_cost, boss_cost = self.COST_BANDS[self.cost_band(ascension)]
+        band = self.cost_band(ascension)
+        monster_cost, elite_cost, boss_cost = self.COST_BANDS[band]
+        elite_factor = self.ELITE_ACT_FACTOR[band][a]
+        danger_frac, comfort_frac = self.ELITE_WINDOW[band]
         max_hp = max(float(max_hp), 1.0)
         hp = min(max(float(hp), 1.0), max_hp)
         p = 1.0
@@ -342,9 +358,9 @@ class LookaheadMapStrategy:
                 parts["elite_danger" if elite else "fight_danger"] -= p * death * self.DEATH_PENALTY
                 if elite:
                     elites += 1
-                    gate = min(max((hp / max_hp - self.ELITE_DANGER_FRAC)
-                                   / (self.ELITE_COMFORT_FRAC - self.ELITE_DANGER_FRAC), 0.0), 1.0)
-                    reward_key, reward = "elite_reward", self.ELITE_REWARD * gate
+                    gate = min(max((hp / max_hp - danger_frac)
+                                   / (comfort_frac - danger_frac), 0.0), 1.0)
+                    reward_key, reward = "elite_reward", self.ELITE_REWARD * elite_factor * gate
                 else:
                     reward_key, reward = "room_reward", self.MONSTER_REWARD
                 p *= 1.0 - death
@@ -435,6 +451,9 @@ class LookaheadMapStrategy:
                             "type": choices[i].get("type"), "path": ev.types,
                             "hp_boss": round(ev.hp_boss, 1), "elites": ev.elites,
                             "rests": ev.rests, "paths": n_paths})
+            band = self.cost_band(self.state_ascension(state, map_json))
+            act_n = state.get("act") or (state.get("context") or {}).get("act")
+            act_n = act_n if isinstance(act_n, int) and not isinstance(act_n, bool) else 1
             ev = planned[pick][0]
             others = [e for i, (e, _) in enumerate(planned) if i != pick]
             runner = max(others, key=lambda e: e.value)
@@ -451,7 +470,9 @@ class LookaheadMapStrategy:
                        hp_ratio=player.get("hp", 80) / max_hp,
                        hp_boss_ratio=ev.hp_boss / max_hp,
                        margin=ev.value - runner.value, decider=decider,
-                       cost_band=self.cost_band(self.state_ascension(state, map_json)),
+                       cost_band=band,
+                       elite_reward_factor=self.ELITE_ACT_FACTOR[band][min(max(act_n, 1), self.MAX_ACT) - 1],
+                       elite_window=list(self.ELITE_WINDOW[band]),
                        act=state.get("act") or (state.get("context") or {}).get("act"),
                        floor=state.get("floor") or (state.get("context") or {}).get("floor"))
         return {"cmd": "action", "action": "select_map_node",
