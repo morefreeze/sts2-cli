@@ -267,7 +267,7 @@ public class PanelTextTests
     }
 
     [Fact]
-    public void EventOptionsShowKeywordsOrSayNoneMatched()
+    public void EventOptionsShowKeywordsOrSayNoBonuses()
     {
         var reply = AdviceReply.Parse("""
         {"action": {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}},
@@ -281,16 +281,120 @@ public class PanelTextTests
         """);
         var labels = new Dictionary<string, string> { ["option:0"] = "祈祷", ["option:1"] = "离开", ["option:2"] = "献祭" };
         var zh = PanelText.Render(new DecisionHeader("event_choice", 1, 5, 1, 60, 80, 30), reply, labels, zh: true);
-        var i1 = zh.ToList().IndexOf(new PanelLine("离开  0.0", LineStyle.Fired));
+        var i1 = zh.ToList().IndexOf(new PanelLine("→ 离开  0.0", LineStyle.Fired));
         Assert.True(i1 > 0);
-        Assert.Equal(new PanelLine("  未命中关键词", LineStyle.Muted), zh[i1 + 1]);
-        Assert.Equal(new PanelLine("祈祷  -2.0", LineStyle.Normal), zh[i1 + 2]);
-        Assert.Equal(new PanelLine("  关键词：失去生命 -2.0", LineStyle.Muted), zh[i1 + 3]);
+        Assert.Equal(new PanelLine("  → 无加分项", LineStyle.Muted), zh[i1 + 1]);
+        Assert.Equal(new PanelLine("  祈祷  -2.0", LineStyle.Normal), zh[i1 + 2]);
+        Assert.Equal(new PanelLine("    关键词：失去生命值 -2.0", LineStyle.Muted), zh[i1 + 3]);
         Assert.Contains(new PanelLine("已锁定：献祭", LineStyle.Muted), zh);
 
         var en = PanelText.Render(new DecisionHeader("event_choice", 1, 5, 1, 60, 80, 30), reply, labels, zh: false);
-        Assert.Contains(new PanelLine("  no keyword matched", LineStyle.Muted), en);
-        Assert.Contains(new PanelLine("  Keywords: Lose HP -2.0", LineStyle.Muted), en);
+        Assert.Contains(new PanelLine("  → no bonuses", LineStyle.Muted), en);
+        Assert.Contains(new PanelLine("    Keywords: Lose HP -2.0", LineStyle.Muted), en);
+    }
+
+    // The real Pael decision (advisor_trace.jsonl, 2026-11-03T07:42): three options, one of them scoring nothing.
+    private const string PaelReplyJson = """
+        {"action": {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}},
+         "options": [
+           {"kind": "option", "index": 0, "score": 1.5, "status": "ok", "components": [{"key": "event.kw.energy_once", "value": 1.5}]},
+           {"kind": "option", "index": 1, "score": 7.0, "status": "ok", "components": [{"key": "event.kw.card_reward", "value": 2.0}, {"key": "event.kw.relic", "value": 5.0}]},
+           {"kind": "option", "index": 2, "score": 0.0, "status": "ok", "components": []}],
+         "rules": [{"key": "event.pick_best", "outcome": "fired", "values": {"best_index": 1, "n_options": 3}}],
+         "warnings": [], "unverified": false, "policy": "greedy"}
+        """;
+
+    private static readonly DecisionHeader PaelHeader = new("event_choice", 2, 1, 1, 53, 66, 510);
+
+    [Fact]
+    public void EventPanelListsEveryOptionWithScoreAndReasonsInChinese()
+    {
+        var labels = new Dictionary<string, string> { ["option:0"] = "佩尔之泪", ["option:1"] = "佩尔之翼", ["option:2"] = "佩尔之眼" };
+        var lines = PanelText.Render(PaelHeader, AdviceReply.Parse(PaelReplyJson), labels, zh: true).Select(l => l.Text).ToList();
+        Assert.Contains("建议：佩尔之翼", lines);
+        Assert.Contains("→ 佩尔之翼  7.0", lines);
+        Assert.Contains("  → 关键词：获得遗物 +5.0 · 卡牌奖励 +2.0", lines);
+        Assert.Contains("  佩尔之泪  1.5", lines);
+        Assert.Contains("    关键词：获得一次性能量 +1.5", lines);
+        Assert.Contains("  佩尔之眼  0.0", lines);
+        Assert.Contains("    无加分项", lines);
+        Assert.Contains("选分数最高的选项", lines);
+    }
+
+    [Fact]
+    public void EventPanelListsEveryOptionWithScoreAndReasonsInEnglish()
+    {
+        var labels = new Dictionary<string, string> { ["option:0"] = "Pael's Tears", ["option:1"] = "Pael's Wing", ["option:2"] = "Pael's Eye" };
+        var lines = PanelText.Render(PaelHeader, AdviceReply.Parse(PaelReplyJson), labels, zh: false).Select(l => l.Text).ToList();
+        Assert.Contains("Pick: Pael's Wing", lines);
+        Assert.Contains("→ Pael's Wing  7.0", lines);
+        Assert.Contains("  → Keywords: Relic +5.0 · Card reward +2.0", lines);
+        Assert.Contains("  Pael's Tears  1.5", lines);
+        Assert.Contains("  Pael's Eye  0.0", lines);
+        Assert.Contains("    no bonuses", lines);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EventPanelWithoutLabelsStillListsEveryOptionNeverBlank(bool zh)
+    {
+        foreach (var labels in new[]
+        {
+            new Dictionary<string, string>(),
+            new Dictionary<string, string> { ["option:0"] = "", ["option:1"] = "  ", ["option:2"] = "" },
+        })
+        {
+            var lines = PanelText.Render(PaelHeader, AdviceReply.Parse(PaelReplyJson), labels, zh).Select(l => l.Text).ToList();
+            string o(int n) => zh ? $"选项 {n}" : $"Option {n}";
+            Assert.Contains(lines, l => l.StartsWith("→ " + o(2) + "  7.0"));
+            Assert.Contains(lines, l => l.StartsWith("  " + o(1) + "  1.5"));
+            Assert.Contains(lines, l => l.StartsWith("  " + o(3) + "  0.0"));
+            Assert.Contains((zh ? "建议：" : "Pick: ") + o(2), lines);
+            Assert.DoesNotContain(lines, l => l.Contains("?") || l.Contains("#"));
+        }
+    }
+
+    [Fact]
+    public void EventOptionLinesCoverAllOptionsEvenPastTheThreeOptionCap()
+    {
+        var options = string.Join(",", Enumerable.Range(0, 5).Select(i =>
+            "{\"kind\": \"option\", \"index\": " + i + ", \"score\": " + i + ".0, \"status\": \"ok\", \"components\": []}"));
+        var reply = AdviceReply.Parse(
+            "{\"action\": {\"cmd\": \"action\", \"action\": \"choose_option\", \"args\": {\"option_index\": 4}}, \"options\": ["
+            + options + "], \"rules\": [], \"warnings\": [], \"unverified\": false, \"policy\": \"greedy\"}");
+        var lines = PanelText.OptionLines("event_choice", reply, new Dictionary<string, string>(), zh: true);
+        Assert.Equal(5, lines.Count(l => l.Text.Contains("选项 ") && !l.Text.Contains("无加分项")));
+        Assert.DoesNotContain(lines, l => l.Text.Contains("未列出"));
+    }
+
+    [Fact]
+    public void LockedEventOptionsAreShownAsLocked()
+    {
+        var reply = AdviceReply.Parse("""
+        {"action": {"cmd": "action", "action": "choose_option", "args": {"option_index": 0}},
+         "options": [
+           {"kind": "option", "index": 0, "score": 3.0, "status": "ok", "components": [{"key": "event.kw.upgrade", "value": 3.0}]},
+           {"kind": "option", "index": 1, "score": null, "status": "locked", "components": []}],
+         "rules": [], "warnings": [], "unverified": false, "policy": "greedy"}
+        """);
+        var labels = new Dictionary<string, string> { ["option:0"] = "Smash", ["option:1"] = "Locked" };
+        Assert.Contains(new PanelLine("已锁定：Locked", LineStyle.Muted), PanelText.OptionLines("event_choice", reply, labels, zh: true));
+        Assert.Contains(new PanelLine("locked: Locked", LineStyle.Muted), PanelText.OptionLines("event_choice", reply, labels, zh: false));
+    }
+
+    [Fact]
+    public void RestSiteListsItsOptionsFromTheLabelsAndMarksTheAdvisedOne()
+    {
+        var reply = AdviceReply.Parse("""
+        {"action": {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}},
+         "options": [], "rules": [{"key": "rest.default_smith", "outcome": "fired", "values": {}}],
+         "warnings": [], "unverified": false, "policy": "greedy"}
+        """);
+        var labels = new Dictionary<string, string> { ["rest:0"] = "休息", ["rest:1"] = "锻造" };
+        var lines = PanelText.Render(new DecisionHeader("rest_site", 1, 8, 1, 70, 80, 50), reply, labels, zh: true);
+        Assert.Contains(new PanelLine("选项：休息、锻造（建议）", LineStyle.Muted), lines);
+        Assert.Contains(new PanelLine("建议：锻造", LineStyle.Pick), lines);
     }
 
     [Fact]

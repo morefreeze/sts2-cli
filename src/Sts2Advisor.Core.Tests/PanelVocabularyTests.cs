@@ -32,6 +32,16 @@ public class PanelVocabularyTests
     [InlineData("能量")]
     [InlineData("辉星")]
     [InlineData("格挡")]
+    [InlineData("遗物")]     // event.kw.relic / relics
+    [InlineData("药水")]     // event.kw.potion
+    [InlineData("最大生命值")] // event.kw.lose_max_hp / gain_max_hp
+    [InlineData("力量")]     // event.kw.gain_strength
+    [InlineData("敏捷")]     // event.kw.gain_dexterity
+    [InlineData("升级")]     // event.kw.upgrade
+    [InlineData("变化")]     // event.kw.transform
+    [InlineData("移除")]     // event.kw.remove_card
+    [InlineData("回复")]     // event.kw.heal
+    [InlineData("每回合")]   // event.kw.energy_each_turn
     public void TheTermIsInTheGamesOwnChineseText(string term)
     {
         if (RepoLocalization.Dir == null)

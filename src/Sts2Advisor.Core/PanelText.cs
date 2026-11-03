@@ -93,34 +93,7 @@ public static class PanelText
 
         lines.Add(new PanelLine(T(zh, "建议：", "Pick: ") + PickText(h.Decision, reply, labels, zh), LineStyle.Pick));
 
-        // Lower is better on the map, and when a card_select picks the lowest cards (remove / transform).
-        bool ascending = h.Decision == "map_select"
-            || reply.Rules.Any(r => r.Key == "card_select.lowest_scores" && r.Outcome == "fired");
-        var ok = Listed(reply, ascending);
-        foreach (var o in ok)
-        {
-            lines.Add(new PanelLine($"{OptionLabel(o, labels)}  {TraceText.Num(o.Score!.Value)}",
-                                    IsPicked(o, reply) ? LineStyle.Fired : LineStyle.Normal));
-            // Event options are scored by keyword hits only; say so (or that none matched).
-            bool isEventOption = o.Kind == "option";
-            if (isEventOption && o.Components.Count == 0)
-            {
-                lines.Add(new PanelLine("  " + T(zh, "未命中关键词", "no keyword matched"), LineStyle.Muted));
-                continue;
-            }
-            var parts = TopComponents(o, labels, zh);
-            if (parts.Length > 0)
-                lines.Add(new PanelLine("  " + (isEventOption ? T(zh, "关键词：", "Keywords: ") : "") + parts,
-                                        LineStyle.Muted));
-        }
-        lines.AddRange(HiddenCounts(reply, ok, zh));
-        // One line per reason: "买不起：A、B".
-        foreach (var group in reply.Options.Where(o => o.Status != "ok").GroupBy(o => o.Status))
-        {
-            var status = StatusNames.TryGetValue(group.Key, out var s) ? (zh ? s.Zh : s.En) : group.Key;
-            lines.Add(new PanelLine(status + T(zh, "：", ": ")
-                + string.Join(T(zh, "、", ", "), group.Select(o => OptionLabel(o, labels))), LineStyle.Muted));
-        }
+        lines.AddRange(OptionLines(h.Decision, reply, labels, zh));
         foreach (var r in reply.Rules.Where(r => !TraceText.IsHidden(r)))
             lines.Add(new PanelLine(TraceText.Rule(r, zh), r.Outcome == "fired" ? LineStyle.Fired : LineStyle.Muted));
 
@@ -136,6 +109,63 @@ public static class PanelText
         lines.AddRange(reply.Warnings.Select(w => new PanelLine(w, LineStyle.Warning)));
         return lines;
     }
+
+    /// <summary>The options the advice weighed, one block each: the label with its score (the picked one marked), then
+    /// why -- every keyword/score component, or that there were none. Locked, sold-out and unaffordable ones in one
+    /// line per reason. Shared by the advice panel and the autopilot's newest step, so both say the same thing.</summary>
+    public static IReadOnlyList<PanelLine> OptionLines(string decision, AdviceReply reply,
+                                                       IReadOnlyDictionary<string, string> labels, bool zh)
+    {
+        var lines = new List<PanelLine>();
+        // Lower is better on the map, and when a card_select picks the lowest cards (remove / transform).
+        bool ascending = decision == "map_select"
+            || reply.Rules.Any(r => r.Key == "card_select.lowest_scores" && r.Outcome == "fired");
+        var ok = Listed(reply, ascending);
+        foreach (var o in ok)
+        {
+            bool picked = IsPicked(o, reply);
+            // Event options are scored by keyword hits only; say so (or that none matched).
+            bool isEventOption = o.Kind == "option";
+            string mark = isEventOption ? (picked ? "→ " : "  ") : "";
+            lines.Add(new PanelLine($"{mark}{OptionLabel(o, labels, zh)}  {TraceText.Num(o.Score!.Value)}",
+                                    picked ? LineStyle.Fired : LineStyle.Normal));
+            if (isEventOption && o.Components.All(c => Math.Abs(c.Value) <= 1e-9))
+            {
+                lines.Add(new PanelLine("  " + mark + T(zh, "无加分项", "no bonuses"), LineStyle.Muted));
+                continue;
+            }
+            var parts = TopComponents(o, labels, zh);
+            if (parts.Length > 0)
+                lines.Add(new PanelLine("  " + mark + (isEventOption ? T(zh, "关键词：", "Keywords: ") : "") + parts,
+                                        LineStyle.Muted));
+        }
+        lines.AddRange(HiddenCounts(reply, ok, zh));
+        // One line per reason: "买不起：A、B".
+        foreach (var group in reply.Options.Where(o => o.Status != "ok").GroupBy(o => o.Status))
+        {
+            var status = StatusNames.TryGetValue(group.Key, out var s) ? (zh ? s.Zh : s.En) : group.Key;
+            lines.Add(new PanelLine(status + T(zh, "：", ": ")
+                + string.Join(T(zh, "、", ", "), group.Select(o => OptionLabel(o, labels, zh))), LineStyle.Muted));
+        }
+        if (decision == "rest_site")
+            lines.AddRange(RestChoices(reply, labels, zh));
+        return lines;
+    }
+
+    /// <summary>The rest site scores nothing, so its options come from the labels: "选项：休息（建议）、锻造".</summary>
+    private static IEnumerable<PanelLine> RestChoices(AdviceReply reply, IReadOnlyDictionary<string, string> labels, bool zh)
+    {
+        int? picked = reply.ActionName == "choose_option" && reply.Arg("option_index") is { ValueKind: JsonValueKind.Number } v
+            ? v.GetInt32() : null;
+        var names = new List<string>();
+        for (int i = 0; labels.ContainsKey($"rest:{i}"); i++)
+            names.Add(Label(labels, $"rest:{i}", OptionFallback(i, zh)) + (picked == i ? T(zh, "（建议）", " (picked)") : ""));
+        if (names.Count > 0)
+            yield return new PanelLine(T(zh, "选项：", "Options: ") + string.Join(T(zh, "、", ", "), names), LineStyle.Muted);
+    }
+
+    /// <summary>"选项 2": what an option is called when the game gave no text for it (never a blank, never a raw key).</summary>
+    private static string OptionFallback(int index, bool zh) => zh ? $"选项 {index + 1}" : $"Option {index + 1}";
 
     /// <summary>Did the map advice come from the whole-path lookahead policy (the sidecar's STS2_MAP_POLICY=lookahead)?
     /// Its trace carries map.la_best_path; map.la_fallback (no map, or an offered node not on it) means the
@@ -156,7 +186,7 @@ public static class PanelText
         foreach (var o in ordered)
         {
             perKind.TryGetValue(o.Kind, out var n);
-            if (n >= MaxOptionsPerKind && !IsPicked(o, reply))
+            if (n >= MaxOptionsPerKind && o.Kind != "option" && !IsPicked(o, reply))
                 continue;
             perKind[o.Kind] = n + 1;
             listed.Add(o);
@@ -190,10 +220,10 @@ public static class PanelText
     };
 
     private static string Label(IReadOnlyDictionary<string, string> labels, string key, string fallback) =>
-        labels.TryGetValue(key, out var v) ? v : fallback;
+        labels.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v) ? v : fallback;
 
-    private static string OptionLabel(TraceOption o, IReadOnlyDictionary<string, string> labels) =>
-        Label(labels, $"{o.Kind}:{o.Index}", $"#{o.Index}");
+    private static string OptionLabel(TraceOption o, IReadOnlyDictionary<string, string> labels, bool zh) =>
+        Label(labels, $"{o.Kind}:{o.Index}", o.Kind == "option" ? OptionFallback(o.Index, zh) : $"#{o.Index}");
 
     private static string TopComponents(TraceOption o, IReadOnlyDictionary<string, string> labels, bool zh)
     {
@@ -202,7 +232,8 @@ public static class PanelText
             .Where(c => c.Key != "card.base" && c.Key != "map.base_priority" && Math.Abs(c.Value) > 1e-9)
             .OrderByDescending(c => Math.Abs(c.Value))
             .ToList();
-        var room = Math.Max(0, MaxComponents - shown.Count);
+        // An event option's keywords are its whole explanation: all of them.
+        var room = o.Kind == "option" ? others.Count : Math.Max(0, MaxComponents - shown.Count);
         shown.AddRange(others.Take(room));
         var text = string.Join(" · ", shown.Select(c =>
             c.Key == "bundle.card" && c.Detail is { ValueKind: JsonValueKind.Number } ci
@@ -249,7 +280,8 @@ public static class PanelText
             case "skip_select":
                 return T(zh, "跳过", "Skip");
             case "choose_option":
-                return Label(labels, $"{(decision == "rest_site" ? "rest" : "option")}:{Index("option_index")}", "?");
+                return Label(labels, $"{(decision == "rest_site" ? "rest" : "option")}:{Index("option_index")}",
+                    Index("option_index") >= 0 ? OptionFallback(Index("option_index"), zh) : "?");
             case "buy_relic":
                 return Label(labels, $"relic:{Index("relic_index")}", "?");
             case "buy_potion":
@@ -265,7 +297,7 @@ public static class PanelText
                     SelectedIndices(reply).Select(i => Label(labels, $"card:{i}", $"#{i}")));
             case "select_map_node":
                 var node = reply.Options.FirstOrDefault(o => o.Kind == "node" && IsPicked(o, reply));
-                return node != null ? OptionLabel(node, labels) : $"({Index("col")},{Index("row")})";
+                return node != null ? OptionLabel(node, labels, zh) : $"({Index("col")},{Index("row")})";
             default:
                 return reply.ActionName ?? "?";
         }

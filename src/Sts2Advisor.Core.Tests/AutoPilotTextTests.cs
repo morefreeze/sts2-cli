@@ -121,6 +121,36 @@ public class AutoPilotTextTests
         Assert.Equal("Stop", running[0].Text);
     }
 
+    [Fact]
+    public void AnEventStepShowsEveryOptionItWeighedUnderTheNewestStepOnly()
+    {
+        var reply = AdviceReply.Parse("""
+        {"action": {"cmd": "action", "action": "choose_option", "args": {"option_index": 1}},
+         "options": [
+           {"kind": "option", "index": 0, "score": 1.5, "status": "ok", "components": [{"key": "event.kw.energy_once", "value": 1.5}]},
+           {"kind": "option", "index": 1, "score": 7.0, "status": "ok", "components": [{"key": "event.kw.card_reward", "value": 2.0}, {"key": "event.kw.relic", "value": 5.0}]},
+           {"kind": "option", "index": 2, "score": 0.0, "status": "ok", "components": []}],
+         "rules": [{"key": "event.pick_best", "outcome": "fired", "values": {"best_index": 1, "n_options": 3}}],
+         "warnings": [], "unverified": false, "policy": "greedy"}
+        """);
+        var labels = new Dictionary<string, string> { ["option:0"] = "佩尔之泪", ["option:1"] = "佩尔之翼", ["option:2"] = "佩尔之眼" };
+        var s = new AutoPilotSession();
+        s.Start();
+        s.Record("older", null, options: new[] { new PanelLine("never shown", LineStyle.Normal) });
+        s.Record(AutoPilotText.StepText("event_choice", reply, labels, zh: true), AutoPilotText.Reason(reply, zh: true),
+                 options: PanelText.OptionLines("event_choice", reply, labels, zh: true));
+        var lines = AutoPilotText.Running(s, "F9", "F10", CombatSolverStatus.Ok, zh: true).Select(l => l.Text).ToList();
+        Assert.Contains("事件：佩尔之翼", lines);
+        Assert.Contains("  → 佩尔之翼  7.0", lines);
+        Assert.Contains("    → 关键词：获得遗物 +5.0 · 卡牌奖励 +2.0", lines);
+        Assert.Contains("    佩尔之泪  1.5", lines);
+        Assert.Contains("      关键词：获得一次性能量 +1.5", lines);
+        Assert.Contains("    佩尔之眼  0.0", lines);
+        Assert.Contains("      无加分项", lines);
+        Assert.Contains("  选分数最高的选项", lines);
+        Assert.DoesNotContain("never shown", lines.Select(l => l.Trim()));
+    }
+
     private static readonly string EnergyIcon = "[img]res://images/packed/sprite_fonts/ironclad_energy_icon.png[/img]";
 
     [Fact]

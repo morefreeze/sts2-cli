@@ -281,7 +281,7 @@ internal static class DecisionCapture
             return Simple(CaptureKind.NoAdvice, "event_finished", rs, player);
         var labels = new Dictionary<string, string>();
         for (int i = 0; i < options.Count; i++)
-            labels[$"option:{i}"] = GameText.Loc(options[i].Title, options[i].TextKey);
+            labels[$"option:{i}"] = GameText.Option(options[i].Title, options[i].TextKey);
         return new Capture
         {
             Kind = CaptureKind.Advise, Screen = nameof(NEventRoom), Header = Header("event_choice", rs, player),
@@ -301,7 +301,7 @@ internal static class DecisionCapture
             return Simple(CaptureKind.NoAdvice, "rest_site_done", rs, player);
         var labels = new Dictionary<string, string>();
         for (int i = 0; i < options.Count; i++)
-            labels[$"rest:{i}"] = GameText.Loc(options[i].Title, options[i].OptionId);
+            labels[$"rest:{i}"] = GameText.Option(options[i].Title, options[i].OptionId);
         return new Capture
         {
             Kind = CaptureKind.Advise, Screen = nameof(NRestSiteRoom), Header = Header("rest_site", rs, player),

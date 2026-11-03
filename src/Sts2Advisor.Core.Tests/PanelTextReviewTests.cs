@@ -523,13 +523,14 @@ public class PanelTextReviewTests
     }
 
     [Fact]
-    public void HiddenEventKeywordsAreMarkedToo()
+    public void EventKeywordsAreNeverCutOff()
     {
         var option = Opt("option", 0, 3.0, "ok", ("event.kw.gain_gold", 2.0), ("event.kw.heal", 1.0), ("event.kw.potion", 0.5), ("event.kw.relic", 0.25));
         var lines = PanelText.Render(new DecisionHeader("event_choice", 1, 4, 1, 70, 80, 50),
                                      Reply(new { cmd = "action", action = "choose_option", args = new { option_index = 0 } }, new object[] { option }, Array.Empty<object>()),
                                      new Dictionary<string, string> { ["option:0"] = "O" }, zh: false);
-        Assert.Contains(new PanelLine("  Keywords: Gain gold +2.0 · Heal +1.0 · Potion +0.5 …", LineStyle.Muted), lines);
+        // An event option's keywords are all of its explanation: none are cut.
+        Assert.Contains(new PanelLine("  → Keywords: Gain gold +2.0 · Heal +1.0 · Potion +0.5 · Relic +0.25", LineStyle.Muted), lines);
     }
 
     [Fact]

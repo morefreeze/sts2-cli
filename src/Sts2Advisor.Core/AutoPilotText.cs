@@ -85,6 +85,8 @@ public static class AutoPilotText
             lines.Add(new PanelLine(step.Text, i == 0 ? LineStyle.Pick : LineStyle.Normal));
             if (i == 0)  // what was chosen, in the game's words; earlier steps keep the short form
                 lines.AddRange(step.Details.Select(d => new PanelLine("  " + d, LineStyle.Muted)));
+            if (i == 0)  // what it weighed: every option with its score and reasons
+                lines.AddRange(step.Options.Select(o => new PanelLine("  " + o.Text, o.Style)));
             if (step.Reason != null)
                 lines.Add(new PanelLine("  " + step.Reason, LineStyle.Muted));
         }

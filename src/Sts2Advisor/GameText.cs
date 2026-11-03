@@ -135,6 +135,24 @@ internal static class GameText
         return Safe(text.GetFormattedText, fallback);
     }
 
+    /// <summary>An event or rest-site option's title in the panel language, never blank and never a raw key: the game's
+    /// formatted text; else the repo's table text (Chinese when the panel is, else English; skipped while it still has a
+    /// {variable}); else the id's last segment as words ("PAELS_TEARS" -> "Paels Tears").</summary>
+    public static string Option(LocString? text, string key)
+    {
+        string viaGame = text == null ? "" : Loc(text, "");
+        if (viaGame != "")
+            return viaGame;
+        if (text != null)
+        {
+            string? repo = (Zh ? _repoLoc?.Zh(text.LocTable, text.LocEntryKey) : null) ?? _repoLoc?.En(text.LocTable, text.LocEntryKey);
+            if (!string.IsNullOrWhiteSpace(repo) && !DescriptionText.HasUnresolvedVariable(repo))
+                return Markup.Replace(repo, "");
+        }
+        string last = key.Substring(key.LastIndexOf('.') + 1).Replace('_', ' ').Trim();
+        return last == "" ? key : System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(last.ToLowerInvariant());
+    }
+
     /// <summary>The game's description text for a model, BBCode and all (Core's DescriptionText makes it plain), read
     /// in the panel's language. Empty when it cannot be: the panel then shows the title alone. A template variable the
     /// game left unresolved counts as failure -- a raw "{Damage}" must never reach the panel.</summary>

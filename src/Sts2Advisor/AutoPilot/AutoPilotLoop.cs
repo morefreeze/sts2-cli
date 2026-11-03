@@ -474,7 +474,8 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
         int n = _session.Record(AutoPilotText.StepText(a.Capture.Header.Decision, a.Reply, a.Capture.Labels, zh),
                                 AutoPilotText.Reason(a.Reply, zh),
                                 AutoPilotText.DetailLines(StepDetails.Of(a), zh),
-                                _now());
+                                _now(),
+                                PanelText.OptionLines(a.Capture.Header.Decision, a.Reply, a.Capture.Labels, zh));
         _trace?.Append(a.Capture.Header.Decision, a.Json, a.Reply.Raw, null, autopilotStep: n);
         ModLog.Info($"autopilot step {n}: {a.Capture.Header.Decision} {a.Reply.ActionName}");
     }

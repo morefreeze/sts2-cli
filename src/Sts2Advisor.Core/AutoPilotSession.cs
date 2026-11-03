@@ -13,8 +13,10 @@ public enum AutoPilotMode { Advice, Running }
 public enum StopReason { Hotkey, GameOver, LeftRun, Multiplayer, HandlerFailed, Stuck, Offline, BadReply, Unsupported, Disabled, StepDone }
 
 /// <summary><paramref name="Details"/>: what the choice was, in the game's words (a card's or relic's description),
-/// one panel line each; shown under the newest step only.</summary>
-public sealed record AutoPilotStep(int Number, string Text, string? Reason, IReadOnlyList<string> Details);
+/// one panel line each; shown under the newest step only. <paramref name="Options"/>: the options the advice weighed with
+/// their scores and reasons (<see cref="PanelText.OptionLines"/>), also under the newest step only.</summary>
+public sealed record AutoPilotStep(int Number, string Text, string? Reason, IReadOnlyList<string> Details,
+                                   IReadOnlyList<PanelLine> Options);
 
 /// <summary>The autopilot's state, kept apart from the game so it can be tested. Main thread only.</summary>
 public sealed class AutoPilotSession
@@ -81,11 +83,13 @@ public sealed class AutoPilotSession
 
     /// <summary>Records an executed step taken at <paramref name="at"/> seconds; returns its number (1-based, over
     /// the whole session).</summary>
-    public int Record(string text, string? reason, IReadOnlyList<string>? details = null, double? at = null)
+    public int Record(string text, string? reason, IReadOnlyList<string>? details = null, double? at = null,
+                      IReadOnlyList<PanelLine>? options = null)
     {
         StepCount++;
         LastStepAt = at;
-        _steps.Insert(0, new AutoPilotStep(StepCount, text, reason, details ?? Array.Empty<string>()));
+        _steps.Insert(0, new AutoPilotStep(StepCount, text, reason, details ?? Array.Empty<string>(),
+                                         options ?? Array.Empty<PanelLine>()));
         if (_steps.Count > MaxSteps)
             _steps.RemoveAt(_steps.Count - 1);
         _retryFingerprint = null;
