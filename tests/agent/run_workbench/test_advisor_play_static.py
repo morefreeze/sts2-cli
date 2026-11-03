@@ -313,6 +313,11 @@ def test_the_page_draws_every_section_from_the_payload(tmp_path: Path):
                 boss: charts.reduce((sum, c) => sum + collect(c, (n) => attr(n, 'class') === 'adv-mark-boss').length, 0),
                 ladderRows: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
                   .map((tr) => [allText(tr.children[0]), allText(tr.children[1])]),
+                ladderCells: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
+                  .map((tr) => tr.children.slice(2, 12).map(allText)),
+                ladderTotals: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
+                  .map((tr) => allText(tr.children[12])),
+                heroSmall: collect(body, (n) => cls(n).includes('adv-hero'))[0].children.filter((c) => c.tag === 'small').map(allText),
                 bars: collect(body, (n) => (attr(n, 'class') || '').startsWith('adv-bar ')).length,
                 deaths: collect(body, (n) => cls(n) === 'adv-death-name').map((n) => n.textContent),
                 journal: collect(body, (n) => n.tag === 'pre' && cls(n) === 'adv-pre').map((n) => n.textContent),
@@ -327,9 +332,13 @@ def test_the_page_draws_every_section_from_the_payload(tmp_path: Path):
         )
     )
     assert payload["fetches"] == ["/api/advisor-play"]
-    assert payload["headings"] == ["实机战役 · 全角色进阶 10", "每个角色解锁到哪一级", "对局列表", "逐层 HP",
+    assert payload["headings"] == ["实机战役 · 全角色通关进阶 10", "每个角色解锁到哪一级", "对局列表", "逐层 HP",
                                    "各幕各房间类型的平均受伤", "死于哪个遭遇", "低血量打精英", "战役日志"]
-    assert "32" in payload["hero"] and "/ 50" in payload["hero"]
+    # the hero counts characters that WON an A10 run (none in this fixture: Silent only lost at A10)
+    hero = re.sub(r"\s+", "", payload["hero"])
+    assert "0/5已通关A10" in hero and "进阶解锁合计32/50" in hero
+    assert payload["headings"][0] == "实机战役 · 全角色通关进阶 10"
+    assert any("还没有角色赢下A10" in re.sub(r"\s+", "", t) for t in payload["heroSmall"])
     # the fake DOM joins text nodes with spaces; compare without them
     facts = [re.sub(r"\s+", "", f) for f in payload["facts"]]
     assert any("正在进行" in f and "IRONCLADa7" in f and "A1F3" in f for f in facts)
@@ -354,7 +363,18 @@ def test_the_page_draws_every_section_from_the_payload(tmp_path: Path):
     # ladder: one row per character, unlocked / 10 and what is left
     assert [r[0] for r in payload["ladderRows"]] == ["IRONCLAD", "SILENT", "DEFECT", "REGENT", "NECROBINDER"]
     unlocked = [re.sub(r"\s+", "", row[1]) for row in payload["ladderRows"]]
-    assert unlocked[0] == "7/10还差3" and unlocked[1] == "10/10✓已达成" and unlocked[4] == "5/10还差5"
+    # Silent has reached A10 but only lost there: not done
+    assert unlocked[0] == "7/10还差3·未通关" and unlocked[1] == "10/10未通关" and unlocked[4] == "5/10还差5·未通关"
+    assert "已通关" not in unlocked[1].replace("未通关", "")
+    # levels cleared before the advisor era show a muted marker; real counts stay for advisor runs
+    squashed = [[re.sub(r"\s+", "", c) for c in row] for row in payload["ladderCells"]]
+    assert squashed[0][:6] == ["此前已通过"] * 5 + ["✓1"] and squashed[0][6] == "▶1"      # IRONCLAD a6 win, a7 running
+    assert squashed[1][:9] == ["此前已通过"] * 9 and squashed[1][9] == "✗1"             # SILENT a10 loss
+    assert squashed[3][:2] == ["此前已通过"] * 2 and squashed[3][2] == "✗1" and squashed[3][3] == ""   # REGENT a3 loss
+    assert set(squashed[2]) == {""} and set(squashed[4]) == {""}                    # no advisor runs: nothing to claim
+    # every row has its own advisor-era record next to the all-time column
+    totals = [re.sub(r"\s+", "", t) for t in payload["ladderTotals"]]
+    assert "Advisor：1胜/0负" in totals[0] and "Advisor：0胜/1负" in totals[1] and "Advisor：0胜/0负" in totals[2]
     assert payload["bars"] > 0 and payload["deaths"] == ["AEONGLASS_BOSS"]
     # the journal is plain text, verbatim (never markup)
     assert payload["journal"][0] == "REGENT a2 WIN <script>alert(1)</script>\nsecond line"
@@ -569,3 +589,34 @@ def test_formatting_helpers():
     assert payload["duration"] == ["0分", "0分", "1分", "45分", "2时30分", "1时00分", "—", "—"]
     assert payload["minutes"] == ["1.5", "0.0", "0.0", "—", "—"]
     assert payload["stamp"] == ["11-02 09:05", "—"]
+
+
+def test_a_character_that_won_a10_is_shown_as_cleared_and_counted_in_the_hero(tmp_path: Path):
+    env = Env(tmp_path)
+    env.write("progress.save", progress(SILENT=10, DEFECT=10), where="saves")
+    env.add_run(BASE, character="SILENT", ascension=10, win=False)
+    env.add_run(BASE + 1, character="DEFECT", ascension=10, win=True, final_hp=40)
+    payload = _run_node_json(
+        _view_script(
+            """
+            (async () => {
+              responses = [__PAYLOAD__];
+              await APV.render({ view: 'advisor-play', character: '' });
+              const body = byId('advisorPlayBody');
+              const cls = (n) => n.className || '';
+              console.log(JSON.stringify({
+                hero: allText(collect(body, (n) => cls(n).includes('adv-hero'))[0]),
+                unlocked: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
+                  .map((tr) => [allText(tr.children[0]), allText(tr.children[1])]),
+                runChars: collect(body, (n) => n.tag === 'td' && cls(n) === 'adv-char').map(allText),
+              }));
+            })();
+            """,
+            payload=ap.build_payload(env.paths, now=NOW),
+        )
+    )
+    hero = re.sub(r"\s+", "", payload["hero"])
+    assert "1/5已通关A10" in hero and "已通关：DEFECT" in hero and "进阶解锁合计20/50" in hero
+    unlocked = {row[0]: re.sub(r"\s+", "", row[1]) for row in payload["unlocked"]}
+    assert unlocked["DEFECT"] == "10/10✓已通关A10" and unlocked["SILENT"] == "10/10未通关"
+    assert payload["runChars"] == ["DEFECT", "SILENT"]            # the runs table shows each run's character

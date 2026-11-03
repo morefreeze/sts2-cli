@@ -224,9 +224,11 @@ def summarise_run(raw: Mapping[str, Any], *, in_progress: bool = False) -> dict[
     if in_progress:
         hp = _int(player.get("current_hp"), hp)
         max_hp = _int(player.get("max_hp"), max_hp)
+    char = short(player.get("character") or player.get("character_id"))
     return {
         "start": _int(raw.get("start_time")),
-        "char": short(player.get("character") or player.get("character_id")),
+        "char": char,
+        "character": char,  # the API-facing name; ``char`` is what the older consumers read
         "asc": _int(raw.get("ascension")),
         "result": "running" if in_progress else (
             "win" if raw.get("win") else ("abandoned" if raw.get("was_abandoned") else "loss")),
@@ -310,6 +312,22 @@ def load_runs(paths: AdvisorPlayPaths, problems: list[str]) -> tuple[list[dict[s
     return runs, current
 
 
+def load_all_history(paths: AdvisorPlayPaths, problems: list[str]) -> list[dict[str, Any]]:
+    """Every run in the modded profile's history, whatever its start time (a manual run
+    counts for the "won A10" goal; the tab's run list stays advisor-only).  Results are
+    cached per file, so only the first call parses the old files."""
+    try:
+        files = sorted(paths.history_dir.glob("*.run"))
+    except OSError:
+        return []
+    runs = []
+    for path in files:
+        run = _load_history_run(path, problems)
+        if run is not None:
+            runs.append(run)
+    return runs
+
+
 def load_campaign_log(paths: AdvisorPlayPaths) -> list[dict[str, Any]]:
     rows = []
     for line in _read_lines(paths.campaign_runs):
@@ -327,9 +345,11 @@ def run_from_log_row(row: Mapping[str, Any]) -> dict[str, Any]:
     killed = short(row.get("killed_by")) or short(row.get("killed_by_event"))
     deck = row.get("deck")
     relics = row.get("relics")
+    char = short(str(row.get("character") or "")).upper()
     return {
         "start": _int(row.get("start_time")),
-        "char": str(row.get("character") or "").upper(),
+        "char": char,
+        "character": char,
         "asc": _int(row.get("ascension")),
         "result": "win" if row.get("victory") else "loss",
         "end": f"A{row['act']}F{row['floor']}" if _int(row.get("act")) and _int(row.get("floor")) else None,
@@ -512,32 +532,60 @@ def elite_fights(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _ladder(runs: list[dict[str, Any]], current: dict[str, Any] | None,
-            stats: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """One row per character: unlocked ascension (global) and the selected runs' results per ascension."""
-    attempts: dict[tuple[str, int], dict[str, int]] = collections.defaultdict(
-        lambda: {"wins": 0, "losses": 0, "abandoned": 0, "running": 0})
+            stats: Mapping[str, Mapping[str, Any]],
+            advisor_runs: list[dict[str, Any]] | None = None,
+            won_goal: set[str] | None = None) -> list[dict[str, Any]]:
+    """One row per character: unlocked ascension (global), whether an A10 run was ever won,
+    the selected runs' results per ascension and the character's whole advisor-era record.
+
+    ``runs`` (+ ``current``) are the *selected* runs (they fill the per-ascension counts);
+    ``advisor_runs`` are every advisor-era run regardless of the tab's character filter (they
+    give the advisor-era summary and the "passed before the advisor" marker, which must not
+    flicker with the filter); ``won_goal`` is the set of characters that have won a run at
+    the goal ascension in the whole modded history."""
+    advisor_runs = runs if advisor_runs is None else advisor_runs
+    won_goal = set() if won_goal is None else won_goal
+
+    def blank() -> dict[str, int]:
+        return {"wins": 0, "losses": 0, "abandoned": 0, "running": 0}
+
+    key_of = {"win": "wins", "loss": "losses", "abandoned": "abandoned", "running": "running"}
+    attempts: dict[tuple[str, int], dict[str, int]] = collections.defaultdict(blank)
     for run in runs + ([current] if current else []):
         if run["asc"] is None:
             continue
-        slot = attempts[(run["char"], run["asc"])]
-        slot[{"win": "wins", "loss": "losses", "abandoned": "abandoned", "running": "running"}[run["result"]]] += 1
+        attempts[(run["char"], run["asc"])][key_of[run["result"]]] += 1
+    advisor_at: dict[tuple[str, int], int] = collections.Counter()
+    advisor_total: dict[str, dict[str, int]] = collections.defaultdict(blank)
+    for run in advisor_runs:
+        advisor_total[run["char"]][key_of[run["result"]]] += 1
+        if run["asc"] is not None:
+            advisor_at[(run["char"], run["asc"])] += 1
     rows = []
     for char in CHARACTERS:
         entry = stats.get(char) or {}
         unlocked = _int(entry.get("max_ascension"), 0) or 0
+        first_asc = min((asc for (c, asc) in advisor_at if c == char), default=None)
+        total = advisor_total.get(char) or blank()
         rows.append({
             "character": char,
             "max_ascension": unlocked,
             "goal": GOAL_ASCENSION,
             "left": max(0, GOAL_ASCENSION - unlocked),
+            "a10_won": char in won_goal,
             "total_wins": _int(entry.get("total_wins")),
             "total_losses": _int(entry.get("total_losses")),
+            "advisor": {**total, "runs": total["wins"] + total["losses"] + total["abandoned"]},
+            "first_advisor_ascension": first_asc,
             "known": char in stats,
             "ascensions": [{
                 "ascension": asc,
                 "unlocked": asc <= unlocked,
                 "top": asc == unlocked,
-                **attempts.get((char, asc), {"wins": 0, "losses": 0, "abandoned": 0, "running": 0}),
+                # unlocked before the advisor played this character: cleared in an earlier era
+                "pre_advisor": (asc <= unlocked and first_asc is not None and asc < first_asc
+                                and advisor_at.get((char, asc), 0) == 0),
+                **attempts.get((char, asc), blank()),
             } for asc in range(1, GOAL_ASCENSION + 1)],
         })
     return rows
@@ -619,7 +667,8 @@ def build_payload(
         return _build(paths, now, problems, flt)
     except Exception as exc:  # defensive boundary: this is a monitoring page
         return {"error": f"{type(exc).__name__}: {exc}", "now": now, "problems": problems, "filter": flt,
-                "goal": {"ascension": GOAL_ASCENSION, "levels": 0, "levels_goal": GOAL_ASCENSION * len(CHARACTERS)},
+                "goal": {"ascension": GOAL_ASCENSION, "levels": 0, "levels_goal": GOAL_ASCENSION * len(CHARACTERS),
+                         "won": 0, "won_goal": len(CHARACTERS), "won_characters": []},
                 "characters": [], "runs": [], "current": None}
 
 
@@ -646,6 +695,13 @@ def _build(paths: AdvisorPlayPaths, now: float, problems: list[str], flt: dict[s
         flt["character"] is None or _character_group(current["char"]) == flt["character"])
     if current:
         current["number"] = len(selected) + 1
+
+    # "Done" = the character has WON a run at the goal ascension -- anywhere in the modded
+    # profile's history (a manual run counts), or in the mod's own log if its file is missing.
+    all_history = load_all_history(paths, [])  # an unreadable pre-advisor file is not this tab's problem
+    won_goal = {
+        r["char"] for r in all_history + everything
+        if r["result"] == "win" and (r["asc"] or 0) >= GOAL_ASCENSION and r["char"] in CHARACTERS}
 
     wins = sum(1 for r in selected if r["result"] == "win")
     losses = sum(1 for r in selected if r["result"] == "loss")
@@ -680,13 +736,18 @@ def _build(paths: AdvisorPlayPaths, now: float, problems: list[str], flt: dict[s
         "since": paths.since,
         "filter": flt,
         "character_options": [{"id": c, "count": group_counts.get(c, 0)} for c in (*CHARACTERS, OTHER)],
-        "goal": {"ascension": GOAL_ASCENSION, "levels": levels, "levels_goal": GOAL_ASCENSION * len(CHARACTERS)},
+        "goal": {
+            "ascension": GOAL_ASCENSION, "levels": levels, "levels_goal": GOAL_ASCENSION * len(CHARACTERS),
+            "won": len(won_goal), "won_goal": len(CHARACTERS),
+            "won_characters": [c for c in CHARACTERS if c in won_goal],
+        },
         "summary": {
             "runs": len(selected), "wins": wins, "losses": losses, "abandoned": abandoned,
             "win_rate": wins / (wins + losses) if wins + losses else None,
             "mean_run_time": round(statistics.mean(times)) if times else None,
         },
-        "characters": _ladder(selected, current if current_selected else None, stats),
+        "characters": _ladder(
+            selected, current if current_selected else None, stats, advisor_runs=everything, won_goal=won_goal),
         "current": current,
         "current_selected": current_selected,
         "activity": _activity(parsed_log, now),

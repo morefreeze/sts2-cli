@@ -284,7 +284,10 @@ def test_goal_and_ladder_read_progress_save_and_the_runs(env: Env):
     env.add_run(BASE + 1, character="IRONCLAD", ascension=7)
     env.add_run(BASE + 2, character="IRONCLAD", ascension=7, abandoned=True)
     payload = env.payload()
-    assert payload["goal"] == {"ascension": 10, "levels": 7 + 10 + 6 + 4 + 0, "levels_goal": 50}
+    assert payload["goal"] == {
+        "ascension": 10, "levels": 7 + 10 + 6 + 4 + 0, "levels_goal": 50,
+        "won": 0, "won_goal": 5, "won_characters": [],
+    }
     by_name = {c["character"]: c for c in payload["characters"]}
     assert list(by_name) == ["IRONCLAD", "SILENT", "DEFECT", "REGENT", "NECROBINDER"]
     iron = by_name["IRONCLAD"]
@@ -293,8 +296,91 @@ def test_goal_and_ladder_read_progress_save_and_the_runs(env: Env):
     assert (a6["wins"], a6["unlocked"], a6["top"]) == (1, True, False)
     assert (a7["losses"], a7["abandoned"], a7["top"]) == (1, 1, True)
     assert (a8["unlocked"], a8["wins"] + a8["losses"]) == (False, 0)
-    assert by_name["SILENT"]["left"] == 0 and by_name["NECROBINDER"]["known"] is False
+    # unlocked A10 is not "done": nobody has won a run at A10 here
+    assert by_name["SILENT"]["left"] == 0 and by_name["SILENT"]["a10_won"] is False
+    assert not any(c["a10_won"] for c in payload["characters"])
+    assert by_name["NECROBINDER"]["known"] is False
     assert by_name["NECROBINDER"]["max_ascension"] == 0
+
+
+def test_done_means_a_won_a10_run_not_having_reached_a10(env: Env):
+    env.write("progress.save", progress(SILENT=10, DEFECT=10, IRONCLAD=10), where="saves")
+    env.add_run(BASE, character="SILENT", ascension=10, win=False)      # reached A10, lost: not done
+    env.add_run(BASE + 1, character="DEFECT", ascension=9, win=True)    # a win one level below does not count
+    env.add_run(BASE + 2, character="DEFECT", ascension=10, win=True)   # won A10: done
+    env.add_run(BASE + 3, character="IRONCLAD", ascension=10, abandoned=True)
+    payload = env.payload()
+    by_name = {c["character"]: c for c in payload["characters"]}
+    assert by_name["SILENT"]["a10_won"] is False and by_name["SILENT"]["left"] == 0
+    assert by_name["DEFECT"]["a10_won"] is True
+    assert by_name["IRONCLAD"]["a10_won"] is False
+    assert payload["goal"]["won"] == 1 and payload["goal"]["won_goal"] == 5
+    assert payload["goal"]["won_characters"] == ["DEFECT"]
+    assert payload["goal"]["levels"] == 30                              # the unlocked-levels sum is still reported
+
+
+def test_a_manual_a10_win_from_before_the_advisor_counts_but_is_not_listed(env: Env):
+    env.write("progress.save", progress(REGENT=10), where="saves")
+    old = ap.ADVISOR_SINCE - 86_400 * 3
+    env.add_run(old, character="REGENT", ascension=10, win=True)
+    env.add_run(old + 1, character="REGENT", ascension=10, win=True, acts=[])   # a second one, odd shape
+    (env.saves / "history" / f"{old - 5}.run").write_text("{ not json", encoding="utf-8")
+    payload = env.payload()
+    assert payload["goal"]["won_characters"] == ["REGENT"]
+    assert {c["character"]: c["a10_won"] for c in payload["characters"]}["REGENT"] is True
+    assert payload["runs"] == [] and payload["problems"] == []          # the run list stays advisor-only
+
+
+def test_the_a10_win_survives_a_character_filter(env: Env):
+    env.write("progress.save", progress(SILENT=10, DEFECT=10), where="saves")
+    env.add_run(BASE, character="DEFECT", ascension=10, win=True)
+    env.add_run(BASE + 1, character="SILENT", ascension=10)
+    payload = env.payload(character="SILENT")
+    assert payload["goal"]["won_characters"] == ["DEFECT"]
+    assert {c["character"]: c["a10_won"] for c in payload["characters"]}["DEFECT"] is True
+
+
+def test_ladder_marks_levels_passed_before_the_advisor_and_summarises_its_record(env: Env):
+    env.write("progress.save", progress(DEFECT=10, SILENT=10), where="saves")
+    env.add_run(BASE, character="DEFECT", ascension=4, win=True)
+    env.add_run(BASE + 1, character="DEFECT", ascension=5, win=True)
+    env.add_run(BASE + 2, character="DEFECT", ascension=10)
+    env.add_run(BASE + 3, character="DEFECT", ascension=10)
+    env.add_run(BASE + 4, character="DEFECT", ascension=10, abandoned=True)
+    env.add_run(BASE + 5, character="SILENT", ascension=9, win=True)
+    payload = env.payload()
+    by_name = {c["character"]: c for c in payload["characters"]}
+    defect = by_name["DEFECT"]
+    pre = [a["ascension"] for a in defect["ascensions"] if a["pre_advisor"]]
+    assert pre == [1, 2, 3]                       # below the first advisor run (a4), unlocked, no advisor run
+    assert defect["first_advisor_ascension"] == 4
+    # a6..a9 lie above a4 but were skipped by the advisor: blank, not "passed before"
+    assert not any(defect["ascensions"][i]["pre_advisor"] for i in range(3, 10))
+    assert defect["advisor"] == {"wins": 2, "losses": 2, "abandoned": 1, "running": 0, "runs": 5}
+    silent = by_name["SILENT"]
+    assert [a["ascension"] for a in silent["ascensions"] if a["pre_advisor"]] == list(range(1, 9))
+    assert silent["advisor"]["wins"] == 1 and silent["advisor"]["losses"] == 0
+    # nothing is "passed before" for a locked level or a character the advisor never played
+    ironclad = by_name["IRONCLAD"]
+    assert not any(a["pre_advisor"] for a in ironclad["ascensions"])
+    assert ironclad["advisor"]["runs"] == 0 and ironclad["first_advisor_ascension"] is None
+    # the character filter scopes the per-ascension counts but not the markers or the advisor record
+    only = {c["character"]: c for c in env.payload(character="SILENT")["characters"]}
+    assert only["DEFECT"]["advisor"]["runs"] == 5
+    assert [a["ascension"] for a in only["DEFECT"]["ascensions"] if a["pre_advisor"]] == [1, 2, 3]
+    assert only["DEFECT"]["ascensions"][9]["losses"] == 0
+
+
+def test_every_run_row_carries_its_character(env: Env):
+    env.write("progress.save", progress(IRONCLAD=3), where="saves")
+    env.add_run(BASE, character="SILENT")
+    env.add_run(BASE + 1, character="DEFECT")
+    env.write("campaign_runs.jsonl", log_row(BASE + 9, character="regent") + "\n")
+    env.write("current_run.save", current_save(BASE + 5000, character="IRONCLAD"), where="saves")
+    payload = env.payload()
+    assert [r["character"] for r in payload["runs"]] == ["REGENT", "DEFECT", "SILENT"]
+    assert all(r["character"] == r["char"] and r["character"] for r in payload["runs"])
+    assert payload["current"]["character"] == "IRONCLAD"
 
 
 def test_levels_cap_at_ten_per_character(env: Env):

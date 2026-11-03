@@ -331,7 +331,7 @@ window.AdvisorPlayView = (() => {
     const panel = element('section', { className: 'panel adv-head' });
     panel.append(heading(
       'Advisor Play',
-      `实机战役 · 全角色进阶 ${payload.goal.ascension}`,
+      `实机战役 · 全角色通关进阶 ${payload.goal.ascension}`,
       `Advisor mod 在真实游戏里打的对局（modded 档，${day(payload.since)} 起）。本页每 60 秒自动刷新。`,
     ));
     const goal = payload.goal;
@@ -340,18 +340,27 @@ window.AdvisorPlayView = (() => {
     const hero = element('article', { className: 'metric-card metric-card-primary adv-hero' });
     const meter = element('div', {
       className: 'adv-meter',
-      attrs: { role: 'img', 'aria-label': `进阶等级合计 ${goal.levels} / ${goal.levels_goal}` },
+      attrs: { role: 'img', 'aria-label': `已通关 A${goal.ascension} 的角色 ${goal.won} / ${goal.won_goal}` },
     });
     const fill = element('i');
-    fill.style.width = `${goal.levels_goal ? Math.min(100, (100 * goal.levels) / goal.levels_goal) : 0}%`;
+    fill.style.width = `${goal.won_goal ? Math.min(100, (100 * goal.won) / goal.won_goal) : 0}%`;
     meter.append(fill);
-    const value = element('strong', { text: String(goal.levels) });
-    value.append(element('span', { className: 'adv-hero-of', text: ` / ${goal.levels_goal}` }));
+    const value = element('strong', { text: String(goal.won) });
+    value.append(element('span', { className: 'adv-hero-of', text: ` / ${goal.won_goal} 已通关 A${goal.ascension}` }));
+    const wonNames = Array.isArray(goal.won_characters) ? goal.won_characters : [];
     hero.append(
-      element('span', { text: `目标 · 全角色进阶 ${goal.ascension}` }),
+      element('span', { text: `目标 · 全角色通关进阶 ${goal.ascension}` }),
       value,
       meter,
-      element('small', { text: `五个角色已解锁的进阶等级之和（每个角色封顶 ${goal.ascension}）` }),
+      element('small', {
+        text: wonNames.length
+          ? `已通关：${wonNames.join('、')}（到达 A${goal.ascension} 不算，必须赢下一局）`
+          : `还没有角色赢下 A${goal.ascension}（到达 A${goal.ascension} 不算，必须赢下一局）`,
+      }),
+      element('small', {
+        className: 'adv-muted adv-hero-sub',
+        text: `进阶解锁合计 ${goal.levels} / ${goal.levels_goal}（每个角色封顶 ${goal.ascension}）`,
+      }),
     );
     const scope = filter.character ? `${characterLabel(filter.character)} · ` : '';
     kpis.append(
@@ -418,7 +427,7 @@ window.AdvisorPlayView = (() => {
     const panel = element('section', { className: 'panel adv-ladder-panel' });
     panel.append(heading(
       '进阶阶梯', '每个角色解锁到哪一级',
-      '解锁的最高进阶取自 progress.save；格子下面是所选对局在该进阶的结果。深色格是当前最高进阶（战役的 “max” 打的那一级）。',
+      '解锁的最高进阶取自 progress.save；“已通关”指该角色赢下过一局 A10（整个 modded 档案，含手动对局）。格子下面是所选对局在该进阶的结果；“此前已通过”表示 Advisor 之前就已解锁、没有 Advisor 对局记录。深色格是当前最高进阶（战役的 “max” 打的那一级）。',
     ));
     const scroll = element('div', { className: 'table-scroll' });
     const table = element('table', { className: 'runs-table adv-ladder' });
@@ -436,7 +445,10 @@ window.AdvisorPlayView = (() => {
         document.createTextNode(` / ${row.goal}`),
         element('small', {
           className: 'adv-muted',
-          text: row.left === 0 ? '✓ 已达成' : `还差 ${row.left}`,
+          text: row.a10_won
+            ? `✓ 已通关 A${row.goal}`
+            : (row.left === 0 ? '未通关' : `还差 ${row.left} · 未通关`),
+          attrs: { 'data-goal': row.a10_won ? 'won' : 'pending' },
         }),
       );
       tr.append(unlocked);
@@ -457,12 +469,15 @@ window.AdvisorPlayView = (() => {
             document.createTextNode(String(count)),
           );
         });
+        if (!parts.length && asc.pre_advisor) {
+          results.append(element('span', { className: 'adv-muted adv-passed', text: '此前已通过' }));
+        }
         td.append(results);
         const lines = [
           `${row.character} ${ascText(asc.ascension)} · ${asc.unlocked ? '已解锁' : '未解锁'}`,
           parts.length
             ? `所选对局：${asc.wins} 胜 ${asc.losses} 负${asc.abandoned ? ` ${asc.abandoned} 弃` : ''}${asc.running ? ` ${asc.running} 进行中` : ''}`
-            : '所选对局：没打过',
+            : (asc.pre_advisor ? 'Advisor 之前已解锁，没有 Advisor 对局记录' : '所选对局：没打过'),
         ];
         bindTip(td, lines, false);
         td.setAttribute('aria-label', lines.join('，'));
@@ -478,6 +493,11 @@ window.AdvisorPlayView = (() => {
       } else {
         total.textContent = '—';
       }
+      const advisor = row.advisor || { wins: 0, losses: 0, abandoned: 0, runs: 0 };
+      total.append(element('small', {
+        className: 'adv-muted adv-advisor-record',
+        text: `Advisor：${advisor.wins} 胜 / ${advisor.losses} 负${advisor.abandoned ? ` / ${advisor.abandoned} 弃` : ''}`,
+      }));
       tr.append(total);
       tbody.append(tr);
     });

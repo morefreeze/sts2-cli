@@ -2334,8 +2334,27 @@ pre {
   font-size: 10px;
 }
 
+.adv-unlocked small[data-goal="won"] {
+  color: var(--adv-s3);
+  font-weight: 700;
+}
+
+.adv-hero-sub {
+  display: block;
+  margin-top: 2px;
+}
+
+.adv-passed {
+  font-size: 10px;
+}
+
+.adv-advisor-record {
+  display: block;
+  font-size: 11px;
+}
+
 .adv-asc {
-  min-width: 56px;
+  min-width: 66px;
   padding-right: 3px !important;
   padding-left: 3px !important;
   text-align: center !important;
