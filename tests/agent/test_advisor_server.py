@@ -22,6 +22,15 @@ from tests.agent.advisor_corpus import (corpus_games, fresh_greedy_state,
 
 
 @pytest.fixture(autouse=True)
+def _restore_gate_env(monkeypatch):
+    """advisor_server.main() sets STS2_CARD_QUALITY_GATE=0 in os.environ (the advisor's own
+    default); put it back so no other test file sees the variable (the corpus builder refuses
+    to run when a greedy behaviour env var is set)."""
+    monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "1")
+    monkeypatch.delenv("STS2_CARD_QUALITY_GATE")
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_greedy():
     fresh_greedy_state()
     yield
@@ -105,8 +114,10 @@ def test_knob_warnings_ignores_values_equal_to_the_default():
                                          "STS2_MC_SMART_THRESH": "0.150",
                                          "STS2_CARD_THRESHOLD_LIFT": "0.0"}) == []
     # one non-default among defaults is the only warning
-    assert advisor_server.knob_warnings(dict(defaults, STS2_CARD_QUALITY_GATE="0")) == [
-        "STS2_CARD_QUALITY_GATE=0"]
+    assert advisor_server.knob_warnings(dict(defaults, STS2_CARD_PICK_TEMP="1")) == [
+        "STS2_CARD_PICK_TEMP=1"]
+    # STS2_CARD_QUALITY_GATE=0 is the advisor's own setting (EXPECTED_SETTINGS): no warning
+    assert advisor_server.knob_warnings(dict(defaults, STS2_CARD_QUALITY_GATE="0")) == []
     assert advisor_server.knob_warnings(dict(defaults, STS2_OVERRIDE_DELTA_CAP="3",
                                              STS2_MC_ROLLOUT="smart")) == [
         "STS2_MC_ROLLOUT=smart", "STS2_OVERRIDE_DELTA_CAP=3"]
@@ -691,3 +702,31 @@ def test_a_real_git_repo_reports_head_and_status(tmp_path):
     git("checkout", "--", "agent/a.py")
     assert run(["status", "--porcelain", "--untracked-files=no", *paths]) == ""
     assert advisor_server.run_git(["rev-parse", "HEAD"], str(tmp_path / "nope")) == ""
+
+
+def test_advisor_env_defaults_turn_the_card_quality_gate_off():
+    env = {}
+    assert advisor_server.advisor_env_defaults(env) == ["card quality gate: off (advisor default)"]
+    assert env["STS2_CARD_QUALITY_GATE"] == "0"
+    # the advisor's own value is not a "differs from the measured policy" warning
+    assert advisor_server.knob_warnings(env) == []
+
+
+def test_advisor_env_defaults_respect_an_explicit_gate_setting():
+    env = {"STS2_CARD_QUALITY_GATE": "1"}
+    assert advisor_server.advisor_env_defaults(env) == ["card quality gate: on (environment)"]
+    assert env["STS2_CARD_QUALITY_GATE"] == "1"
+    assert advisor_server.knob_warnings(env) == []  # 1 is the headless default
+    env = {"STS2_CARD_QUALITY_GATE": "0"}
+    assert advisor_server.advisor_env_defaults(env) == ["card quality gate: off (environment)"]
+
+
+def test_advisor_env_defaults_leave_headless_defaults_alone(monkeypatch):
+    from agent.combat_env import _card_quality_gate_enabled
+    monkeypatch.setenv("STS2_CARD_QUALITY_GATE", "1")        # registers the undo
+    monkeypatch.delenv("STS2_CARD_QUALITY_GATE")
+    assert _card_quality_gate_enabled()                      # play_full_run default: ON
+    advisor_server.advisor_env_defaults({})                  # a scratch env, os.environ untouched
+    assert _card_quality_gate_enabled()
+    advisor_server.advisor_env_defaults()                    # os.environ (monkeypatch restores it)
+    assert not _card_quality_gate_enabled()

@@ -71,14 +71,34 @@ ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 # states the active map policy itself (its footer reads "whole-path lookahead (A/B: ...)").
 # STS2_MAP_POLICY=lookahead won its paired A/B (a5, 43 pairs, +5.42 floors, t 2.84); a value
 # nobody measured, or any other variable, still warns.
-EXPECTED_SETTINGS = {"STS2_MAP_POLICY": "lookahead"}
+#
+# STS2_CARD_QUALITY_GATE=0 (2026-11-03): in real games the act-1 gate skipped 149 of 165
+# late-act-1 card rewards (43 of them act-1 boss rare choices); its only evidence (July, old
+# PPO policy, pre-fix engine) predates the engine fix. The headless default stays ON until a
+# paired A/B, so the advice service sets it itself (advisor_env_defaults) -- advice here
+# differs from play_full_run on purpose.
+EXPECTED_SETTINGS = {"STS2_MAP_POLICY": "lookahead", "STS2_CARD_QUALITY_GATE": "0"}
+# Env the advice service defaults at startup (an explicit value in the environment wins).
+ADVISOR_ENV_DEFAULTS = {"STS2_CARD_QUALITY_GATE": "0"}
+
+
+def advisor_env_defaults(environ=None) -> list:
+    """setdefault ADVISOR_ENV_DEFAULTS into `environ` (os.environ); returns the log lines
+    describing the act-1 card quality gate setting."""
+    environ = os.environ if environ is None else environ
+    explicit = "STS2_CARD_QUALITY_GATE" in environ
+    for k, v in ADVISOR_ENV_DEFAULTS.items():
+        environ.setdefault(k, v)
+    flag = environ["STS2_CARD_QUALITY_GATE"].strip().lower()
+    state = "on" if flag in ("1", "true", "on", "yes") else "off"
+    return [f"card quality gate: {state} ({'environment' if explicit else 'advisor default'})"]
 
 
 def knob_warnings(env) -> list:
     """`KEY=value` for every greedy behaviour env var set to something other than
     its default (STS2_CARD_QUALITY_GATE=1 is the default, so it is not listed) --
     except an EXPECTED_SETTINGS value (STS2_MAP_POLICY=lookahead, the config's
-    map_policy)."""
+    map_policy; STS2_CARD_QUALITY_GATE=0, the advisor's own default)."""
     return [f"{k}={env[k].strip()}" for k in GREEDY_BEHAVIOR_ENV
             if not behavior_env_is_default(k, env.get(k))
             and env[k].strip().lower() != EXPECTED_SETTINGS.get(k)]
@@ -424,9 +444,12 @@ def main(argv=None) -> int:
                     help="re-exec the service when git HEAD moves and agent/ python/ data/ are clean")
     args = ap.parse_args(argv)
     start_head = run_git(["rev-parse", "HEAD"]) if args.reload_on_commit else ""
+    gate_lines = advisor_env_defaults()  # before make_server: the warm-up and knob_warnings read os.environ
     if args.exit_on_stdin_eof:
         watch_stdin_eof()  # before the warm-up: an orphan must not sit through that either
     server = make_server(args.port)
+    for line in gate_lines:
+        print(f"[advisor_server] {line}", file=sys.stderr, flush=True)
     for w in server.warnings:
         print(f"WARNING: greedy behaviour env set, advice differs from the measured policy: {w}",
               file=sys.stderr)
