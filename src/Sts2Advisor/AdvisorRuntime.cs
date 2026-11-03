@@ -92,6 +92,7 @@ internal static class AdvisorRuntime
         AutoPilotControl.Init(_advisor, locOk ? _loc : null, _trace, gameUserDir, () => Clock.Elapsed.TotalSeconds,
                    config.StepPauseSeconds, autopilotProblem ?? (locOk ? null : $"repo_path ({configPath})"));
         CampaignControl.Init(userDir, _trace, () => Clock.Elapsed.TotalSeconds);
+        InstantMode.Init(config.InstantMode);
         if (!locOk)
         {
             _configProblem = $"repo_path ({configPath})";
@@ -143,6 +144,7 @@ internal static class AdvisorRuntime
     {
         double now = Clock.Elapsed.TotalSeconds;
         PollHotkey();
+        InstantMode.Tick(now);
         // While the autopilot runs a late advice reply must not paint over its panel: drop them.
         DrainResults(now, discard: AutoPilotControl.IsRunning);
         CampaignControl.Tick();  // throttled to once a second inside; works with the panel hidden

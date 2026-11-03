@@ -7,7 +7,8 @@ namespace Sts2Advisor.Core;
 public sealed record AdvisorConfig(string RepoPath, string Python, int Port, bool Autostart, string Hotkey,
                                    string AutopilotHotkey = AdvisorConfig.DefaultAutopilotHotkey,
                                    string StepHotkey = AdvisorConfig.DefaultStepHotkey,
-                                   double StepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds)
+                                   double StepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds,
+                                   bool InstantMode = false)
 {
     public const int DefaultPort = 8767;
     public const string DefaultHotkey = "F8";
@@ -31,7 +32,8 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
     /// "autostart" a boolean or the string "true"/"false" in any case (else true).
     /// "autopilot_hotkey" is a Godot Key name like "hotkey" (else "F9"); "step_hotkey" likewise (else "F10").
     /// "step_pause_seconds" -- how long the autopilot leaves a step on the panel before acting on the next screen --
-    /// must be a JSON number, clamped to 0..10 (0 = no pause), else 2.5.</summary>
+    /// must be a JSON number, clamped to 0..10 (0 = no pause), else 2.5.
+    /// "instant_mode" (apply the game's Instant speed once it has started) is read like "autostart" but defaults to false.</summary>
     public static AdvisorConfig Load(string path)
     {
         try
@@ -46,11 +48,12 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                 Str(root, "repo_path") ?? Defaults.RepoPath,
                 Str(root, "python") ?? Defaults.Python,
                 ReadPort(root),
-                ReadAutostart(root),
+                ReadBool(root, "autostart", Defaults.Autostart),
                 Str(root, "hotkey") ?? DefaultHotkey,
                 Str(root, "autopilot_hotkey") ?? DefaultAutopilotHotkey,
                 Str(root, "step_hotkey") ?? DefaultStepHotkey,
-                ReadStepPause(root));
+                ReadStepPause(root),
+                ReadBool(root, "instant_mode", false));
         }
         catch (Exception e)
         {
@@ -68,16 +71,16 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
         && p.TryGetDouble(out var seconds) && double.IsFinite(seconds)
             ? Math.Clamp(seconds, 0, MaxStepPauseSeconds) : DefaultStepPauseSeconds;
 
-    private static bool ReadAutostart(JsonElement root)
+    private static bool ReadBool(JsonElement root, string name, bool fallback)
     {
-        if (!root.TryGetProperty("autostart", out var a))
-            return Defaults.Autostart;
+        if (!root.TryGetProperty(name, out var a))
+            return fallback;
         return a.ValueKind switch
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
             JsonValueKind.String when bool.TryParse(a.GetString(), out var parsed) => parsed,
-            _ => Defaults.Autostart,
+            _ => fallback,
         };
     }
 

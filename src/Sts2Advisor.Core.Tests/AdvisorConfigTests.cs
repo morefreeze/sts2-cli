@@ -206,4 +206,26 @@ public class AdvisorConfigTests
     {
         Assert.Equal(2.5, AdvisorConfig.Load(Write($$"""{"step_pause_seconds": {{json}}}""")).StepPauseSeconds);
     }
+
+    [Fact]
+    public void InstantModeDefaultsToFalseAndIsRead()
+    {
+        Assert.False(AdvisorConfig.Defaults.InstantMode);
+        Assert.False(AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).InstantMode);
+        Assert.True(AdvisorConfig.Load(Write("""{"instant_mode": true}""")).InstantMode);
+        Assert.True(AdvisorConfig.Load(Write("""{"instant_mode": "TRUE"}""")).InstantMode);
+        Assert.False(AdvisorConfig.Load(Write("""{"instant_mode": false}""")).InstantMode);
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("\"yes\"")]
+    [InlineData("null")]
+    [InlineData("[true]")]
+    [InlineData("{}")]
+    [InlineData("\"\"")]
+    public void AnUnusableInstantModeTakesTheDefaultFalse(string json)
+    {
+        Assert.False(AdvisorConfig.Load(Write($$"""{"instant_mode": {{json}}}""")).InstantMode);
+    }
 }
