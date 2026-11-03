@@ -525,6 +525,12 @@ def pre_boss_heal_threshold():
     return value
 
 
+# rest.critical_heal floor at ascension >= HIGH_ASCENSION_REST_MIN_ASC (see the comment
+# in rest_site_action for the a9 evidence).
+HIGH_ASCENSION_REST_MIN_ASC = 8
+HIGH_ASCENSION_CRITICAL_HEAL = 0.65
+
+
 def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
     """Decide heal vs upgrade at a rest site.
 
@@ -595,6 +601,15 @@ def rest_site_action(state: dict, options: list[dict], trace=None) -> dict:
         CRITICAL_HEAL = 0.40  # Act 2 body: balance
     else:
         CRITICAL_HEAL = 0.30  # Pre-boss zone
+    # Ascension 8+: real-game act-1 hallways hit about twice as hard as at a1-4
+    # (act 1 mean 3.8 HP-fraction-points, spikes of 23 HP). Live a9 evidence: a
+    # Necrobinder at A1F7 rest with 37/66 (56%) smithed (must_upgrade), lost 23 HP
+    # to Cultists (14/66) and died at A1F9 to a normal fight; an earlier a9 run sat
+    # at 59% and smithed three times in act 1. So 0.55 is too low there. Unknown
+    # or lower ascension: unchanged.
+    asc = LookaheadMapStrategy.state_ascension(state)
+    if asc is not None and asc >= HIGH_ASCENSION_REST_MIN_ASC:
+        CRITICAL_HEAL = max(CRITICAL_HEAL, HIGH_ASCENSION_CRITICAL_HEAL)
 
     enabled = [o for o in options if o.get("is_enabled", True)]
     heal  = next((o for o in enabled if "heal"  in (o.get("option_id") or "").lower()), None)

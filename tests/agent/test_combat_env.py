@@ -14,6 +14,7 @@ from agent.run_workbench.recorded_maps import (
     latest_recorded_acts,
     parse_recorded_map_row,
 )
+from agent.greedy_trace import GreedyTrace
 from agent.strategy import rest_site_action
 
 CARDS_JSON = os.path.join(os.path.dirname(__file__), '..', '..', 'localization_eng', 'cards.json')
@@ -3648,6 +3649,50 @@ def test_vantom_mid_act_rest_heals_below_seventy_when_enabled(monkeypatch):
     action = rest_site_action(state, _rest_options())
 
     assert action["args"]["option_index"] == 1
+
+
+def _act1_rest(hp, *, top=None, ctx=None, max_hp=100):
+    state = {
+        "decision": "rest_site",
+        "floor": 7,
+        "context": dict(ctx or {}),
+        "player": {"hp": hp, "max_hp": max_hp, "deck": _must_smith_deck()},
+    }
+    if top is not None:
+        state["ascension"] = top
+    return state
+
+
+def test_a9_act1_rest_at_56_percent_heals_instead_of_must_upgrade():
+    # Live a9 Necrobinder A1F7: 37/66 smithed, then died at A1F9.
+    trace = GreedyTrace()
+    action = rest_site_action(_act1_rest(37, top=9, max_hp=66), _rest_options(), trace=trace)
+    assert action["args"]["option_index"] == 1
+    fired = trace.fired()[0]
+    assert fired["key"] == "rest.critical_heal"
+    assert fired["values"]["threshold"] == 0.65
+
+
+def test_a9_rest_at_70_percent_still_smiths_a_must_upgrade_card():
+    action = rest_site_action(_act1_rest(70, top=9), _rest_options())
+    assert action["args"]["option_index"] == 0
+
+
+def test_a9_ascension_from_context_also_counts():
+    action = rest_site_action(_act1_rest(60, ctx={"ascension": 9}), _rest_options())
+    assert action["args"]["option_index"] == 1
+
+
+def test_a5_rest_at_56_percent_still_smiths():
+    action = rest_site_action(_act1_rest(56, top=5), _rest_options())
+    assert action["args"]["option_index"] == 0
+
+
+def test_rest_without_ascension_is_unchanged():
+    trace = GreedyTrace()
+    action = rest_site_action(_act1_rest(56), _rest_options(), trace=trace)
+    assert action["args"]["option_index"] == 0
+    assert trace.fired()[0]["key"] == "rest.must_upgrade"
 
 
 def test_non_vantom_mid_act_rest_keeps_must_smith_override():

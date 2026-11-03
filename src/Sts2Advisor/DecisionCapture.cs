@@ -89,13 +89,16 @@ internal static class DecisionCapture
     /// <summary>Adds the belt size to the decision's player: the shared serializer does not carry it
     /// (changing src/Sts2Shared needs a headless replay + regression), and greedy needs it because the
     /// belt shrinks at higher ascensions (Player.MaxPotionCount). Without it greedy assumes 3 slots and a
-    /// shop buy the game refuses stops the autopilot.</summary>
-    private static Func<Dictionary<string, object?>> WithPotionSlots(Player player, Func<Dictionary<string, object?>> build) =>
+    /// shop buy the game refuses stops the autopilot. Also adds the top-level <c>ascension</c> to EVERY
+    /// decision (rest_site's critical-heal threshold and the lookahead map policy scale by it; the shared
+    /// serializer carries none).</summary>
+    private static Func<Dictionary<string, object?>> WithPotionSlots(RunState rs, Player player, Func<Dictionary<string, object?>> build) =>
         () =>
         {
             var decision = build();
             if (decision.TryGetValue("player", out var p) && p is Dictionary<string, object?> playerDict)
                 playerDict["potion_slots"] = player.MaxPotionCount;
+            decision["ascension"] = (int)rs.AscensionLevel;
             return decision;
         };
 
@@ -111,9 +114,6 @@ internal static class DecisionCapture
             try
             {
                 decision["map"] = FullMap(rs, loc);
-                // The lookahead map policy scales its expected HP costs by ascension (agent/strategy.py
-                // LookaheadMapStrategy.COST_BANDS); the shared serializer carries no ascension.
-                decision["ascension"] = (int)rs.AscensionLevel;
             }
             catch (Exception e)
             {
@@ -192,7 +192,7 @@ internal static class DecisionCapture
             Labels = labels,
             Fingerprint = Fingerprint.Of("map_select",
                 new object?[] { Common(rs, player) }.Concat(points.Select(p => $"{p.coord.col},{p.coord.row}"))),
-            Build = WithFullMap(rs, loc, WithPotionSlots(player,
+            Build = WithFullMap(rs, loc, WithPotionSlots(rs, player,
                 () => DecisionSerializer.MapSelect(rs, points.Select(DecisionSerializer.MapChoice).ToList(), loc))),
             Choices = points.Cast<object>().ToList(),
         };
@@ -215,7 +215,7 @@ internal static class DecisionCapture
             Fingerprint = Fingerprint.Of("card_reward",
                 new object?[] { Common(rs, player), canSkip }.Concat(cards.Select(CardKey))),
             // gold_earned: the real game gives no pre-combat gold snapshot; greedy does not read it.
-            Build = WithPotionSlots(player, () => DecisionSerializer.CardReward(cards, canSkip, null, rs, loc)),
+            Build = WithPotionSlots(rs, player, () => DecisionSerializer.CardReward(cards, canSkip, null, rs, loc)),
             Choices = cards.Cast<object>().ToList(),
         };
     }
@@ -247,7 +247,7 @@ internal static class DecisionCapture
             Kind = CaptureKind.Advise, Screen = screen, Header = Header("card_select", rs, player), Labels = labels,
             Fingerprint = Fingerprint.Of("card_select",
                 new object?[] { screen, min, max, Common(rs, player) }.Concat(cards.Select(CardKey))),
-            Build = WithPotionSlots(player, () => DecisionSerializer.CardSelect(cards, min, max, player, rs, loc)),
+            Build = WithPotionSlots(rs, player, () => DecisionSerializer.CardSelect(cards, min, max, player, rs, loc)),
             Choices = cards.Cast<object>().ToList(),
         };
     }
@@ -268,7 +268,7 @@ internal static class DecisionCapture
             Header = Header("bundle_select", rs, player), Labels = labels,
             Fingerprint = Fingerprint.Of("bundle_select",
                 new object?[] { Common(rs, player) }.Concat(bundles.Select(x => string.Join(",", x.Select(CardKey))))),
-            Build = WithPotionSlots(player, () => DecisionSerializer.BundleSelect(bundles, player, rs, loc)),
+            Build = WithPotionSlots(rs, player, () => DecisionSerializer.BundleSelect(bundles, player, rs, loc)),
             Choices = bundles.Cast<object>().ToList(),
         };
     }
@@ -289,7 +289,7 @@ internal static class DecisionCapture
             Fingerprint = Fingerprint.Of("event_choice",
                 new object?[] { Common(rs, player), ev.Id.Entry, ev.Description?.LocEntryKey }
                     .Concat(options.Select(o => $"{o.TextKey}#{o.IsLocked}#{o.WasChosen}"))),
-            Build = WithPotionSlots(player, () => DecisionSerializer.EventChoice(ev, rs, loc)),
+            Build = WithPotionSlots(rs, player, () => DecisionSerializer.EventChoice(ev, rs, loc)),
             Choices = options.Cast<object>().ToList(),
         };
     }
@@ -308,7 +308,7 @@ internal static class DecisionCapture
             Labels = labels,
             Fingerprint = Fingerprint.Of("rest_site",
                 new object?[] { Common(rs, player) }.Concat(options.Select(o => $"{o.OptionId}#{o.IsEnabled}"))),
-            Build = WithPotionSlots(player, () => DecisionSerializer.RestSite(options, rs, loc)),
+            Build = WithPotionSlots(rs, player, () => DecisionSerializer.RestSite(options, rs, loc)),
             Choices = options.Cast<object>().ToList(),
         };
     }
@@ -333,7 +333,7 @@ internal static class DecisionCapture
             Kind = CaptureKind.Advise, Screen = nameof(NMerchantRoom), Header = Header("shop", rs, player),
             Labels = labels,
             Fingerprint = Fingerprint.Of("shop", new object?[] { Common(rs, player) }.Concat(stock)),
-            Build = WithPotionSlots(player, () => DecisionSerializer.Shop(inv, player, rs, loc)),
+            Build = WithPotionSlots(rs, player, () => DecisionSerializer.Shop(inv, player, rs, loc)),
             Choices = cardEntries.Cast<object>().ToList(), Inventory = inv,
         };
     }
