@@ -11,6 +11,11 @@ DOTNET="${DOTNET:-$HOME/.dotnet-arm64/dotnet}"
 
 "$DOTNET" build "$ROOT/src/Sts2Advisor/Sts2Advisor.csproj" -c Release -p:Sts2DataDir="$DATA_DIR"
 OUT="$ROOT/src/Sts2Advisor/bin/Release/net9.0"
+# Overwriting the DLL the game has loaded corrupts it, so refuse while the game runs (override: STS2_INSTALL_WHILE_RUNNING=1).
+if [ "${STS2_INSTALL_WHILE_RUNNING:-}" != "1" ] && pgrep -f 'SlayTheSpire2.app/Contents/MacOS/[S]lay the Spire 2' >/dev/null; then
+  echo "Slay the Spire 2 is running: overwriting the loaded Sts2Advisor.dll corrupts it (BadImageFormatException 'Bad IL range' on every not-yet-JIT-compiled method). Quit the game first (campaign.json \"command\": \"quit\"), then re-run." >&2
+  exit 1
+fi
 mkdir -p "$MODS_DIR"
 cp "$OUT/Sts2Advisor.dll" "$OUT/Sts2Advisor.json" "$MODS_DIR/"
 
