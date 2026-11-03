@@ -509,3 +509,185 @@ def test_potion_swap_leaves_advise_alone(live_server):
     with pytest.raises(urllib.error.HTTPError) as err:
         _post_json(port, "/nope", {})
     assert err.value.code == 404
+
+
+# --- hot reload (--reload-on-commit) ---------------------------------------------------------
+
+@pytest.mark.parametrize("start,head,dirty,expected", [
+    ("aaa", "aaa", False, "none"),
+    ("aaa", "aaa", True, "none"),       # edits without a new commit never reload
+    ("aaa", "", False, "none"),         # git unreadable: stay put
+    ("aaa", "bbb", False, "reload"),
+    ("aaa", "bbb", True, "wait_dirty"),
+])
+def test_reload_decision(start, head, dirty, expected):
+    assert advisor_server.reload_decision(start, head, dirty) == expected
+
+
+class _FakeGit:
+    def __init__(self, head, status=""):
+        self.head, self.status, self.calls = head, status, []
+
+    def __call__(self, args):
+        self.calls.append(list(args))
+        return self.head if args[0] == "rev-parse" else self.status
+
+
+def _reloader(git, inflight=None, execv=None, logs=None):
+    logs = [] if logs is None else logs
+    execs = []
+    r = advisor_server.HotReloader(
+        inflight or advisor_server.InFlight(), "a" * 40, git=git,
+        execv=execv or (lambda exe, argv: execs.append((exe, argv))),
+        argv=["agent/advisor_server.py", "--port", "8767", "--reload-on-commit"],
+        log=logs.append)
+    r.execs, r.logs = execs, logs
+    return r
+
+
+def test_hot_reload_does_nothing_while_head_is_unchanged():
+    git = _FakeGit("a" * 40, status=" M agent/combat_env.py")
+    r = _reloader(git)
+    assert r.check() == "none" and r.execs == [] and r.logs == []
+    assert git.calls == [["rev-parse", "HEAD"]]  # no status call until HEAD moves
+
+
+def test_hot_reload_execs_itself_with_the_same_argv_on_a_new_clean_commit():
+    git = _FakeGit("b" * 40)
+    r = _reloader(git)
+    assert r.check() == "reload"
+    assert r.execs == [(sys.executable, [sys.executable, "agent/advisor_server.py", "--port", "8767",
+                                         "--reload-on-commit"])]
+    assert r.logs == ["hot reload: aaaaaaa -> bbbbbbb"]
+    status = [c for c in git.calls if c[0] == "status"][0]
+    assert status[:3] == ["status", "--porcelain", "--untracked-files=no"]
+    assert status[status.index("--") + 1:] == list(advisor_server.RELOAD_PATHS)
+
+
+def test_hot_reload_waits_when_the_tree_is_dirty_and_logs_once_per_head():
+    git = _FakeGit("b" * 40, status=" M agent/greedy_trace.py")
+    r = _reloader(git)
+    assert r.check() == "wait_dirty" and r.check() == "wait_dirty"
+    assert r.execs == [] and len(r.logs) == 1 and "uncommitted" in r.logs[0]
+    git.status = ""  # committed or reverted: the next poll reloads
+    assert r.check() == "reload" and len(r.execs) == 1
+    git.head, git.status = "c" * 40, " M data/x.json"
+    assert r.check() == "wait_dirty" and len(r.logs) == 3  # hot reload line + a new HEAD logs again
+
+
+def test_hot_reload_waits_for_the_request_in_flight():
+    inflight = advisor_server.InFlight()
+    r = _reloader(_FakeGit("b" * 40), inflight=inflight)
+    with inflight:
+        assert inflight.count == 1
+        assert r.check() == "busy" and r.execs == [] and r.logs == []
+    assert inflight.count == 0
+    assert r.check() == "reload" and len(r.execs) == 1
+
+
+def test_a_request_arriving_during_the_exec_waits_for_it():
+    inflight = advisor_server.InFlight()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_exec(exe, argv):
+        entered.set()
+        release.wait(5)
+
+    r = _reloader(_FakeGit("b" * 40), inflight=inflight, execv=slow_exec)
+    t = threading.Thread(target=r.check)
+    t.start()
+    assert entered.wait(5)
+    got_in = threading.Event()
+
+    def request():
+        with inflight:
+            got_in.set()
+
+    q = threading.Thread(target=request)
+    q.start()
+    assert not got_in.wait(0.2)  # held back while the exec is under way
+    release.set()
+    t.join(5), q.join(5)
+    assert got_in.is_set()
+
+
+def test_a_failing_exec_keeps_the_service_and_retries_next_poll():
+    def broken(exe, argv):
+        raise OSError("no such file")
+    r = _reloader(_FakeGit("b" * 40), execv=broken)
+    assert r.check() == "reload"
+    assert any("hot reload failed" in m for m in r.logs)
+    assert r.check() == "reload"  # still on the old HEAD, so it tries again
+
+
+def test_handlers_count_as_in_flight(live_server):
+    server, port = live_server
+    seen = []
+    orig = advisor_server._Handler._get
+
+    def spy(self):
+        seen.append(self.server.inflight.count)
+        return orig(self)
+
+    advisor_server._Handler._get = spy
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5).read()
+    finally:
+        advisor_server._Handler._get = orig
+    assert seen == [1] and server.inflight.count == 0
+
+
+def test_main_starts_the_reloader_only_with_the_flag(monkeypatch):
+    started = []
+
+    class Fake:
+        def __init__(self, inflight, start_head):
+            started.append(start_head)
+
+        def start(self):
+            pass
+
+    class Stop(Exception):
+        pass
+
+    class FakeServer:
+        warnings, commit, warmup_s = [], "x", 0.0
+        server_address = ("127.0.0.1", 1)
+        inflight = advisor_server.InFlight()
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(advisor_server, "HotReloader", Fake)
+    monkeypatch.setattr(advisor_server, "make_server", lambda port: FakeServer())
+    monkeypatch.setattr(advisor_server, "run_git", lambda args, root=advisor_server.ROOT: "f" * 40)
+    advisor_server.main(["--port", "0"])
+    assert started == []
+    advisor_server.main(["--port", "0", "--reload-on-commit"])
+    assert started == ["f" * 40]
+
+
+def test_a_real_git_repo_reports_head_and_status(tmp_path):
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t")
+    def git(*a):
+        subprocess.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, env=env)
+    git("init", "-q")
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "agent" / "a.py").write_text("x = 1\n")
+    git("add", "."), git("commit", "-qm", "one")
+    run = lambda args: advisor_server.run_git(args, str(tmp_path))
+    head = run(["rev-parse", "HEAD"])
+    assert len(head) == 40
+    paths = ["--", *advisor_server.RELOAD_PATHS]
+    assert run(["status", "--porcelain", "--untracked-files=no", *paths]) == ""
+    (tmp_path / "agent" / "a.py").write_text("x = 2\n")
+    assert run(["status", "--porcelain", "--untracked-files=no", *paths]) != ""
+    (tmp_path / "agent" / "scratch.py").write_text("y\n")  # untracked files do not count
+    git("checkout", "--", "agent/a.py")
+    assert run(["status", "--porcelain", "--untracked-files=no", *paths]) == ""
+    assert advisor_server.run_git(["rev-parse", "HEAD"], str(tmp_path / "nope")) == ""

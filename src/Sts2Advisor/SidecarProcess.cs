@@ -49,6 +49,9 @@ internal static class SidecarProcess
             info.ArgumentList.Add("--port");
             info.ArgumentList.Add(config.Port.ToString());
             info.ArgumentList.Add("--exit-on-stdin-eof");
+            // Hot reload: the service re-executes itself (same pipe, same env) when a policy commit lands
+            // in the repo, so the running game picks it up without a restart.
+            info.ArgumentList.Add("--reload-on-commit");
             _process = Process.Start(info)!;
             _process.EnableRaisingEvents = true;
             _process.Exited += OnExited;

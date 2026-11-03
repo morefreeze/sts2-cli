@@ -23,6 +23,12 @@ NaN/Infinity: a trace that cannot be encoded strictly becomes "no advice".
 `--exit-on-stdin-eof`: exit when stdin reaches EOF. The mod starts the service
 with a piped stdin it never writes to, so the pipe closes when the game process
 dies for any reason (a crash included) and the service does not outlive it.
+
+`--reload-on-commit`: hot reload. Every RELOAD_INTERVAL seconds a daemon thread compares
+git HEAD with the HEAD at startup; once it moved and agent/, python/ and data/ hold no
+uncommitted change, the service waits for the request in flight (if any), logs
+`hot reload: <old> -> <new>` and re-executes itself (same argv, same env, same stdin
+pipe), so a policy commit is live in the running game without restarting it.
 """
 import os
 
@@ -52,6 +58,9 @@ from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, GreedyTrace,  # noqa: E402
                                 behavior_env_is_default, reset_greedy_context)
 
 DEFAULT_PORT = 8767
+RELOAD_INTERVAL = 30  # seconds between HEAD checks (--reload-on-commit)
+# Paths whose uncommitted edits must never be served: everything this process imports or reads.
+RELOAD_PATHS = ("agent/", "python/", "data/")
 MAX_BODY = 4 * 1024 * 1024  # a decision JSON is a few KB; this only bounds abuse
 CLIENT_TIMEOUT = 5  # seconds; requests are served one at a time, so a stalled client must not hold the line
 ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
@@ -178,6 +187,14 @@ class _Handler(BaseHTTPRequestHandler):
             super().log_request(code, size)
 
     def do_GET(self):
+        with self.server.inflight:
+            self._get()
+
+    def do_POST(self):
+        with self.server.inflight:
+            self._post()
+
+    def _get(self):
         try:
             if self.path != "/health":
                 return self._send(404, {"error": "not found"})
@@ -186,7 +203,7 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._fail(exc)
 
-    def do_POST(self):
+    def _post(self):
         try:
             if self.path not in ("/advise", "/potion_swap"):
                 return self._send(404, {"error": "not found"})
@@ -244,6 +261,37 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class InFlight:
+    """Counts requests being handled. `run_if_idle(fn)` runs fn while holding the lock only when
+    nothing is in flight; a request that arrives meanwhile waits at `with guard:` until fn
+    returns (for a reload fn never returns: the process image is replaced)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def __enter__(self):
+        with self._lock:
+            self._count += 1
+        return self
+
+    def __exit__(self, *exc):
+        with self._lock:
+            self._count -= 1
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+    def run_if_idle(self, fn) -> bool:
+        with self._lock:
+            if self._count:
+                return False
+            fn()
+            return True
+
+
 class _Server(HTTPServer):
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
@@ -259,6 +307,77 @@ def _git_commit() -> str:
                               capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
     except (OSError, subprocess.SubprocessError):
         return "unknown"
+
+
+def run_git(args, root: str = ROOT) -> str:
+    """stdout of `git -C root <args>`; "" when git is missing or fails (no lock files taken)."""
+    try:
+        done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=10,
+                              env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def reload_decision(start_head: str, head: str, dirty: bool) -> str:
+    """"none" (HEAD unchanged or unreadable), "wait_dirty" (moved, but the served code has
+    uncommitted edits) or "reload"."""
+    if not head or head == start_head:
+        return "none"
+    return "wait_dirty" if dirty else "reload"
+
+
+class HotReloader:
+    """--reload-on-commit. check() is one poll; start() runs it every `interval` seconds on a
+    daemon thread. `git(args) -> stdout` and `execv` are injectable for tests."""
+
+    def __init__(self, inflight: InFlight, start_head: str, git=run_git, execv=os.execv,
+                 argv=None, log=None, interval: float = RELOAD_INTERVAL):
+        self.inflight = inflight
+        self.start_head = start_head
+        self.git = git
+        self.execv = execv
+        self.argv = [sys.executable] + (sys.argv if argv is None else argv)
+        self.log = log or (lambda msg: print(f"[advisor_server] {msg}", file=sys.stderr, flush=True))
+        self.interval = interval
+        self._dirty_logged_for = None
+
+    def check(self) -> str:
+        """One poll. Returns the decision; "reload" also means the request guard was idle and the
+        exec was attempted (a real execv does not return; if it raises, the old image keeps
+        serving and the next poll retries)."""
+        head = self.git(["rev-parse", "HEAD"])
+        # Cheap first: no need to ask about the tree while HEAD has not moved.
+        dirty = bool(head and head != self.start_head
+                     and self.git(["status", "--porcelain", "--untracked-files=no", "--", *RELOAD_PATHS]))
+        decision = reload_decision(self.start_head, head, dirty)
+        if decision == "wait_dirty":
+            if self._dirty_logged_for != head:  # once per new HEAD, not every 30 s
+                self._dirty_logged_for = head
+                self.log(f"HEAD moved {self.start_head[:7]} -> {head[:7]} but {' '.join(RELOAD_PATHS)} "
+                         "have uncommitted changes; keeping the running code until they are committed")
+        elif decision == "reload":
+            def go():
+                self.log(f"hot reload: {self.start_head[:7]} -> {head[:7]}")
+                try:
+                    self.execv(sys.executable, self.argv)
+                except OSError as exc:
+                    self.log(f"hot reload failed, keeping the running code: {exc}")
+            if not self.inflight.run_if_idle(go):
+                return "busy"
+        return decision
+
+    def start(self) -> threading.Thread:
+        def run():
+            while True:
+                time.sleep(self.interval)
+                try:
+                    self.check()
+                except Exception as exc:  # never let the watcher die silently
+                    self.log(f"hot reload check failed: {type(exc).__name__}: {exc}")
+        thread = threading.Thread(target=run, name="hot-reload", daemon=True)
+        thread.start()
+        return thread
 
 
 def watch_stdin_eof(stream=None, exit_fn=os._exit) -> threading.Thread:
@@ -289,6 +408,7 @@ def make_server(port: int, greedy=None, env=None, warm: bool = True) -> HTTPServ
     warmup_s = warm_up(greedy) if warm else None
     server = _Server(("127.0.0.1", port), _Handler)
     server.greedy = greedy
+    server.inflight = InFlight()
     server.warmup_s = warmup_s
     server.warnings = knob_warnings(os.environ if env is None else env)
     server.commit = _git_commit()
@@ -300,7 +420,10 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--exit-on-stdin-eof", action="store_true",
                     help="exit when stdin reaches EOF (the parent process died)")
+    ap.add_argument("--reload-on-commit", action="store_true",
+                    help="re-exec the service when git HEAD moves and agent/ python/ data/ are clean")
     args = ap.parse_args(argv)
+    start_head = run_git(["rev-parse", "HEAD"]) if args.reload_on_commit else ""
     if args.exit_on_stdin_eof:
         watch_stdin_eof()  # before the warm-up: an orphan must not sit through that either
     server = make_server(args.port)
@@ -310,6 +433,10 @@ def main(argv=None) -> int:
     print(f"Sts2Advisor advice service on http://127.0.0.1:{server.server_address[1]} "
           f"(commit {server.commit}, warm-up {server.warmup_s:.1f} s)",
           file=sys.stderr, flush=True)
+    if args.reload_on_commit and start_head:
+        HotReloader(server.inflight, start_head).start()
+        print(f"[advisor_server] hot reload on: HEAD {start_head[:7]} checked every {RELOAD_INTERVAL} s",
+              file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
