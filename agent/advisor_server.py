@@ -55,6 +55,7 @@ for _p in (ROOT, os.path.join(ROOT, "python")):
         sys.path.insert(0, _p)
 
 import play_full_run  # noqa: E402
+from agent.advice_debug import debug_info  # noqa: E402
 from agent.potion_swap import choose_potion_swap  # noqa: E402
 from agent.greedy_trace import (GREEDY_BEHAVIOR_ENV, GreedyTrace,  # noqa: E402
                                 behavior_env_is_default, reset_greedy_context)
@@ -175,13 +176,28 @@ def advise(state: dict, greedy, warnings: list) -> dict:
         return reply
     advice = dict(reply, action=action, **evidence)
     try:
-        # strict JSON only, and the WHOLE reply: a NaN/Infinity anywhere (a score,
-        # a rule value, the action) would break the mod's parser
-        json.dumps(advice, default=_json_default, allow_nan=False)
-    except (ValueError, TypeError):
+        dbg = debug_info(state, evidence)
+        if dbg is not None:
+            advice["debug"] = dbg
+    except Exception as exc:  # debug is extra: never lose the advice for it
+        advice["warnings"] = advice["warnings"] + [f"debug_raised: {type(exc).__name__}"]
+    if not _strict_json(advice) and "debug" in advice:
+        del advice["debug"]
+        advice["warnings"] = advice["warnings"] + ["debug_not_serializable"]
+    if not _strict_json(advice):
         reply["warnings"].append("trace_not_serializable")
         return reply
     return advice
+
+
+def _strict_json(obj) -> bool:
+    """Strict JSON only, and the WHOLE reply: a NaN/Infinity anywhere (a score, a rule
+    value, the action) would break the mod's parser."""
+    try:
+        json.dumps(obj, default=_json_default, allow_nan=False)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def potion_swap(request: dict):
