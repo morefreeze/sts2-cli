@@ -19,6 +19,12 @@
 - Python 3.11（服务用）。依赖见 `requirements-advisor.txt`：numpy、gymnasium、scikit-learn，都固定了版本（`deck_predictor_v2.pkl` 是 scikit-learn 的 pickle，换版本可能读不出来）。
 - git 是可选的：没有它服务照样能用，只是 `/health` 里的 commit 显示 unknown。
 
+## Steam 创意工坊
+
+这个模组在创意工坊里叫 **你玩了我玩什么**（模组 id 仍是 `Sts2Advisor`，配置和日志目录都按这个 id）。订阅它可以代替下面「复制 DLL 到 `mods\`」这一步，但建议服务照样要整个仓库、Python 环境和 `config.json`，所以下面其余步骤都要做（安装脚本仍可用来写 `config.json` 和建 `.venv`）。
+
+**别同时装两份**：订阅了创意工坊版本，就删掉 `<游戏目录>\mods\Sts2Advisor\`；用本目录的 DLL，就取消订阅。两份 id 相同，游戏只会加载其中一份，不一定是你以为的那份。
+
 ## Windows 安装
 
 1. 装 Python 3.11（python.org，勾选 py launcher 或 Add to PATH）。

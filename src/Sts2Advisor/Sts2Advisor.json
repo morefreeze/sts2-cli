@@ -1,6 +1,6 @@
 {
   "id": "Sts2Advisor",
-  "name": "Sts2Advisor",
+  "name": "你玩了我玩什么",
   "author": "morefreeze",
   "description": "Out-of-combat advice (card rewards, rest sites, events, shops, maps) with the reasons behind each pick. Combat is left to CombatSolver.",
   "version": "0.1.0",
