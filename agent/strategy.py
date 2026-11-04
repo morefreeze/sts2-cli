@@ -3,6 +3,8 @@
 Each strategy implements the same interface: choose(state, choices) -> command dict.
 Swap strategies globally via set_map_strategy() or pass directly.
 """
+import heapq
+import os
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -165,6 +167,24 @@ def _interp(curve: tuple, x: float) -> float:
     return curve[-1][1]
 
 
+LOOKAHEAD_MODELS = ("v1", "v2")
+
+
+def lookahead_model(override=None) -> str:
+    """STS2_LOOKAHEAD_MODEL: which LookaheadMapStrategy value model plans routes.
+    Blank / unset = "v1" (the shipped planner, unchanged); "v2" = gold-aware routing
+    (docs/superpowers/specs/2026-11-04-lookahead-gold-aware-routing-design.md).
+    ``override`` (the strategy's ``model=`` argument) wins over the environment.
+    Anything else raises ValueError naming the variable."""
+    raw = override if override is not None else os.environ.get("STS2_LOOKAHEAD_MODEL", "")
+    value = raw.strip().lower() if isinstance(raw, str) else raw
+    if value == "":
+        return "v1"
+    if value not in LOOKAHEAD_MODELS:
+        raise ValueError(f"STS2_LOOKAHEAD_MODEL={raw!r}: want v1, v2 or blank")
+    return value
+
+
 @dataclass(frozen=True)
 class PathEval:
     """One scored route. ``value`` is higher-is-better and is the sum of ``parts``
@@ -176,6 +196,11 @@ class PathEval:
     elites: int = 0
     rests: int = 0
     p_boss: float = 1.0      # projected chance of reaching the boss alive
+    # v2 only (v1 leaves the defaults): gold paid at shops along the route, gold still
+    # held on entering the boss, and the shops on the route that were affordable
+    gold_spent: float = 0.0
+    gold_left: float = 0.0
+    shops: int = 0
 
 
 class LookaheadMapStrategy:
@@ -230,6 +255,45 @@ class LookaheadMapStrategy:
         "a6-7": ((1.7, 3.0, 5.6), (9.2, 10.8, max(13.7, 22.0)), (22.7, 33.5, max(45.3, 35.0))),
         "a8+": ((3.8, 6.3, 8.2), (14.9, 25.1, max(27.6, 22.0)), (32.6, 43.1, max(39.9, 35.0))),
     }
+
+    # ---- v2 costs (STS2_LOOKAHEAD_MODEL=v2) ----
+    # Real a8+ games 2026-11-02..04 (88 campaign runs, survivors' means): the act-3
+    # monster really costs 10.7 (n=105; the table above says 8.2) and the act-3 elite
+    # 34.3 (n=9; 27.6). Everything else, and the whole base and a6-7 bands, is as v1.
+    COST_BANDS_V2 = {
+        "base": COST_BANDS["base"],
+        "a6-7": COST_BANDS["a6-7"],
+        "a8+": ((3.8, 6.3, 10.7), (14.9, 25.1, 34.3), (32.6, 43.1, max(39.9, 35.0))),
+    }
+    # Survivors' damage relative to the all-character mean of the same (act, room
+    # type), a8+ real games: Ironclad 1.70 (n=168), Defect 0.86 (130), Regent 0.89
+    # (113), Necrobinder 0.76 (337), Silent 0.75 (20); each shrunk toward 1 by
+    # n/(n+50). Multiplies the monster and elite cost (not the boss) in the a6-7 and
+    # a8+ tables only: act 1 and ascension <= 5 use the base table, which is not
+    # multiplied. Matched by case-insensitive substring of state["character"] or
+    # state["player"]["name"] ("The Ironclad"); unknown = 1.0.
+    CHARACTER_COST_MULT = {"ironclad": 1.54, "silent": 0.93, "defect": 0.90,
+                           "regent": 0.92, "necrobinder": 0.79}
+
+    @classmethod
+    def character_multiplier(cls, character) -> float:
+        """The v2 cost multiplier of a character name / id; 1.0 when unknown."""
+        if isinstance(character, str):
+            low = character.lower()
+            for name, mult in cls.CHARACTER_COST_MULT.items():
+                if name in low:
+                    return mult
+        return 1.0
+
+    @classmethod
+    def state_character(cls, state: dict):
+        """The character name of a decision: ``character`` if it carries one, else
+        ``player.name``; None when neither is a string."""
+        ch = state.get("character")
+        if isinstance(ch, str) and ch:
+            return ch
+        name = (state.get("player") or {}).get("name")
+        return name if isinstance(name, str) and name else None
 
     # Act 1 routes with the base band at EVERY ascension: its costs and its elite
     # reward window / factor (= exactly ascension <= 5, the A/B-validated setting);
@@ -320,6 +384,33 @@ class LookaheadMapStrategy:
     SHOP_GOLD = HpAwareMapStrategy.SHOP_GOLD_THRESHOLD   # HpAware's own thresholds
     SHOP_GOLD_ACT2 = 75
 
+    # ---- v2 gold (STS2_LOOKAHEAD_MODEL=v2) ----
+    # Gold gained per room, a8+ real games, survivors' mean gold_gained: Monster 12,
+    # Elite 30, Treasure 40 (a 632-gold outlier excluded), Unknown 12 in acts 1-2 and
+    # 7 in act 3 (v1 gives Unknown nothing and uses GOLD_GAIN above).
+    GOLD_GAIN_V2 = {"Monster": 12.0, "Elite": 30.0, "Treasure": 40.0}
+    UNKNOWN_GOLD_V2 = (12.0, 12.0, 7.0)
+    # A shop visit spends ~70% of the gold walked in with (62-79% by band) and
+    # 340-380 per visit at 350+ gold, so the visit is capped at 400. Runs died holding
+    # 900-1146 gold and 13/47 act-3 boss entries held >= 300.
+    SHOP_SPEND_FRAC = 0.70
+    SHOP_SPEND_CAP = 400.0
+    # Points a shop is worth by gold spent: 0.08/gold to 150 (150 gold ~ 12 points, one
+    # elite relic), 0.04/gold beyond (400 gold ~ 22).
+    SHOP_VALUE_RATE = 0.08
+    SHOP_VALUE_KNEE = 150.0
+    SHOP_VALUE_RATE_HIGH = 0.04
+    # Gold still held entering the boss, per gold, by act (1, 2, 3+): below every shop
+    # rate so spending beats carrying; act-3 gold buys nothing any more.
+    LEFTOVER_GOLD_VALUE = (0.03, 0.03, 0.0)
+    N_CANDIDATES = 3          # routes listed in the v2 trace
+
+    @classmethod
+    def shop_value(cls, spend: float) -> float:
+        """Points for a shop visit that spends ``spend`` gold (v2)."""
+        return (cls.SHOP_VALUE_RATE * min(spend, cls.SHOP_VALUE_KNEE)
+                + cls.SHOP_VALUE_RATE_HIGH * max(spend - cls.SHOP_VALUE_KNEE, 0.0))
+
     MAX_ACT = 3
     TIE_EPS = 1e-9
 
@@ -329,10 +420,19 @@ class LookaheadMapStrategy:
     # PathEval.parts keys -> the trace component each becomes (negated)
     PART_KEYS = {"room_reward": "map.la_room_reward", "elite_reward": "map.la_elite_reward",
                  "elite_danger": "map.la_elite_danger", "fight_danger": "map.la_fight_danger",
-                 "boss_danger": "map.la_boss_danger", "hp_end": "map.la_hp_end"}
+                 "boss_danger": "map.la_boss_danger", "hp_end": "map.la_hp_end",
+                 "shop": "map.la_shop", "gold_left": "map.la_gold_left"}
+    # the parts v1 can produce (shop / gold_left exist only in v2)
+    V1_PART_KEYS = ("room_reward", "elite_reward", "elite_danger", "fight_danger",
+                    "boss_danger", "hp_end")
 
-    def __init__(self, fallback=None):
+    def __init__(self, fallback=None, model=None):
         self.fallback = fallback if fallback is not None else HpAwareMapStrategy()
+        # None = follow STS2_LOOKAHEAD_MODEL at each decision; "v1" / "v2" pins it
+        self.model = None if model is None else lookahead_model(model)
+
+    def _model(self) -> str:
+        return self.model if self.model is not None else lookahead_model()
 
     @staticmethod
     def rest_heal_below(floor: int) -> float:
@@ -348,20 +448,27 @@ class LookaheadMapStrategy:
         return 0.75
 
     def evaluate_path(self, path: list, hp: float, max_hp: float, gold: float,
-                      act: int, ascension=None) -> PathEval:
+                      act: int, ascension=None, model=None, character=None) -> PathEval:
         """Walk ``path`` (map nodes, first = the room entered next) from ``hp``
         and return its value. Expected HP is deterministic; the chance of dying
-        is carried along (``p``) so a risky room discounts everything after it."""
+        is carried along (``p``) so a risky room discounts everything after it.
+
+        ``model`` "v1" / "v2" (None = the strategy's own, see lookahead_model).
+        ``character`` (v2 only) is the player's name, for the cost multiplier."""
+        model = model if model is not None else self._model()
+        v2 = model == "v2"
         a = min(max(act, 1), self.MAX_ACT) - 1
         band = self.table_band(self.cost_band(ascension), a)
-        monster_cost, elite_cost, boss_cost = self.COST_BANDS[band]
+        monster_cost, elite_cost, boss_cost = (self.COST_BANDS_V2 if v2 else self.COST_BANDS)[band]
+        mult = self.character_multiplier(character) if v2 and band != "base" else 1.0
         elite_factor = self.ELITE_ACT_FACTOR[band][a]
         danger_frac, comfort_frac = self.ELITE_WINDOW[band]
         max_hp = max(float(max_hp), 1.0)
         hp = min(max(float(hp), 1.0), max_hp)
         p = 1.0
-        parts = dict.fromkeys(self.PART_KEYS, 0.0)
-        elites = rests = 0
+        parts = dict.fromkeys(self.PART_KEYS if v2 else self.V1_PART_KEYS, 0.0)
+        elites = rests = shops = 0
+        gold_spent = 0.0
         letters = []
         for node in path:
             kind = node.get("type")
@@ -370,6 +477,8 @@ class LookaheadMapStrategy:
             if kind in ("Monster", "Elite"):
                 elite = kind == "Elite"
                 cost = elite_cost[a] if elite else monster_cost[a]
+                if mult != 1.0:
+                    cost = cost * mult
                 death = _interp(self.ELITE_DEATH if elite else self.MONSTER_DEATH, hp / cost)
                 parts["elite_danger" if elite else "fight_danger"] -= p * death * self.DEATH_PENALTY
                 if elite:
@@ -382,7 +491,7 @@ class LookaheadMapStrategy:
                 p *= 1.0 - death
                 parts[reward_key] += p * reward
                 hp = max(hp - cost, 1.0)
-                gold += self.GOLD_GAIN[kind]
+                gold += (self.GOLD_GAIN_V2 if v2 else self.GOLD_GAIN)[kind]
             elif kind == "RestSite":
                 rests += 1
                 if hp / max_hp < self.rest_heal_below(floor):
@@ -391,26 +500,44 @@ class LookaheadMapStrategy:
                     parts["room_reward"] += p * self.SMITH_REWARD
             elif kind == "Shop":
                 if gold >= (self.SHOP_GOLD_ACT2 if act >= 2 else self.SHOP_GOLD):
-                    parts["room_reward"] += p * self.SHOP_REWARD
-                    gold = 0.0
+                    if v2:
+                        spend = min(self.SHOP_SPEND_FRAC * gold, self.SHOP_SPEND_CAP)
+                        parts["shop"] += p * self.shop_value(spend)
+                        gold -= spend
+                        gold_spent += spend
+                        shops += 1
+                    else:
+                        parts["room_reward"] += p * self.SHOP_REWARD
+                        gold = 0.0
             elif kind == "Treasure":
                 parts["room_reward"] += p * self.TREASURE_REWARD
-                gold += self.GOLD_GAIN["Treasure"]
+                gold += (self.GOLD_GAIN_V2 if v2 else self.GOLD_GAIN)["Treasure"]
             else:  # Unknown, and any type this table does not know (HpAware: priority 4)
                 hp = max(hp - self.UNKNOWN_COST, 1.0)
                 parts["room_reward"] += p * self.UNKNOWN_REWARD
+                if v2:
+                    gold += self.UNKNOWN_GOLD_V2[a]
         boss_death = _interp(self.BOSS_DEATH, hp / boss_cost[a])
         parts["boss_danger"] -= p * boss_death * self.DEATH_PENALTY
         parts["hp_end"] += p * self.HP_VALUE * hp
+        gold_left = 0.0
+        if v2:
+            gold_left = gold
+            parts["gold_left"] += p * self.LEFTOVER_GOLD_VALUE[a] * gold
         parts = {k: v for k, v in parts.items() if abs(v) > 1e-12}
         return PathEval(value=sum(parts.values()), parts=parts, types="".join(letters),
-                        hp_boss=hp, elites=elites, rests=rests, p_boss=p)
+                        hp_boss=hp, elites=elites, rests=rests, p_boss=p,
+                        gold_spent=gold_spent, gold_left=gold_left, shops=shops)
 
-    def _best_paths(self, state: dict, choices: list, map_json) -> list | str:
+    def _best_paths(self, state: dict, choices: list, map_json, model=None,
+                    candidates=None) -> list | str:
         """[(best PathEval, paths scored)] per choice, or the reason the map cannot
-        be used."""
+        be used. With ``candidates`` (a list, v2 trace) it is filled with the
+        N_CANDIDATES best routes over ALL choices, best first, as (PathEval, first
+        node (col, row)) -- selected while scoring, the paths are not enumerated twice."""
         if not isinstance(map_json, dict) or not map_json.get("rows"):
             return "no_map"
+        model = model if model is not None else self._model()
         index = node_index(map_json)
         player = state.get("player") or {}
         hp, max_hp = player.get("hp", 80), max(player.get("max_hp", 80), 1)
@@ -418,6 +545,9 @@ class LookaheadMapStrategy:
         act = state.get("act") or (state.get("context") or {}).get("act")
         act = act if isinstance(act, int) and not isinstance(act, bool) else 1
         ascension = self.state_ascension(state, map_json)
+        character = self.state_character(state) if model == "v2" else None
+        top = []      # min-heap of the best routes so far: worst of them at top[0]
+        seq = 0
         out = []
         for choice in choices:
             key = node_key(choice)
@@ -429,18 +559,32 @@ class LookaheadMapStrategy:
                 return "too_many_paths"
             best = None
             for path in paths:
-                scored = self.evaluate_path(path, hp, max_hp, gold, act, ascension)
+                scored = self.evaluate_path(path, hp, max_hp, gold, act, ascension,
+                                            model, character)
                 if best is None or scored.value > best.value + self.TIE_EPS:
                     best = scored
+                if candidates is not None:
+                    seq += 1
+                    # ties: lower (col, row) first, then enumeration order
+                    entry = (scored.value, -key[0], -key[1], -seq, scored, key)
+                    if len(top) < self.N_CANDIDATES:
+                        heapq.heappush(top, entry)
+                    elif entry > top[0]:
+                        heapq.heapreplace(top, entry)
             out.append((best, len(paths)))
+        if candidates is not None:
+            candidates.extend((e[4], e[5]) for e in sorted(top, reverse=True))
         return out
 
     def choose(self, state: dict, choices: list[dict], trace=None, map_json=None) -> dict:
+        model = self._model()   # a bad STS2_LOOKAHEAD_MODEL raises here, whatever the offer
         if len(choices) < 2:  # nothing to plan: HpAware takes the only node
             return self._fallback(state, choices, trace, None)
         if map_json is None:
             map_json = state.get("map")
-        planned = self._best_paths(state, choices, map_json)
+        v2 = model == "v2"
+        candidates = [] if v2 and trace is not None else None
+        planned = self._best_paths(state, choices, map_json, model, candidates)
         if isinstance(planned, str):
             return self._fallback(state, choices, trace, planned)
 
@@ -466,7 +610,10 @@ class LookaheadMapStrategy:
                     detail={"col": choices[i].get("col"), "row": choices[i].get("row"),
                             "type": choices[i].get("type"), "path": ev.types,
                             "hp_boss": round(ev.hp_boss, 1), "elites": ev.elites,
-                            "rests": ev.rests, "paths": n_paths})
+                            "rests": ev.rests, "paths": n_paths,
+                            **({"gold_spent": round(ev.gold_spent, 1),
+                                "gold_left": round(ev.gold_left, 1),
+                                "shops": ev.shops} if v2 else {})})
             band = self.cost_band(self.state_ascension(state, map_json))
             act_n = state.get("act") or (state.get("context") or {}).get("act")
             act_n = act_n if isinstance(act_n, int) and not isinstance(act_n, bool) else 1
@@ -477,10 +624,26 @@ class LookaheadMapStrategy:
             if len(tied) > 1:
                 decider = "tied"
             else:
-                gap = {k: ev.parts.get(k, 0.0) - runner.parts.get(k, 0.0) for k in self.PART_KEYS}
+                gap = {k: ev.parts.get(k, 0.0) - runner.parts.get(k, 0.0)
+                       for k in (self.PART_KEYS if v2 else self.V1_PART_KEYS)}
                 decider = max(gap, key=gap.get)
                 if gap[decider] <= self.TIE_EPS:
                     decider = "no_gap"
+            extra = {}
+            if v2:
+                character = self.state_character(state)
+                extra = dict(
+                    gold_spent=round(ev.gold_spent, 1), gold_left=round(ev.gold_left, 1),
+                    shops=ev.shops,
+                    character_mult=self.character_multiplier(character) if table != "base" else 1.0,
+                    model="v2",
+                    candidates=[{"path": c.types, "first": [first[0], first[1]],
+                                 "hp_boss_ratio": round(c.hp_boss / max_hp, 3),
+                                 "gold_spent": round(c.gold_spent, 1),
+                                 "gold_left": round(c.gold_left, 1),
+                                 "elites": c.elites, "shops": c.shops,
+                                 "value": round(c.value, 2)}
+                                for c, first in candidates])
             trace.rule("map.la_best_path", "fired", best_index=pick, tied_best=tied,
                        n_choices=len(choices), n_paths=sum(n for _, n in planned),
                        path=ev.types, elites=ev.elites, rests=ev.rests,
@@ -491,7 +654,8 @@ class LookaheadMapStrategy:
                        elite_reward_factor=self.ELITE_ACT_FACTOR[table][min(max(act_n, 1), self.MAX_ACT) - 1],
                        elite_window=list(self.ELITE_WINDOW[table]),
                        act=state.get("act") or (state.get("context") or {}).get("act"),
-                       floor=state.get("floor") or (state.get("context") or {}).get("floor"))
+                       floor=state.get("floor") or (state.get("context") or {}).get("floor"),
+                       **extra)
         return {"cmd": "action", "action": "select_map_node",
                 "args": {"col": best["col"], "row": best["row"]}}
 

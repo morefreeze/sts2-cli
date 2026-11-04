@@ -32,7 +32,7 @@ GREEDY_BEHAVIOR_ENV = (
     "STS2_CARD_PICK_TEMP", "STS2_MC_ROLLOUT", "STS2_VANTOM_REST_HEAL",
     "STS2_ARCHETYPE", "STS2_BOSS_READINESS_LIFT", "STS2_CTX_WEIGHTS",
     "STS2_OVERRIDE_DELTA_CAP", "STS2_PREDICTOR_TARGET", "STS2_MC_SMART_THRESH",
-    "STS2_MAP_POLICY", "STS2_PRE_BOSS_HEAL",
+    "STS2_MAP_POLICY", "STS2_PRE_BOSS_HEAL", "STS2_LOOKAHEAD_MODEL",
 )
 
 # What each GREEDY_BEHAVIOR_ENV variable means when it is NOT set: the string the
@@ -58,6 +58,7 @@ GREEDY_BEHAVIOR_DEFAULTS = {
     "STS2_MC_SMART_THRESH": "0.15",  # card_scoring._MC_SMART_THRESHOLD
     "STS2_MAP_POLICY": "",           # combat_env._map_policy: hpaware (HpAwareMapStrategy)
     "STS2_PRE_BOSS_HEAL": "",        # strategy.pre_boss_heal_threshold: 0.85 (blank = unset)
+    "STS2_LOOKAHEAD_MODEL": "",      # strategy.lookahead_model: v1 (no gold model)
 }
 
 
@@ -174,6 +175,8 @@ TRACE_KEYS = frozenset({
     # and the cost components of a route (the option score is their sum)
     "map.la_best_path", "map.la_fallback", "map.la_room_reward", "map.la_elite_reward",
     "map.la_elite_danger", "map.la_fight_danger", "map.la_boss_danger", "map.la_hp_end",
+    # STS2_LOOKAHEAD_MODEL=v2 only: gold spent at shops on the route, gold left at the boss
+    "map.la_shop", "map.la_gold_left",
 })
 
 RULE_OUTCOMES = ("fired", "skipped")

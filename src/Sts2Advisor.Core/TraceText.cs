@@ -117,6 +117,8 @@ public static class TraceText
         ["map.la_fight_danger"] = ("普通战斗死亡风险", "Normal fight death risk"),
         ["map.la_boss_danger"] = ("进 Boss 时生命值不足的风险", "Boss entry death risk"),
         ["map.la_hp_end"] = ("到 Boss 时的生命值", "HP at the boss"),
+        ["map.la_shop"] = ("商店消费", "Shop spending"),
+        ["map.la_gold_left"] = ("到 Boss 时剩余的金币", "Gold left at the boss"),
     };
 
     /// <summary>Rule values that are words, not numbers.</summary>
@@ -131,6 +133,8 @@ public static class TraceText
         ["fight_danger"] = ("普通战斗死亡风险", "normal fight death risk"),
         ["boss_danger"] = ("进 Boss 时生命值不足的风险", "boss entry death risk"),
         ["hp_end"] = ("到 Boss 时的生命值", "HP at the boss"),
+        ["shop"] = ("商店消费", "shop spending"),
+        ["gold_left"] = ("到 Boss 时剩余的金币", "gold left at the boss"),
         ["no_gap"] = ("没有明显差别", "no clear gap"),
         ["tied"] = ("并列（按优先级）", "a tie (priority decides)"),
         // map.la_fallback `reason`

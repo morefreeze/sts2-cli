@@ -868,3 +868,66 @@ def test_the_route_arm_ignores_sts2_map_policy_in_the_environment(monkeypatch):
     monkeypatch.setenv("STS2_MAP_POLICY", "not-a-policy")
     result, _ = _run(monkeypatch, [{"type": "ready"}, _corridor_decision(), _game_over(2)])
     assert result["route_plans"] == 1 and result["route_fallbacks"] == 0
+
+
+# ---- the run's ascension rides on the copy of the map decision ----
+
+@pytest.mark.parametrize("policy", ["hpaware", "lookahead"])
+def test_route_via_greedy_passes_the_ascension_without_mutating_the_state(policy):
+    seen = []
+
+    def greedy(state, trace=None, *, map_policy=None):
+        seen.append((state, map_policy))
+        return {"cmd": "action", "action": "select_map_node", "args": {"col": 0, "row": 1}}
+
+    state = _ms(1)
+    before = json.dumps(state, sort_keys=True)
+    reply = MAP_REPLY if policy == "lookahead" else None
+    play_full_run._route_via_greedy(greedy, state, policy, reply, 9)
+    given, mp = seen[0]
+    assert mp == policy and given["ascension"] == 9
+    assert ("map" in given) == (reply is not None)
+    assert given is not state and "ascension" not in state and "map" not in state
+    assert json.dumps(state, sort_keys=True) == before
+    # ascension 0 is a value too (a0 runs use the base band either way)
+    play_full_run._route_via_greedy(greedy, state, policy, reply, 0)
+    assert seen[1][0]["ascension"] == 0
+    # no ascension given: the decision is passed as it was (no copy, no key)
+    play_full_run._route_via_greedy(greedy, state, policy, None)
+    assert seen[2][0] is state
+
+
+@pytest.mark.parametrize("policy", ["hpaware", "lookahead"])
+def test_the_run_passes_its_ascension_to_the_route_arm(monkeypatch, policy):
+    greedy = _route_env(monkeypatch, policy,
+                        _FakeGreedy(lambda s: (1, s["choices"][0]["row"])))
+    script = [{"type": "ready"}, _ms(1)]
+    if policy == "lookahead":
+        script.append(MAP_REPLY)
+    script.append(_game_over(2))
+    _run(monkeypatch, script, ascension=9)
+    state, mp = greedy.calls[0]
+    assert mp == policy and state["ascension"] == 9
+    assert ("map" in state) == (policy == "lookahead")
+    # the default ascension is 0 and is passed as well
+    greedy.calls.clear()
+    _run(monkeypatch, [s for s in script], ascension=0)
+    assert greedy.calls[0][0]["ascension"] == 0
+
+
+def test_the_real_lookahead_uses_the_a8_band_through_the_harness(monkeypatch):
+    """With the run's ascension on the decision the headless lookahead arm plans with
+    the a6+ band (cost_band in its trace), as the in-game advisor does."""
+    monkeypatch.setenv("STS2_ROUTE_POLICY", "lookahead")
+    monkeypatch.setenv("STS2_OOC_POLICY", "naive")
+    monkeypatch.delenv("STS2_MAP_POLICY", raising=False)
+    monkeypatch.delenv("STS2_LOOKAHEAD_MODEL", raising=False)
+    from agent import strategy
+    bands = []
+    orig = strategy.LookaheadMapStrategy.cost_band
+    monkeypatch.setattr(strategy.LookaheadMapStrategy, "cost_band",
+                        staticmethod(lambda a: bands.append(a) or orig(a)))
+    script = [{"type": "ready"}, _corridor_decision(), _corridor_map_reply(), _game_over(2)]
+    result, _ = _run(monkeypatch, script, ascension=9)
+    assert result["route_plans"] == 1 and result["route_fallbacks"] == 0
+    assert 9 in bands

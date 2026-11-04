@@ -456,10 +456,12 @@ def _route_choose(map_reply: dict, state: dict, character: str, model):
     return _load_route_planner().choose_node(map_reply, state, character, model)
 
 
-def _route_via_greedy(greedy, state: dict, policy: str, map_reply=None):
+def _route_via_greedy(greedy, state: dict, policy: str, map_reply=None, ascension=None):
     """One map_select played through greedy_action under the map policy `policy`
     ("hpaware" | "lookahead"). `map_reply` (the engine's get_map reply) is attached
-    to a COPY of the pending decision as state["map"]; the decision itself is
+    to a COPY of the pending decision as state["map"], and the run's `ascension`
+    as state["ascension"] (the engine's decision carries none; the in-game mod adds
+    it, and the lookahead picks its cost band by it); the decision itself is
     untouched. Returns (command, trace) where trace is the GreedyTrace
     greedy_action filled in -- its rules say whether the lookahead planned the
     route (`map.la_best_path`) or handed it to HpAware (`map.la_fallback`).
@@ -467,7 +469,12 @@ def _route_via_greedy(greedy, state: dict, policy: str, map_reply=None):
     _repo_root_on_path()
     from agent.greedy_trace import GreedyTrace
     trace = GreedyTrace()
-    map_state = state if map_reply is None else dict(state, map=map_reply)
+    extra = {}
+    if map_reply is not None:
+        extra["map"] = map_reply
+    if ascension is not None:
+        extra["ascension"] = ascension
+    map_state = dict(state, **extra) if extra else state
     return greedy(map_state, trace=trace, map_policy=policy), trace
 
 
@@ -868,7 +875,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                     why = "greedy_action returned no node"
                     try:
                         cmd, route_trace = _route_via_greedy(route_greedy, state, route_mode,
-                                                             map_reply)
+                                                             map_reply, ascension)
                         args = (cmd or {}).get("args") or {}
                         offered = {(c["col"], c["row"]) for c in choices}
                         if (args.get("col"), args.get("row")) not in offered:
