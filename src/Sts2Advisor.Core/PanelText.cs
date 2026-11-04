@@ -102,7 +102,7 @@ public static class PanelText
         if (h.Decision == "shop")
             lines.Add(new PanelLine(T(zh, "买完会重新评估下一步", "Re-evaluated after every purchase"), LineStyle.Muted));
         lines.Add(new PanelLine(IsLookaheadMapAdvice(reply)
-            ? T(zh, "整条路线前瞻（A/B：a5 43 局 +5.4 层）", "whole-path lookahead (A/B: a5, 43 pairs, +5.4 floors)")
+            ? T(zh, "整条路线前瞻（A/B：a5 100 局 +3.0 层）", "whole-path lookahead (A/B: a5, 100 pairs, +3.0 floors)")
             : reply.Unverified
             ? T(zh, "启发式，只看下一步，未经 A/B 验证", "Heuristic, next step only, not A/B tested")
             : T(zh, "greedy 启发式打分，不是概率", "greedy heuristic scores, not probabilities"), LineStyle.Muted));

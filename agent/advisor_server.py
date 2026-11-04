@@ -72,7 +72,7 @@ ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 # Settings the advisor itself chooses (config.json -> SidecarProcess sets the env), so they are
 # not "the measured policy differs" warnings: {env var: value that is expected}. The panel
 # states the active map policy itself (its footer reads "whole-path lookahead (A/B: ...)").
-# STS2_MAP_POLICY=lookahead won its paired A/B (a5, 43 pairs, +5.42 floors, t 2.84); a value
+# STS2_MAP_POLICY=lookahead won its paired A/B (a5, 100 pairs, +3.03 floors, t 2.47); a value
 # nobody measured, or any other variable, still warns.
 #
 # STS2_CARD_QUALITY_GATE=0 (2026-11-03): in real games the act-1 gate skipped 149 of 165

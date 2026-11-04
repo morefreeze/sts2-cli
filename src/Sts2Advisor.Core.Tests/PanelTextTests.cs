@@ -448,9 +448,9 @@ public class PanelTextTests
         var header = new DecisionHeader("map_select", 1, 8, 1, 75, 80, 40);
         var labels = new Dictionary<string, string> { ["node:0"] = "敌人 (1,4)", ["node:1"] = "精英 (3,4)" };
         var reply = LookaheadMapReply("map.la_best_path");
-        Assert.Equal(new PanelLine("整条路线前瞻（A/B：a5 43 局 +5.4 层）", LineStyle.Muted),
+        Assert.Equal(new PanelLine("整条路线前瞻（A/B：a5 100 局 +3.0 层）", LineStyle.Muted),
                      PanelText.Render(header, reply, labels, zh: true)[^1]);
-        Assert.Equal(new PanelLine("whole-path lookahead (A/B: a5, 43 pairs, +5.4 floors)", LineStyle.Muted),
+        Assert.Equal(new PanelLine("whole-path lookahead (A/B: a5, 100 pairs, +3.0 floors)", LineStyle.Muted),
                      PanelText.Render(header, reply, labels, zh: false)[^1]);
     }
 
