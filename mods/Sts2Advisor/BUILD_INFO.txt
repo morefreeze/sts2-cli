@@ -1,0 +1,10 @@
+Sts2Advisor prebuilt plugin
+mod version:   0.1.0
+source commit: eb46c52c08d4f26e1b4ef93531c4ff042d2a5624
+game version:  v0.111.0 (game commit 41cef1ea)
+built:         2026-11-04T06:52:42Z (UTC)
+configuration: Release, net9.0, built against the Steam sts2.dll / GodotSharp.dll / 0Harmony.dll of the game version above
+sha256:        607711deb456ac47a1c9921e89b4fb7e2ba96f683e902452aa58596ebf2c3d23  Sts2Advisor.dll
+
+Install: tools/install_advisor_mod.ps1 (Windows) or tools/install_advisor_mod.sh (macOS). See README.md.
+Refresh:  tools/package_advisor_mod.sh
