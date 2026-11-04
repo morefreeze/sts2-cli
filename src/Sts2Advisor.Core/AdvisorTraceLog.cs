@@ -25,12 +25,17 @@ public sealed class AdvisorTraceLog
     private readonly string _path;
     private readonly long _maxBytes;
     private readonly object _gate = new();
+    private readonly Func<string?>? _runInfoJson;
     private int _dropped;
 
-    public AdvisorTraceLog(string path, long maxBytes = DefaultMaxBytes)
+    /// <param name="runInfoJson">Optional provider of the run identity JSON written as <c>"run"</c> on every line
+    /// (see <see cref="RunIdentity"/>). Append runs on a background thread, so the provider must only read a
+    /// snapshot (a volatile string), never game state. Null, an exception or invalid JSON just omit the key.</param>
+    public AdvisorTraceLog(string path, long maxBytes = DefaultMaxBytes, Func<string?>? runInfoJson = null)
     {
         _path = path;
         _maxBytes = maxBytes;
+        _runInfoJson = runInfoJson;
         try { EnsureDirectory(); }
         catch (Exception) { /* retried on every Append; a missing log must not stop the mod loading */ }
     }
@@ -44,7 +49,7 @@ public sealed class AdvisorTraceLog
     {
         try
         {
-            var line = BuildLine(decision, stateJson, replyJson, error, autopilotStep);
+            var line = BuildLine(decision, stateJson, replyJson, error, autopilotStep, ReadRunInfo());
             lock (_gate)
             {
                 EnsureDirectory();
@@ -55,6 +60,22 @@ public sealed class AdvisorTraceLog
         catch (Exception)
         {
             Interlocked.Increment(ref _dropped);
+        }
+    }
+
+    private string? ReadRunInfo()
+    {
+        if (_runInfoJson == null) return null;
+        try
+        {
+            var json = _runInfoJson();
+            if (json == null) return null;
+            using (JsonDocument.Parse(json)) { }  // invalid JSON -> no run key, the line is still written
+            return json;
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 
@@ -86,7 +107,7 @@ public sealed class AdvisorTraceLog
     /// <summary>One compact line. The state and reply are parsed and re-written rather than pasted
     /// in raw, so invalid JSON throws here (before anything reaches the file) and a pretty-printed
     /// input still stays on one line.</summary>
-    private static string BuildLine(string decision, string stateJson, string? replyJson, string? error, int? autopilotStep)
+    private static string BuildLine(string decision, string stateJson, string? replyJson, string? error, int? autopilotStep, string? runJson)
     {
         using var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer, WriterOptions))
@@ -94,6 +115,11 @@ public sealed class AdvisorTraceLog
             w.WriteStartObject();
             w.WriteString("ts", DateTime.UtcNow.ToString("O"));
             w.WriteString("decision", decision);
+            if (runJson != null)
+            {
+                w.WritePropertyName("run");
+                WriteJson(w, runJson);
+            }
             w.WritePropertyName("state");
             WriteJson(w, stateJson);
             w.WritePropertyName("reply");

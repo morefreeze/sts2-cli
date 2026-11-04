@@ -212,4 +212,71 @@ public class AdvisorTraceLogTests
         using var second = JsonDocument.Parse(lines[1]);
         Assert.False(second.RootElement.TryGetProperty("autopilot", out _));
     }
+
+    private static JsonDocument OnlyLine(string path)
+    {
+        var lines = File.ReadAllLines(path);
+        Assert.Single(lines);
+        return JsonDocument.Parse(lines[0]);
+    }
+
+    [Fact]
+    public void RunProviderJsonIsWrittenAsTheRunObjectAfterDecision()
+    {
+        var path = NewPath();
+        var log = new AdvisorTraceLog(path, runInfoJson: () => RunIdentity.ToJson(1730000000, "ABC123", "IRONCLAD", 7));
+        log.Append("shop", """{"decision": "shop"}""", null, null);
+        using var doc = OnlyLine(path);
+        var run = doc.RootElement.GetProperty("run");
+        Assert.Equal(1730000000, run.GetProperty("start_time").GetInt64());
+        Assert.Equal("ABC123", run.GetProperty("seed").GetString());
+        Assert.Equal("IRONCLAD", run.GetProperty("character").GetString());
+        Assert.Equal(7, run.GetProperty("ascension").GetInt32());
+        var names = doc.RootElement.EnumerateObject().Select(p => p.Name).ToList();
+        Assert.Equal(names.IndexOf("decision") + 1, names.IndexOf("run"));
+    }
+
+    [Fact]
+    public void NoRunKeyWithoutAProviderOrWhenItReturnsNull()
+    {
+        var withoutProvider = NewPath();
+        new AdvisorTraceLog(withoutProvider).Append("shop", """{"a": 1}""", null, null);
+        using (var doc = OnlyLine(withoutProvider))
+            Assert.False(doc.RootElement.TryGetProperty("run", out _));
+
+        var nullProvider = NewPath();
+        new AdvisorTraceLog(nullProvider, runInfoJson: () => null).Append("shop", """{"a": 1}""", null, null);
+        using (var doc = OnlyLine(nullProvider))
+            Assert.False(doc.RootElement.TryGetProperty("run", out _));
+    }
+
+    [Fact]
+    public void ThrowingOrInvalidProviderStillWritesTheLineWithoutRun()
+    {
+        var thrower = NewPath();
+        var log1 = new AdvisorTraceLog(thrower, runInfoJson: () => throw new InvalidOperationException("boom"));
+        log1.Append("shop", """{"a": 1}""", null, null);
+        using (var doc = OnlyLine(thrower))
+        {
+            Assert.False(doc.RootElement.TryGetProperty("run", out _));
+            Assert.Equal(1, doc.RootElement.GetProperty("state").GetProperty("a").GetInt32());
+        }
+        Assert.Equal(0, log1.Dropped);
+
+        var invalid = NewPath();
+        var log2 = new AdvisorTraceLog(invalid, runInfoJson: () => "{not json");
+        log2.Append("shop", """{"a": 1}""", null, null);
+        using (var doc = OnlyLine(invalid))
+            Assert.False(doc.RootElement.TryGetProperty("run", out _));
+        Assert.Equal(0, log2.Dropped);
+    }
+
+    [Fact]
+    public void PrettyPrintedRunJsonStaysOnOneLine()
+    {
+        var path = NewPath();
+        new AdvisorTraceLog(path, runInfoJson: () => "{\n \"seed\": \"X\"\n}").Append("shop", """{"a": 1}""", null, null);
+        using var doc = OnlyLine(path);
+        Assert.Equal("X", doc.RootElement.GetProperty("run").GetProperty("seed").GetString());
+    }
 }

@@ -73,7 +73,8 @@ internal static class AdvisorRuntime
     public static void Start(AdvisorConfig config, string configPath, string userDir, string? autopilotProblem)
     {
         _advisor = new SidecarAdvisor(config.Port);
-        _trace = new AdvisorTraceLog(System.IO.Path.Combine(userDir, "advisor_trace.jsonl"));
+        _trace = new AdvisorTraceLog(System.IO.Path.Combine(userDir, "advisor_trace.jsonl"), runInfoJson: () => RunSnapshot.Current);
+        CombatRecorder.Init(_trace);
         if (!Enum.TryParse(config.Hotkey, ignoreCase: true, out _hotkey))
             _hotkey = Key.F8;
         if (!Enum.TryParse(config.AutopilotHotkey, ignoreCase: true, out _autoKey))
@@ -148,6 +149,7 @@ internal static class AdvisorRuntime
         double now = Clock.Elapsed.TotalSeconds;
         PollHotkey();
         InstantMode.Tick(now);
+        RunSnapshot.Refresh();  // before the campaign's run_end line, which is written by CampaignControl.Tick
         // While the autopilot runs a late advice reply must not paint over its panel: drop them.
         DrainResults(now, discard: AutoPilotControl.IsRunning);
         CampaignControl.Tick();  // throttled to once a second inside; works with the panel hidden
