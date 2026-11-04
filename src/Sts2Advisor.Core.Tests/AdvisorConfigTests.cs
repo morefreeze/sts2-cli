@@ -329,10 +329,10 @@ public class AdvisorConfigTests
     }
 
     [Fact]
-    public void MapPolicyDefaultsToHpAware()
+    public void MapPolicyDefaultsToLookahead()
     {
-        Assert.Equal("hpaware", AdvisorConfig.Defaults.MapPolicy);
-        Assert.Equal("hpaware", AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).MapPolicy);
+        Assert.Equal("lookahead", AdvisorConfig.Defaults.MapPolicy);
+        Assert.Equal("lookahead", AdvisorConfig.Load(Write("""{"repo_path": "/r"}""")).MapPolicy);
     }
 
     [Theory]
@@ -341,12 +341,14 @@ public class AdvisorConfigTests
     [InlineData("\"look-ahead\"", "lookahead")]
     [InlineData("\"hpaware\"", "hpaware")]
     [InlineData("\"HpAware\"", "hpaware")]
-    [InlineData("\"value\"", "hpaware")]
-    [InlineData("\"\"", "hpaware")]
-    [InlineData("true", "hpaware")]
-    [InlineData("1", "hpaware")]
-    [InlineData("null", "hpaware")]
-    [InlineData("[\"lookahead\"]", "hpaware")]
+    [InlineData("\"LOOKAHEAD\"", "lookahead")]
+    [InlineData("\"garbage\"", "lookahead")]
+    [InlineData("\"value\"", "lookahead")]
+    [InlineData("\"\"", "lookahead")]
+    [InlineData("true", "lookahead")]
+    [InlineData("1", "lookahead")]
+    [InlineData("null", "lookahead")]
+    [InlineData("[\"lookahead\"]", "lookahead")]
     public void MapPolicyIsReadLeniently(string json, string expected)
     {
         Assert.Equal(expected, AdvisorConfig.Load(Write($$"""{"map_policy": {{json}}}""")).MapPolicy);
@@ -356,7 +358,7 @@ public class AdvisorConfigTests
     public void ABadMapPolicyDoesNotSpoilTheOtherKeys()
     {
         var c = AdvisorConfig.Load(Write("""{"map_policy": 7, "port": 9000, "instant_mode": true}"""));
-        Assert.Equal("hpaware", c.MapPolicy);
+        Assert.Equal("lookahead", c.MapPolicy);
         Assert.Equal(9000, c.Port);
         Assert.True(c.InstantMode);
     }

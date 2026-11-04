@@ -137,7 +137,9 @@ def test_knob_warnings_accepts_the_configured_lookahead_map_policy():
     advisor's own, A/B-measured setting, not a deviation from the measured policy."""
     assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "lookahead"}) == []
     assert advisor_server.knob_warnings({"STS2_MAP_POLICY": " Lookahead "}) == []
-    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "hpaware"}) == ["STS2_MAP_POLICY=hpaware"]
+    # hpaware is the config's opt-out (map_policy="hpaware"): chosen, so not a warning
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "hpaware"}) == []
+    assert advisor_server.knob_warnings({"STS2_MAP_POLICY": " HpAware "}) == []
     assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "value"}) == ["STS2_MAP_POLICY=value"]
     # only that one value of that one variable is exempt
     assert advisor_server.knob_warnings({"STS2_MAP_POLICY": "lookahead", "STS2_MC_ROLLOUT": "1"}) == [

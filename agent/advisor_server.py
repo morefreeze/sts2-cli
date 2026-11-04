@@ -70,7 +70,7 @@ ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 
 
 # Settings the advisor itself chooses (config.json -> SidecarProcess sets the env), so they are
-# not "the measured policy differs" warnings: {env var: value that is expected}. The panel
+# not "the measured policy differs" warnings: {env var: values that are expected}. The panel
 # states the active map policy itself (its footer reads "whole-path lookahead (A/B: ...)").
 # STS2_MAP_POLICY=lookahead won its paired A/B (a5, 100 pairs, +3.03 floors, t 2.47); a value
 # nobody measured, or any other variable, still warns.
@@ -80,7 +80,7 @@ ADVISED = frozenset(play_full_run.OOC_GREEDY_DECISIONS | {"map_select"})
 # PPO policy, pre-fix engine) predates the engine fix. The headless default stays ON until a
 # paired A/B, so the advice service sets it itself (advisor_env_defaults) -- advice here
 # differs from play_full_run on purpose.
-EXPECTED_SETTINGS = {"STS2_MAP_POLICY": "lookahead", "STS2_CARD_QUALITY_GATE": "0"}
+EXPECTED_SETTINGS = {"STS2_MAP_POLICY": ("lookahead", "hpaware"), "STS2_CARD_QUALITY_GATE": ("0",)}
 # Env the advice service defaults at startup (an explicit value in the environment wins).
 ADVISOR_ENV_DEFAULTS = {"STS2_CARD_QUALITY_GATE": "0"}
 
@@ -100,11 +100,11 @@ def advisor_env_defaults(environ=None) -> list:
 def knob_warnings(env) -> list:
     """`KEY=value` for every greedy behaviour env var set to something other than
     its default (STS2_CARD_QUALITY_GATE=1 is the default, so it is not listed) --
-    except an EXPECTED_SETTINGS value (STS2_MAP_POLICY=lookahead, the config's
+    except an EXPECTED_SETTINGS value (STS2_MAP_POLICY=lookahead|hpaware, the config's
     map_policy; STS2_CARD_QUALITY_GATE=0, the advisor's own default)."""
     return [f"{k}={env[k].strip()}" for k in GREEDY_BEHAVIOR_ENV
             if not behavior_env_is_default(k, env.get(k))
-            and env[k].strip().lower() != EXPECTED_SETTINGS.get(k)]
+            and env[k].strip().lower() not in EXPECTED_SETTINGS.get(k, ())]
 
 
 def _warmup_state() -> dict:

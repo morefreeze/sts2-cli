@@ -191,7 +191,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
   "step_hotkey": "F10",
   "step_pause_seconds": 2.5,
   "panel_language": "auto",
-  "map_policy": "hpaware"
+  "map_policy": "lookahead"
 }
 "@
     # UTF-8 without BOM.

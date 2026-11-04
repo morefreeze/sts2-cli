@@ -12,8 +12,9 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                                    PanelLanguage PanelLanguage = PanelLanguage.Auto,
                                    string MapPolicy = AdvisorConfig.DefaultMapPolicy)
 {
-    public const string DefaultMapPolicy = "hpaware";
+    public const string DefaultMapPolicy = "lookahead";
     public const string LookaheadMapPolicy = "lookahead";
+    public const string HpAwareMapPolicy = "hpaware";
 
     public const int DefaultPort = 8767;
     public const string DefaultHotkey = "F8";
@@ -51,8 +52,9 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
     /// "instant_mode" (apply the game's Instant speed once it has started) is read like "autostart" but defaults to false.
     /// "panel_language" is "auto" (follow the game's language; the default), "zh" or "en" -- see <see cref="PanelLanguageRules.Parse"/>;
     /// anything else, or a non-string, is "auto".
-    /// "map_policy" is "hpaware" (the default: route one step ahead) or "lookahead" (plan the whole path to the boss;
-    /// the sidecar gets it as STS2_MAP_POLICY) -- see <see cref="ParseMapPolicy"/>; anything else, or a non-string, is "hpaware".</summary>
+    /// "map_policy" is "lookahead" (the default since 2026-11-04: plan the whole path to the boss; the sidecar gets it
+    /// as STS2_MAP_POLICY) or "hpaware" (route one step ahead) -- see <see cref="ParseMapPolicy"/>; a missing key,
+    /// anything else, or a non-string, is "lookahead".</summary>
     public static AdvisorConfig Load(string path)
     {
         try
@@ -82,11 +84,11 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
         }
     }
 
-    /// <summary>"lookahead" (case-insensitive, trimmed; "look-ahead"/"look_ahead" too) is the whole-path policy; anything
-    /// else, null included, is the default "hpaware". Never throws: a typo must not switch the routing on or break the mod.</summary>
+    /// <summary>"hpaware" (case-insensitive, trimmed) is the one-step opt-out; anything else, null included, is the
+    /// default "lookahead" (which also covers "look-ahead"/"look_ahead"). Never throws: a typo must not break the mod.</summary>
     public static string ParseMapPolicy(string? raw) =>
-        raw?.Trim().ToLowerInvariant() is "lookahead" or "look-ahead" or "look_ahead"
-            ? LookaheadMapPolicy : DefaultMapPolicy;
+        raw?.Trim().ToLowerInvariant() is "hpaware"
+            ? HpAwareMapPolicy : DefaultMapPolicy;
 
     private static int ReadPort(JsonElement root) =>
         root.TryGetProperty("port", out var p) && p.ValueKind == JsonValueKind.Number

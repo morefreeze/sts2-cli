@@ -63,7 +63,7 @@
 | `step_pause_seconds` | `2.5` | 全托管每一步之后停多久再处理下一屏，限制在 0 到 10，0 为不停 |
 | `instant_mode` | `false` | 游戏启动后把游戏速度设为 Instant |
 | `panel_language` | `"auto"` | 面板语言：`auto`（跟游戏）、`zh`、`en` |
-| `map_policy` | `"hpaware"` | 路线策略：`hpaware`（只看下一步）或 `lookahead`（规划到 Boss 的整条路径） |
+| `map_policy` | `"lookahead"` | 路线策略：`lookahead`（默认，规划到 Boss 的整条路径）或 `hpaware`（只看下一步） |
 
 两个热键设成同一个键会禁用全托管热键（面板上的按钮仍然可用）。`map_policy` 是服务启动时读的，换了以后要结束旧的服务进程（见下）再重启游戏。
 
