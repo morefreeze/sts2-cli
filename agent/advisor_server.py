@@ -29,6 +29,8 @@ git HEAD with the HEAD at startup; once it moved and agent/, python/ and data/ h
 uncommitted change, the service waits for the request in flight (if any), logs
 `hot reload: <old> -> <new>` and re-executes itself (same argv, same env, same stdin
 pipe), so a policy commit is live in the running game without restarting it.
+Not supported on Windows (os.execv there starts a new process and exits this one): the flag is then
+ignored with a warning.
 """
 import os
 
@@ -400,6 +402,13 @@ class HotReloader:
         return thread
 
 
+def reload_supported(os_name: str | None = None) -> bool:
+    """--reload-on-commit needs a real exec(): on Windows (os.name == "nt") os.execv spawns a NEW process
+    and exits this one, so the parent (the mod, which owns the stdin pipe and watches this pid) would
+    see the service exit. Hot reload is therefore POSIX-only."""
+    return (os.name if os_name is None else os_name) != "nt"
+
+
 def watch_stdin_eof(stream=None, exit_fn=os._exit) -> threading.Thread:
     """Start a daemon thread that blocks reading `stream` (default: stdin) and calls
     exit_fn(0) at EOF. A stream that cannot be read at all counts as EOF too: the
@@ -443,7 +452,13 @@ def main(argv=None) -> int:
     ap.add_argument("--reload-on-commit", action="store_true",
                     help="re-exec the service when git HEAD moves and agent/ python/ data/ are clean")
     args = ap.parse_args(argv)
-    start_head = run_git(["rev-parse", "HEAD"]) if args.reload_on_commit else ""
+    reload_on_commit = args.reload_on_commit
+    if reload_on_commit and not reload_supported():
+        print("[advisor_server] WARNING: --reload-on-commit is not supported on Windows "
+              "(os.execv would spawn a new process and exit this one); hot reload is off, "
+              "restart the game to pick up a policy change", file=sys.stderr, flush=True)
+        reload_on_commit = False
+    start_head = run_git(["rev-parse", "HEAD"]) if reload_on_commit else ""
     gate_lines = advisor_env_defaults()  # before make_server: the warm-up and knob_warnings read os.environ
     if args.exit_on_stdin_eof:
         watch_stdin_eof()  # before the warm-up: an orphan must not sit through that either
@@ -456,7 +471,7 @@ def main(argv=None) -> int:
     print(f"Sts2Advisor advice service on http://127.0.0.1:{server.server_address[1]} "
           f"(commit {server.commit}, warm-up {server.warmup_s:.1f} s)",
           file=sys.stderr, flush=True)
-    if args.reload_on_commit and start_head:
+    if reload_on_commit and start_head:
         HotReloader(server.inflight, start_head).start()
         print(f"[advisor_server] hot reload on: HEAD {start_head[:7]} checked every {RELOAD_INTERVAL} s",
               file=sys.stderr, flush=True)

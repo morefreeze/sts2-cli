@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Sts2Advisor.Core;
 
 /// <summary>User settings, read from &lt;game user dir&gt;/Sts2Advisor/config.json
-/// (written by tools/install_advisor_mod.sh). Missing or unusable keys take the defaults.</summary>
+/// (written by tools/install_advisor_mod.sh / .ps1). Missing or unusable keys take the defaults.</summary>
 public sealed record AdvisorConfig(string RepoPath, string Python, int Port, bool Autostart, string Hotkey,
                                    string AutopilotHotkey = AdvisorConfig.DefaultAutopilotHotkey,
                                    string StepHotkey = AdvisorConfig.DefaultStepHotkey,
@@ -24,11 +24,21 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
 
     public static AdvisorConfig Defaults { get; } = new("", "", DefaultPort, true, DefaultHotkey);
 
-    /// <summary>"python" if set, else the repo's .venv/bin/python, else "".</summary>
-    public string ResolvedPython =>
-        !string.IsNullOrWhiteSpace(Python) ? Python
-        : string.IsNullOrWhiteSpace(RepoPath) ? ""
-        : Path.Combine(RepoPath, ".venv", "bin", "python");
+    /// <summary>"python" if set, else the repo's virtualenv interpreter: <c>.venv/bin/python</c> (macOS/Linux) if it exists,
+    /// else <c>.venv/Scripts/python.exe</c> (Windows) if it exists, else the bin path (so the "cannot start" log names
+    /// the conventional location); "" when neither is set.</summary>
+    public string ResolvedPython
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Python)) return Python;
+            if (string.IsNullOrWhiteSpace(RepoPath)) return "";
+            string unix = Path.Combine(RepoPath, ".venv", "bin", "python");
+            if (File.Exists(unix)) return unix;
+            string windows = Path.Combine(RepoPath, ".venv", "Scripts", "python.exe");
+            return File.Exists(windows) ? windows : unix;
+        }
+    }
 
     /// <summary>Defaults when the file is absent. Throws <see cref="JsonException"/> -- and only
     /// that -- when the file exists but is unusable: unreadable (the original exception is the

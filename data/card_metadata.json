@@ -1,0 +1,722 @@
+{
+  "AGGRESSION": {
+    "cost": 1,
+    "occurrences": 423,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 423
+    }
+  },
+  "ANGER": {
+    "cost": 0,
+    "occurrences": 7961,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 7961
+    }
+  },
+  "ARMAMENTS": {
+    "cost": 1,
+    "occurrences": 8680,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 8680
+    }
+  },
+  "ASHEN_STRIKE": {
+    "cost": 1,
+    "occurrences": 2786,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2786
+    }
+  },
+  "BARRICADE": {
+    "cost": 3,
+    "occurrences": 502,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 502
+    }
+  },
+  "BATTLE_TRANCE": {
+    "cost": 0,
+    "occurrences": 2924,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2924
+    }
+  },
+  "BLOODLETTING": {
+    "cost": 0,
+    "occurrences": 7949,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 7949
+    }
+  },
+  "BLOOD_WALL": {
+    "cost": 2,
+    "occurrences": 8133,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 8133
+    }
+  },
+  "BLUDGEON": {
+    "cost": 3,
+    "occurrences": 2771,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2771
+    }
+  },
+  "BODY_SLAM": {
+    "cost": 1,
+    "occurrences": 8778,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8778
+    }
+  },
+  "BRAND": {
+    "cost": 0,
+    "occurrences": 540,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 540
+    }
+  },
+  "BREAKTHROUGH": {
+    "cost": 1,
+    "occurrences": 7936,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 7936
+    }
+  },
+  "BULLY": {
+    "cost": 0,
+    "occurrences": 2914,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2914
+    }
+  },
+  "BURNING_PACT": {
+    "cost": 1,
+    "occurrences": 3121,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 3121
+    }
+  },
+  "CASCADE": {
+    "cost": 0,
+    "occurrences": 549,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 549
+    }
+  },
+  "CINDER": {
+    "cost": 2,
+    "occurrences": 8090,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8090
+    }
+  },
+  "COLOSSUS": {
+    "cost": 1,
+    "occurrences": 2877,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2877
+    }
+  },
+  "CONFLAGRATION": {
+    "cost": 1,
+    "occurrences": 360,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 360
+    }
+  },
+  "CRIMSON_MANTLE": {
+    "cost": 1,
+    "occurrences": 382,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 382
+    }
+  },
+  "CRUELTY": {
+    "cost": 1,
+    "occurrences": 407,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 407
+    }
+  },
+  "DARK_EMBRACE": {
+    "cost": 2,
+    "occurrences": 485,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 485
+    }
+  },
+  "DEMON_FORM": {
+    "cost": 3,
+    "occurrences": 423,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 423
+    }
+  },
+  "DISMANTLE": {
+    "cost": 1,
+    "occurrences": 2787,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2787
+    }
+  },
+  "DOMINATE": {
+    "cost": 1,
+    "occurrences": 2878,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2878
+    }
+  },
+  "DRUM_OF_BATTLE": {
+    "cost": 0,
+    "occurrences": 2977,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2977
+    }
+  },
+  "EVIL_EYE": {
+    "cost": 1,
+    "occurrences": 2785,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2785
+    }
+  },
+  "EXPECT_A_FIGHT": {
+    "cost": 2,
+    "occurrences": 2907,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2907
+    }
+  },
+  "FEED": {
+    "cost": 1,
+    "occurrences": 394,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 394
+    }
+  },
+  "FEEL_NO_PAIN": {
+    "cost": 1,
+    "occurrences": 3119,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 3119
+    }
+  },
+  "FIEND_FIRE": {
+    "cost": 2,
+    "occurrences": 377,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 377
+    }
+  },
+  "FIGHT_ME": {
+    "cost": 2,
+    "occurrences": 2833,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2833
+    }
+  },
+  "FLAME_BARRIER": {
+    "cost": 2,
+    "occurrences": 2750,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2750
+    }
+  },
+  "FORGOTTEN_RITUAL": {
+    "cost": 1,
+    "occurrences": 2887,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2887
+    }
+  },
+  "HAVOC": {
+    "cost": 1,
+    "occurrences": 8807,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 8807
+    }
+  },
+  "HEADBUTT": {
+    "cost": 1,
+    "occurrences": 8313,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8313
+    }
+  },
+  "HELLRAISER": {
+    "cost": 2,
+    "occurrences": 506,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 506
+    }
+  },
+  "HEMOKINESIS": {
+    "cost": 1,
+    "occurrences": 2953,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2953
+    }
+  },
+  "HOWL_FROM_BEYOND": {
+    "cost": 3,
+    "occurrences": 2876,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2876
+    }
+  },
+  "IMPERVIOUS": {
+    "cost": 2,
+    "occurrences": 415,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 415
+    }
+  },
+  "INFERNAL_BLADE": {
+    "cost": 1,
+    "occurrences": 2846,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2846
+    }
+  },
+  "INFERNO": {
+    "cost": 1,
+    "occurrences": 2876,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2876
+    }
+  },
+  "INFLAME": {
+    "cost": 1,
+    "occurrences": 2867,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2867
+    }
+  },
+  "IRON_WAVE": {
+    "cost": 1,
+    "occurrences": 8292,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8292
+    }
+  },
+  "JUGGERNAUT": {
+    "cost": 2,
+    "occurrences": 494,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 494
+    }
+  },
+  "JUGGLING": {
+    "cost": 1,
+    "occurrences": 2769,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2769
+    }
+  },
+  "MANGLE": {
+    "cost": 3,
+    "occurrences": 375,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 375
+    }
+  },
+  "MOLTEN_FIST": {
+    "cost": 1,
+    "occurrences": 8021,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8021
+    }
+  },
+  "NOT_YET": {
+    "cost": 2,
+    "occurrences": 423,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 423
+    }
+  },
+  "OFFERING": {
+    "cost": 0,
+    "occurrences": 345,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 345
+    }
+  },
+  "ONE_TWO_PUNCH": {
+    "cost": 1,
+    "occurrences": 412,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 412
+    }
+  },
+  "PACTS_END": {
+    "cost": 0,
+    "occurrences": 462,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 462
+    }
+  },
+  "PERFECTED_STRIKE": {
+    "cost": 2,
+    "occurrences": 8056,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8056
+    }
+  },
+  "PILLAGE": {
+    "cost": 1,
+    "occurrences": 3054,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 3054
+    }
+  },
+  "POMMEL_STRIKE": {
+    "cost": 1,
+    "occurrences": 7838,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 7838
+    }
+  },
+  "PRIMAL_FORCE": {
+    "cost": 0,
+    "occurrences": 386,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 386
+    }
+  },
+  "PYRE": {
+    "cost": 2,
+    "occurrences": 448,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 448
+    }
+  },
+  "RAGE": {
+    "cost": 0,
+    "occurrences": 2870,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2870
+    }
+  },
+  "RAMPAGE": {
+    "cost": 1,
+    "occurrences": 2903,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2903
+    }
+  },
+  "RUPTURE": {
+    "cost": 1,
+    "occurrences": 2654,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2654
+    }
+  },
+  "SECOND_WIND": {
+    "cost": 1,
+    "occurrences": 2923,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2923
+    }
+  },
+  "SETUP_STRIKE": {
+    "cost": 1,
+    "occurrences": 8125,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8125
+    }
+  },
+  "SHRUG_IT_OFF": {
+    "cost": 1,
+    "occurrences": 8141,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 8141
+    }
+  },
+  "SPITE": {
+    "cost": 0,
+    "occurrences": 2701,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2701
+    }
+  },
+  "STAMPEDE": {
+    "cost": 2,
+    "occurrences": 2685,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2685
+    }
+  },
+  "STOKE": {
+    "cost": 1,
+    "occurrences": 486,
+    "rarity": "Rare",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 486
+    }
+  },
+  "STOMP": {
+    "cost": 3,
+    "occurrences": 2670,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2670
+    }
+  },
+  "STONE_ARMOR": {
+    "cost": 1,
+    "occurrences": 2972,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2972
+    }
+  },
+  "SWORD_BOOMERANG": {
+    "cost": 1,
+    "occurrences": 8125,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 8125
+    }
+  },
+  "TAUNT": {
+    "cost": 1,
+    "occurrences": 2893,
+    "rarity": "Uncommon",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 2893
+    }
+  },
+  "TEAR_ASUNDER": {
+    "cost": 2,
+    "occurrences": 427,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 427
+    }
+  },
+  "THRASH": {
+    "cost": 1,
+    "occurrences": 369,
+    "rarity": "Rare",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 369
+    }
+  },
+  "THUNDERCLAP": {
+    "cost": 1,
+    "occurrences": 7909,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 7909
+    }
+  },
+  "TREMBLE": {
+    "cost": 1,
+    "occurrences": 7916,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 7916
+    }
+  },
+  "TRUE_GRIT": {
+    "cost": 1,
+    "occurrences": 8112,
+    "rarity": "Common",
+    "type": "Skill",
+    "upgrade_seen": {
+      "False": 8112
+    }
+  },
+  "TWIN_STRIKE": {
+    "cost": 1,
+    "occurrences": 7819,
+    "rarity": "Common",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 7819
+    }
+  },
+  "UNMOVABLE": {
+    "cost": 2,
+    "occurrences": 364,
+    "rarity": "Rare",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 364
+    }
+  },
+  "UNRELENTING": {
+    "cost": 2,
+    "occurrences": 2790,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2790
+    }
+  },
+  "UPPERCUT": {
+    "cost": 2,
+    "occurrences": 2908,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2908
+    }
+  },
+  "VICIOUS": {
+    "cost": 1,
+    "occurrences": 2902,
+    "rarity": "Uncommon",
+    "type": "Power",
+    "upgrade_seen": {
+      "False": 2902
+    }
+  },
+  "WHIRLWIND": {
+    "cost": 0,
+    "occurrences": 2844,
+    "rarity": "Uncommon",
+    "type": "Attack",
+    "upgrade_seen": {
+      "False": 2844
+    }
+  }
+}

@@ -1,0 +1,419 @@
+{
+  "summary": {
+    "by_tag": {
+      "UPGRADE_PRIORITY_HIGH": 19,
+      "DRAW": 14,
+      "STRENGTH_USER": 9,
+      "CHEAP_ATTACK": 25,
+      "MOB_OPTIMAL": 9,
+      "BLOCK_PAYLOAD": 19,
+      "EXHAUST_PAYLOAD": 11,
+      "EXHAUST_FUEL": 25,
+      "SCALING_PILLAR": 17,
+      "BLOCK_SCALING": 2,
+      "BOSS_OPTIMAL": 13,
+      "ELITE_OPTIMAL": 9,
+      "VULNERABLE": 13,
+      "BURST": 10,
+      "ENERGY_GAIN": 8,
+      "STRENGTH_GAIN": 6,
+      "VULNERABLE_PAYLOAD": 7,
+      "STR_DOWN": 2,
+      "WEAK": 1
+    },
+    "n_tagged": 85,
+    "n_untagged": 1
+  },
+  "card_tags": {
+    "AGGRESSION": [
+      "DRAW",
+      "STRENGTH_USER",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "ANGER": [
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL"
+    ],
+    "ARMAMENTS": [
+      "BLOCK_PAYLOAD"
+    ],
+    "ASHEN_STRIKE": [
+      "CHEAP_ATTACK",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "BARRICADE": [
+      "BLOCK_SCALING",
+      "BOSS_OPTIMAL",
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "BASH": [
+      "BURST",
+      "ELITE_OPTIMAL",
+      "VULNERABLE"
+    ],
+    "BATTLE_TRANCE": [
+      "DRAW"
+    ],
+    "BLOOD_WALL": [
+      "BLOCK_PAYLOAD"
+    ],
+    "BLOODLETTING": [
+      "ENERGY_GAIN"
+    ],
+    "BLUDGEON": [
+      "BOSS_OPTIMAL",
+      "BURST",
+      "ELITE_OPTIMAL",
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "BODY_SLAM": [
+      "BLOCK_SCALING",
+      "BOSS_OPTIMAL",
+      "CHEAP_ATTACK",
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "BRAND": [
+      "EXHAUST_FUEL",
+      "STRENGTH_GAIN"
+    ],
+    "BREAK": [
+      "BURST",
+      "ELITE_OPTIMAL",
+      "VULNERABLE"
+    ],
+    "BREAKTHROUGH": [
+      "CHEAP_ATTACK"
+    ],
+    "BULLY": [
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL",
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "BURNING_PACT": [
+      "DRAW",
+      "EXHAUST_FUEL"
+    ],
+    "CASCADE": [
+      "ENERGY_GAIN"
+    ],
+    "CINDER": [
+      "BURST",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "COLOSSUS": [
+      "BLOCK_PAYLOAD",
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "CONFLAGRATION": [
+      "CHEAP_ATTACK"
+    ],
+    "CORRUPTION": [
+      "BOSS_OPTIMAL",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "CRIMSON_MANTLE": [
+      "BLOCK_PAYLOAD"
+    ],
+    "CRUELTY": [
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "DARK_EMBRACE": [
+      "BOSS_OPTIMAL",
+      "DRAW",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "DEFEND": [
+      "BLOCK_PAYLOAD"
+    ],
+    "DEMON_FORM": [
+      "BOSS_OPTIMAL",
+      "SCALING_PILLAR",
+      "STRENGTH_GAIN",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "DEMONIC_SHIELD": [
+      "EXHAUST_FUEL"
+    ],
+    "DISMANTLE": [
+      "CHEAP_ATTACK",
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "DOMINATE": [
+      "EXHAUST_FUEL",
+      "STRENGTH_GAIN",
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "DRUM_OF_BATTLE": [
+      "DRAW",
+      "EXHAUST_FUEL"
+    ],
+    "EVIL_EYE": [
+      "BLOCK_PAYLOAD",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "EXPECT_A_FIGHT": [
+      "ENERGY_GAIN",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "FEED": [
+      "BOSS_OPTIMAL",
+      "CHEAP_ATTACK",
+      "EXHAUST_FUEL",
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "FEEL_NO_PAIN": [
+      "BLOCK_PAYLOAD",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "FIEND_FIRE": [
+      "BURST",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "FLAME_BARRIER": [
+      "BLOCK_PAYLOAD"
+    ],
+    "FORGOTTEN_RITUAL": [
+      "ENERGY_GAIN",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "GRAPPLE": [
+      "BLOCK_PAYLOAD",
+      "CHEAP_ATTACK"
+    ],
+    "HAVOC": [
+      "EXHAUST_FUEL",
+      "MOB_OPTIMAL",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "HEADBUTT": [
+      "CHEAP_ATTACK",
+      "DRAW"
+    ],
+    "HELLRAISER": [
+      "DRAW",
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "HEMOKINESIS": [
+      "BURST",
+      "CHEAP_ATTACK",
+      "ELITE_OPTIMAL"
+    ],
+    "HOWL_FROM_BEYOND": [
+      "BURST",
+      "EXHAUST_FUEL"
+    ],
+    "IMPERVIOUS": [
+      "BLOCK_PAYLOAD",
+      "EXHAUST_FUEL"
+    ],
+    "INFERNAL_BLADE": [
+      "EXHAUST_FUEL",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "INFERNO": [
+      "SCALING_PILLAR"
+    ],
+    "INFLAME": [
+      "BOSS_OPTIMAL",
+      "SCALING_PILLAR",
+      "STRENGTH_GAIN",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "IRON_WAVE": [
+      "BLOCK_PAYLOAD",
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL"
+    ],
+    "JUGGERNAUT": [
+      "BLOCK_PAYLOAD",
+      "BOSS_OPTIMAL",
+      "SCALING_PILLAR"
+    ],
+    "JUGGLING": [
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "MANGLE": [
+      "BURST",
+      "ELITE_OPTIMAL",
+      "STR_DOWN"
+    ],
+    "MOLTEN_FIST": [
+      "CHEAP_ATTACK",
+      "ELITE_OPTIMAL",
+      "EXHAUST_FUEL",
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "OFFERING": [
+      "DRAW",
+      "ENERGY_GAIN",
+      "EXHAUST_FUEL"
+    ],
+    "ONE_TWO_PUNCH": [
+      "STRENGTH_USER"
+    ],
+    "PACTS_END": [
+      "CHEAP_ATTACK",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "PERFECTED_STRIKE": [
+      "BOSS_OPTIMAL",
+      "ELITE_OPTIMAL",
+      "SCALING_PILLAR",
+      "STRENGTH_USER"
+    ],
+    "PILLAGE": [
+      "CHEAP_ATTACK",
+      "DRAW"
+    ],
+    "POMMEL_STRIKE": [
+      "CHEAP_ATTACK",
+      "DRAW",
+      "MOB_OPTIMAL",
+      "STRENGTH_USER"
+    ],
+    "PRIMAL_FORCE": [
+      "SCALING_PILLAR"
+    ],
+    "PYRE": [
+      "ENERGY_GAIN",
+      "SCALING_PILLAR"
+    ],
+    "RAGE": [
+      "BLOCK_PAYLOAD"
+    ],
+    "RAMPAGE": [
+      "BOSS_OPTIMAL",
+      "CHEAP_ATTACK",
+      "SCALING_PILLAR"
+    ],
+    "RUPTURE": [
+      "BOSS_OPTIMAL",
+      "SCALING_PILLAR",
+      "STRENGTH_GAIN",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "SECOND_WIND": [
+      "BLOCK_PAYLOAD",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD"
+    ],
+    "SETUP_STRIKE": [
+      "CHEAP_ATTACK",
+      "STRENGTH_GAIN",
+      "STR_DOWN"
+    ],
+    "SHRUG_IT_OFF": [
+      "BLOCK_PAYLOAD",
+      "DRAW"
+    ],
+    "SPITE": [
+      "CHEAP_ATTACK",
+      "DRAW"
+    ],
+    "STAMPEDE": [
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "STOKE": [
+      "DRAW",
+      "EXHAUST_FUEL",
+      "EXHAUST_PAYLOAD",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "STOMP": [
+      "ENERGY_GAIN"
+    ],
+    "STONE_ARMOR": [
+      "BLOCK_PAYLOAD"
+    ],
+    "STRIKE": [
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL"
+    ],
+    "SWORD_BOOMERANG": [
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL",
+      "STRENGTH_USER"
+    ],
+    "TANK": [],
+    "TAUNT": [
+      "BLOCK_PAYLOAD",
+      "VULNERABLE"
+    ],
+    "TEAR_ASUNDER": [
+      "ELITE_OPTIMAL",
+      "STRENGTH_USER"
+    ],
+    "THRASH": [
+      "CHEAP_ATTACK",
+      "EXHAUST_FUEL",
+      "STRENGTH_USER"
+    ],
+    "THUNDERCLAP": [
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL",
+      "STRENGTH_USER",
+      "VULNERABLE"
+    ],
+    "TREMBLE": [
+      "VULNERABLE"
+    ],
+    "TRUE_GRIT": [
+      "BLOCK_PAYLOAD",
+      "EXHAUST_FUEL"
+    ],
+    "TWIN_STRIKE": [
+      "CHEAP_ATTACK",
+      "MOB_OPTIMAL",
+      "STRENGTH_USER"
+    ],
+    "UNMOVABLE": [
+      "BLOCK_PAYLOAD",
+      "UPGRADE_PRIORITY_HIGH"
+    ],
+    "UNRELENTING": [
+      "BURST",
+      "ENERGY_GAIN"
+    ],
+    "UPPERCUT": [
+      "BURST",
+      "ELITE_OPTIMAL",
+      "VULNERABLE",
+      "WEAK"
+    ],
+    "VICIOUS": [
+      "DRAW",
+      "VULNERABLE",
+      "VULNERABLE_PAYLOAD"
+    ],
+    "WHIRLWIND": [
+      "BOSS_OPTIMAL",
+      "CHEAP_ATTACK",
+      "SCALING_PILLAR",
+      "UPGRADE_PRIORITY_HIGH"
+    ]
+  }
+}

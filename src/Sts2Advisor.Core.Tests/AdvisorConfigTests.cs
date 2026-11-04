@@ -38,6 +38,71 @@ public class AdvisorConfigTests
         Assert.Equal(8767, c.Port);
     }
 
+    private static string TempRepo()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"sts2advisor-repo-{Guid.NewGuid()}");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static void Touch(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "");
+    }
+
+    [Fact]
+    public void PythonDefaultsToTheWindowsVenvWhenOnlyThatExists()
+    {
+        var repo = TempRepo();
+        try
+        {
+            var scripts = Path.Combine(repo, ".venv", "Scripts", "python.exe");
+            Touch(scripts);
+            var c = new AdvisorConfig(repo, "", 8767, true, "F8");
+            Assert.Equal(scripts, c.ResolvedPython);
+        }
+        finally { Directory.Delete(repo, true); }
+    }
+
+    [Fact]
+    public void PythonPrefersTheUnixVenvWhenBothExist()
+    {
+        var repo = TempRepo();
+        try
+        {
+            var unix = Path.Combine(repo, ".venv", "bin", "python");
+            Touch(unix);
+            Touch(Path.Combine(repo, ".venv", "Scripts", "python.exe"));
+            Assert.Equal(unix, new AdvisorConfig(repo, "", 8767, true, "F8").ResolvedPython);
+        }
+        finally { Directory.Delete(repo, true); }
+    }
+
+    [Fact]
+    public void PythonFallsBackToTheBinPathWhenNoVenvExists()
+    {
+        var repo = TempRepo();
+        try
+        {
+            Assert.Equal(Path.Combine(repo, ".venv", "bin", "python"),
+                new AdvisorConfig(repo, "", 8767, true, "F8").ResolvedPython);
+        }
+        finally { Directory.Delete(repo, true); }
+    }
+
+    [Fact]
+    public void AnExplicitPythonWinsOverAnyVenv()
+    {
+        var repo = TempRepo();
+        try
+        {
+            Touch(Path.Combine(repo, ".venv", "Scripts", "python.exe"));
+            Assert.Equal("C:/py/python.exe", new AdvisorConfig(repo, "C:/py/python.exe", 8767, true, "F8").ResolvedPython);
+        }
+        finally { Directory.Delete(repo, true); }
+    }
+
     [Fact]
     public void MalformedJsonThrows()
     {

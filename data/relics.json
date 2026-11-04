@@ -1,0 +1,2727 @@
+{
+  "relics": [
+    {
+      "id": "akabeko",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/akabeko",
+      "runtime_id": "AKABEKO",
+      "meta_raw": "Akabeko is a uncommon Slay the Spire 2 relic. At the start of each combat, gain 8 Vigor. Pool: Shared.",
+      "en_name": "Akabeko",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each combat, gain 8 Vigor",
+      "character": "Shared"
+    },
+    {
+      "id": "alchemical-coffer",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/alchemical-coffer",
+      "runtime_id": "ALCHEMICAL_COFFER",
+      "meta_raw": "Alchemical Coffer is a ancient Slay the Spire 2 relic. Upon pickup, gain 4 potion slots filled with random potions. Pool: Event.",
+      "en_name": "Alchemical Coffer",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, gain 4 potion slots filled with random potions",
+      "character": "Event"
+    },
+    {
+      "id": "amethyst-aubergine",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/amethyst-aubergine",
+      "runtime_id": "AMETHYST_AUBERGINE",
+      "meta_raw": "Amethyst Aubergine is a common Slay the Spire 2 relic. Enemies drop 15 additional Gold. Pool: Shared.",
+      "en_name": "Amethyst Aubergine",
+      "rarity": "Common",
+      "effect_text": "Enemies drop 15 additional Gold",
+      "character": "Shared"
+    },
+    {
+      "id": "anchor",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/anchor",
+      "runtime_id": "ANCHOR",
+      "meta_raw": "Anchor is a common Slay the Spire 2 relic. Start each combat with 10 Block. Pool: Shared.",
+      "en_name": "Anchor",
+      "rarity": "Common",
+      "effect_text": "Start each combat with 10 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "arcane-scroll",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/arcane-scroll",
+      "runtime_id": "ARCANE_SCROLL",
+      "meta_raw": "Arcane Scroll is a ancient Slay the Spire 2 relic. Upon pickup, obtain a random Rare Card to add to your Deck. Pool: Event.",
+      "en_name": "Arcane Scroll",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain a random Rare Card to add to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "archaic-tooth",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/archaic-tooth",
+      "runtime_id": "ARCHAIC_TOOTH",
+      "meta_raw": "Archaic Tooth is a ancient Slay the Spire 2 relic. Upon pickup, Transform a starter card with an ancient version. Pool: Event.",
+      "en_name": "Archaic Tooth",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Transform a starter card with an ancient version",
+      "character": "Event"
+    },
+    {
+      "id": "art-of-war",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/art-of-war",
+      "runtime_id": "ART_OF_WAR",
+      "meta_raw": "Art of War is a rare Slay the Spire 2 relic. If you do not play any Attacks during your turn, gain an additional 1 Energy next turn. Pool: Shared.",
+      "en_name": "Art of War",
+      "rarity": "Rare",
+      "effect_text": "If you do not play any Attacks during your turn, gain an additional 1 Energy next turn",
+      "character": "Shared"
+    },
+    {
+      "id": "astrolabe",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/astrolabe",
+      "runtime_id": "ASTROLABE",
+      "meta_raw": "Astrolabe is a ancient Slay the Spire 2 relic. Upon pickup, Transform 3 cards, then Upgrade them. Pool: Event.",
+      "en_name": "Astrolabe",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Transform 3 cards, then Upgrade them",
+      "character": "Event"
+    },
+    {
+      "id": "bag-of-marbles",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bag-of-marbles",
+      "runtime_id": "BAG_OF_MARBLES",
+      "meta_raw": "Bag of Marbles is a common Slay the Spire 2 relic. At the start of each combat, apply 1 Vulnerable to ALL enemies. Pool: Shared.",
+      "en_name": "Bag of Marbles",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, apply 1 Vulnerable to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "bag-of-preparation",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bag-of-preparation",
+      "runtime_id": "BAG_OF_PREPARATION",
+      "meta_raw": "Bag of Preparation is a common Slay the Spire 2 relic. At the start of each combat, draw 2 additional cards. Pool: Shared.",
+      "en_name": "Bag of Preparation",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, draw 2 additional cards",
+      "character": "Shared"
+    },
+    {
+      "id": "beating-remnant",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/beating-remnant",
+      "runtime_id": "BEATING_REMNANT",
+      "meta_raw": "Beating Remnant is a rare Slay the Spire 2 relic. You cannot lose more than 20 HP in a single turn. Pool: Shared.",
+      "en_name": "Beating Remnant",
+      "rarity": "Rare",
+      "effect_text": "You cannot lose more than 20 HP in a single turn",
+      "character": "Shared"
+    },
+    {
+      "id": "beautiful-bracelet",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/beautiful-bracelet",
+      "runtime_id": "BEAUTIFUL_BRACELET",
+      "meta_raw": "Beautiful Bracelet is a ancient Slay the Spire 2 relic. Upon pickup, choose 3 cards in your Deck. Enchant them with Swift 3. Pool: Event.",
+      "en_name": "Beautiful Bracelet",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, choose 3 cards in your Deck. Enchant them with Swift 3",
+      "character": "Event"
+    },
+    {
+      "id": "bellows",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bellows",
+      "runtime_id": "BELLOWS",
+      "meta_raw": "Bellows is a rare Slay the Spire 2 relic. The first Hand you draw each combat is Upgraded. Pool: Shared.",
+      "en_name": "Bellows",
+      "rarity": "Rare",
+      "effect_text": "The first Hand you draw each combat is Upgraded",
+      "character": "Shared"
+    },
+    {
+      "id": "belt-buckle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/belt-buckle",
+      "runtime_id": "BELT_BUCKLE",
+      "meta_raw": "Belt Buckle is a shop Slay the Spire 2 relic. While you have no potions, you have 2 additional Dexterity. Pool: Shared.",
+      "en_name": "Belt Buckle",
+      "rarity": "Shop",
+      "effect_text": "While you have no potions, you have 2 additional Dexterity",
+      "character": "Shared"
+    },
+    {
+      "id": "big-hat",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/big-hat",
+      "runtime_id": "BIG_HAT",
+      "meta_raw": "Big Hat is a rare Slay the Spire 2 relic. At the start of each combat, add 2 random Ethereal cards into your Hand. Pool: Necrobinder.",
+      "en_name": "Big Hat",
+      "rarity": "Rare",
+      "effect_text": "At the start of each combat, add 2 random Ethereal cards into your Hand",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "big-mushroom",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/big-mushroom",
+      "runtime_id": "BIG_MUSHROOM",
+      "meta_raw": "Big Mushroom is a event Slay the Spire 2 relic. Upon pickup, raise your Max HP by 20. At the start of each combat, draw 2 fewer cards. Pool: Event.",
+      "en_name": "Big Mushroom",
+      "rarity": "Event",
+      "effect_text": "Upon pickup, raise your Max HP by 20. At the start of each combat, draw 2 fewer cards",
+      "character": "Event"
+    },
+    {
+      "id": "biiig-hug",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/biiig-hug",
+      "runtime_id": "BIIIG_HUG",
+      "meta_raw": "Biiig Hug is a ancient Slay the Spire 2 relic. Upon pickup, remove 4 cards from your Deck. Whenever you shuffle your Draw Pile, add a Soot into your Draw… Pool: Event.",
+      "en_name": "Biiig Hug",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, remove 4 cards from your Deck. Whenever you shuffle your Draw Pile, add a Soot into your Draw…",
+      "character": "Event"
+    },
+    {
+      "id": "bing-bong",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bing-bong",
+      "runtime_id": "BING_BONG",
+      "meta_raw": "Bing Bong is a event Slay the Spire 2 relic. Whenever you add a card to your Deck, add one additional copy. Pool: Event.",
+      "en_name": "Bing Bong",
+      "rarity": "Event",
+      "effect_text": "Whenever you add a card to your Deck, add one additional copy",
+      "character": "Event"
+    },
+    {
+      "id": "black-blood",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/black-blood",
+      "runtime_id": "BLACK_BLOOD",
+      "meta_raw": "Black Blood is a starter Slay the Spire 2 relic. At the end of combat, heal 12 HP. Pool: Event.",
+      "en_name": "Black Blood",
+      "rarity": "Starter",
+      "effect_text": "At the end of combat, heal 12 HP",
+      "character": "Event"
+    },
+    {
+      "id": "black-star",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/black-star",
+      "runtime_id": "BLACK_STAR",
+      "meta_raw": "Black Star is a ancient Slay the Spire 2 relic. Elites drop an additional Relic when defeated. Pool: Event.",
+      "en_name": "Black Star",
+      "rarity": "Ancient",
+      "effect_text": "Elites drop an additional Relic when defeated",
+      "character": "Event"
+    },
+    {
+      "id": "blessed-antler",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/blessed-antler",
+      "runtime_id": "BLESSED_ANTLER",
+      "meta_raw": "Blessed Antler is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. At the start of each combat, shuffle 3 Dazed into your Draw Pile. Pool: Event.",
+      "en_name": "Blessed Antler",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. At the start of each combat, shuffle 3 Dazed into your Draw Pile",
+      "character": "Event"
+    },
+    {
+      "id": "blood-vial",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/blood-vial",
+      "runtime_id": "BLOOD_VIAL",
+      "meta_raw": "Blood Vial is a common Slay the Spire 2 relic. At the start of each combat, heal 2 HP. Pool: Shared.",
+      "en_name": "Blood Vial",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, heal 2 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "blood-soaked-rose",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/blood-soaked-rose",
+      "runtime_id": "BLOOD_SOAKED_ROSE",
+      "meta_raw": "Blood-Soaked Rose is a ancient Slay the Spire 2 relic. Upon pickup, add 1 Enthralled to your Deck. Gain 1 Energy at the start of each turn. Pool: Event.",
+      "en_name": "Blood-Soaked Rose",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, add 1 Enthralled to your Deck. Gain 1 Energy at the start of each turn",
+      "character": "Event"
+    },
+    {
+      "id": "bone-flute",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bone-flute",
+      "runtime_id": "BONE_FLUTE",
+      "meta_raw": "Bone Flute is a common Slay the Spire 2 relic. Whenever Osty attacks, gain 2 Block. Pool: Necrobinder.",
+      "en_name": "Bone Flute",
+      "rarity": "Common",
+      "effect_text": "Whenever Osty attacks, gain 2 Block",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "bone-tea",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bone-tea",
+      "runtime_id": "BONE_TEA",
+      "meta_raw": "Bone Tea is a event Slay the Spire 2 relic. At the start of the next combats, Upgrade your starting hand. Pool: Event.",
+      "en_name": "Bone Tea",
+      "rarity": "Event",
+      "effect_text": "At the start of the next combats, Upgrade your starting hand",
+      "character": "Event"
+    },
+    {
+      "id": "book-of-five-rings",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/book-of-five-rings",
+      "runtime_id": "BOOK_OF_FIVE_RINGS",
+      "meta_raw": "Book of Five Rings is a common Slay the Spire 2 relic. Every 5 cards you add to your Deck, heal 20 HP. Pool: Shared.",
+      "en_name": "Book of Five Rings",
+      "rarity": "Common",
+      "effect_text": "Every 5 cards you add to your Deck, heal 20 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "book-repair-knife",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/book-repair-knife",
+      "runtime_id": "BOOK_REPAIR_KNIFE",
+      "meta_raw": "Book Repair Knife is a uncommon Slay the Spire 2 relic. Whenever a non-Minion enemy dies to Doom, heal 3 HP. Pool: Necrobinder.",
+      "en_name": "Book Repair Knife",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever a non-Minion enemy dies to Doom, heal 3 HP",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "bookmark",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bookmark",
+      "runtime_id": "BOOKMARK",
+      "meta_raw": "Bookmark is a rare Slay the Spire 2 relic. At the end of each turn, lower the cost of a random Retained card by 1 until played. Pool: Necrobinder.",
+      "en_name": "Bookmark",
+      "rarity": "Rare",
+      "effect_text": "At the end of each turn, lower the cost of a random Retained card by 1 until played",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "booming-conch",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/booming-conch",
+      "runtime_id": "BOOMING_CONCH",
+      "meta_raw": "Booming Conch is a ancient Slay the Spire 2 relic. At the start of Elite combats, draw 2 additional cards. Pool: Event.",
+      "en_name": "Booming Conch",
+      "rarity": "Ancient",
+      "effect_text": "At the start of Elite combats, draw 2 additional cards",
+      "character": "Event"
+    },
+    {
+      "id": "bound-phylactery",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bound-phylactery",
+      "runtime_id": "BOUND_PHYLACTERY",
+      "meta_raw": "Bound Phylactery is a starter Slay the Spire 2 relic. At the start of your turn, Summon 1. Pool: Necrobinder.",
+      "en_name": "Bound Phylactery",
+      "rarity": "Starter",
+      "effect_text": "At the start of your turn, Summon 1",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "bowler-hat",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bowler-hat",
+      "runtime_id": "BOWLER_HAT",
+      "meta_raw": "Bowler Hat is a uncommon Slay the Spire 2 relic. Gain 25% additional Gold. Pool: Shared.",
+      "en_name": "Bowler Hat",
+      "rarity": "Uncommon",
+      "effect_text": "Gain 25% additional Gold",
+      "character": "Shared"
+    },
+    {
+      "id": "bread",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bread",
+      "runtime_id": "BREAD",
+      "meta_raw": "Bread is a shop Slay the Spire 2 relic. At the start of your first turn, lose 2 Energy. At the start of all other turns, gain 1 Energy. Pool: Shared.",
+      "en_name": "Bread",
+      "rarity": "Shop",
+      "effect_text": "At the start of your first turn, lose 2 Energy. At the start of all other turns, gain 1 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "brilliant-scarf",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/brilliant-scarf",
+      "runtime_id": "BRILLIANT_SCARF",
+      "meta_raw": "Brilliant Scarf is a ancient Slay the Spire 2 relic. The 5th card you play each turn is free. Pool: Event.",
+      "en_name": "Brilliant Scarf",
+      "rarity": "Ancient",
+      "effect_text": "The 5th card you play each turn is free",
+      "character": "Event"
+    },
+    {
+      "id": "brimstone",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/brimstone",
+      "runtime_id": "BRIMSTONE",
+      "meta_raw": "Brimstone is a shop Slay the Spire 2 relic. At the start of your turn, gain 2 Strength and ALL enemies gain 1 Strength. Pool: Ironclad.",
+      "en_name": "Brimstone",
+      "rarity": "Shop",
+      "effect_text": "At the start of your turn, gain 2 Strength and ALL enemies gain 1 Strength",
+      "character": "Ironclad"
+    },
+    {
+      "id": "bronze-scales",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/bronze-scales",
+      "runtime_id": "BRONZE_SCALES",
+      "meta_raw": "Bronze Scales is a common Slay the Spire 2 relic. Start each combat with 3 Thorns. Pool: Shared.",
+      "en_name": "Bronze Scales",
+      "rarity": "Common",
+      "effect_text": "Start each combat with 3 Thorns",
+      "character": "Shared"
+    },
+    {
+      "id": "burning-blood",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/burning-blood",
+      "runtime_id": "BURNING_BLOOD",
+      "meta_raw": "Burning Blood is a starter Slay the Spire 2 relic. At the end of combat, heal 6 HP. Pool: Ironclad.",
+      "en_name": "Burning Blood",
+      "rarity": "Starter",
+      "effect_text": "At the end of combat, heal 6 HP",
+      "character": "Ironclad"
+    },
+    {
+      "id": "burning-sticks",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/burning-sticks",
+      "runtime_id": "BURNING_STICKS",
+      "meta_raw": "Burning Sticks is a shop Slay the Spire 2 relic. The first time each combat you Exhaust a Skill, add a copy of it into your Hand. Pool: Shared.",
+      "en_name": "Burning Sticks",
+      "rarity": "Shop",
+      "effect_text": "The first time each combat you Exhaust a Skill, add a copy of it into your Hand",
+      "character": "Shared"
+    },
+    {
+      "id": "byrdpip",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/byrdpip",
+      "runtime_id": "BYRDPIP",
+      "meta_raw": "Byrdpip is a event Slay the Spire 2 relic. Upon pickup, gain the card Byrd Swoop. A Byrdpip will accompany you in battles. Pool: Event.",
+      "en_name": "Byrdpip",
+      "rarity": "Event",
+      "effect_text": "Upon pickup, gain the card Byrd Swoop. A Byrdpip will accompany you in battles",
+      "character": "Event"
+    },
+    {
+      "id": "calling-bell",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/calling-bell",
+      "runtime_id": "CALLING_BELL",
+      "meta_raw": "Calling Bell is a ancient Slay the Spire 2 relic. Upon pickup, obtain a unique Curse and 3 Relics. Pool: Event.",
+      "en_name": "Calling Bell",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain a unique Curse and 3 Relics",
+      "character": "Event"
+    },
+    {
+      "id": "candelabra",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/candelabra",
+      "runtime_id": "CANDELABRA",
+      "meta_raw": "Candelabra is a uncommon Slay the Spire 2 relic. At the start of your 2nd turn, gain 2 Energy. Pool: Shared.",
+      "en_name": "Candelabra",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of your 2nd turn, gain 2 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "captains-wheel",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/captains-wheel",
+      "runtime_id": "CAPTAINS_WHEEL",
+      "meta_raw": "Captain's Wheel is a rare Slay the Spire 2 relic. At the start of your 3rd turn, gain 18 Block. Pool: Shared.",
+      "en_name": "Captain's Wheel",
+      "rarity": "Rare",
+      "effect_text": "At the start of your 3rd turn, gain 18 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "cauldron",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/cauldron",
+      "runtime_id": "CAULDRON",
+      "meta_raw": "Cauldron is a shop Slay the Spire 2 relic. Upon pickup, brews 5 random potions. Pool: Shared.",
+      "en_name": "Cauldron",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, brews 5 random potions",
+      "character": "Shared"
+    },
+    {
+      "id": "centennial-puzzle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/centennial-puzzle",
+      "runtime_id": "CENTENNIAL_PUZZLE",
+      "meta_raw": "Centennial Puzzle is a common Slay the Spire 2 relic. The first time you lose HP each combat, draw 3 cards. Pool: Shared.",
+      "en_name": "Centennial Puzzle",
+      "rarity": "Common",
+      "effect_text": "The first time you lose HP each combat, draw 3 cards",
+      "character": "Shared"
+    },
+    {
+      "id": "chandelier",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/chandelier",
+      "runtime_id": "CHANDELIER",
+      "meta_raw": "Chandelier is a rare Slay the Spire 2 relic. At the start of your 3rd turn, gain 3 Energy. Pool: Shared.",
+      "en_name": "Chandelier",
+      "rarity": "Rare",
+      "effect_text": "At the start of your 3rd turn, gain 3 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "charons-ashes",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/charons-ashes",
+      "runtime_id": "CHARONS_ASHES",
+      "meta_raw": "Charon's Ashes is a rare Slay the Spire 2 relic. Whenever you Exhaust a card, deal 3 damage to ALL enemies. Pool: Ironclad.",
+      "en_name": "Charon's Ashes",
+      "rarity": "Rare",
+      "effect_text": "Whenever you Exhaust a card, deal 3 damage to ALL enemies",
+      "character": "Ironclad"
+    },
+    {
+      "id": "chemical-x",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/chemical-x",
+      "runtime_id": "CHEMICAL_X",
+      "meta_raw": "Chemical X is a shop Slay the Spire 2 relic. The effects of your cost X cards are increased by 2. Pool: Shared.",
+      "en_name": "Chemical X",
+      "rarity": "Shop",
+      "effect_text": "The effects of your cost X cards are increased by 2",
+      "character": "Shared"
+    },
+    {
+      "id": "choices-paradox",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/choices-paradox",
+      "runtime_id": "CHOICES_PARADOX",
+      "meta_raw": "Choices Paradox is a ancient Slay the Spire 2 relic. At the start of each combat, add 1 of 5 random cards into your Hand. Add Retain to the chosen card. Pool: Event.",
+      "en_name": "Choices Paradox",
+      "rarity": "Ancient",
+      "effect_text": "At the start of each combat, add 1 of 5 random cards into your Hand. Add Retain to the chosen card",
+      "character": "Event"
+    },
+    {
+      "id": "circlet",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/circlet",
+      "runtime_id": "CIRCLET",
+      "meta_raw": "Circlet is a ancient Slay the Spire 2 relic. It's a circlet. Pool: Shared.",
+      "en_name": "Circlet",
+      "rarity": "Ancient",
+      "effect_text": "It's a circlet",
+      "character": "Shared"
+    },
+    {
+      "id": "claws",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/claws",
+      "runtime_id": "CLAWS",
+      "meta_raw": "Claws is a ancient Slay the Spire 2 relic. Upon pickup, Transform up to 6 cards into Maul. Pool: Event.",
+      "en_name": "Claws",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Transform up to 6 cards into Maul",
+      "character": "Event"
+    },
+    {
+      "id": "cloak-clasp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/cloak-clasp",
+      "runtime_id": "CLOAK_CLASP",
+      "meta_raw": "Cloak Clasp is a rare Slay the Spire 2 relic. At the end of your turn, gain 1 Block for each card in your Hand. Pool: Shared.",
+      "en_name": "Cloak Clasp",
+      "rarity": "Rare",
+      "effect_text": "At the end of your turn, gain 1 Block for each card in your Hand",
+      "character": "Shared"
+    },
+    {
+      "id": "cracked-core",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/cracked-core",
+      "runtime_id": "CRACKED_CORE",
+      "meta_raw": "Cracked Core is a starter Slay the Spire 2 relic. At the start of each combat, Channel 1 Lightning. Pool: Defect.",
+      "en_name": "Cracked Core",
+      "rarity": "Starter",
+      "effect_text": "At the start of each combat, Channel 1 Lightning",
+      "character": "Defect"
+    },
+    {
+      "id": "crossbow",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/crossbow",
+      "runtime_id": "CROSSBOW",
+      "meta_raw": "Crossbow is a ancient Slay the Spire 2 relic. At the start of your turn, add a random Attack into your Hand. It's free to play this turn. Pool: Event.",
+      "en_name": "Crossbow",
+      "rarity": "Ancient",
+      "effect_text": "At the start of your turn, add a random Attack into your Hand. It's free to play this turn",
+      "character": "Event"
+    },
+    {
+      "id": "cursed-kettle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/cursed-kettle",
+      "runtime_id": "CURSED_KETTLE",
+      "meta_raw": "Cursed Kettle is a ancient Slay the Spire 2 relic. Whenever you defeat an Elite, the other Elites in the act will gain 3 Strength at the start of combat. Pool: Event.",
+      "en_name": "Cursed Kettle",
+      "rarity": "Ancient",
+      "effect_text": "Whenever you defeat an Elite, the other Elites in the act will gain 3 Strength at the start of combat",
+      "character": "Event"
+    },
+    {
+      "id": "cursed-pearl",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/cursed-pearl",
+      "runtime_id": "CURSED_PEARL",
+      "meta_raw": "Cursed Pearl is a ancient Slay the Spire 2 relic. Upon pickup, receive Greed. Gain 333 Gold. Pool: Event.",
+      "en_name": "Cursed Pearl",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, receive Greed. Gain 333 Gold",
+      "character": "Event"
+    },
+    {
+      "id": "darkstone-periapt",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/darkstone-periapt",
+      "runtime_id": "DARKSTONE_PERIAPT",
+      "meta_raw": "Darkstone Periapt is a event Slay the Spire 2 relic. Whenever you obtain a Curse, raise your Max HP by 6. Pool: Event.",
+      "en_name": "Darkstone Periapt",
+      "rarity": "Event",
+      "effect_text": "Whenever you obtain a Curse, raise your Max HP by 6",
+      "character": "Event"
+    },
+    {
+      "id": "data-disk",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/data-disk",
+      "runtime_id": "DATA_DISK",
+      "meta_raw": "Data Disk is a common Slay the Spire 2 relic. Start each combat with 1 Focus. Pool: Defect.",
+      "en_name": "Data Disk",
+      "rarity": "Common",
+      "effect_text": "Start each combat with 1 Focus",
+      "character": "Defect"
+    },
+    {
+      "id": "daughter-of-the-wind",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/daughter-of-the-wind",
+      "runtime_id": "DAUGHTER_OF_THE_WIND",
+      "meta_raw": "Daughter of the Wind is a event Slay the Spire 2 relic. Whenever you play an Attack, gain 1 Block. Pool: Event.",
+      "en_name": "Daughter of the Wind",
+      "rarity": "Event",
+      "effect_text": "Whenever you play an Attack, gain 1 Block",
+      "character": "Event"
+    },
+    {
+      "id": "delicate-frond",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/delicate-frond",
+      "runtime_id": "DELICATE_FROND",
+      "meta_raw": "Delicate Frond is a ancient Slay the Spire 2 relic. At the start of each combat, fill all empty potion slots with random potions. Pool: Event.",
+      "en_name": "Delicate Frond",
+      "rarity": "Ancient",
+      "effect_text": "At the start of each combat, fill all empty potion slots with random potions",
+      "character": "Event"
+    },
+    {
+      "id": "demon-tongue",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/demon-tongue",
+      "runtime_id": "DEMON_TONGUE",
+      "meta_raw": "Demon Tongue is a rare Slay the Spire 2 relic. The first time you lose HP on your turn, heal HP equal to the amount lost. Pool: Ironclad.",
+      "en_name": "Demon Tongue",
+      "rarity": "Rare",
+      "effect_text": "The first time you lose HP on your turn, heal HP equal to the amount lost",
+      "character": "Ironclad"
+    },
+    {
+      "id": "diamond-diadem",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/diamond-diadem",
+      "runtime_id": "DIAMOND_DIADEM",
+      "meta_raw": "Diamond Diadem is a ancient Slay the Spire 2 relic. Whenever you play 2 or fewer cards in a turn, take half damage from enemies. Pool: Event.",
+      "en_name": "Diamond Diadem",
+      "rarity": "Ancient",
+      "effect_text": "Whenever you play 2 or fewer cards in a turn, take half damage from enemies",
+      "character": "Event"
+    },
+    {
+      "id": "dingy-rug",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/dingy-rug",
+      "runtime_id": "DINGY_RUG",
+      "meta_raw": "Dingy Rug is a shop Slay the Spire 2 relic. Card rewards can now contain Colorless cards. Pool: Shared.",
+      "en_name": "Dingy Rug",
+      "rarity": "Shop",
+      "effect_text": "Card rewards can now contain Colorless cards",
+      "character": "Shared"
+    },
+    {
+      "id": "distinguished-cape",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/distinguished-cape",
+      "runtime_id": "DISTINGUISHED_CAPE",
+      "meta_raw": "Distinguished Cape is a ancient Slay the Spire 2 relic. Upon pickup, lose 9 Max HP. Add 3 Apparitions to your Deck. Pool: Event.",
+      "en_name": "Distinguished Cape",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, lose 9 Max HP. Add 3 Apparitions to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "divine-destiny",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/divine-destiny",
+      "runtime_id": "DIVINE_DESTINY",
+      "meta_raw": "Divine Destiny is a starter Slay the Spire 2 relic. At the start of each combat, gain 6 Stars. Pool: Event.",
+      "en_name": "Divine Destiny",
+      "rarity": "Starter",
+      "effect_text": "At the start of each combat, gain 6 Stars",
+      "character": "Event"
+    },
+    {
+      "id": "divine-right",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/divine-right",
+      "runtime_id": "DIVINE_RIGHT",
+      "meta_raw": "Divine Right is a starter Slay the Spire 2 relic. At the start of each combat, gain 3 Stars. Pool: Regent.",
+      "en_name": "Divine Right",
+      "rarity": "Starter",
+      "effect_text": "At the start of each combat, gain 3 Stars",
+      "character": "Regent"
+    },
+    {
+      "id": "dollys-mirror",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/dollys-mirror",
+      "runtime_id": "DOLLYS_MIRROR",
+      "meta_raw": "Dolly's Mirror is a shop Slay the Spire 2 relic. Upon pickup, obtain an additional copy of a card in your Deck. Pool: Shared.",
+      "en_name": "Dolly's Mirror",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, obtain an additional copy of a card in your Deck",
+      "character": "Shared"
+    },
+    {
+      "id": "dragon-fruit",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/dragon-fruit",
+      "runtime_id": "DRAGON_FRUIT",
+      "meta_raw": "Dragon Fruit is a shop Slay the Spire 2 relic. Whenever you gain Gold, raise your Max HP by 1. Pool: Shared.",
+      "en_name": "Dragon Fruit",
+      "rarity": "Shop",
+      "effect_text": "Whenever you gain Gold, raise your Max HP by 1",
+      "character": "Shared"
+    },
+    {
+      "id": "dream-catcher",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/dream-catcher",
+      "runtime_id": "DREAM_CATCHER",
+      "meta_raw": "Dream Catcher is a event Slay the Spire 2 relic. Whenever you Rest, you may add a card to your Deck. Pool: Event.",
+      "en_name": "Dream Catcher",
+      "rarity": "Event",
+      "effect_text": "Whenever you Rest, you may add a card to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "driftwood",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/driftwood",
+      "runtime_id": "DRIFTWOOD",
+      "meta_raw": "Driftwood is a ancient Slay the Spire 2 relic. You may reroll each card reward once. Pool: Event.",
+      "en_name": "Driftwood",
+      "rarity": "Ancient",
+      "effect_text": "You may reroll each card reward once",
+      "character": "Event"
+    },
+    {
+      "id": "dusty-tome",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/dusty-tome",
+      "runtime_id": "DUSTY_TOME",
+      "meta_raw": "Dusty Tome is a ancient Slay the Spire 2 relic. Upon pickup, obtain an Ancient Card. Pool: Event.",
+      "en_name": "Dusty Tome",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain an Ancient Card",
+      "character": "Event"
+    },
+    {
+      "id": "ectoplasm",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ectoplasm",
+      "runtime_id": "ECTOPLASM",
+      "meta_raw": "Ectoplasm is a ancient Slay the Spire 2 relic. You can no longer gain Gold. Gain 1 Energy at the start of each turn. Pool: Event.",
+      "en_name": "Ectoplasm",
+      "rarity": "Ancient",
+      "effect_text": "You can no longer gain Gold. Gain 1 Energy at the start of each turn",
+      "character": "Event"
+    },
+    {
+      "id": "electric-shrymp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/electric-shrymp",
+      "runtime_id": "ELECTRIC_SHRYMP",
+      "meta_raw": "Electric Shrymp is a ancient Slay the Spire 2 relic. Upon pickup, Enchant a Skill with Imbued. Pool: Event.",
+      "en_name": "Electric Shrymp",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Enchant a Skill with Imbued",
+      "character": "Event"
+    },
+    {
+      "id": "ember-tea",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ember-tea",
+      "runtime_id": "EMBER_TEA",
+      "meta_raw": "Ember Tea is a event Slay the Spire 2 relic. At the start of the next combats, gain 2 Strength. Pool: Event.",
+      "en_name": "Ember Tea",
+      "rarity": "Event",
+      "effect_text": "At the start of the next combats, gain 2 Strength",
+      "character": "Event"
+    },
+    {
+      "id": "emotion-chip",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/emotion-chip",
+      "runtime_id": "EMOTION_CHIP",
+      "meta_raw": "Emotion Chip is a rare Slay the Spire 2 relic. If you lost HP during the previous turn, trigger the passive ability of all Orbs at the start of your turn. Pool: Defect.",
+      "en_name": "Emotion Chip",
+      "rarity": "Rare",
+      "effect_text": "If you lost HP during the previous turn, trigger the passive ability of all Orbs at the start of your turn",
+      "character": "Defect"
+    },
+    {
+      "id": "empty-cage",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/empty-cage",
+      "runtime_id": "EMPTY_CAGE",
+      "meta_raw": "Empty Cage is a ancient Slay the Spire 2 relic. Upon pickup, remove 2 cards from your Deck. Pool: Event.",
+      "en_name": "Empty Cage",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, remove 2 cards from your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "eternal-feather",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/eternal-feather",
+      "runtime_id": "ETERNAL_FEATHER",
+      "meta_raw": "Eternal Feather is a uncommon Slay the Spire 2 relic. For every 5 cards in your Deck, heal 3 HP whenever you enter a Rest Site. Pool: Shared.",
+      "en_name": "Eternal Feather",
+      "rarity": "Uncommon",
+      "effect_text": "For every 5 cards in your Deck, heal 3 HP whenever you enter a Rest Site",
+      "character": "Shared"
+    },
+    {
+      "id": "fencing-manual",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/fencing-manual",
+      "runtime_id": "FENCING_MANUAL",
+      "meta_raw": "Fencing Manual is a common Slay the Spire 2 relic. At the start of each combat, Forge 10. Pool: Regent.",
+      "en_name": "Fencing Manual",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, Forge 10",
+      "character": "Regent"
+    },
+    {
+      "id": "festive-popper",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/festive-popper",
+      "runtime_id": "FESTIVE_POPPER",
+      "meta_raw": "Festive Popper is a common Slay the Spire 2 relic. At the start of each combat, deal 9 damage to ALL enemies. Pool: Shared.",
+      "en_name": "Festive Popper",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, deal 9 damage to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "fiddle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/fiddle",
+      "runtime_id": "FIDDLE",
+      "meta_raw": "Fiddle is a ancient Slay the Spire 2 relic. At the start of each turn, draw 2 additional cards. You may not draw cards during your turn. Pool: Event.",
+      "en_name": "Fiddle",
+      "rarity": "Ancient",
+      "effect_text": "At the start of each turn, draw 2 additional cards. You may not draw cards during your turn",
+      "character": "Event"
+    },
+    {
+      "id": "forgotten-soul",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/forgotten-soul",
+      "runtime_id": "FORGOTTEN_SOUL",
+      "meta_raw": "Forgotten Soul is a event Slay the Spire 2 relic. Whenever you Exhaust a card, deal 1 damage to a random enemy. Pool: Event.",
+      "en_name": "Forgotten Soul",
+      "rarity": "Event",
+      "effect_text": "Whenever you Exhaust a card, deal 1 damage to a random enemy",
+      "character": "Event"
+    },
+    {
+      "id": "fragrant-mushroom",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/fragrant-mushroom",
+      "runtime_id": "FRAGRANT_MUSHROOM",
+      "meta_raw": "Fragrant Mushroom is a event Slay the Spire 2 relic. Upon pickup, lose 15 HP and Upgrade 3 random cards. Pool: Event.",
+      "en_name": "Fragrant Mushroom",
+      "rarity": "Event",
+      "effect_text": "Upon pickup, lose 15 HP and Upgrade 3 random cards",
+      "character": "Event"
+    },
+    {
+      "id": "fresnel-lens",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/fresnel-lens",
+      "runtime_id": "FRESNEL_LENS",
+      "meta_raw": "Fresnel Lens is a event Slay the Spire 2 relic. Whenever you add a card that gains Block to your Deck, Enchant it with Nimble 2. Pool: Shared.",
+      "en_name": "Fresnel Lens",
+      "rarity": "Event",
+      "effect_text": "Whenever you add a card that gains Block to your Deck, Enchant it with Nimble 2",
+      "character": "Shared"
+    },
+    {
+      "id": "frozen-egg",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/frozen-egg",
+      "runtime_id": "FROZEN_EGG",
+      "meta_raw": "Frozen Egg is a rare Slay the Spire 2 relic. Whenever you add a Power into your Deck, Upgrade it. Pool: Shared.",
+      "en_name": "Frozen Egg",
+      "rarity": "Rare",
+      "effect_text": "Whenever you add a Power into your Deck, Upgrade it",
+      "character": "Shared"
+    },
+    {
+      "id": "funerary-mask",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/funerary-mask",
+      "runtime_id": "FUNERARY_MASK",
+      "meta_raw": "Funerary Mask is a uncommon Slay the Spire 2 relic. At the start of each combat, add 3 Souls into your Draw Pile. Pool: Necrobinder.",
+      "en_name": "Funerary Mask",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each combat, add 3 Souls into your Draw Pile",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "fur-coat",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/fur-coat",
+      "runtime_id": "FUR_COAT",
+      "meta_raw": "Fur Coat is a ancient Slay the Spire 2 relic. Upon pickup, mark 7 random combats. Enemies in those rooms have 1 HP. Pool: Event.",
+      "en_name": "Fur Coat",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, mark 7 random combats. Enemies in those rooms have 1 HP",
+      "character": "Event"
+    },
+    {
+      "id": "galactic-dust",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/galactic-dust",
+      "runtime_id": "GALACTIC_DUST",
+      "meta_raw": "Galactic Dust is a uncommon Slay the Spire 2 relic. For every 10 1 Star spent, gain 10 Block. Pool: Regent.",
+      "en_name": "Galactic Dust",
+      "rarity": "Uncommon",
+      "effect_text": "For every 10 1 Star spent, gain 10 Block",
+      "character": "Regent"
+    },
+    {
+      "id": "gambling-chip",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/gambling-chip",
+      "runtime_id": "GAMBLING_CHIP",
+      "meta_raw": "Gambling Chip is a rare Slay the Spire 2 relic. At the start of each combat, discard any number of cards then draw that many. Pool: Shared.",
+      "en_name": "Gambling Chip",
+      "rarity": "Rare",
+      "effect_text": "At the start of each combat, discard any number of cards then draw that many",
+      "character": "Shared"
+    },
+    {
+      "id": "game-piece",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/game-piece",
+      "runtime_id": "GAME_PIECE",
+      "meta_raw": "Game Piece is a rare Slay the Spire 2 relic. Whenever you play a Power, draw 1 card. Pool: Shared.",
+      "en_name": "Game Piece",
+      "rarity": "Rare",
+      "effect_text": "Whenever you play a Power, draw 1 card",
+      "character": "Shared"
+    },
+    {
+      "id": "ghost-seed",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ghost-seed",
+      "runtime_id": "GHOST_SEED",
+      "meta_raw": "Ghost Seed is a shop Slay the Spire 2 relic. Strikes and Defends gain Ethereal. Pool: Shared.",
+      "en_name": "Ghost Seed",
+      "rarity": "Shop",
+      "effect_text": "Strikes and Defends gain Ethereal",
+      "character": "Shared"
+    },
+    {
+      "id": "girya",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/girya",
+      "runtime_id": "GIRYA",
+      "meta_raw": "Girya is a rare Slay the Spire 2 relic. You can now gain Strength at Rest Sites. (3 times max) Pool: Shared.",
+      "en_name": "Girya",
+      "rarity": "Rare",
+      "effect_text": "You can now gain Strength at Rest Sites. (3 times max)",
+      "character": "Shared"
+    },
+    {
+      "id": "glass-eye",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/glass-eye",
+      "runtime_id": "GLASS_EYE",
+      "meta_raw": "Glass Eye is a ancient Slay the Spire 2 relic. Upon pickup, obtain 2 Common cards, 2 Uncommon cards, and 1 Rare card. Pool: Event.",
+      "en_name": "Glass Eye",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain 2 Common cards, 2 Uncommon cards, and 1 Rare card",
+      "character": "Event"
+    },
+    {
+      "id": "glitter",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/glitter",
+      "runtime_id": "GLITTER",
+      "meta_raw": "Glitter is a ancient Slay the Spire 2 relic. Enchant all card rewards with Glam. Pool: Event.",
+      "en_name": "Glitter",
+      "rarity": "Ancient",
+      "effect_text": "Enchant all card rewards with Glam",
+      "character": "Event"
+    },
+    {
+      "id": "gnarled-hammer",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/gnarled-hammer",
+      "runtime_id": "GNARLED_HAMMER",
+      "meta_raw": "Gnarled Hammer is a shop Slay the Spire 2 relic. Upon pickup, Enchant up to 3 Attacks with Sharp 3. Pool: Shared.",
+      "en_name": "Gnarled Hammer",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, Enchant up to 3 Attacks with Sharp 3",
+      "character": "Shared"
+    },
+    {
+      "id": "gold-plated-cables",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/gold-plated-cables",
+      "runtime_id": "GOLD_PLATED_CABLES",
+      "meta_raw": "Gold-Plated Cables is a uncommon Slay the Spire 2 relic. Your rightmost Orb triggers its passive an additional time. Pool: Defect.",
+      "en_name": "Gold-Plated Cables",
+      "rarity": "Uncommon",
+      "effect_text": "Your rightmost Orb triggers its passive an additional time",
+      "character": "Defect"
+    },
+    {
+      "id": "golden-compass",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/golden-compass",
+      "runtime_id": "GOLDEN_COMPASS",
+      "meta_raw": "Golden Compass is a ancient Slay the Spire 2 relic. Upon pickup, replace the Act 2 Map with a single special path. Pool: Event.",
+      "en_name": "Golden Compass",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, replace the Act 2 Map with a single special path",
+      "character": "Event"
+    },
+    {
+      "id": "golden-pearl",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/golden-pearl",
+      "runtime_id": "GOLDEN_PEARL",
+      "meta_raw": "Golden Pearl is a ancient Slay the Spire 2 relic. Upon pickup, gain 150 Gold. Pool: Event.",
+      "en_name": "Golden Pearl",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, gain 150 Gold",
+      "character": "Event"
+    },
+    {
+      "id": "gorget",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/gorget",
+      "runtime_id": "GORGET",
+      "meta_raw": "Gorget is a common Slay the Spire 2 relic. At the start of each combat, gain 4 Plating. Pool: Shared.",
+      "en_name": "Gorget",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, gain 4 Plating",
+      "character": "Shared"
+    },
+    {
+      "id": "gremlin-horn",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/gremlin-horn",
+      "runtime_id": "GREMLIN_HORN",
+      "meta_raw": "Gremlin Horn is a uncommon Slay the Spire 2 relic. Whenever an enemy dies, gain 1 Energy and draw 1 card. Pool: Shared.",
+      "en_name": "Gremlin Horn",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever an enemy dies, gain 1 Energy and draw 1 card",
+      "character": "Shared"
+    },
+    {
+      "id": "hand-drill",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/hand-drill",
+      "runtime_id": "HAND_DRILL",
+      "meta_raw": "Hand Drill is a event Slay the Spire 2 relic. Whenever you break an enemy's Block, apply 2 Vulnerable. Pool: Event.",
+      "en_name": "Hand Drill",
+      "rarity": "Event",
+      "effect_text": "Whenever you break an enemy's Block, apply 2 Vulnerable",
+      "character": "Event"
+    },
+    {
+      "id": "hefty-tablet",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/hefty-tablet",
+      "runtime_id": "HEFTY_TABLET",
+      "meta_raw": "Hefty Tablet is a ancient Slay the Spire 2 relic. Upon pickup, choose 1 of 3 Rare cards to add to your Deck, and add 1 Injury to your Deck. Pool: Event.",
+      "en_name": "Hefty Tablet",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, choose 1 of 3 Rare cards to add to your Deck, and add 1 Injury to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "helical-dart",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/helical-dart",
+      "runtime_id": "HELICAL_DART",
+      "meta_raw": "Helical Dart is a rare Slay the Spire 2 relic. Whenever you play a Shiv, gain 1 Dexterity this turn. Pool: Silent.",
+      "en_name": "Helical Dart",
+      "rarity": "Rare",
+      "effect_text": "Whenever you play a Shiv, gain 1 Dexterity this turn",
+      "character": "Silent"
+    },
+    {
+      "id": "history-course",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/history-course",
+      "runtime_id": "HISTORY_COURSE",
+      "meta_raw": "History Course is a event Slay the Spire 2 relic. At the start of your turn, play a copy of your last played Attack or Skill. Pool: Event.",
+      "en_name": "History Course",
+      "rarity": "Event",
+      "effect_text": "At the start of your turn, play a copy of your last played Attack or Skill",
+      "character": "Event"
+    },
+    {
+      "id": "horn-cleat",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/horn-cleat",
+      "runtime_id": "HORN_CLEAT",
+      "meta_raw": "Horn Cleat is a uncommon Slay the Spire 2 relic. At the start of your 2nd turn, gain 14 Block. Pool: Shared.",
+      "en_name": "Horn Cleat",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of your 2nd turn, gain 14 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "ice-cream",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ice-cream",
+      "runtime_id": "ICE_CREAM",
+      "meta_raw": "Ice Cream is a rare Slay the Spire 2 relic. Energy is now conserved between turns. Pool: Shared.",
+      "en_name": "Ice Cream",
+      "rarity": "Rare",
+      "effect_text": "Energy is now conserved between turns",
+      "character": "Shared"
+    },
+    {
+      "id": "infused-core",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/infused-core",
+      "runtime_id": "INFUSED_CORE",
+      "meta_raw": "Infused Core is a starter Slay the Spire 2 relic. At the start of each combat, Channel 3 Lightning. Pool: Event.",
+      "en_name": "Infused Core",
+      "rarity": "Starter",
+      "effect_text": "At the start of each combat, Channel 3 Lightning",
+      "character": "Event"
+    },
+    {
+      "id": "ink-bottle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ink-bottle",
+      "runtime_id": "INK_BOTTLE",
+      "meta_raw": "Ink Bottle is a rare Slay the Spire 2 relic. Every time you play 10 cards, draw 1 card. Pool: Shared.",
+      "en_name": "Ink Bottle",
+      "rarity": "Rare",
+      "effect_text": "Every time you play 10 cards, draw 1 card",
+      "character": "Shared"
+    },
+    {
+      "id": "intimidating-helmet",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/intimidating-helmet",
+      "runtime_id": "INTIMIDATING_HELMET",
+      "meta_raw": "Intimidating Helmet is a rare Slay the Spire 2 relic. Whenever you play a card that costs 2 Energy or more, gain 4 Block. Pool: Shared.",
+      "en_name": "Intimidating Helmet",
+      "rarity": "Rare",
+      "effect_text": "Whenever you play a card that costs 2 Energy or more, gain 4 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "iron-club",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/iron-club",
+      "runtime_id": "IRON_CLUB",
+      "meta_raw": "Iron Club is a ancient Slay the Spire 2 relic. Every 4 cards you play, draw 1 card. Pool: Event.",
+      "en_name": "Iron Club",
+      "rarity": "Ancient",
+      "effect_text": "Every 4 cards you play, draw 1 card",
+      "character": "Event"
+    },
+    {
+      "id": "ivory-tile",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ivory-tile",
+      "runtime_id": "IVORY_TILE",
+      "meta_raw": "Ivory Tile is a rare Slay the Spire 2 relic. Whenever you play a card that costs 3 Energy or more, gain 1 Energy. Pool: Necrobinder.",
+      "en_name": "Ivory Tile",
+      "rarity": "Rare",
+      "effect_text": "Whenever you play a card that costs 3 Energy or more, gain 1 Energy",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "jeweled-mask",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/jeweled-mask",
+      "runtime_id": "JEWELED_MASK",
+      "meta_raw": "Jeweled Mask is a ancient Slay the Spire 2 relic. At the start of combat put a random Power from your Draw Pile into your Hand, it's free to play. Pool: Event.",
+      "en_name": "Jeweled Mask",
+      "rarity": "Ancient",
+      "effect_text": "At the start of combat put a random Power from your Draw Pile into your Hand, it's free to play",
+      "character": "Event"
+    },
+    {
+      "id": "jewelry-box",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/jewelry-box",
+      "runtime_id": "JEWELRY_BOX",
+      "meta_raw": "Jewelry Box is a ancient Slay the Spire 2 relic. Upon pickup, add 1 Apotheosis to your Deck. Pool: Event.",
+      "en_name": "Jewelry Box",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, add 1 Apotheosis to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "joss-paper",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/joss-paper",
+      "runtime_id": "JOSS_PAPER",
+      "meta_raw": "Joss Paper is a uncommon Slay the Spire 2 relic. Every 5 times you Exhaust a card, draw 1 card. Pool: Shared.",
+      "en_name": "Joss Paper",
+      "rarity": "Uncommon",
+      "effect_text": "Every 5 times you Exhaust a card, draw 1 card",
+      "character": "Shared"
+    },
+    {
+      "id": "juzu-bracelet",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/juzu-bracelet",
+      "runtime_id": "JUZU_BRACELET",
+      "meta_raw": "Juzu Bracelet is a common Slay the Spire 2 relic. Regular enemy combats are no longer encountered in ? rooms. Pool: Shared.",
+      "en_name": "Juzu Bracelet",
+      "rarity": "Common",
+      "effect_text": "Regular enemy combats are no longer encountered in ? rooms",
+      "character": "Shared"
+    },
+    {
+      "id": "kifuda",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/kifuda",
+      "runtime_id": "KIFUDA",
+      "meta_raw": "Kifuda is a shop Slay the Spire 2 relic. Upon pickup, Enchant up to 3 cards with Adroit. Pool: Shared.",
+      "en_name": "Kifuda",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, Enchant up to 3 cards with Adroit",
+      "character": "Shared"
+    },
+    {
+      "id": "kunai",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/kunai",
+      "runtime_id": "KUNAI",
+      "meta_raw": "Kunai is a rare Slay the Spire 2 relic. Every time you play 3 Attacks in a single turn, gain 1 Dexterity. Pool: Shared.",
+      "en_name": "Kunai",
+      "rarity": "Rare",
+      "effect_text": "Every time you play 3 Attacks in a single turn, gain 1 Dexterity",
+      "character": "Shared"
+    },
+    {
+      "id": "kusarigama",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/kusarigama",
+      "runtime_id": "KUSARIGAMA",
+      "meta_raw": "Kusarigama is a uncommon Slay the Spire 2 relic. Every time you play 3 Attacks in a single turn, deal 6 damage to a random enemy. Pool: Shared.",
+      "en_name": "Kusarigama",
+      "rarity": "Uncommon",
+      "effect_text": "Every time you play 3 Attacks in a single turn, deal 6 damage to a random enemy",
+      "character": "Shared"
+    },
+    {
+      "id": "lantern",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lantern",
+      "runtime_id": "LANTERN",
+      "meta_raw": "Lantern is a common Slay the Spire 2 relic. Start each combat with an additional 1 Energy. Pool: Shared.",
+      "en_name": "Lantern",
+      "rarity": "Common",
+      "effect_text": "Start each combat with an additional 1 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "large-capsule",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/large-capsule",
+      "runtime_id": "LARGE_CAPSULE",
+      "meta_raw": "Large Capsule is a ancient Slay the Spire 2 relic. Upon pickup, obtain 2 random Relics. Add an additional Strike and Defend to your Deck. Pool: Event.",
+      "en_name": "Large Capsule",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain 2 random Relics. Add an additional Strike and Defend to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "lasting-candy",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lasting-candy",
+      "runtime_id": "LASTING_CANDY",
+      "meta_raw": "Lasting Candy is a uncommon Slay the Spire 2 relic. Every other combat, your card rewards gain an additional Power. Pool: Event · Shared.",
+      "en_name": "Lasting Candy",
+      "rarity": "Uncommon",
+      "effect_text": "Every other combat, your card rewards gain an additional Power",
+      "character": "Event · Shared"
+    },
+    {
+      "id": "lava-lamp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lava-lamp",
+      "runtime_id": "LAVA_LAMP",
+      "meta_raw": "Lava Lamp is a shop Slay the Spire 2 relic. At the end of combat, Upgrade all card rewards if you took no damage. Pool: Shared.",
+      "en_name": "Lava Lamp",
+      "rarity": "Shop",
+      "effect_text": "At the end of combat, Upgrade all card rewards if you took no damage",
+      "character": "Shared"
+    },
+    {
+      "id": "lava-rock",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lava-rock",
+      "runtime_id": "LAVA_ROCK",
+      "meta_raw": "Lava Rock is a ancient Slay the Spire 2 relic. The Act 1 Boss drops 2 Relics. Pool: Event.",
+      "en_name": "Lava Rock",
+      "rarity": "Ancient",
+      "effect_text": "The Act 1 Boss drops 2 Relics",
+      "character": "Event"
+    },
+    {
+      "id": "lead-paperweight",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lead-paperweight",
+      "runtime_id": "LEAD_PAPERWEIGHT",
+      "meta_raw": "Lead Paperweight is a ancient Slay the Spire 2 relic. Upon pickup, choose 1 of 2 Colorless cards to add to your Deck. Pool: Event.",
+      "en_name": "Lead Paperweight",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, choose 1 of 2 Colorless cards to add to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "leafy-poultice",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/leafy-poultice",
+      "runtime_id": "LEAFY_POULTICE",
+      "meta_raw": "Leafy Poultice is a ancient Slay the Spire 2 relic. Upon pickup, Transform 1 of your Strikes and 1 of your Defends and lose 12 Max HP. Pool: Event.",
+      "en_name": "Leafy Poultice",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Transform 1 of your Strikes and 1 of your Defends and lose 12 Max HP",
+      "character": "Event"
+    },
+    {
+      "id": "letter-opener",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/letter-opener",
+      "runtime_id": "LETTER_OPENER",
+      "meta_raw": "Letter Opener is a uncommon Slay the Spire 2 relic. Every time you play 3 Skills in a single turn, deal 5 damage to ALL enemies. Pool: Shared.",
+      "en_name": "Letter Opener",
+      "rarity": "Uncommon",
+      "effect_text": "Every time you play 3 Skills in a single turn, deal 5 damage to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "lizard-tail",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lizard-tail",
+      "runtime_id": "LIZARD_TAIL",
+      "meta_raw": "Lizard Tail is a rare Slay the Spire 2 relic. When your HP would be reduced to 0, heal to 50% of your Max HP instead (works once). Pool: Shared.",
+      "en_name": "Lizard Tail",
+      "rarity": "Rare",
+      "effect_text": "When your HP would be reduced to 0, heal to 50% of your Max HP instead (works once)",
+      "character": "Shared"
+    },
+    {
+      "id": "looming-fruit",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/looming-fruit",
+      "runtime_id": "LOOMING_FRUIT",
+      "meta_raw": "Looming Fruit is a ancient Slay the Spire 2 relic. Upon pickup, raise your Max HP by 31. Pool: Shared.",
+      "en_name": "Looming Fruit",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, raise your Max HP by 31",
+      "character": "Shared"
+    },
+    {
+      "id": "lords-parasol",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lords-parasol",
+      "runtime_id": "LORDS_PARASOL",
+      "meta_raw": "Lord's Parasol is a ancient Slay the Spire 2 relic. When you encounter the Merchant, immediately obtain EVERYTHING he sells. Pool: Event.",
+      "en_name": "Lord's Parasol",
+      "rarity": "Ancient",
+      "effect_text": "When you encounter the Merchant, immediately obtain EVERYTHING he sells",
+      "character": "Event"
+    },
+    {
+      "id": "lost-coffer",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lost-coffer",
+      "runtime_id": "LOST_COFFER",
+      "meta_raw": "Lost Coffer is a ancient Slay the Spire 2 relic. Upon pickup, gain 1 card reward and procure 1 random potion. Pool: Event.",
+      "en_name": "Lost Coffer",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, gain 1 card reward and procure 1 random potion",
+      "character": "Event"
+    },
+    {
+      "id": "lost-wisp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lost-wisp",
+      "runtime_id": "LOST_WISP",
+      "meta_raw": "Lost Wisp is a event Slay the Spire 2 relic. Whenever you play a Power, deal 8 damage to ALL enemies. Pool: Event.",
+      "en_name": "Lost Wisp",
+      "rarity": "Event",
+      "effect_text": "Whenever you play a Power, deal 8 damage to ALL enemies",
+      "character": "Event"
+    },
+    {
+      "id": "lucky-fysh",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lucky-fysh",
+      "runtime_id": "LUCKY_FYSH",
+      "meta_raw": "Lucky Fysh is a uncommon Slay the Spire 2 relic. Whenever you add a card to your Deck, gain 15 Gold. Pool: Shared.",
+      "en_name": "Lucky Fysh",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you add a card to your Deck, gain 15 Gold",
+      "character": "Shared"
+    },
+    {
+      "id": "lunar-pastry",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/lunar-pastry",
+      "runtime_id": "LUNAR_PASTRY",
+      "meta_raw": "Lunar Pastry is a rare Slay the Spire 2 relic. At the end of your turn, gain 1 Star. Pool: Regent.",
+      "en_name": "Lunar Pastry",
+      "rarity": "Rare",
+      "effect_text": "At the end of your turn, gain 1 Star",
+      "character": "Regent"
+    },
+    {
+      "id": "massive-scroll",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/massive-scroll",
+      "runtime_id": "MASSIVE_SCROLL",
+      "meta_raw": "Massive Scroll is a ancient Slay the Spire 2 relic. Upon pickup, choose 1 of 3 Multiplayer Cards to add to your Deck. Pool: Event.",
+      "en_name": "Massive Scroll",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, choose 1 of 3 Multiplayer Cards to add to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "maw-bank",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/maw-bank",
+      "runtime_id": "MAW_BANK",
+      "meta_raw": "Maw Bank is a event Slay the Spire 2 relic. Whenever you climb a floor, gain 12 Gold. No longer works when you spend any Gold at the shop. Pool: Event.",
+      "en_name": "Maw Bank",
+      "rarity": "Event",
+      "effect_text": "Whenever you climb a floor, gain 12 Gold. No longer works when you spend any Gold at the shop",
+      "character": "Event"
+    },
+    {
+      "id": "meal-ticket",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/meal-ticket",
+      "runtime_id": "MEAL_TICKET",
+      "meta_raw": "Meal Ticket is a common Slay the Spire 2 relic. Whenever you enter a shop room, heal 15 HP. Pool: Shared.",
+      "en_name": "Meal Ticket",
+      "rarity": "Common",
+      "effect_text": "Whenever you enter a shop room, heal 15 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "meat-cleaver",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/meat-cleaver",
+      "runtime_id": "MEAT_CLEAVER",
+      "meta_raw": "Meat Cleaver is a ancient Slay the Spire 2 relic. You may Cook at Rest Sites. Pool: Event.",
+      "en_name": "Meat Cleaver",
+      "rarity": "Ancient",
+      "effect_text": "You may Cook at Rest Sites",
+      "character": "Event"
+    },
+    {
+      "id": "meat-on-the-bone",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/meat-on-the-bone",
+      "runtime_id": "MEAT_ON_THE_BONE",
+      "meta_raw": "Meat on the Bone is a rare Slay the Spire 2 relic. If your HP is at or below 50% at the end of combat, heal 12 HP. Pool: Shared.",
+      "en_name": "Meat on the Bone",
+      "rarity": "Rare",
+      "effect_text": "If your HP is at or below 50% at the end of combat, heal 12 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "medical-kit",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/medical-kit",
+      "runtime_id": "MEDICAL_KIT",
+      "meta_raw": "Medical Kit is a shop Slay the Spire 2 relic. Status cards can now be played. Playing a Status will Exhaust the card. Pool: Shared.",
+      "en_name": "Medical Kit",
+      "rarity": "Shop",
+      "effect_text": "Status cards can now be played. Playing a Status will Exhaust the card",
+      "character": "Shared"
+    },
+    {
+      "id": "membership-card",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/membership-card",
+      "runtime_id": "MEMBERSHIP_CARD",
+      "meta_raw": "Membership Card is a shop Slay the Spire 2 relic. 50% discount on all products! Pool: Shared.",
+      "en_name": "Membership Card",
+      "rarity": "Shop",
+      "effect_text": "50% discount on all products!",
+      "character": "Shared"
+    },
+    {
+      "id": "mercury-hourglass",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/mercury-hourglass",
+      "runtime_id": "MERCURY_HOURGLASS",
+      "meta_raw": "Mercury Hourglass is a uncommon Slay the Spire 2 relic. At the start of your turn, deal 3 damage to ALL enemies. Pool: Shared.",
+      "en_name": "Mercury Hourglass",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of your turn, deal 3 damage to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "metronome",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/metronome",
+      "runtime_id": "METRONOME",
+      "meta_raw": "Metronome is a rare Slay the Spire 2 relic. The first time you Channel 7 Orbs each combat, deal 30 damage to ALL enemies. Pool: Defect.",
+      "en_name": "Metronome",
+      "rarity": "Rare",
+      "effect_text": "The first time you Channel 7 Orbs each combat, deal 30 damage to ALL enemies",
+      "character": "Defect"
+    },
+    {
+      "id": "mini-regent",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/mini-regent",
+      "runtime_id": "MINI_REGENT",
+      "meta_raw": "Mini Regent is a rare Slay the Spire 2 relic. The first time you spend 1 Star each turn, gain 1 Strength. Pool: Regent.",
+      "en_name": "Mini Regent",
+      "rarity": "Rare",
+      "effect_text": "The first time you spend 1 Star each turn, gain 1 Strength",
+      "character": "Regent"
+    },
+    {
+      "id": "miniature-cannon",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/miniature-cannon",
+      "runtime_id": "MINIATURE_CANNON",
+      "meta_raw": "Miniature Cannon is a uncommon Slay the Spire 2 relic. Upgraded Attacks deal 3 additional damage. Pool: Shared.",
+      "en_name": "Miniature Cannon",
+      "rarity": "Uncommon",
+      "effect_text": "Upgraded Attacks deal 3 additional damage",
+      "character": "Shared"
+    },
+    {
+      "id": "miniature-tent",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/miniature-tent",
+      "runtime_id": "MINIATURE_TENT",
+      "meta_raw": "Miniature Tent is a shop Slay the Spire 2 relic. You may choose any number of options at Rest Sites. Pool: Shared.",
+      "en_name": "Miniature Tent",
+      "rarity": "Shop",
+      "effect_text": "You may choose any number of options at Rest Sites",
+      "character": "Shared"
+    },
+    {
+      "id": "molten-egg",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/molten-egg",
+      "runtime_id": "MOLTEN_EGG",
+      "meta_raw": "Molten Egg is a rare Slay the Spire 2 relic. Whenever you add an Attack card to your Deck, Upgrade it. Pool: Shared.",
+      "en_name": "Molten Egg",
+      "rarity": "Rare",
+      "effect_text": "Whenever you add an Attack card to your Deck, Upgrade it",
+      "character": "Shared"
+    },
+    {
+      "id": "mr.-struggles",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/mr.-struggles",
+      "runtime_id": "MR._STRUGGLES",
+      "meta_raw": "Mr. Struggles is a event Slay the Spire 2 relic. At the start of your turn, deal damage equal to the turn number to ALL enemies. Pool: Event.",
+      "en_name": "Mr. Struggles",
+      "rarity": "Event",
+      "effect_text": "At the start of your turn, deal damage equal to the turn number to ALL enemies",
+      "character": "Event"
+    },
+    {
+      "id": "mummified-hand",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/mummified-hand",
+      "runtime_id": "MUMMIFIED_HAND",
+      "meta_raw": "Mummified Hand is a rare Slay the Spire 2 relic. Whenever you play a Power, a random card in your Hand is free to play that turn. Pool: Shared.",
+      "en_name": "Mummified Hand",
+      "rarity": "Rare",
+      "effect_text": "Whenever you play a Power, a random card in your Hand is free to play that turn",
+      "character": "Shared"
+    },
+    {
+      "id": "music-box",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/music-box",
+      "runtime_id": "MUSIC_BOX",
+      "meta_raw": "Music Box is a ancient Slay the Spire 2 relic. Create an Ethereal copy of the first Attack you play each turn. Pool: Event.",
+      "en_name": "Music Box",
+      "rarity": "Ancient",
+      "effect_text": "Create an Ethereal copy of the first Attack you play each turn",
+      "character": "Event"
+    },
+    {
+      "id": "mysterious-cocoon",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/mysterious-cocoon",
+      "runtime_id": "MYSTERIOUS_COCOON",
+      "meta_raw": "Mysterious Cocoon is a ancient Slay the Spire 2 relic. Upon gaining 2 experience, transform Training Strike into Impale. Pool: Event.",
+      "en_name": "Mysterious Cocoon",
+      "rarity": "Ancient",
+      "effect_text": "Upon gaining 2 experience, transform Training Strike into Impale",
+      "character": "Event"
+    },
+    {
+      "id": "mystic-lighter",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/mystic-lighter",
+      "runtime_id": "MYSTIC_LIGHTER",
+      "meta_raw": "Mystic Lighter is a shop Slay the Spire 2 relic. Enchanted Attacks deal 9 additional damage. Pool: Shared.",
+      "en_name": "Mystic Lighter",
+      "rarity": "Shop",
+      "effect_text": "Enchanted Attacks deal 9 additional damage",
+      "character": "Shared"
+    },
+    {
+      "id": "neows-talisman",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/neows-talisman",
+      "runtime_id": "NEOWS_TALISMAN",
+      "meta_raw": "Neow's Talisman is a ancient Slay the Spire 2 relic. Upon pickup, Upgrade 1 of your Strikes and 1 of your Defends. Pool: Event.",
+      "en_name": "Neow's Talisman",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Upgrade 1 of your Strikes and 1 of your Defends",
+      "character": "Event"
+    },
+    {
+      "id": "neows-torment",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/neows-torment",
+      "runtime_id": "NEOWS_TORMENT",
+      "meta_raw": "Neow's Torment is a ancient Slay the Spire 2 relic. Upon pickup, add 1 Neow's Fury to your Deck. Pool: Event.",
+      "en_name": "Neow's Torment",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, add 1 Neow's Fury to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "new-leaf",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/new-leaf",
+      "runtime_id": "NEW_LEAF",
+      "meta_raw": "New Leaf is a ancient Slay the Spire 2 relic. Upon pickup, Transform 1 card. Pool: Event.",
+      "en_name": "New Leaf",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Transform 1 card",
+      "character": "Event"
+    },
+    {
+      "id": "ninja-scroll",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ninja-scroll",
+      "runtime_id": "NINJA_SCROLL",
+      "meta_raw": "Ninja Scroll is a shop Slay the Spire 2 relic. At the start of each combat, add 3 Shivs into your Hand. Pool: Silent.",
+      "en_name": "Ninja Scroll",
+      "rarity": "Shop",
+      "effect_text": "At the start of each combat, add 3 Shivs into your Hand",
+      "character": "Silent"
+    },
+    {
+      "id": "nunchaku",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/nunchaku",
+      "runtime_id": "NUNCHAKU",
+      "meta_raw": "Nunchaku is a uncommon Slay the Spire 2 relic. Every time you play 10 Attacks, gain 1 Energy. Pool: Shared.",
+      "en_name": "Nunchaku",
+      "rarity": "Uncommon",
+      "effect_text": "Every time you play 10 Attacks, gain 1 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "nutritious-oyster",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/nutritious-oyster",
+      "runtime_id": "NUTRITIOUS_OYSTER",
+      "meta_raw": "Nutritious Oyster is a ancient Slay the Spire 2 relic. Upon pickup, raise your Max HP by 11. Pool: Event.",
+      "en_name": "Nutritious Oyster",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, raise your Max HP by 11",
+      "character": "Event"
+    },
+    {
+      "id": "nutritious-soup",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/nutritious-soup",
+      "runtime_id": "NUTRITIOUS_SOUP",
+      "meta_raw": "Nutritious Soup is a ancient Slay the Spire 2 relic. Upon pickup, Enchant all Strikes in your Deck with Tezcatara's Ember. Pool: Event.",
+      "en_name": "Nutritious Soup",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Enchant all Strikes in your Deck with Tezcatara's Ember",
+      "character": "Event"
+    },
+    {
+      "id": "oddly-smooth-stone",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/oddly-smooth-stone",
+      "runtime_id": "ODDLY_SMOOTH_STONE",
+      "meta_raw": "Oddly Smooth Stone is a common Slay the Spire 2 relic. Start each combat with 1 Dexterity. Pool: Shared.",
+      "en_name": "Oddly Smooth Stone",
+      "rarity": "Common",
+      "effect_text": "Start each combat with 1 Dexterity",
+      "character": "Shared"
+    },
+    {
+      "id": "old-coin",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/old-coin",
+      "runtime_id": "OLD_COIN",
+      "meta_raw": "Old Coin is a rare Slay the Spire 2 relic. Upon pickup, gain 300 Gold. Pool: Shared.",
+      "en_name": "Old Coin",
+      "rarity": "Rare",
+      "effect_text": "Upon pickup, gain 300 Gold",
+      "character": "Shared"
+    },
+    {
+      "id": "orange-dough",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/orange-dough",
+      "runtime_id": "ORANGE_DOUGH",
+      "meta_raw": "Orange Dough is a rare Slay the Spire 2 relic. At the start of each combat, add 2 random Colorless cards into your Hand. Pool: Regent.",
+      "en_name": "Orange Dough",
+      "rarity": "Rare",
+      "effect_text": "At the start of each combat, add 2 random Colorless cards into your Hand",
+      "character": "Regent"
+    },
+    {
+      "id": "orichalcum-2",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/orichalcum-2",
+      "runtime_id": "ORICHALCUM",
+      "meta_raw": "Orichalcum is a uncommon Slay the Spire 2 relic. If you end your turn without Block, gain 6 Block. Pool: Shared.",
+      "en_name": "Orichalcum",
+      "rarity": "Uncommon",
+      "effect_text": "If you end your turn without Block, gain 6 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "ornamental-fan",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ornamental-fan",
+      "runtime_id": "ORNAMENTAL_FAN",
+      "meta_raw": "Ornamental Fan is a uncommon Slay the Spire 2 relic. Every time you play 3 Attacks in a single turn, gain 4 Block. Pool: Shared.",
+      "en_name": "Ornamental Fan",
+      "rarity": "Uncommon",
+      "effect_text": "Every time you play 3 Attacks in a single turn, gain 4 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "orrery",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/orrery",
+      "runtime_id": "ORRERY",
+      "meta_raw": "Orrery is a shop Slay the Spire 2 relic. Upon pickup, gain 5 card rewards. Pool: Shared.",
+      "en_name": "Orrery",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, gain 5 card rewards",
+      "character": "Shared"
+    },
+    {
+      "id": "paels-blood",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/paels-blood",
+      "runtime_id": "PAELS_BLOOD",
+      "meta_raw": "Pael's Blood is a ancient Slay the Spire 2 relic. At the start of your turn, draw 1 additional card. Pool: Event.",
+      "en_name": "Pael's Blood",
+      "rarity": "Ancient",
+      "effect_text": "At the start of your turn, draw 1 additional card",
+      "character": "Event"
+    },
+    {
+      "id": "pandoras-box",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pandoras-box",
+      "runtime_id": "PANDORAS_BOX",
+      "meta_raw": "Pandora's Box is a ancient Slay the Spire 2 relic. Transform ALL Strikes and Defends. Pool: Event.",
+      "en_name": "Pandora's Box",
+      "rarity": "Ancient",
+      "effect_text": "Transform ALL Strikes and Defends",
+      "character": "Event"
+    },
+    {
+      "id": "pantograph",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pantograph",
+      "runtime_id": "PANTOGRAPH",
+      "meta_raw": "Pantograph is a uncommon Slay the Spire 2 relic. At the start of each Boss combat, heal 25 HP. Pool: Shared.",
+      "en_name": "Pantograph",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each Boss combat, heal 25 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "paper-krane",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/paper-krane",
+      "runtime_id": "PAPER_KRANE",
+      "meta_raw": "Paper Krane is a rare Slay the Spire 2 relic. Enemies with Weak deal 40% less damage to you rather than 25%. Pool: Silent.",
+      "en_name": "Paper Krane",
+      "rarity": "Rare",
+      "effect_text": "Enemies with Weak deal 40% less damage to you rather than 25%",
+      "character": "Silent"
+    },
+    {
+      "id": "paper-phrog",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/paper-phrog",
+      "runtime_id": "PAPER_PHROG",
+      "meta_raw": "Paper Phrog is a uncommon Slay the Spire 2 relic. Enemies with Vulnerable take 75% more damage rather than 50%. Pool: Ironclad.",
+      "en_name": "Paper Phrog",
+      "rarity": "Uncommon",
+      "effect_text": "Enemies with Vulnerable take 75% more damage rather than 50%",
+      "character": "Ironclad"
+    },
+    {
+      "id": "parrying-shield",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/parrying-shield",
+      "runtime_id": "PARRYING_SHIELD",
+      "meta_raw": "Parrying Shield is a uncommon Slay the Spire 2 relic. If you end a turn with at least 10 Block, deal 6 damage to a random enemy. Pool: Shared.",
+      "en_name": "Parrying Shield",
+      "rarity": "Uncommon",
+      "effect_text": "If you end a turn with at least 10 Block, deal 6 damage to a random enemy",
+      "character": "Shared"
+    },
+    {
+      "id": "pear",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pear",
+      "runtime_id": "PEAR",
+      "meta_raw": "Pear is a uncommon Slay the Spire 2 relic. Upon pickup, raise your Max HP by 10. Pool: Shared.",
+      "en_name": "Pear",
+      "rarity": "Uncommon",
+      "effect_text": "Upon pickup, raise your Max HP by 10",
+      "character": "Shared"
+    },
+    {
+      "id": "pen-nib",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pen-nib",
+      "runtime_id": "PEN_NIB",
+      "meta_raw": "Pen Nib is a uncommon Slay the Spire 2 relic. Every 10th Attack you play deals double damage. Pool: Shared.",
+      "en_name": "Pen Nib",
+      "rarity": "Uncommon",
+      "effect_text": "Every 10th Attack you play deals double damage",
+      "character": "Shared"
+    },
+    {
+      "id": "pendulum",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pendulum",
+      "runtime_id": "PENDULUM",
+      "meta_raw": "Pendulum is a common Slay the Spire 2 relic. Every 3 turns, draw 1 card. Pool: Shared.",
+      "en_name": "Pendulum",
+      "rarity": "Common",
+      "effect_text": "Every 3 turns, draw 1 card",
+      "character": "Shared"
+    },
+    {
+      "id": "permafrost",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/permafrost",
+      "runtime_id": "PERMAFROST",
+      "meta_raw": "Permafrost is a uncommon Slay the Spire 2 relic. The first time you play a Power each combat, gain 7 Block. Pool: Shared.",
+      "en_name": "Permafrost",
+      "rarity": "Uncommon",
+      "effect_text": "The first time you play a Power each combat, gain 7 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "petrified-toad",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/petrified-toad",
+      "runtime_id": "PETRIFIED_TOAD",
+      "meta_raw": "Petrified Toad is a uncommon Slay the Spire 2 relic. At the start of each combat, procure a Potion-Shaped Rock. Pool: Shared.",
+      "en_name": "Petrified Toad",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each combat, procure a Potion-Shaped Rock",
+      "character": "Shared"
+    },
+    {
+      "id": "philosophers-stone",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/philosophers-stone",
+      "runtime_id": "PHILOSOPHERS_STONE",
+      "meta_raw": "Philosopher's Stone is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. ALL enemies start combat with 1 Strength. Pool: Event.",
+      "en_name": "Philosopher's Stone",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. ALL enemies start combat with 1 Strength",
+      "character": "Event"
+    },
+    {
+      "id": "phylactery-unbound",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/phylactery-unbound",
+      "runtime_id": "PHYLACTERY_UNBOUND",
+      "meta_raw": "Phylactery Unbound is a starter Slay the Spire 2 relic. At the start of each combat, Summon 5. At the start of your turn, Summon 2. Pool: Event.",
+      "en_name": "Phylactery Unbound",
+      "rarity": "Starter",
+      "effect_text": "At the start of each combat, Summon 5. At the start of your turn, Summon 2",
+      "character": "Event"
+    },
+    {
+      "id": "planisphere",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/planisphere",
+      "runtime_id": "PLANISPHERE",
+      "meta_raw": "Planisphere is a uncommon Slay the Spire 2 relic. Whenever you enter a ? room, heal 5 HP. Pool: Shared.",
+      "en_name": "Planisphere",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you enter a ? room, heal 5 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "pocketwatch",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pocketwatch",
+      "runtime_id": "POCKETWATCH",
+      "meta_raw": "Pocketwatch is a rare Slay the Spire 2 relic. Whenever you play 3 or fewer cards during your turn, draw 3 additional cards at the start of your next turn. Pool: Shared.",
+      "en_name": "Pocketwatch",
+      "rarity": "Rare",
+      "effect_text": "Whenever you play 3 or fewer cards during your turn, draw 3 additional cards at the start of your next turn",
+      "character": "Shared"
+    },
+    {
+      "id": "pollinous-core",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pollinous-core",
+      "runtime_id": "POLLINOUS_CORE",
+      "meta_raw": "Pollinous Core is a event Slay the Spire 2 relic. Every 4 turns, draw 2 additional cards. Pool: Event.",
+      "en_name": "Pollinous Core",
+      "rarity": "Event",
+      "effect_text": "Every 4 turns, draw 2 additional cards",
+      "character": "Event"
+    },
+    {
+      "id": "pomander",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pomander",
+      "runtime_id": "POMANDER",
+      "meta_raw": "Pomander is a ancient Slay the Spire 2 relic. Upon pickup, Upgrade a card. Pool: Event.",
+      "en_name": "Pomander",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Upgrade a card",
+      "character": "Event"
+    },
+    {
+      "id": "potion-belt",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/potion-belt",
+      "runtime_id": "POTION_BELT",
+      "meta_raw": "Potion Belt is a common Slay the Spire 2 relic. Upon pickup, gain 2 potion slots. Pool: Shared.",
+      "en_name": "Potion Belt",
+      "rarity": "Common",
+      "effect_text": "Upon pickup, gain 2 potion slots",
+      "character": "Shared"
+    },
+    {
+      "id": "power-cell",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/power-cell",
+      "runtime_id": "POWER_CELL",
+      "meta_raw": "Power Cell is a rare Slay the Spire 2 relic. At the start of each combat, add 2 zero-cost cards from your Draw Pile into your Hand. Pool: Defect.",
+      "en_name": "Power Cell",
+      "rarity": "Rare",
+      "effect_text": "At the start of each combat, add 2 zero-cost cards from your Draw Pile into your Hand",
+      "character": "Defect"
+    },
+    {
+      "id": "prayer-wheel",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/prayer-wheel",
+      "runtime_id": "PRAYER_WHEEL",
+      "meta_raw": "Prayer Wheel is a rare Slay the Spire 2 relic. Normal enemies drop an additional card reward. Pool: Shared.",
+      "en_name": "Prayer Wheel",
+      "rarity": "Rare",
+      "effect_text": "Normal enemies drop an additional card reward",
+      "character": "Shared"
+    },
+    {
+      "id": "precarious-shears",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/precarious-shears",
+      "runtime_id": "PRECARIOUS_SHEARS",
+      "meta_raw": "Precarious Shears is a ancient Slay the Spire 2 relic. Upon pickup, remove 2 cards from your Deck and lose 16 HP. Pool: Event.",
+      "en_name": "Precarious Shears",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, remove 2 cards from your Deck and lose 16 HP",
+      "character": "Event"
+    },
+    {
+      "id": "precise-scissors",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/precise-scissors",
+      "runtime_id": "PRECISE_SCISSORS",
+      "meta_raw": "Precise Scissors is a ancient Slay the Spire 2 relic. Upon pickup, remove 1 card from your Deck. Pool: Event.",
+      "en_name": "Precise Scissors",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, remove 1 card from your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "preserved-fog",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/preserved-fog",
+      "runtime_id": "PRESERVED_FOG",
+      "meta_raw": "Preserved Fog is a ancient Slay the Spire 2 relic. Upon pickup, remove 3 cards from your Deck. Add Folly to your Deck. Pool: Event.",
+      "en_name": "Preserved Fog",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, remove 3 cards from your Deck. Add Folly to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "prismatic-gem",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/prismatic-gem",
+      "runtime_id": "PRISMATIC_GEM",
+      "meta_raw": "Prismatic Gem is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. Card rewards now contain cards from other colors. Pool: Event.",
+      "en_name": "Prismatic Gem",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. Card rewards now contain cards from other colors",
+      "character": "Event"
+    },
+    {
+      "id": "pumpkin-candle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/pumpkin-candle",
+      "runtime_id": "PUMPKIN_CANDLE",
+      "meta_raw": "Pumpkin Candle is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. Extinguishes at the start of Act 3. Pool: Event.",
+      "en_name": "Pumpkin Candle",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. Extinguishes at the start of Act 3",
+      "character": "Event"
+    },
+    {
+      "id": "punch-dagger",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/punch-dagger",
+      "runtime_id": "PUNCH_DAGGER",
+      "meta_raw": "Punch Dagger is a shop Slay the Spire 2 relic. Upon pickup, Enchant an Attack with Momentum 5. Pool: Shared.",
+      "en_name": "Punch Dagger",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, Enchant an Attack with Momentum 5",
+      "character": "Shared"
+    },
+    {
+      "id": "radiant-pearl",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/radiant-pearl",
+      "runtime_id": "RADIANT_PEARL",
+      "meta_raw": "Radiant Pearl is a ancient Slay the Spire 2 relic. At the start of each combat, add 1 Luminesce into your Hand. Pool: Event.",
+      "en_name": "Radiant Pearl",
+      "rarity": "Ancient",
+      "effect_text": "At the start of each combat, add 1 Luminesce into your Hand",
+      "character": "Event"
+    },
+    {
+      "id": "rainbow-ring",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/rainbow-ring",
+      "runtime_id": "RAINBOW_RING",
+      "meta_raw": "Rainbow Ring is a rare Slay the Spire 2 relic. The first time you play an Attack, Skill, and Power each turn, gain 1 Strength and 1 Dexterity. Pool: Shared.",
+      "en_name": "Rainbow Ring",
+      "rarity": "Rare",
+      "effect_text": "The first time you play an Attack, Skill, and Power each turn, gain 1 Strength and 1 Dexterity",
+      "character": "Shared"
+    },
+    {
+      "id": "razor-tooth",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/razor-tooth",
+      "runtime_id": "RAZOR_TOOTH",
+      "meta_raw": "Razor Tooth is a rare Slay the Spire 2 relic. Every time you play an Attack or Skill, Upgrade it for the remainder of combat. Pool: Event · Shared.",
+      "en_name": "Razor Tooth",
+      "rarity": "Rare",
+      "effect_text": "Every time you play an Attack or Skill, Upgrade it for the remainder of combat",
+      "character": "Event · Shared"
+    },
+    {
+      "id": "red-mask",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/red-mask",
+      "runtime_id": "RED_MASK",
+      "meta_raw": "Red Mask is a common Slay the Spire 2 relic. At the start of each combat, apply 1 Weak to ALL enemies. Pool: Shared.",
+      "en_name": "Red Mask",
+      "rarity": "Common",
+      "effect_text": "At the start of each combat, apply 1 Weak to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "red-skull",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/red-skull",
+      "runtime_id": "RED_SKULL",
+      "meta_raw": "Red Skull is a common Slay the Spire 2 relic. While your HP is at or below 50%, you have 3 additional Strength. Pool: Ironclad.",
+      "en_name": "Red Skull",
+      "rarity": "Common",
+      "effect_text": "While your HP is at or below 50%, you have 3 additional Strength",
+      "character": "Ironclad"
+    },
+    {
+      "id": "regal-pillow",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/regal-pillow",
+      "runtime_id": "REGAL_PILLOW",
+      "meta_raw": "Regal Pillow is a common Slay the Spire 2 relic. Whenever you Rest, heal an additional 15 HP. Pool: Shared.",
+      "en_name": "Regal Pillow",
+      "rarity": "Common",
+      "effect_text": "Whenever you Rest, heal an additional 15 HP",
+      "character": "Shared"
+    },
+    {
+      "id": "regalite",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/regalite",
+      "runtime_id": "REGALITE",
+      "meta_raw": "Regalite is a uncommon Slay the Spire 2 relic. Whenever you create a Colorless card, gain 2 Block. Pool: Regent.",
+      "en_name": "Regalite",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you create a Colorless card, gain 2 Block",
+      "character": "Regent"
+    },
+    {
+      "id": "reptile-trinket",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/reptile-trinket",
+      "runtime_id": "REPTILE_TRINKET",
+      "meta_raw": "Reptile Trinket is a uncommon Slay the Spire 2 relic. Whenever you use a potion, gain 3 Strength this turn. Pool: Shared.",
+      "en_name": "Reptile Trinket",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you use a potion, gain 3 Strength this turn",
+      "character": "Shared"
+    },
+    {
+      "id": "ring-of-the-drake",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ring-of-the-drake",
+      "runtime_id": "RING_OF_THE_DRAKE",
+      "meta_raw": "Ring of the Drake is a starter Slay the Spire 2 relic. At the start of your first 3 turns, draw 2 additional cards. Pool: Event.",
+      "en_name": "Ring of the Drake",
+      "rarity": "Starter",
+      "effect_text": "At the start of your first 3 turns, draw 2 additional cards",
+      "character": "Event"
+    },
+    {
+      "id": "ring-of-the-snake",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ring-of-the-snake",
+      "runtime_id": "RING_OF_THE_SNAKE",
+      "meta_raw": "Ring of the Snake is a starter Slay the Spire 2 relic. At the start of each combat, draw 2 additional cards. Pool: Silent.",
+      "en_name": "Ring of the Snake",
+      "rarity": "Starter",
+      "effect_text": "At the start of each combat, draw 2 additional cards",
+      "character": "Silent"
+    },
+    {
+      "id": "ringing-triangle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ringing-triangle",
+      "runtime_id": "RINGING_TRIANGLE",
+      "meta_raw": "Ringing Triangle is a shop Slay the Spire 2 relic. Retain your Hand on the first turn of combat. Pool: Shared.",
+      "en_name": "Ringing Triangle",
+      "rarity": "Shop",
+      "effect_text": "Retain your Hand on the first turn of combat",
+      "character": "Shared"
+    },
+    {
+      "id": "ripple-basin",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ripple-basin",
+      "runtime_id": "RIPPLE_BASIN",
+      "meta_raw": "Ripple Basin is a uncommon Slay the Spire 2 relic. If you did not play any Attacks during your turn, gain 4 Block. Pool: Shared.",
+      "en_name": "Ripple Basin",
+      "rarity": "Uncommon",
+      "effect_text": "If you did not play any Attacks during your turn, gain 4 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "royal-poison",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/royal-poison",
+      "runtime_id": "ROYAL_POISON",
+      "meta_raw": "Royal Poison is a event Slay the Spire 2 relic. At the start of each combat, lose 4 HP. Pool: Event.",
+      "en_name": "Royal Poison",
+      "rarity": "Event",
+      "effect_text": "At the start of each combat, lose 4 HP",
+      "character": "Event"
+    },
+    {
+      "id": "royal-stamp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/royal-stamp",
+      "runtime_id": "ROYAL_STAMP",
+      "meta_raw": "Royal Stamp is a shop Slay the Spire 2 relic. Upon pickup, choose an Attack or Skill in your Deck to Enchant with Royally Approved. Pool: Shared.",
+      "en_name": "Royal Stamp",
+      "rarity": "Shop",
+      "effect_text": "Upon pickup, choose an Attack or Skill in your Deck to Enchant with Royally Approved",
+      "character": "Shared"
+    },
+    {
+      "id": "ruined-helmet",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/ruined-helmet",
+      "runtime_id": "RUINED_HELMET",
+      "meta_raw": "Ruined Helmet is a rare Slay the Spire 2 relic. The first time you gain Strength each combat, double the amount gained. Pool: Ironclad.",
+      "en_name": "Ruined Helmet",
+      "rarity": "Rare",
+      "effect_text": "The first time you gain Strength each combat, double the amount gained",
+      "character": "Ironclad"
+    },
+    {
+      "id": "runic-capacitor",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/runic-capacitor",
+      "runtime_id": "RUNIC_CAPACITOR",
+      "meta_raw": "Runic Capacitor is a shop Slay the Spire 2 relic. Start each combat with 3 additional Orb Slots. Pool: Defect.",
+      "en_name": "Runic Capacitor",
+      "rarity": "Shop",
+      "effect_text": "Start each combat with 3 additional Orb Slots",
+      "character": "Defect"
+    },
+    {
+      "id": "runic-pyramid",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/runic-pyramid",
+      "runtime_id": "RUNIC_PYRAMID",
+      "meta_raw": "Runic Pyramid is a ancient Slay the Spire 2 relic. At the end of your turn, you no longer discard your Hand. Pool: Event.",
+      "en_name": "Runic Pyramid",
+      "rarity": "Ancient",
+      "effect_text": "At the end of your turn, you no longer discard your Hand",
+      "character": "Event"
+    },
+    {
+      "id": "sai",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sai",
+      "runtime_id": "SAI",
+      "meta_raw": "Sai is a ancient Slay the Spire 2 relic. At the start of your turn, gain 7 Block. Pool: Event.",
+      "en_name": "Sai",
+      "rarity": "Ancient",
+      "effect_text": "At the start of your turn, gain 7 Block",
+      "character": "Event"
+    },
+    {
+      "id": "sand-castle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sand-castle",
+      "runtime_id": "SAND_CASTLE",
+      "meta_raw": "Sand Castle is a ancient Slay the Spire 2 relic. Upon pickup, Upgrade 6 random cards. Pool: Event.",
+      "en_name": "Sand Castle",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Upgrade 6 random cards",
+      "character": "Event"
+    },
+    {
+      "id": "screaming-flagon",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/screaming-flagon",
+      "runtime_id": "SCREAMING_FLAGON",
+      "meta_raw": "Screaming Flagon is a shop Slay the Spire 2 relic. If you end your turn with no cards in your Hand, deal 20 damage to ALL enemies. Pool: Shared.",
+      "en_name": "Screaming Flagon",
+      "rarity": "Shop",
+      "effect_text": "If you end your turn with no cards in your Hand, deal 20 damage to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "scroll-boxes",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/scroll-boxes",
+      "runtime_id": "SCROLL_BOXES",
+      "meta_raw": "Scroll Boxes is a ancient Slay the Spire 2 relic. Upon pickup, lose all Gold and choose 1 of 2 packs of cards to add to your Deck. Pool: Event.",
+      "en_name": "Scroll Boxes",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, lose all Gold and choose 1 of 2 packs of cards to add to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "sea-glass",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sea-glass",
+      "runtime_id": "SEA_GLASS",
+      "meta_raw": "Sea Glass is a ancient Slay the Spire 2 relic. See 15 cards from another character. Choose any number of them to add to your Deck. Pool: Event.",
+      "en_name": "Sea Glass",
+      "rarity": "Ancient",
+      "effect_text": "See 15 cards from another character. Choose any number of them to add to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "seal-of-gold",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/seal-of-gold",
+      "runtime_id": "SEAL_OF_GOLD",
+      "meta_raw": "Seal of Gold is a ancient Slay the Spire 2 relic. At the start of your turn, spend 5 Gold to gain 1 Energy. Pool: Event.",
+      "en_name": "Seal of Gold",
+      "rarity": "Ancient",
+      "effect_text": "At the start of your turn, spend 5 Gold to gain 1 Energy",
+      "character": "Event"
+    },
+    {
+      "id": "self-forming-clay",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/self-forming-clay",
+      "runtime_id": "SELF_FORMING_CLAY",
+      "meta_raw": "Self-Forming Clay is a uncommon Slay the Spire 2 relic. Whenever you lose HP in combat, gain 3 Block next turn. Pool: Ironclad.",
+      "en_name": "Self-Forming Clay",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you lose HP in combat, gain 3 Block next turn",
+      "character": "Ironclad"
+    },
+    {
+      "id": "sere-talon",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sere-talon",
+      "runtime_id": "SERE_TALON",
+      "meta_raw": "Sere Talon is a ancient Slay the Spire 2 relic. Upon pickup, add 2 random Curses and 3 Wishes to your Deck. Pool: Event.",
+      "en_name": "Sere Talon",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, add 2 random Curses and 3 Wishes to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "shovel",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/shovel",
+      "runtime_id": "SHOVEL",
+      "meta_raw": "Shovel is a rare Slay the Spire 2 relic. You can now dig at Rest Sites to obtain a random Relic. Pool: Shared.",
+      "en_name": "Shovel",
+      "rarity": "Rare",
+      "effect_text": "You can now dig at Rest Sites to obtain a random Relic",
+      "character": "Shared"
+    },
+    {
+      "id": "shuriken",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/shuriken",
+      "runtime_id": "SHURIKEN",
+      "meta_raw": "Shuriken is a rare Slay the Spire 2 relic. Every time you play 3 Attacks in a single turn, gain 1 Strength. Pool: Shared.",
+      "en_name": "Shuriken",
+      "rarity": "Rare",
+      "effect_text": "Every time you play 3 Attacks in a single turn, gain 1 Strength",
+      "character": "Shared"
+    },
+    {
+      "id": "signet-ring",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/signet-ring",
+      "runtime_id": "SIGNET_RING",
+      "meta_raw": "Signet Ring is a ancient Slay the Spire 2 relic. Upon pickup, gain 999 Gold. Pool: Event.",
+      "en_name": "Signet Ring",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, gain 999 Gold",
+      "character": "Event"
+    },
+    {
+      "id": "silver-crucible",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/silver-crucible",
+      "runtime_id": "SILVER_CRUCIBLE",
+      "meta_raw": "Silver Crucible is a ancient Slay the Spire 2 relic. The first 3 card rewards you see are Upgraded. The first Treasure Chest you open is empty. Pool: Event.",
+      "en_name": "Silver Crucible",
+      "rarity": "Ancient",
+      "effect_text": "The first 3 card rewards you see are Upgraded. The first Treasure Chest you open is empty",
+      "character": "Event"
+    },
+    {
+      "id": "sling-of-courage",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sling-of-courage",
+      "runtime_id": "SLING_OF_COURAGE",
+      "meta_raw": "Sling of Courage is a shop Slay the Spire 2 relic. Start each Elite combat with 2 Strength. Pool: Shared.",
+      "en_name": "Sling of Courage",
+      "rarity": "Shop",
+      "effect_text": "Start each Elite combat with 2 Strength",
+      "character": "Shared"
+    },
+    {
+      "id": "small-capsule",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/small-capsule",
+      "runtime_id": "SMALL_CAPSULE",
+      "meta_raw": "Small Capsule is a ancient Slay the Spire 2 relic. Upon pickup, obtain a random Relic. Pool: Event.",
+      "en_name": "Small Capsule",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain a random Relic",
+      "character": "Event"
+    },
+    {
+      "id": "snecko-eye-2",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/snecko-eye-2",
+      "runtime_id": "SNECKO_EYE",
+      "meta_raw": "Snecko Eye is a ancient Slay the Spire 2 relic. At the start of your turn, draw 2 additional cards. Start each combat Confused. Pool: Event.",
+      "en_name": "Snecko Eye",
+      "rarity": "Ancient",
+      "effect_text": "At the start of your turn, draw 2 additional cards. Start each combat Confused",
+      "character": "Event"
+    },
+    {
+      "id": "snecko-skull",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/snecko-skull",
+      "runtime_id": "SNECKO_SKULL",
+      "meta_raw": "Snecko Skull is a common Slay the Spire 2 relic. Whenever you apply Poison, apply an additional 1 Poison. Pool: Silent.",
+      "en_name": "Snecko Skull",
+      "rarity": "Common",
+      "effect_text": "Whenever you apply Poison, apply an additional 1 Poison",
+      "character": "Silent"
+    },
+    {
+      "id": "sozu",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sozu",
+      "runtime_id": "SOZU",
+      "meta_raw": "Sozu is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. You can no longer obtain potions. Pool: Event.",
+      "en_name": "Sozu",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. You can no longer obtain potions",
+      "character": "Event"
+    },
+    {
+      "id": "sparkling-rouge",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sparkling-rouge",
+      "runtime_id": "SPARKLING_ROUGE",
+      "meta_raw": "Sparkling Rouge is a uncommon Slay the Spire 2 relic. At the start of your 3rd turn, gain 1 Strength and 1 Dexterity. Pool: Event · Shared.",
+      "en_name": "Sparkling Rouge",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of your 3rd turn, gain 1 Strength and 1 Dexterity",
+      "character": "Event · Shared"
+    },
+    {
+      "id": "spiked-gauntlets",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/spiked-gauntlets",
+      "runtime_id": "SPIKED_GAUNTLETS",
+      "meta_raw": "Spiked Gauntlets is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. Powers cost 1 more 1 Energy. Pool: Event.",
+      "en_name": "Spiked Gauntlets",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. Powers cost 1 more 1 Energy",
+      "character": "Event"
+    },
+    {
+      "id": "stone-calendar",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/stone-calendar",
+      "runtime_id": "STONE_CALENDAR",
+      "meta_raw": "Stone Calendar is a rare Slay the Spire 2 relic. At the end of turn 7, deal 52 damage to ALL enemies. Pool: Shared.",
+      "en_name": "Stone Calendar",
+      "rarity": "Rare",
+      "effect_text": "At the end of turn 7, deal 52 damage to ALL enemies",
+      "character": "Shared"
+    },
+    {
+      "id": "stone-cracker",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/stone-cracker",
+      "runtime_id": "STONE_CRACKER",
+      "meta_raw": "Stone Cracker is a uncommon Slay the Spire 2 relic. At the start of each combat, Upgrade 2 random cards in your Draw Pile for the rest of combat. Pool: Shared.",
+      "en_name": "Stone Cracker",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each combat, Upgrade 2 random cards in your Draw Pile for the rest of combat",
+      "character": "Shared"
+    },
+    {
+      "id": "stone-humidifier",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/stone-humidifier",
+      "runtime_id": "STONE_HUMIDIFIER",
+      "meta_raw": "Stone Humidifier is a ancient Slay the Spire 2 relic. Whenever you Rest at a Rest Site, raise your Max HP by 5. Pool: Event.",
+      "en_name": "Stone Humidifier",
+      "rarity": "Ancient",
+      "effect_text": "Whenever you Rest at a Rest Site, raise your Max HP by 5",
+      "character": "Event"
+    },
+    {
+      "id": "storybook",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/storybook",
+      "runtime_id": "STORYBOOK",
+      "meta_raw": "Storybook is a ancient Slay the Spire 2 relic. Upon pickup, add 1 Brightest Flame to your Deck. Pool: Event.",
+      "en_name": "Storybook",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, add 1 Brightest Flame to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "strawberry",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/strawberry",
+      "runtime_id": "STRAWBERRY",
+      "meta_raw": "Strawberry is a common Slay the Spire 2 relic. Upon pickup, raise your Max HP by 7. Pool: Shared.",
+      "en_name": "Strawberry",
+      "rarity": "Common",
+      "effect_text": "Upon pickup, raise your Max HP by 7",
+      "character": "Shared"
+    },
+    {
+      "id": "strike-dummy-2",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/strike-dummy-2",
+      "runtime_id": "STRIKE_DUMMY",
+      "meta_raw": "Strike Dummy is a common Slay the Spire 2 relic. Cards containing “Strike” deal 3 additional damage. Pool: Shared.",
+      "en_name": "Strike Dummy",
+      "rarity": "Common",
+      "effect_text": "Cards containing “Strike” deal 3 additional damage",
+      "character": "Shared"
+    },
+    {
+      "id": "sturdy-clamp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sturdy-clamp",
+      "runtime_id": "STURDY_CLAMP",
+      "meta_raw": "Sturdy Clamp is a rare Slay the Spire 2 relic. Up to 10 Block persists across turns. Pool: Shared.",
+      "en_name": "Sturdy Clamp",
+      "rarity": "Rare",
+      "effect_text": "Up to 10 Block persists across turns",
+      "character": "Shared"
+    },
+    {
+      "id": "sword-of-jade",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sword-of-jade",
+      "runtime_id": "SWORD_OF_JADE",
+      "meta_raw": "Sword of Jade is a event Slay the Spire 2 relic. Start each combat with 3 Strength. Pool: Event.",
+      "en_name": "Sword of Jade",
+      "rarity": "Event",
+      "effect_text": "Start each combat with 3 Strength",
+      "character": "Event"
+    },
+    {
+      "id": "sword-of-stone",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/sword-of-stone",
+      "runtime_id": "SWORD_OF_STONE",
+      "meta_raw": "Sword of Stone is a event Slay the Spire 2 relic. Transforms into a powerful Relic after defeating 5 Elites. Pool: Event.",
+      "en_name": "Sword of Stone",
+      "rarity": "Event",
+      "effect_text": "Transforms into a powerful Relic after defeating 5 Elites",
+      "character": "Event"
+    },
+    {
+      "id": "symbiotic-virus",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/symbiotic-virus",
+      "runtime_id": "SYMBIOTIC_VIRUS",
+      "meta_raw": "Symbiotic Virus is a uncommon Slay the Spire 2 relic. At the start of each combat, Channel 1 Dark. Pool: Defect.",
+      "en_name": "Symbiotic Virus",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each combat, Channel 1 Dark",
+      "character": "Defect"
+    },
+    {
+      "id": "tanxs-whistle",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tanxs-whistle",
+      "runtime_id": "TANXS_WHISTLE",
+      "meta_raw": "Tanx's Whistle is a ancient Slay the Spire 2 relic. Upon pickup, add 1 Whistle to your Deck. Pool: Event.",
+      "en_name": "Tanx's Whistle",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, add 1 Whistle to your Deck",
+      "character": "Event"
+    },
+    {
+      "id": "tea-of-discourtesy",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tea-of-discourtesy",
+      "runtime_id": "TEA_OF_DISCOURTESY",
+      "meta_raw": "Tea of Discourtesy is a event Slay the Spire 2 relic. At the start of the next combat, shuffle 2 Dazed into your Draw Pile. Pool: Event.",
+      "en_name": "Tea of Discourtesy",
+      "rarity": "Event",
+      "effect_text": "At the start of the next combat, shuffle 2 Dazed into your Draw Pile",
+      "character": "Event"
+    },
+    {
+      "id": "the-abacus",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/the-abacus",
+      "runtime_id": "THE_ABACUS",
+      "meta_raw": "The Abacus is a shop Slay the Spire 2 relic. Whenever you shuffle your Draw Pile, gain 6 Block. Pool: Shared.",
+      "en_name": "The Abacus",
+      "rarity": "Shop",
+      "effect_text": "Whenever you shuffle your Draw Pile, gain 6 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "the-boot",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/the-boot",
+      "runtime_id": "THE_BOOT",
+      "meta_raw": "The Boot is a event Slay the Spire 2 relic. Whenever you would deal 4 or less unblocked attack damage, increase it to 5. Pool: Event.",
+      "en_name": "The Boot",
+      "rarity": "Event",
+      "effect_text": "Whenever you would deal 4 or less unblocked attack damage, increase it to 5",
+      "character": "Event"
+    },
+    {
+      "id": "the-chosen-cheese",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/the-chosen-cheese",
+      "runtime_id": "THE_CHOSEN_CHEESE",
+      "meta_raw": "The Chosen Cheese is a event Slay the Spire 2 relic. At the end of combat, gain 1 Max HP. Pool: Event.",
+      "en_name": "The Chosen Cheese",
+      "rarity": "Event",
+      "effect_text": "At the end of combat, gain 1 Max HP",
+      "character": "Event"
+    },
+    {
+      "id": "the-courier",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/the-courier",
+      "runtime_id": "THE_COURIER",
+      "meta_raw": "The Courier is a rare Slay the Spire 2 relic. The merchant no longer runs out of cards, relics, or potions and his prices are reduced by 20%. Pool: Shared.",
+      "en_name": "The Courier",
+      "rarity": "Rare",
+      "effect_text": "The merchant no longer runs out of cards, relics, or potions and his prices are reduced by 20%",
+      "character": "Shared"
+    },
+    {
+      "id": "throwing-axe",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/throwing-axe",
+      "runtime_id": "THROWING_AXE",
+      "meta_raw": "Throwing Axe is a ancient Slay the Spire 2 relic. The first card you play each combat is played an extra time. Pool: Event.",
+      "en_name": "Throwing Axe",
+      "rarity": "Ancient",
+      "effect_text": "The first card you play each combat is played an extra time",
+      "character": "Event"
+    },
+    {
+      "id": "tingsha",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tingsha",
+      "runtime_id": "TINGSHA",
+      "meta_raw": "Tingsha is a uncommon Slay the Spire 2 relic. Whenever you discard a card during your turn, deal 3 damage to a random enemy for each card discarded. Pool: Silent.",
+      "en_name": "Tingsha",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you discard a card during your turn, deal 3 damage to a random enemy for each card discarded",
+      "character": "Silent"
+    },
+    {
+      "id": "tiny-mailbox",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tiny-mailbox",
+      "runtime_id": "TINY_MAILBOX",
+      "meta_raw": "Tiny Mailbox is a uncommon Slay the Spire 2 relic. Whenever you Rest, procure 2 random potions. Pool: Shared.",
+      "en_name": "Tiny Mailbox",
+      "rarity": "Uncommon",
+      "effect_text": "Whenever you Rest, procure 2 random potions",
+      "character": "Shared"
+    },
+    {
+      "id": "toasty-mittens",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/toasty-mittens",
+      "runtime_id": "TOASTY_MITTENS",
+      "meta_raw": "Toasty Mittens is a ancient Slay the Spire 2 relic. At the start of your turn, Exhaust the top card of your Draw Pile and gain 1 Strength. Pool: Event.",
+      "en_name": "Toasty Mittens",
+      "rarity": "Ancient",
+      "effect_text": "At the start of your turn, Exhaust the top card of your Draw Pile and gain 1 Strength",
+      "character": "Event"
+    },
+    {
+      "id": "toolbox",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/toolbox",
+      "runtime_id": "TOOLBOX",
+      "meta_raw": "Toolbox is a shop Slay the Spire 2 relic. At the start of each combat, choose 1 of 3 random Colorless cards and add the chosen card into your Hand. Pool: Shared.",
+      "en_name": "Toolbox",
+      "rarity": "Shop",
+      "effect_text": "At the start of each combat, choose 1 of 3 random Colorless cards and add the chosen card into your Hand",
+      "character": "Shared"
+    },
+    {
+      "id": "touch-of-orobas",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/touch-of-orobas",
+      "runtime_id": "TOUCH_OF_OROBAS",
+      "meta_raw": "Touch of Orobas is a ancient Slay the Spire 2 relic. Upon pickup, replace your starter Relic with an Ancient version. Pool: Event.",
+      "en_name": "Touch of Orobas",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, replace your starter Relic with an Ancient version",
+      "character": "Event"
+    },
+    {
+      "id": "tough-bandages",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tough-bandages",
+      "runtime_id": "TOUGH_BANDAGES",
+      "meta_raw": "Tough Bandages is a rare Slay the Spire 2 relic. Whenever you discard a card during your turn, gain 3 Block. Pool: Silent.",
+      "en_name": "Tough Bandages",
+      "rarity": "Rare",
+      "effect_text": "Whenever you discard a card during your turn, gain 3 Block",
+      "character": "Silent"
+    },
+    {
+      "id": "toxic-egg",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/toxic-egg",
+      "runtime_id": "TOXIC_EGG",
+      "meta_raw": "Toxic Egg is a rare Slay the Spire 2 relic. Whenever you add a Skill into your Deck, Upgrade it. Pool: Shared.",
+      "en_name": "Toxic Egg",
+      "rarity": "Rare",
+      "effect_text": "Whenever you add a Skill into your Deck, Upgrade it",
+      "character": "Shared"
+    },
+    {
+      "id": "toy-box",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/toy-box",
+      "runtime_id": "TOY_BOX",
+      "meta_raw": "Toy Box is a ancient Slay the Spire 2 relic. Upon pickup, obtain 4 Wax Relics. Every 3 combats, your left-most Wax Relic will melt away. Pool: Event.",
+      "en_name": "Toy Box",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, obtain 4 Wax Relics. Every 3 combats, your left-most Wax Relic will melt away",
+      "character": "Event"
+    },
+    {
+      "id": "tri-boomerang",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tri-boomerang",
+      "runtime_id": "TRI_BOOMERANG",
+      "meta_raw": "Tri-Boomerang is a ancient Slay the Spire 2 relic. Choose 3 Attacks in your Deck. Enchant them with Instinct. Pool: Event.",
+      "en_name": "Tri-Boomerang",
+      "rarity": "Ancient",
+      "effect_text": "Choose 3 Attacks in your Deck. Enchant them with Instinct",
+      "character": "Event"
+    },
+    {
+      "id": "tungsten-rod",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tungsten-rod",
+      "runtime_id": "TUNGSTEN_ROD",
+      "meta_raw": "Tungsten Rod is a rare Slay the Spire 2 relic. Whenever you would lose HP, lose 1 less. Pool: Shared.",
+      "en_name": "Tungsten Rod",
+      "rarity": "Rare",
+      "effect_text": "Whenever you would lose HP, lose 1 less",
+      "character": "Shared"
+    },
+    {
+      "id": "tuning-fork",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/tuning-fork",
+      "runtime_id": "TUNING_FORK",
+      "meta_raw": "Tuning Fork is a uncommon Slay the Spire 2 relic. Every time you play 10 Skills, gain 7 Block. Pool: Shared.",
+      "en_name": "Tuning Fork",
+      "rarity": "Uncommon",
+      "effect_text": "Every time you play 10 Skills, gain 7 Block",
+      "character": "Shared"
+    },
+    {
+      "id": "twisted-funnel",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/twisted-funnel",
+      "runtime_id": "TWISTED_FUNNEL",
+      "meta_raw": "Twisted Funnel is a uncommon Slay the Spire 2 relic. At the start of each combat, apply 4 Poison to ALL enemies. Pool: Silent.",
+      "en_name": "Twisted Funnel",
+      "rarity": "Uncommon",
+      "effect_text": "At the start of each combat, apply 4 Poison to ALL enemies",
+      "character": "Silent"
+    },
+    {
+      "id": "unceasing-top",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/unceasing-top",
+      "runtime_id": "UNCEASING_TOP",
+      "meta_raw": "Unceasing Top is a rare Slay the Spire 2 relic. Whenever you have no cards in Hand during your turn, draw a card. Pool: Shared.",
+      "en_name": "Unceasing Top",
+      "rarity": "Rare",
+      "effect_text": "Whenever you have no cards in Hand during your turn, draw a card",
+      "character": "Shared"
+    },
+    {
+      "id": "undying-sigil",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/undying-sigil",
+      "runtime_id": "UNDYING_SIGIL",
+      "meta_raw": "Undying Sigil is a shop Slay the Spire 2 relic. Enemies with at least as much Doom as HP deal 50% less damage. Pool: Necrobinder.",
+      "en_name": "Undying Sigil",
+      "rarity": "Shop",
+      "effect_text": "Enemies with at least as much Doom as HP deal 50% less damage",
+      "character": "Necrobinder"
+    },
+    {
+      "id": "unsettling-lamp",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/unsettling-lamp",
+      "runtime_id": "UNSETTLING_LAMP",
+      "meta_raw": "Unsettling Lamp is a rare Slay the Spire 2 relic. Each combat, the first time you play a card that Debuffs an enemy, double its effect. Pool: Shared.",
+      "en_name": "Unsettling Lamp",
+      "rarity": "Rare",
+      "effect_text": "Each combat, the first time you play a card that Debuffs an enemy, double its effect",
+      "character": "Shared"
+    },
+    {
+      "id": "vajra",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/vajra",
+      "runtime_id": "VAJRA",
+      "meta_raw": "Vajra is a common Slay the Spire 2 relic. Start each combat with 1 Strength. Pool: Shared.",
+      "en_name": "Vajra",
+      "rarity": "Common",
+      "effect_text": "Start each combat with 1 Strength",
+      "character": "Shared"
+    },
+    {
+      "id": "vambrace",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/vambrace",
+      "runtime_id": "VAMBRACE",
+      "meta_raw": "Vambrace is a uncommon Slay the Spire 2 relic. The first time you gain Block from a card each combat, double the amount gained. Pool: Shared.",
+      "en_name": "Vambrace",
+      "rarity": "Uncommon",
+      "effect_text": "The first time you gain Block from a card each combat, double the amount gained",
+      "character": "Shared"
+    },
+    {
+      "id": "velvet-choker",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/velvet-choker",
+      "runtime_id": "VELVET_CHOKER",
+      "meta_raw": "Velvet Choker is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. You cannot play more than 6 cards per turn. Pool: Event.",
+      "en_name": "Velvet Choker",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. You cannot play more than 6 cards per turn",
+      "character": "Event"
+    },
+    {
+      "id": "venerable-tea-set-2",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/venerable-tea-set-2",
+      "runtime_id": "VENERABLE_TEA_SET",
+      "meta_raw": "Venerable Tea Set is a common Slay the Spire 2 relic. Whenever you enter a Rest Site, start the next combat with an additional 2 Energy. Pool: Shared.",
+      "en_name": "Venerable Tea Set",
+      "rarity": "Common",
+      "effect_text": "Whenever you enter a Rest Site, start the next combat with an additional 2 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "very-hot-cocoa",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/very-hot-cocoa",
+      "runtime_id": "VERY_HOT_COCOA",
+      "meta_raw": "Very Hot Cocoa is a ancient Slay the Spire 2 relic. Start each combat with an additional 4 Energy. Pool: Shared.",
+      "en_name": "Very Hot Cocoa",
+      "rarity": "Ancient",
+      "effect_text": "Start each combat with an additional 4 Energy",
+      "character": "Shared"
+    },
+    {
+      "id": "vexing-puzzlebox",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/vexing-puzzlebox",
+      "runtime_id": "VEXING_PUZZLEBOX",
+      "meta_raw": "Vexing Puzzlebox is a rare Slay the Spire 2 relic. At the start of each combat, add a random card into your Hand. It's free to play this turn. Pool: Shared.",
+      "en_name": "Vexing Puzzlebox",
+      "rarity": "Rare",
+      "effect_text": "At the start of each combat, add a random card into your Hand. It's free to play this turn",
+      "character": "Shared"
+    },
+    {
+      "id": "vitruvian-minion",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/vitruvian-minion",
+      "runtime_id": "VITRUVIAN_MINION",
+      "meta_raw": "Vitruvian Minion is a shop Slay the Spire 2 relic. Cards containing “Minion” deal double damage and gain double Block. Pool: Regent.",
+      "en_name": "Vitruvian Minion",
+      "rarity": "Shop",
+      "effect_text": "Cards containing “Minion” deal double damage and gain double Block",
+      "character": "Regent"
+    },
+    {
+      "id": "war-hammer",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/war-hammer",
+      "runtime_id": "WAR_HAMMER",
+      "meta_raw": "War Hammer is a ancient Slay the Spire 2 relic. Whenever you kill an Elite, Upgrade 4 random cards. Pool: Event.",
+      "en_name": "War Hammer",
+      "rarity": "Ancient",
+      "effect_text": "Whenever you kill an Elite, Upgrade 4 random cards",
+      "character": "Event"
+    },
+    {
+      "id": "war-paint",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/war-paint",
+      "runtime_id": "WAR_PAINT",
+      "meta_raw": "War Paint is a common Slay the Spire 2 relic. Upon pickup, Upgrade 2 random Skills. Pool: Shared.",
+      "en_name": "War Paint",
+      "rarity": "Common",
+      "effect_text": "Upon pickup, Upgrade 2 random Skills",
+      "character": "Shared"
+    },
+    {
+      "id": "whetstone",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/whetstone",
+      "runtime_id": "WHETSTONE",
+      "meta_raw": "Whetstone is a common Slay the Spire 2 relic. Upon pickup, Upgrade 2 random Attacks. Pool: Shared.",
+      "en_name": "Whetstone",
+      "rarity": "Common",
+      "effect_text": "Upon pickup, Upgrade 2 random Attacks",
+      "character": "Shared"
+    },
+    {
+      "id": "whispering-earring",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/whispering-earring",
+      "runtime_id": "WHISPERING_EARRING",
+      "meta_raw": "Whispering Earring is a ancient Slay the Spire 2 relic. Gain 1 Energy at the start of each turn. Vakuu plays your first turn for you. Pool: Event.",
+      "en_name": "Whispering Earring",
+      "rarity": "Ancient",
+      "effect_text": "Gain 1 Energy at the start of each turn. Vakuu plays your first turn for you",
+      "character": "Event"
+    },
+    {
+      "id": "white-beast-statue",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/white-beast-statue",
+      "runtime_id": "WHITE_BEAST_STATUE",
+      "meta_raw": "White Beast Statue is a rare Slay the Spire 2 relic. Potions always appear in combat rewards. Pool: Shared.",
+      "en_name": "White Beast Statue",
+      "rarity": "Rare",
+      "effect_text": "Potions always appear in combat rewards",
+      "character": "Shared"
+    },
+    {
+      "id": "white-star",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/white-star",
+      "runtime_id": "WHITE_STAR",
+      "meta_raw": "White Star is a rare Slay the Spire 2 relic. Elites drop an additional Rare card reward. Pool: Shared.",
+      "en_name": "White Star",
+      "rarity": "Rare",
+      "effect_text": "Elites drop an additional Rare card reward",
+      "character": "Shared"
+    },
+    {
+      "id": "wing-charm",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/wing-charm",
+      "runtime_id": "WING_CHARM",
+      "meta_raw": "Wing Charm is a shop Slay the Spire 2 relic. A random card in each card reward is Enchanted with Swift 1. Pool: Shared.",
+      "en_name": "Wing Charm",
+      "rarity": "Shop",
+      "effect_text": "A random card in each card reward is Enchanted with Swift 1",
+      "character": "Shared"
+    },
+    {
+      "id": "wongo-customer-appreciation-badge",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/wongo-customer-appreciation-badge",
+      "runtime_id": "WONGO_CUSTOMER_APPRECIATION_BADGE",
+      "meta_raw": "Wongo Customer Appreciation Badge is a event Slay the Spire 2 relic. Does nothing. Pool: Event.",
+      "en_name": "Wongo Customer Appreciation Badge",
+      "rarity": "Event",
+      "effect_text": "Does nothing",
+      "character": "Event"
+    },
+    {
+      "id": "wongos-mystery-ticket",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/wongos-mystery-ticket",
+      "runtime_id": "WONGOS_MYSTERY_TICKET",
+      "meta_raw": "Wongo's Mystery Ticket is a event Slay the Spire 2 relic. Receive 3 random Relics after 5 combats. Pool: Event.",
+      "en_name": "Wongo's Mystery Ticket",
+      "rarity": "Event",
+      "effect_text": "Receive 3 random Relics after 5 combats",
+      "character": "Event"
+    },
+    {
+      "id": "yummy-cookie",
+      "url": "https://sts2-wiki.org/slay-the-spire-2-relics/yummy-cookie",
+      "runtime_id": "YUMMY_COOKIE",
+      "meta_raw": "Yummy Cookie is a ancient Slay the Spire 2 relic. Upon pickup, Upgrade 4 cards. Pool: Event.",
+      "en_name": "Yummy Cookie",
+      "rarity": "Ancient",
+      "effect_text": "Upon pickup, Upgrade 4 cards",
+      "character": "Event"
+    }
+  ],
+  "n": 272,
+  "n_fail": 0,
+  "fails": []
+}

@@ -41,7 +41,16 @@ internal static class SidecarProcess
                 // A pipe we never write to and never close: when the game process dies, however it dies,
                 // the service sees EOF on it and exits instead of lingering as an orphan.
                 RedirectStandardInput = true,
+                // The service prints Chinese; a Windows pipe would otherwise use the ANSI code page on both ends.
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+                // A GUI parent on Windows would otherwise flash (or keep) a console window for python.exe.
+                CreateNoWindow = true,
             };
+            // Python on Windows reads/writes text files in the ANSI code page unless told otherwise (the repo's
+            // JSON data is UTF-8); UTF-8 mode fixes that and the pipe encoding in one switch. Harmless elsewhere.
+            info.Environment["PYTHONUTF8"] = "1";
+            info.Environment["PYTHONIOENCODING"] = "utf-8";
             // The advisor's routing policy: the env var greedy_action reads per call. Always set (also for the
             // default), so a STS2_MAP_POLICY left in the game's own environment cannot override the config.
             info.Environment["STS2_MAP_POLICY"] = config.MapPolicy;
@@ -50,8 +59,12 @@ internal static class SidecarProcess
             info.ArgumentList.Add(config.Port.ToString());
             info.ArgumentList.Add("--exit-on-stdin-eof");
             // Hot reload: the service re-executes itself (same pipe, same env) when a policy commit lands
-            // in the repo, so the running game picks it up without a restart.
-            info.ArgumentList.Add("--reload-on-commit");
+            // in the repo, so the running game picks it up without a restart. Not on Windows: os.execv there
+            // starts a NEW process and exits the old one, which the mod would take for a crashed service.
+            if (OperatingSystem.IsWindows())
+                ModLog.Info("hot reload is off on Windows (restart the game to pick up a policy change)");
+            else
+                info.ArgumentList.Add("--reload-on-commit");
             _process = Process.Start(info)!;
             _process.EnableRaisingEvents = true;
             _process.Exited += OnExited;

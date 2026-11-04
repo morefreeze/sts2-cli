@@ -676,10 +676,79 @@ def test_main_starts_the_reloader_only_with_the_flag(monkeypatch):
     monkeypatch.setattr(advisor_server, "HotReloader", Fake)
     monkeypatch.setattr(advisor_server, "make_server", lambda port: FakeServer())
     monkeypatch.setattr(advisor_server, "run_git", lambda args, root=advisor_server.ROOT: "f" * 40)
+    monkeypatch.setattr(advisor_server, "reload_supported", lambda os_name=None: True)  # also true on Windows
     advisor_server.main(["--port", "0"])
     assert started == []
     advisor_server.main(["--port", "0", "--reload-on-commit"])
     assert started == ["f" * 40]
+
+
+def test_reload_is_supported_everywhere_but_windows():
+    assert advisor_server.reload_supported("posix") is True
+    assert advisor_server.reload_supported("nt") is False
+    assert advisor_server.reload_supported() is (os.name != "nt")
+
+
+def _main_with_fakes(monkeypatch, supported):
+    started = []
+
+    class Fake:
+        def __init__(self, inflight, start_head):
+            started.append(start_head)
+
+        def start(self):
+            pass
+
+    class FakeServer:
+        warnings, commit, warmup_s = [], "x", 0.0
+        server_address = ("127.0.0.1", 1)
+        inflight = advisor_server.InFlight()
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    git_calls = []
+
+    def fake_git(args, root=advisor_server.ROOT):
+        git_calls.append(args)
+        return "f" * 40
+
+    monkeypatch.setattr(advisor_server, "HotReloader", Fake)
+    monkeypatch.setattr(advisor_server, "make_server", lambda port: FakeServer())
+    monkeypatch.setattr(advisor_server, "run_git", fake_git)
+    monkeypatch.setattr(advisor_server, "reload_supported", lambda os_name=None: supported)
+    return started, git_calls
+
+
+def test_main_ignores_reload_on_commit_on_windows_with_a_warning(monkeypatch, capsys):
+    started, git_calls = _main_with_fakes(monkeypatch, supported=False)
+    assert advisor_server.main(["--port", "0", "--reload-on-commit"]) == 0
+    assert started == [] and git_calls == []  # no reloader thread, HEAD never read
+    err = capsys.readouterr().err
+    assert "--reload-on-commit is not supported on Windows" in err
+    assert "hot reload on" not in err
+
+
+def test_main_still_reloads_where_exec_is_supported(monkeypatch, capsys):
+    started, _ = _main_with_fakes(monkeypatch, supported=True)
+    advisor_server.main(["--port", "0", "--reload-on-commit"])
+    assert started == ["f" * 40]
+    assert "not supported on Windows" not in capsys.readouterr().err
+
+
+def test_the_service_imports_without_fcntl_as_on_windows():
+    """fcntl does not exist on Windows; agent.combat_env used to import it at module level, which made
+    advisor_server (via play_full_run -> combat_env) unimportable there. Block it and import."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    code = ("import sys; sys.modules['fcntl'] = None; "
+            f"sys.path[:0] = [{root!r}, {os.path.join(root, 'python')!r}]; "
+            "import agent.advisor_server as a; import agent.combat_env as c; "
+            "assert c.fcntl is None; print('ok')")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=root, timeout=120)
+    assert done.returncode == 0 and done.stdout.strip() == "ok", done.stderr
 
 
 def test_a_real_git_repo_reports_head_and_status(tmp_path):

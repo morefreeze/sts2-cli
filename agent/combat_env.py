@@ -11,7 +11,11 @@ Design: simple 1:1 mapping — each env.step() = one game action (including
 end_turn). No auto-skip. Policy and value networks are separated in train.py
 to prevent value-loss gradient from corrupting policy on forced end_turn steps.
 """
-import fcntl, hashlib, json, math, os, subprocess, random, time, select, sys, warnings
+import hashlib, json, math, os, subprocess, random, time, select, sys, warnings
+try:
+    import fcntl  # POSIX only; the Windows advice service (agent/advisor_server.py) imports this module too
+except ImportError:  # pragma: no cover - exercised on Windows
+    fcntl = None
 import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box, Discrete
@@ -2910,7 +2914,8 @@ class CombatEnv(gym.Env):
         committed = False
         try:
             with open(path, "a+b", buffering=0) as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
                     f.seek(0, os.SEEK_END)
                     original_offset = f.tell()
@@ -2932,7 +2937,8 @@ class CombatEnv(gym.Env):
                             ) from write_exc
                         raise
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    if fcntl is not None:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except Exception as exc:
             if committed:
                 return exc

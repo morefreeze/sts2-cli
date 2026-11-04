@@ -1,0 +1,9 @@
+# Python packages for the Sts2Advisor advice service (agent/advisor_server.py) -- NOT the full
+# requirements-agent.txt (no torch / stable-baselines3). Pinned to the versions the advice was
+# validated with (the .venv on the macOS dev machine, Python 3.11):
+#   - deck_predictor_v2.pkl is a scikit-learn pickle, which only loads under the version that wrote it;
+#   - scipy / joblib / threadpoolctl come in with scikit-learn.
+# Install: py -3.11 -m venv .venv ; .venv\Scripts\python.exe -m pip install -r requirements-advisor.txt
+numpy==2.4.4
+gymnasium==1.2.3
+scikit-learn==1.8.0

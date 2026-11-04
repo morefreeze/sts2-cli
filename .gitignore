@@ -27,12 +27,23 @@ crash_stderr.log
 crash_*.log
 eval_global_progress*.log
 train_pids/
-data/
+data/*
 # Exceptions: advisor card ratings are derived from an EXTERNAL site
 # (ing-gom/sts2-card-advisor) that can change/disappear, so we commit a
 # snapshot. Regenerate with: agent/build_advisor_ratings.py
 !data/advisor_card_ratings.json
 !data/advisor_card_tags.json
+# The rest of greedy_action's local data (agent/greedy_trace.py GREEDY_DATA_FILES + data/relics.json, read by
+# agent/state_encoder.py): the Windows advice service runs from a clone and has no other copy of them.
+# deck_predictor_v2.pkl needs the scikit-learn pinned in requirements-advisor.txt.
+!data/card_empirical.json
+!data/card_metadata.json
+!data/card_q_values.json
+!data/card_synergies.py
+!data/deck_predictor_v2.pkl
+!data/ironclad_card_tags.json
+!data/ironclad_cards.json
+!data/relics.json
 # Fitted route models (Phase 3b) are small and committed. A file cannot be
 # re-included while its parent directory is excluded, so re-include agent/data/
 # first and ignore everything in it except the models.
