@@ -24,8 +24,10 @@ internal sealed class ShopHandler(IAutoPilotHost host) : IHandler
 
     public async Task HandleAsync(Rng random, CancellationToken ct)
     {
-        var root = ((SceneTree)Engine.GetMainLoop()).Root;
-        var room = await WaitHelper.ForNode<NMerchantRoom>(root, "/root/Game/RootSceneContainer/Run/RoomContainer/MerchantRoom", ct);
+        // v0.113.0: the merchant room is no longer at RoomContainer/MerchantRoom; the game's own
+        // ShopRoomHandler waits for the NMerchantRoom.Instance singleton instead.
+        await WaitHelper.Until(() => NMerchantRoom.Instance?.Visible ?? false, ct, null, "Merchant room not found");
+        var room = NMerchantRoom.Instance!;
         if (!room.Inventory.IsOpen)
         {
             room.OpenInventory();
