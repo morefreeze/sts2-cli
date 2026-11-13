@@ -19,6 +19,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.Timeline;
 using MegaCrit.Sts2.Core.Random;
+using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Timeline.Epochs;
@@ -141,7 +142,9 @@ internal static class CampaignActions
         await game.Transition.FadeOut(0.8f, character.CharacterSelectTransitionPath);
         try
         {
-            await game.StartNewSingleplayerRun(character, true, acts, Array.Empty<ModifierModel>(), seed, GameMode.Standard, ascension.Level);
+            // v0.113.0 takes a ready Player (v0.111.0 built this inside NGame): same unlock state and net id 1.
+            var player = Player.CreateForNewRun(character, SaveManager.Instance.GenerateUnlockStateFromProgress(), 1uL);
+            await game.StartNewSingleplayerRun(player, true, acts, Array.Empty<ModifierModel>(), seed, GameMode.Standard, false, ascension.Level);
         }
         catch (Exception e)
         {

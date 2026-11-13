@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Random;
+using MegaCrit.Sts2.Core.Runs;
 using Sts2Advisor.Core;
 
 namespace Sts2Advisor.AutoPilot;
@@ -43,12 +44,11 @@ internal sealed class ShopHandler(IAutoPilotHost host) : IHandler
                 break;
             }
             var entry = EntryFor(advice);
-            var inventory = room.Inventory.Inventory ?? throw new AutoPilotException("shop: no inventory");
+            _ = room.Inventory.Inventory ?? throw new AutoPilotException("shop: no inventory");
             host.StepTaken(advice);
-            // The removal entry has its own wrapper (its price rises and the purchase can be cancelled).
-            var purchase = entry is MerchantCardRemovalEntry removal
-                ? removal.OnTryPurchaseWrapper(inventory)
-                : entry.OnTryPurchaseWrapper(inventory);
+            // v0.113.0: OnTryPurchaseWrapper is gone; the shop UI (NMerchantSlot.OnSelected) calls
+            // MerchantSynchronizer.PurchaseLocalEntry, which also covers the card-removal entry.
+            var purchase = RunManager.Instance.MerchantSynchronizer.PurchaseLocalEntry(entry);
             await host.DrainUntilAsync(purchase, ct);
             if (!await purchase)
                 throw new AutoPilotException($"shop: {advice.Plan.Kind} was refused");

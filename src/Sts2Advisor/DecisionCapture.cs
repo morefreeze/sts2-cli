@@ -315,7 +315,7 @@ internal static class DecisionCapture
 
     private static Capture Shop(MerchantRoom mr, RunState rs, Player player, LocLookup loc)
     {
-        var inv = mr.GetLocalInventory();
+        var inv = RunManager.Instance.MerchantSynchronizer.GetLocalInventory();
         var cardEntries = inv.CharacterCardEntries.Concat(inv.ColorlessCardEntries).ToList();
         var labels = new Dictionary<string, string>();
         for (int i = 0; i < cardEntries.Count; i++)
