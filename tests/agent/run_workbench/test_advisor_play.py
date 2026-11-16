@@ -278,6 +278,18 @@ def test_a_current_run_from_before_the_advisor_or_with_a_win_time_is_ignored(env
 # ---------------------------------------------------------------------------
 
 
+def test_configured_fool_counts_toward_the_expedition_goal(env: Env):
+    env.write("campaign.json", {"enabled": True, "strategy": "ladder", "characters": ["FOOL"]})
+    payload = env.payload(character="FOOL")
+    assert payload["goal"]["won_goal"] == 6
+    assert payload["characters"][-1]["character"] == "FOOL"
+    assert {"id": "FOOL", "count": 0} in payload["character_options"]
+
+    env.add_run(BASE, character="FOOL", ascension=0, win=True)
+    payload = env.payload(character="FOOL")
+    assert [run["char"] for run in payload["runs"]] == ["FOOL"]
+
+
 def test_goal_and_ladder_read_progress_save_and_the_runs(env: Env):
     env.write("progress.save", progress(IRONCLAD=7, SILENT=10, DEFECT=6, REGENT=4), where="saves")
     env.add_run(BASE, character="IRONCLAD", ascension=6, win=True)

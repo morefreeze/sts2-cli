@@ -10,6 +10,14 @@ public class CampaignFileTests
     private static string TempPath() => Path.Combine(Path.GetTempPath(), $"sts2campaign-{Guid.NewGuid()}.json");
 
     [Fact]
+    public void ReadsFoolInTheLadder()
+    {
+        var r = Parse("""{"enabled": true, "strategy": "ladder", "characters": ["FOOL"]}""");
+        Assert.Null(r.Problem);
+        Assert.Equal(new[] { "FOOL" }, r.Settings!.Ladder);
+    }
+
+    [Fact]
     public void ReadsAnEnabledFileWithAMaxAscension()
     {
         var r = Parse("""{"enabled": true, "next": {"character": "IRONCLAD", "ascension": "max"}, "command": null}""");

@@ -186,6 +186,7 @@ internal static class CampaignActions
         if (c.Id == ModelDb.GetId<Regent>()) return save.IsEpochRevealed<Regent4Epoch>();
         if (c.Id == ModelDb.GetId<Defect>()) return save.IsEpochRevealed<Defect4Epoch>();
         if (c.Id == ModelDb.GetId<Necrobinder>()) return save.IsEpochRevealed<Necrobinder4Epoch>();
+        if (c.Id.Entry == "FOOL") return save.IsEpochRevealed("FOOL4_EPOCH");
         return true;
     }
 

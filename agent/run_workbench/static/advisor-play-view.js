@@ -393,7 +393,8 @@ window.AdvisorPlayView = (() => {
   // ---- filter -----------------------------------------------------------
 
   function characterLabel(id) {
-    return id === 'OTHER' ? OTHER_LABEL : id;
+    if (id === 'OTHER') return OTHER_LABEL;
+    return id === 'FOOL' ? '愚者' : id;
   }
 
   function filterPanel(payload) {
@@ -438,7 +439,7 @@ window.AdvisorPlayView = (() => {
     const tbody = element('tbody');
     (payload.characters || []).forEach((row) => {
       const tr = element('tr');
-      tr.append(element('th', { className: 'adv-char', text: row.character, attrs: { scope: 'row' } }));
+      tr.append(element('th', { className: 'adv-char', text: characterLabel(row.character), attrs: { scope: 'row' } }));
       const unlocked = element('td', { className: 'adv-unlocked' });
       unlocked.append(
         strong(String(row.max_ascension)),

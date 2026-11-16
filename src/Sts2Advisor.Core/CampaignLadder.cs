@@ -27,7 +27,7 @@ public static class CampaignLadder
     /// <summary>A win at this ascension or above finishes a character.</summary>
     public const int DoneAscension = CampaignPlan.GameMaxAscension;
 
-    public static readonly IReadOnlyList<string> KnownCharacters = new[] { "IRONCLAD", "SILENT", "DEFECT", "REGENT", "NECROBINDER" };
+    public static readonly IReadOnlyList<string> KnownCharacters = new[] { "IRONCLAD", "SILENT", "DEFECT", "REGENT", "NECROBINDER", "FOOL" };
 
     public static int LevelOf(IReadOnlyDictionary<string, int> levels, string character) =>
         levels.TryGetValue(character, out int l) ? Math.Clamp(l, 0, CampaignPlan.GameMaxAscension) : 0;

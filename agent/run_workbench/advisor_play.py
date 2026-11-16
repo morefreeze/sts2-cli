@@ -391,6 +391,9 @@ def parse_campaign_json(data: Any) -> dict[str, Any]:
     result["ok"] = True
     result["enabled"] = data.get("enabled") if isinstance(data.get("enabled"), bool) else None
     result["command"] = data.get("command") if isinstance(data.get("command"), str) else None
+    ladder = data.get("characters")
+    if data.get("strategy") == "ladder" and isinstance(ladder, list):
+        result["ladder"] = [short(entry.strip().upper()) for entry in ladder if isinstance(entry, str)]
     for entry in data.get("rotation") or []:
         if isinstance(entry, str) and entry:
             result["rotation"].append({"character": entry.upper(), "ascension": "max"})
@@ -534,7 +537,8 @@ def elite_fights(runs: list[dict[str, Any]]) -> dict[str, Any]:
 def _ladder(runs: list[dict[str, Any]], current: dict[str, Any] | None,
             stats: Mapping[str, Mapping[str, Any]],
             advisor_runs: list[dict[str, Any]] | None = None,
-            won_goal: set[str] | None = None) -> list[dict[str, Any]]:
+            won_goal: set[str] | None = None,
+            characters: tuple[str, ...] = CHARACTERS) -> list[dict[str, Any]]:
     """One row per character: unlocked ascension (global), whether an A10 run was ever won,
     the selected runs' results per ascension and the character's whole advisor-era record.
 
@@ -562,7 +566,7 @@ def _ladder(runs: list[dict[str, Any]], current: dict[str, Any] | None,
         if run["asc"] is not None:
             advisor_at[(run["char"], run["asc"])] += 1
     rows = []
-    for char in CHARACTERS:
+    for char in characters:
         entry = stats.get(char) or {}
         unlocked = _int(entry.get("max_ascension"), 0) or 0
         first_asc = min((asc for (c, asc) in advisor_at if c == char), default=None)
@@ -640,10 +644,6 @@ def parse_filter(character: Any = None, shown: Any = None) -> dict[str, Any]:
     return {"character": char, "shown": count}
 
 
-def _character_group(char: str) -> str:
-    return char if char in CHARACTERS else OTHER
-
-
 def build_payload(
     paths: AdvisorPlayPaths | None = None,
     *,
@@ -687,12 +687,23 @@ def _build(paths: AdvisorPlayPaths, now: float, problems: list[str], flt: dict[s
     log_tail = _read_tail(paths.advisor_log)
     parsed_log = parse_log_tail(log_tail)
 
-    group_counts = collections.Counter(_character_group(r["char"]) for r in everything)
-    selected = [r for r in everything if flt["character"] is None or _character_group(r["char"]) == flt["character"]]
+    known_fool = (
+        "FOOL" in camp.get("ladder", ())
+        or any(r["char"] == "FOOL" for r in everything)
+        or (current is not None and current["char"] == "FOOL")
+        or "FOOL" in stats
+    )
+    characters = (*CHARACTERS, "FOOL") if known_fool else CHARACTERS
+
+    def character_group(char: str) -> str:
+        return char if char in characters else OTHER
+
+    group_counts = collections.Counter(character_group(r["char"]) for r in everything)
+    selected = [r for r in everything if flt["character"] is None or character_group(r["char"]) == flt["character"]]
     for number, run in enumerate(selected, 1):
         run["number"] = number
     current_selected = current is not None and (
-        flt["character"] is None or _character_group(current["char"]) == flt["character"])
+        flt["character"] is None or character_group(current["char"]) == flt["character"])
     if current:
         current["number"] = len(selected) + 1
 
@@ -701,13 +712,13 @@ def _build(paths: AdvisorPlayPaths, now: float, problems: list[str], flt: dict[s
     all_history = load_all_history(paths, [])  # an unreadable pre-advisor file is not this tab's problem
     won_goal = {
         r["char"] for r in all_history + everything
-        if r["result"] == "win" and (r["asc"] or 0) >= GOAL_ASCENSION and r["char"] in CHARACTERS}
+        if r["result"] == "win" and (r["asc"] or 0) >= GOAL_ASCENSION and r["char"] in characters}
 
     wins = sum(1 for r in selected if r["result"] == "win")
     losses = sum(1 for r in selected if r["result"] == "loss")
     abandoned = sum(1 for r in selected if r["result"] == "abandoned")
     times = [r["run_time"] for r in selected if r["run_time"]]
-    levels = sum(min(GOAL_ASCENSION, (_int((stats.get(c) or {}).get("max_ascension"), 0) or 0)) for c in CHARACTERS)
+    levels = sum(min(GOAL_ASCENSION, (_int((stats.get(c) or {}).get("max_ascension"), 0) or 0)) for c in characters)
 
     last_logged = log_rows[-1].get("character") if log_rows else None
     anchor = current["char"] if current else (str(last_logged).upper() if last_logged else None)
@@ -735,11 +746,11 @@ def _build(paths: AdvisorPlayPaths, now: float, problems: list[str], flt: dict[s
         "problems": problems,
         "since": paths.since,
         "filter": flt,
-        "character_options": [{"id": c, "count": group_counts.get(c, 0)} for c in (*CHARACTERS, OTHER)],
+        "character_options": [{"id": c, "count": group_counts.get(c, 0)} for c in (*characters, OTHER)],
         "goal": {
-            "ascension": GOAL_ASCENSION, "levels": levels, "levels_goal": GOAL_ASCENSION * len(CHARACTERS),
-            "won": len(won_goal), "won_goal": len(CHARACTERS),
-            "won_characters": [c for c in CHARACTERS if c in won_goal],
+            "ascension": GOAL_ASCENSION, "levels": levels, "levels_goal": GOAL_ASCENSION * len(characters),
+            "won": len(won_goal), "won_goal": len(characters),
+            "won_characters": [c for c in characters if c in won_goal],
         },
         "summary": {
             "runs": len(selected), "wins": wins, "losses": losses, "abandoned": abandoned,
@@ -747,14 +758,15 @@ def _build(paths: AdvisorPlayPaths, now: float, problems: list[str], flt: dict[s
             "mean_run_time": round(statistics.mean(times)) if times else None,
         },
         "characters": _ladder(
-            selected, current if current_selected else None, stats, advisor_runs=everything, won_goal=won_goal),
+            selected, current if current_selected else None, stats, advisor_runs=everything,
+            won_goal=won_goal, characters=characters),
         "current": current,
         "current_selected": current_selected,
         "activity": _activity(parsed_log, now),
         "campaign": {
             "ok": camp["ok"], "enabled": camp["enabled"], "command": camp["command"],
             "rotation": camp["rotation"],
-            "not_in_rotation": [c for c in CHARACTERS if c not in rotation_chars] if camp["ok"] else [],
+            "not_in_rotation": [c for c in characters if c not in rotation_chars] if camp["ok"] else [],
             "next": next_entry,
             "next_after_current": current is not None,
         },
