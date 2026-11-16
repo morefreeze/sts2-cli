@@ -571,6 +571,7 @@ def _ladder(runs: list[dict[str, Any]], current: dict[str, Any] | None,
         unlocked = _int(entry.get("max_ascension"), 0) or 0
         first_asc = min((asc for (c, asc) in advisor_at if c == char), default=None)
         total = advisor_total.get(char) or blank()
+        a0_unlocked = char in stats or first_asc is not None or (current is not None and current["char"] == char)
         rows.append({
             "character": char,
             "max_ascension": unlocked,
@@ -584,13 +585,13 @@ def _ladder(runs: list[dict[str, Any]], current: dict[str, Any] | None,
             "known": char in stats,
             "ascensions": [{
                 "ascension": asc,
-                "unlocked": asc <= unlocked,
+                "unlocked": a0_unlocked if asc == 0 else asc <= unlocked,
                 "top": asc == unlocked,
                 # unlocked before the advisor played this character: cleared in an earlier era
                 "pre_advisor": (asc <= unlocked and first_asc is not None and asc < first_asc
                                 and advisor_at.get((char, asc), 0) == 0),
                 **attempts.get((char, asc), blank()),
-            } for asc in range(1, GOAL_ASCENSION + 1)],
+            } for asc in range(GOAL_ASCENSION + 1)],
         })
     return rows
 

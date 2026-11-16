@@ -2361,7 +2361,7 @@ pre {
   vertical-align: top;
 }
 
-.adv-ladder thead th:nth-child(n+3):nth-child(-n+12) {
+.adv-ladder thead th:nth-child(n+3):not(:last-child) {
   text-align: center;
 }
 

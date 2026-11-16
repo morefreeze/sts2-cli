@@ -433,7 +433,7 @@ window.AdvisorPlayView = (() => {
     const scroll = element('div', { className: 'table-scroll' });
     const table = element('table', { className: 'runs-table adv-ladder' });
     const labels = ['角色', '已解锁'];
-    for (let asc = 1; asc <= payload.goal.ascension; asc += 1) labels.push(`a${asc}`);
+    for (let asc = 0; asc <= payload.goal.ascension; asc += 1) labels.push(`a${asc}`);
     labels.push('累计 胜 / 负（含 mod 之前）');
     table.append(headRow(labels));
     const tbody = element('tbody');
@@ -475,7 +475,7 @@ window.AdvisorPlayView = (() => {
         }
         td.append(results);
         const lines = [
-          `${row.character} ${ascText(asc.ascension)} · ${asc.unlocked ? '已解锁' : '未解锁'}`,
+          `${characterLabel(row.character)} ${ascText(asc.ascension)} · ${asc.unlocked ? '已解锁' : '未解锁'}`,
           parts.length
             ? `所选对局：${asc.wins} 胜 ${asc.losses} 负${asc.abandoned ? ` ${asc.abandoned} 弃` : ''}${asc.running ? ` ${asc.running} 进行中` : ''}`
             : (asc.pre_advisor ? 'Advisor 之前已解锁，没有 Advisor 对局记录' : '所选对局：没打过'),

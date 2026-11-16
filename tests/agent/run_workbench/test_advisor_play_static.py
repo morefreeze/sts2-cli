@@ -313,10 +313,12 @@ def test_the_page_draws_every_section_from_the_payload(tmp_path: Path):
                 boss: charts.reduce((sum, c) => sum + collect(c, (n) => attr(n, 'class') === 'adv-mark-boss').length, 0),
                 ladderRows: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
                   .map((tr) => [allText(tr.children[0]), allText(tr.children[1])]),
+                ladderHeaders: collect(body, (n) => n.tag === 'table' && cls(n).includes('adv-ladder'))[0]
+                  .children.find((c) => c.tag === 'thead').children[0].children.map(allText),
                 ladderCells: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
-                  .map((tr) => tr.children.slice(2, 12).map(allText)),
+                  .map((tr) => tr.children.filter((c) => cls(c) === 'adv-asc').map(allText)),
                 ladderTotals: collect(body, (n) => n.tag === 'tr' && n.children[0] && n.children[0].tag === 'th' && cls(n.children[0]).includes('adv-char'))
-                  .map((tr) => allText(tr.children[12])),
+                  .map((tr) => allText(tr.children.at(-1))),
                 heroSmall: collect(body, (n) => cls(n).includes('adv-hero'))[0].children.filter((c) => c.tag === 'small').map(allText),
                 bars: collect(body, (n) => (attr(n, 'class') || '').startsWith('adv-bar ')).length,
                 deaths: collect(body, (n) => cls(n) === 'adv-death-name').map((n) => n.textContent),
@@ -360,6 +362,7 @@ def test_the_page_draws_every_section_from_the_payload(tmp_path: Path):
     # 3 finished runs x (2 elites + 2 bosses); the run in progress has reached neither yet (the legend's keys are not counted)
     assert payload["elite"] == 6 and payload["boss"] == 6
     assert "−30" in payload["labels"] and "−50" in payload["labels"]
+    assert payload["ladderHeaders"][2:-1] == [f"a{asc}" for asc in range(11)]
     # ladder: one row per character, unlocked / 10 and what is left
     assert [r[0] for r in payload["ladderRows"]] == ["IRONCLAD", "SILENT", "DEFECT", "REGENT", "NECROBINDER"]
     unlocked = [re.sub(r"\s+", "", row[1]) for row in payload["ladderRows"]]
@@ -368,9 +371,9 @@ def test_the_page_draws_every_section_from_the_payload(tmp_path: Path):
     assert "已通关" not in unlocked[1].replace("未通关", "")
     # levels cleared before the advisor era show a muted marker; real counts stay for advisor runs
     squashed = [[re.sub(r"\s+", "", c) for c in row] for row in payload["ladderCells"]]
-    assert squashed[0][:6] == ["此前已通过"] * 5 + ["✓1"] and squashed[0][6] == "▶1"      # IRONCLAD a6 win, a7 running
-    assert squashed[1][:9] == ["此前已通过"] * 9 and squashed[1][9] == "✗1"             # SILENT a10 loss
-    assert squashed[3][:2] == ["此前已通过"] * 2 and squashed[3][2] == "✗1" and squashed[3][3] == ""   # REGENT a3 loss
+    assert squashed[0][:7] == ["此前已通过"] * 6 + ["✓1"] and squashed[0][7] == "▶1"      # IRONCLAD a6 win, a7 running
+    assert squashed[1][:10] == ["此前已通过"] * 10 and squashed[1][10] == "✗1"             # SILENT a10 loss
+    assert squashed[3][:3] == ["此前已通过"] * 3 and squashed[3][3] == "✗1" and squashed[3][4] == ""   # REGENT a3 loss
     assert set(squashed[2]) == {""} and set(squashed[4]) == {""}                    # no advisor runs: nothing to claim
     # every row has its own advisor-era record next to the all-time column
     totals = [re.sub(r"\s+", "", t) for t in payload["ladderTotals"]]

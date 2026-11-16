@@ -254,7 +254,7 @@ def test_the_run_in_progress_is_reported_apart_from_the_finished_runs(env: Env):
     assert payload["summary"]["runs"] == 1 and len(payload["runs"]) == 1       # not a finished run
     assert payload["current_selected"] is True
     ladder = next(c for c in payload["characters"] if c["character"] == "IRONCLAD")
-    assert ladder["ascensions"][6]["running"] == 1                             # but it shows in the ladder
+    assert ladder["ascensions"][7]["running"] == 1                             # but it shows in the ladder
 
 
 def test_a_run_that_just_finished_is_not_listed_twice(env: Env):
@@ -286,8 +286,17 @@ def test_configured_fool_counts_toward_the_expedition_goal(env: Env):
     assert {"id": "FOOL", "count": 0} in payload["character_options"]
 
     env.add_run(BASE, character="FOOL", ascension=0, win=True)
+    env.add_run(BASE + 1, character="FOOL", ascension=0)
+    env.write("current_run.save", current_save(BASE + 2, character="FOOL", ascension=0), where="saves")
     payload = env.payload(character="FOOL")
-    assert [run["char"] for run in payload["runs"]] == ["FOOL"]
+    assert [(run["char"], run["asc"]) for run in payload["runs"]] == [("FOOL", 0), ("FOOL", 0)]
+    fool = payload["characters"][-1]
+    assert [a["ascension"] for a in fool["ascensions"]] == list(range(11))
+    assert fool["ascensions"][0] == {
+        "ascension": 0, "unlocked": True, "top": True, "pre_advisor": False,
+        "wins": 1, "losses": 1, "abandoned": 0, "running": 1,
+    }
+    assert payload["goal"]["won"] == 0 and payload["goal"]["levels_goal"] == 60
 
 
 def test_goal_and_ladder_read_progress_save_and_the_runs(env: Env):
@@ -304,7 +313,7 @@ def test_goal_and_ladder_read_progress_save_and_the_runs(env: Env):
     assert list(by_name) == ["IRONCLAD", "SILENT", "DEFECT", "REGENT", "NECROBINDER"]
     iron = by_name["IRONCLAD"]
     assert (iron["max_ascension"], iron["left"], iron["total_wins"], iron["total_losses"]) == (7, 3, 14, 21)
-    a6, a7, a8 = iron["ascensions"][5], iron["ascensions"][6], iron["ascensions"][7]
+    a6, a7, a8 = iron["ascensions"][6:9]
     assert (a6["wins"], a6["unlocked"], a6["top"]) == (1, True, False)
     assert (a7["losses"], a7["abandoned"], a7["top"]) == (1, 1, True)
     assert (a8["unlocked"], a8["wins"] + a8["losses"]) == (False, 0)
@@ -364,13 +373,13 @@ def test_ladder_marks_levels_passed_before_the_advisor_and_summarises_its_record
     by_name = {c["character"]: c for c in payload["characters"]}
     defect = by_name["DEFECT"]
     pre = [a["ascension"] for a in defect["ascensions"] if a["pre_advisor"]]
-    assert pre == [1, 2, 3]                       # below the first advisor run (a4), unlocked, no advisor run
+    assert pre == [0, 1, 2, 3]                       # below the first advisor run (a4), unlocked, no advisor run
     assert defect["first_advisor_ascension"] == 4
     # a6..a9 lie above a4 but were skipped by the advisor: blank, not "passed before"
-    assert not any(defect["ascensions"][i]["pre_advisor"] for i in range(3, 10))
+    assert not any(a["pre_advisor"] for a in defect["ascensions"][4:])
     assert defect["advisor"] == {"wins": 2, "losses": 2, "abandoned": 1, "running": 0, "runs": 5}
     silent = by_name["SILENT"]
-    assert [a["ascension"] for a in silent["ascensions"] if a["pre_advisor"]] == list(range(1, 9))
+    assert [a["ascension"] for a in silent["ascensions"] if a["pre_advisor"]] == list(range(9))
     assert silent["advisor"]["wins"] == 1 and silent["advisor"]["losses"] == 0
     # nothing is "passed before" for a locked level or a character the advisor never played
     ironclad = by_name["IRONCLAD"]
@@ -379,8 +388,8 @@ def test_ladder_marks_levels_passed_before_the_advisor_and_summarises_its_record
     # the character filter scopes the per-ascension counts but not the markers or the advisor record
     only = {c["character"]: c for c in env.payload(character="SILENT")["characters"]}
     assert only["DEFECT"]["advisor"]["runs"] == 5
-    assert [a["ascension"] for a in only["DEFECT"]["ascensions"] if a["pre_advisor"]] == [1, 2, 3]
-    assert only["DEFECT"]["ascensions"][9]["losses"] == 0
+    assert [a["ascension"] for a in only["DEFECT"]["ascensions"] if a["pre_advisor"]] == [0, 1, 2, 3]
+    assert only["DEFECT"]["ascensions"][10]["losses"] == 0
 
 
 def test_every_run_row_carries_its_character(env: Env):
@@ -517,7 +526,7 @@ def test_character_filter_scopes_the_runs_and_the_numbers_but_not_the_goal(env: 
     assert silent["goal"]["levels"] == everything["goal"]["levels"] == 10
     assert silent["current"]["char"] == "IRONCLAD" and silent["current_selected"] is False
     iron = next(c for c in silent["characters"] if c["character"] == "IRONCLAD")
-    assert iron["max_ascension"] == 7 and iron["ascensions"][6]["running"] == 0   # results follow the filter
+    assert iron["max_ascension"] == 7 and iron["ascensions"][7]["running"] == 0   # results follow the filter
 
     other = env.payload(character="OTHER")
     assert [r["char"] for r in other["runs"]] == ["WATCHER-WATCHER"]
