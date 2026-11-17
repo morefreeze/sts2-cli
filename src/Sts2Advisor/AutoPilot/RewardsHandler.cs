@@ -41,25 +41,20 @@ internal sealed class RewardsHandler(IAutoPilotHost host) : IScreenHandler
             ct.ThrowIfCancellationRequested();
             var me = LocalContext.GetMe(RunManager.Instance.DebugOnlyGetState());
             bool hasPotionSlots = me?.HasOpenPotionSlots ?? false;
-            NRewardButton? button = null;
-            if (me != null && !hasPotionSlots && CombatManager.Instance?.IsInProgress != true)
+            var buttons = UiHelper.FindAll<NRewardButton>(screen).Where(b => b.IsEnabled && !_attempted.Contains(b)).ToList();
+            var button = buttons.FirstOrDefault(b => b.Reward is not PotionReward || hasPotionSlots);
+            var swapButton = !hasPotionSlots && CombatManager.Instance?.IsInProgress != true
+                ? buttons.FirstOrDefault(b => !_swapAsked.Contains(b) && b.Reward is PotionReward)
+                : null;
+            string pendingAction = swapButton != null ? "swap_potion" : button != null ? "claim_reward" : "leave_rewards";
+            if (await host.TryUsePotionAsync(pendingAction, ct))
+                continue;  // Re-read the belt and the eligible rewards after the potion's effect.
+            if (me != null && swapButton?.Reward is PotionReward potionReward)
             {
-                // A full belt used to leave the potion on the floor, Fairy in a Bottle included. Ask once per
-                // button whether a held potion should make room; if so the reward is claimed right away.
-                var potionButton = UiHelper.FindAll<NRewardButton>(screen).FirstOrDefault(b =>
-                    b.IsEnabled && !_attempted.Contains(b) && !_swapAsked.Contains(b) && b.Reward is PotionReward);
-                if (potionButton?.Reward is PotionReward potionReward)
-                {
-                    _swapAsked.Add(potionButton);
-                    if (await host.MakeRoomForPotionAsync(me, potionReward, ct))
-                    {
-                        hasPotionSlots = true;
-                        button = potionButton;
-                    }
-                }
+                _swapAsked.Add(swapButton);
+                if (await host.MakeRoomForPotionAsync(me, potionReward, ct))
+                    button = swapButton;
             }
-            button ??= UiHelper.FindAll<NRewardButton>(screen).FirstOrDefault(b =>
-                b.IsEnabled && !_attempted.Contains(b) && (b.Reward is not PotionReward || hasPotionSlots));
             if (button == null)
                 break;
             _attempted.Add(button);

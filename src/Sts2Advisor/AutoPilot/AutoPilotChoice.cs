@@ -53,6 +53,8 @@ internal interface IAutoPilotHost
     void StepTaken(CachedAdvice advice);
     Task DrainUntilAsync(Task pending, CancellationToken ct);
 
+    Task<bool> TryUsePotionAsync(string pendingAction, CancellationToken ct);
+
     /// <summary>The belt is full and a potion reward is on the rewards screen: asks the service whether a held potion
     /// should make room for it and, when it says so, discards that one (the game's own potion-popup path), waits for
     /// the slot to open and records the step. True when a slot is free for the reward now; false (belt untouched, the

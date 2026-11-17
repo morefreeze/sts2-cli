@@ -6,7 +6,9 @@ using MegaCrit.Sts2.Core.AutoSlay.Handlers.Rooms;
 using MegaCrit.Sts2.Core.AutoSlay.Handlers.Screens;
 using MegaCrit.Sts2.Core.AutoSlay.Helpers;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
@@ -168,12 +170,18 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
                 MarkProgress();
                 return;
             case AutoPilotScreen.Map:
+                if (await TryUsePotionAsync("map", ct))
+                    return;
                 await HandleMapAsync(ct);
                 return;
             case AutoPilotScreen.Overlay:
+                if (overlay is not NRewardsScreen && await TryUsePotionAsync("overlay", ct))
+                    return;
                 await HandleOverlayAsync(overlay!, ct);
                 return;
         }
+        if (await TryUsePotionAsync("room", ct))
+            return;
         _sameOverlay = 0;
 
         var room = rs.CurrentRoom;
@@ -430,6 +438,14 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
             // Screens animate in: ask only about a fingerprint seen on two polls in a row (as the advice panel does).
             if (advisable && cap!.Fingerprint == last)
             {
+                // A shop purchase or an event page can have added a potion inside the same room handler.
+                if (await TryUsePotionAsync(cap.Header.Decision, ct))
+                {
+                    await HoldAsync(ct);
+                    last = null;
+                    deadline = _now() + FetchSeconds;
+                    continue;
+                }
                 var advice = await AskAsync(cap, ct);
                 if (advice != null)
                     return advice;
@@ -516,6 +532,84 @@ internal sealed class AutoPilotLoop : IAutoPilotHost
 
     private const double PotionDiscardSeconds = 5;
     private bool _potionSwapFailureLogged;
+
+    public async Task<bool> TryUsePotionAsync(string pendingAction, CancellationToken ct)
+    {
+        var run = RunManager.Instance;
+        var rs = run.DebugOnlyGetState();
+        if (rs?.Players.Count != 1 || _session.StepDone || CombatManager.Instance.IsInProgress
+            || run.IsPotionUseLocked || ModalOpen() || NOverlayStack.Instance?.Peek() is NGameOverScreen)
+            return false;
+        var executor = run.ActionExecutor;
+        if (executor.IsPaused || executor.CurrentlyRunningAction != null)
+            return false;
+        var me = LocalContext.GetMe(rs);
+        if (me == null || !me.CanUseOrRemovePotions || me.Creature.IsDead)
+            return false;
+
+        var usable = me.Potions.Where(p => p.Usage == PotionUsage.AnyTime && !p.IsQueued
+                    && p.PassesCustomUsabilityCheck && p.IsValidTarget(me.Creature)).ToList();
+        if (usable.Count == 0)
+            return false;
+        var ranked = OutOfCombatAction.Rank(pendingAction, usable.Select(p => p.Id.ToString()).ToList());
+        var chosen = ranked[0];
+        if (chosen.PotionIndex is not { } index)
+            return false;
+        var potion = usable[index];
+        int slot = me.GetPotionSlotIndex(potion);
+        if (slot < 0)
+            return false;
+        ct.ThrowIfCancellationRequested();
+
+        bool finished = false;
+        void OnActionExecuted(GameAction action)
+        {
+            if (action is UsePotionAction used && ReferenceEquals(used.Player, me)
+                && !used.WasEnqueuedInCombat && used.PotionIndex == (uint)slot)
+                finished = true;
+        }
+        string name = GameText.Potion(potion);
+        int maxHpBefore = me.Creature.MaxHp;
+        executor.AfterActionExecuted += OnActionExecuted;
+        try
+        {
+            // The same queue path as the game's potion popup, including its target and history hooks.
+            potion.EnqueueManualUse(me.Creature);
+            await WaitHelper.Until(() => finished && me.GetPotionSlotIndex(potion) < 0, ct, TimeSpan.FromSeconds(5),
+                                   $"out-of-combat use of {name} did not finish");
+        }
+        finally
+        {
+            executor.AfterActionExecuted -= OnActionExecuted;
+        }
+
+        bool zh = GameText.Zh;
+        int hpGain = me.Creature.MaxHp - maxHpBefore;
+        int n = _session.Record(zh ? $"饮用 {name}" : $"Drink {name}",
+                                zh ? $"最大生命值 +{hpGain}，腾出一个药水槽" : $"+{hpGain} max HP and a free potion slot",
+                                AutoPilotText.DetailLines(StepDetails.OfPotions(potion), zh), _now());
+        if (_trace != null)
+        {
+            string request = JsonSerializer.Serialize(new
+            {
+                context = DecisionSerializer.RunContext(rs, _loc),
+                pending_action = pendingAction,
+                potions = usable.Select((p, i) => DecisionSerializer.PotionDict(p, i, _loc)).ToList(),
+            }, AdvisorRuntime.JsonOpts);
+            string reply = JsonSerializer.Serialize(new
+            {
+                action = new { action = chosen.Name, args = new { potion_index = index, potion_id = potion.Id.ToString() } },
+                max_hp_gain = hpGain,
+                options = ranked.Select(a => new { kind = a.PotionIndex.HasValue ? "potion" : a.Name,
+                                                   index = a.PotionIndex, score = a.Priority }),
+            }, AdvisorRuntime.JsonOpts);
+            _trace.Append("out_of_combat_action", request, reply, null, autopilotStep: n);
+        }
+        ModLog.Info($"autopilot step {n}: out_of_combat_action use_potion {potion.Id.Entry} before {pendingAction}; max HP +{hpGain}");
+        if (_session.StepDone)
+            throw new AutoPilotStopException(StopReason.StepDone, null);
+        return true;
+    }
 
     public async Task<bool> MakeRoomForPotionAsync(Player me, PotionReward reward, CancellationToken ct)
     {
