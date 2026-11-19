@@ -147,3 +147,21 @@ def test_recurring_block_upgrade_beats_a_small_strike_upgrade():
     a=card('HIDDEN_ROOTS',hiddenrootspower=3)
     a['after_upgrade']={'cost':1,'stats':{'hiddenrootspower':4}}
     assert upgrade_value(a,starter()) > 1.5
+
+
+def test_vitriol_is_free_weak_utility_not_an_effectless_sadness_card():
+    from agent.fool_scoring import upgrade_value
+    value=card('VITRIOL',weakpower=2)
+    value['cost']=0
+    value['after_upgrade']={'cost':0,'stats':{'weakpower':3}}
+    assert score_card_in_deck(value,starter()) >= 5.5
+    assert upgrade_value(value,starter()) > 0
+
+
+def test_sparse_upgraded_debuff_metadata_and_observation_aliases():
+    from agent.fool_scoring import effects, upgrade_value
+    assert effects({'id':'CARD.VITRIOL','upgraded':True})['weak']==3
+    value=card('VITRIOL',weak=2)
+    value['after_upgrade']={'cost':0,'stats':{'weak':3}}
+    assert upgrade_value(value,starter()) > 0
+    assert effects(card('UPROOT',vulnerable=7))['vulnerable']==7

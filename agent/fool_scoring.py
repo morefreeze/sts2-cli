@@ -37,9 +37,23 @@ def _stats(card):
     if card.get('upgraded'):
         for key, change in meta['upgrade'].items():
             if key in values and isinstance(change, str) and change.startswith(('+', '-')):
-                values[key] += float(change)
-    values.update({k.lower(): v for k, v in (card.get('stats') or {}).items()
-                   if isinstance(v, (int, float))})
+                values[key] = meta['stats'][key] + float(change)
+                # Extracted metadata may name the upgrade Weak while the
+                # runtime serializes WeakPower. Keep both aliases in sync.
+                alias = key[:-5] if key.endswith('power') else key + 'power'
+                if alias in meta['stats']:
+                    values[alias] = meta['stats'][alias] + float(change)
+    observed = {k.lower(): v for k, v in (card.get('stats') or {}).items()
+                if isinstance(v, (int, float))}
+    values.update(observed)
+    for key in tuple(values):
+        if not key.endswith('power'):
+            continue
+        alias = key[:-5]
+        if key in observed:
+            values[alias] = observed[key]
+        elif alias in observed:
+            values[key] = observed[alias]
     return values
 
 
@@ -60,6 +74,7 @@ _ENGINE_BASE = {'ARCHERY': 7.0, 'HIDDEN_ROOTS': 7.4, 'MYTHIC_FORM': 8.3,
                 'KI_VERSE': 4.0, 'QUIETUS': 4.0, 'BLOT_OUT_THE_SKY': 5.0,
                 'LOCKED_IN': 4.5, 'RECALL': 3.8, 'UPROOT': 4.0,
                 'FLORESCENCE': 3.2, 'BRIGHTEN_UP': 4.0, 'SELF_DEPRECATE': 1.0,
+                'VITRIOL': 5.8,  # free two-turn Weak offsets the Sadness cost
                 'ENSEMBLE': 1.0, 'ENRAPTURE': 1.0}
 
 
@@ -130,7 +145,9 @@ def effects(card, deck=None):
     defense = block + .7 * stretch
     return {'attack': damage * hits, 'defense': defense, 'draw': draw,
             'energy': energy, 'aim': s.get('aimpower', 0),
-            'cost': max(cost, 1), 'hits': hits, 'sadness': _SADNESS.get(cid, 0)}
+            'cost': max(cost, 1), 'hits': hits, 'sadness': _SADNESS.get(cid, 0),
+            'weak': s.get('weakpower', s.get('power', 0)) if meta['weak'] else 0,
+            'vulnerable': s.get('vulnerablepower', s.get('power', 0)) if meta['vulnerable'] else 0}
 
 
 def dimensions(card):
@@ -259,6 +276,8 @@ def upgrade_value(card, deck):
     value += (after_effects['draw'] - before['draw']) * 2
     value += (after_effects['aim'] - before['aim']) * .4
     value += (after_effects['energy'] - before['energy']) * 1.5
+    value += (after_effects.get('weak', 0) - before.get('weak', 0)) * 1.2
+    value += (after_effects.get('vulnerable', 0) - before.get('vulnerable', 0)) * 1.2
     if is_fool(card) and METADATA[card_id(card)]['type'] == 'Power':
         recurring = {'HIDDEN_ROOTS': ('hiddenrootspower', .4),
                      'ARCHERY': ('aimpower', .4), 'SONG_PATH': ('songpathpower', .4),
