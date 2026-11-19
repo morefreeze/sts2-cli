@@ -4,11 +4,11 @@ using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
-using MegaCrit.Sts2.Core.Models.Singleton;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.Common.Mirrors;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
+using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver.Engine.InCombat.Mirrors.Hooks.Block;
 
@@ -48,8 +48,27 @@ internal static class ModifyBlockMultiplicativeMirrors
         registry.Register<Vambrace>(HandleVambrace);
         registry.Register<MultiplayerScalingModel>(HandleMultiplayerScaling);
         registry.Register<UnmovablePower>(HandleUnmovablePower);
+        registry.Register<ShadowmeldPower>(HandleShadowmeldPower);
 
         return registry;
+    }
+
+    /// <summary>
+    /// Vanilla doubles block once per Shadowmeld stack: 2^Amount. The exponential factor
+    /// leaves decimal range at 96 stacks. The facade carries that overflow through the
+    /// remaining modifiers and applies the simulation's ceiling at settlement.
+    /// </summary>
+    private static decimal HandleShadowmeldPower(
+        ShadowmeldPower power,
+        ModifyBlockMultiplicativeMirrorContext context)
+    {
+        if (power.Owner != context.Target)
+        {
+            return 1m;
+        }
+        return power.Amount >= 96
+            ? decimal.MaxValue
+            : (decimal)Math.Pow(2.0, power.Amount);
     }
 
     private static decimal HandleUnmovablePower(
@@ -88,7 +107,8 @@ internal static class ModifyBlockMultiplicativeMirrors
         var state = context.StateStore.Get(relic, () => new PaelsLegionPredictionState(relic));
         return context.Props.IsCardOrMonsterMove() &&
             context.CardSource?.Preview.Owner == relic.Owner &&
-            state.Cooldown <= 0
+            state.Cooldown <= 0 && !state.HasCompletedAffectedCardPlay &&
+            (state.AffectedCardPlay is null || ReferenceEquals(state.AffectedCardPlay, context.CardPlay))
                 ? 2
                 : 1;
     }

@@ -1,3 +1,4 @@
+using CombatSolver.Engine.Common;
 using CombatSolver.Engine.Common.Mirrors;
 using CombatSolver.Engine.InCombat.Simulation;
 using MegaCrit.Sts2.Core.Combat;
@@ -40,12 +41,56 @@ internal static class AfterSideTurnEndLateMirrors
             Volatile.Write(ref _sealed, true);
     }
 
+    /// <summary>
+    /// Registers <see cref="AbstractModel.AfterSideTurnEndLate"/> for one runtime type.
+    /// </summary>
+    /// <remarks>
+    /// The entry point for external adapters, which resolve the other mod's types at runtime and therefore cannot
+    /// supply a generic type argument (see <see cref="ThirdPartyMirrorRegistration"/>). This phase is a hard gate: a
+    /// third-party override that is neither registered nor ignored makes <see cref="Invoke"/> throw, failing the whole
+    /// search instead of approximating it.
+    /// </remarks>
+    public static void Register(
+        Type modelType,
+        Action<AbstractModel, AfterSideTurnEndLateMirrorContext> handler)
+    {
+        ArgumentNullException.ThrowIfNull(modelType);
+        ArgumentNullException.ThrowIfNull(handler);
+        if (modelType.IsAbstract)
+            throw new ArgumentException("Turn-phase mirrors require a concrete runtime model type.", nameof(modelType));
+        lock (RegistrationLock)
+        {
+            if (_sealed)
+                throw new InvalidOperationException("Turn-phase mirrors must be registered before root capture or dispatch.");
+            ThirdPartyMirrorRegistration.Register(Registry, modelType, handler);
+        }
+    }
+
+    /// <summary>
+    /// Declares that one runtime type's override has no prediction-relevant behavior.
+    /// </summary>
+    /// <remarks>
+    /// The escape hatch for reviewed overrides that only play sounds, text or visuals: without it the hard gate above
+    /// would reject the whole combat. The type must really override this phase; the underlying registry enforces that.
+    /// </remarks>
+    public static void RegisterIgnored(Type modelType)
+    {
+        ArgumentNullException.ThrowIfNull(modelType);
+        lock (RegistrationLock)
+        {
+            if (_sealed)
+                throw new InvalidOperationException("Turn-phase mirrors must be registered before root capture or dispatch.");
+            Registry.RegisterIgnored(modelType);
+        }
+    }
+
     internal static void Invoke(AbstractModel listener, AfterSideTurnEndLateMirrorContext context)
     {
         Seal();
         if (Registry.Invoke(listener, context).Kind == MirrorDispatchKind.Unsupported)
-            throw new NotSupportedException(
-                $"No AfterSideTurnEndLate mirror is registered for {listener.GetType().FullName}.");
+            throw PredictionUnsupportedException.ForContent(
+                $"No AfterSideTurnEndLate mirror is registered for {listener.GetType().FullName}.",
+                listener.GetType());
     }
 
     private static Registry CreateRegistry()
@@ -65,6 +110,11 @@ internal static class AfterSideTurnEndLateMirrors
                     context.Simulator.Damage(power.Owner, power.Amount, ValueProp.Unpowered, power.Owner);
                 }
             }
+        });
+        registry.Register<InsatiableDominionPower>(static (power, context) =>
+        {
+            if (context.Participants.Contains(power.Owner))
+                context.Simulator.Damage(power.Owner, power.DynamicVars.Damage.BaseValue, ValueProp.Unpowered, null);
         });
         return registry;
     }

@@ -3,7 +3,6 @@ using System.Runtime.ExceptionServices;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.Models.Cards;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Simulation;
 
@@ -11,7 +10,7 @@ namespace CombatSolver;
 
 internal sealed partial class CombatBeamSolver
 {
-    private CancellationToken SearchCancellationToken => cancellationToken;
+    private CancellationToken SearchCancellationToken => ReplayCancellationToken;
     private SearchMemoryPressureSignal SearchMemoryPressure => policy.MemoryPressureSignal;
     private object? _parallelActionReplayForkGate;
 
@@ -129,15 +128,15 @@ internal sealed partial class CombatBeamSolver
     /// coordinator 独占按序提交；自然单父节点使用同一调度器，不嵌套线程池。
     /// 候选只在各 lane 内物化，transposition/dominance 仍按父节点原序提交。
     /// </summary>
-    private sealed partial class ParallelExpansionExecutor : IDisposable
+    private sealed partial class ParallelExpansionExecutor : IExpansionExecutor, IDisposable
     {
         private readonly CombatBeamSolver _coordinator;
         private readonly ParallelExpansionWorkProfile _workProfile = new();
         private ExpansionLane[]? _backgroundLanes;
-        private int _activeWorkers;
-        private int _maximumActiveWorkers;
-        private int _activeActionReplayWorkers;
-        private int _maximumActiveActionReplayWorkers;
+        internal int _activeWorkers;
+        internal int _maximumActiveWorkers;
+        internal int _activeActionReplayWorkers;
+        internal int _maximumActiveActionReplayWorkers;
         private bool _disposed;
 
         public ParallelExpansionExecutor(CombatBeamSolver coordinator, int degreeOfParallelism)
@@ -153,6 +152,24 @@ internal sealed partial class CombatBeamSolver
         public int DegreeOfParallelism { get; }
 
         public int MaximumQueuedParents => SearchWaveMemoryPolicy.MaximumQueuedParents(DegreeOfParallelism);
+
+        public ExpansionWorkerOutcome[] Execute(
+            IReadOnlyList<SearchNode> nodes,
+            Action<SearchNode, SearchNode> acceptChild,
+            Action<SearchNode> finishParent,
+            Action<int, ExpansionBatch>? beforeCommit = null)
+        {
+            ArgumentNullException.ThrowIfNull(beforeCommit);
+            return Evaluate(nodes, (index, batch) =>
+            {
+                beforeCommit(index, batch);
+                SearchNode parent = nodes[index];
+                _coordinator.CommitExpansionBatch(parent, batch,
+                    child => acceptChild(parent, child));
+                batch.Dispose();
+                finishParent(parent);
+            });
+        }
 
         public ExpansionWorkerOutcome[] Evaluate(
             IReadOnlyList<SearchNode> nodes,
@@ -224,10 +241,10 @@ internal sealed partial class CombatBeamSolver
             }
         }
 
-        private static long SaturatingAdd(long left, long right)
+        internal static long SaturatingAdd(long left, long right)
             => left > long.MaxValue - right ? long.MaxValue : left + right;
 
-        private static void UpdateMaximum(ref int target, int value)
+        internal static void UpdateMaximum(ref int target, int value)
         {
             int observed = Volatile.Read(ref target);
             while (observed < value)
@@ -239,7 +256,7 @@ internal sealed partial class CombatBeamSolver
             }
         }
 
-        private interface IExpansionLaneWorkItem
+        internal interface IExpansionLaneWorkItem
         {
             void Execute(ParallelExpansionExecutor owner, CombatBeamSolver worker);
             void Signal();
@@ -371,25 +388,7 @@ internal sealed partial class CombatBeamSolver
     private bool TryPrepareParallelExpansion(SearchNode node)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (node.IsTerminal
-            || node.Snapshot.PlayerDead
-            || node.Snapshot.AllEnemiesDead
-            || node.Snapshot.BoundaryReason != SearchBoundaryReason.None)
-        {
-            throw new InvalidOperationException("终结搜索节点不应进入并行展开阶段。");
-        }
-        _run.ReusedNodeSnapshots++;
-        if (!TryMarkExpandedState(node))
-            return false;
-        if (!TryConsumeCycleExitProbeExpansionBudget(node))
-        {
-            _run.CycleContinuationsStopped++;
-            ObserveSearchPath(node, SearchPathObservationStage.ExpansionBlocked, "cycle_exit_budget");
-            return false;
-        }
-        _run.Expanded++;
-        ObserveSearchPath(node, SearchPathObservationStage.Expanded, "parallel_parent");
-        return true;
+        return TryAdmitExpansionParent(node, node.Snapshot, parallel: true);
     }
 
     private CombatBeamSolver CreateExpansionWorker()
@@ -404,7 +403,9 @@ internal sealed partial class CombatBeamSolver
             searchProfile: _profile,
             potionPolicyOverride: _potionPolicy,
             potionFreePolicyBaseline: _potionFreePolicyBaseline,
-            maximumPotionUses: _maximumPotionUses);
+            maximumPotionUses: _maximumPotionUses,
+            earliestPotionTurn: _earliestPotionTurn,
+            planCommitment: _planCommitment);
         worker._run.InitialPersistentBuffValue = _run.InitialPersistentBuffValue;
         worker._run.InitialEnemyStrengthSuppression = _run.InitialEnemyStrengthSuppression;
         worker._run.InitialEnemyWeakTurns = _run.InitialEnemyWeakTurns;
@@ -421,7 +422,8 @@ internal sealed partial class CombatBeamSolver
         SearchNode parent,
         PreparedCardAction action,
         ReplayForkSeed? seed,
-        object replayForkGate)
+        object replayForkGate,
+        bool allowPendingChoiceDeferral = true)
     {
         ExpansionBatch batch = RentExpansionBatch();
         bool completed = false;
@@ -433,7 +435,7 @@ internal sealed partial class CombatBeamSolver
                 seed,
                 replayForkGate,
                 batch,
-                allowPendingChoiceDeferral: true);
+                allowPendingChoiceDeferral);
             if (deferredProbe != null)
             {
                 batch.Dispose();
@@ -450,90 +452,13 @@ internal sealed partial class CombatBeamSolver
         }
     }
 
-    private List<PreparedCardAction> PrepareCardActions(SearchNode node)
+    private List<PreparedCardAction> PrepareCardActions(
+        SearchNode node, bool cardNameFirst = true)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        SimulationSnapshot snapshot = node.Snapshot;
-        CombatPredictionSimulator simulator = (CombatPredictionSimulator)snapshot.Simulator;
-        SimulatedCombatState simulatedCombat = (SimulatedCombatState)simulator.State.CombatState;
-        if (snapshot.PlayerDead || snapshot.AllEnemiesDead)
-            return [];
-
-        SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(_player);
-        IReadOnlyList<PredictedCard> hand = playerState.Hand.Cards;
-        List<PreparedCardAction> actions = new(hand.Count);
-        HandFingerprintBuffer seenCards = default;
-        int seenCardCount = 0;
-        for (int handIndex = 0; handIndex < hand.Count; handIndex++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            PredictedCard card = hand[handIndex];
-            string cardId = card.Preview.Id.Entry;
-            int occurrence = 0;
-            for (int priorIndex = 0; priorIndex < handIndex; priorIndex++)
-            {
-                if (string.Equals(hand[priorIndex].Preview.Id.Entry, cardId, StringComparison.Ordinal))
-                    occurrence++;
-            }
-            if (!simulatedCombat.CanPlayCard(simulator, card))
-                continue;
-            StateFingerprint playableKey = BuildPlayableCardKey(card);
-            bool duplicate = false;
-            for (int seenIndex = 0; seenIndex < seenCardCount; seenIndex++)
-            {
-                if (seenCards[seenIndex] == playableKey)
-                {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate)
-            {
-                _run.DuplicateCardBranchesPruned++;
-                continue;
-            }
-            seenCards[seenCardCount++] = playableKey;
-            string cardStateKey = CardChoiceSupport.ChoiceCardKey(card);
-            bool requiresUnsupportedExistingChoice =
-                CardChoiceSupport.RequiresUnsupportedExistingChoice(card.Preview);
-            PlanCardChoice? requiredEmptyChoice =
-                CardChoiceSupport.BuildRequiredEmptyChoice(card.Preview);
-            int cardStateOccurrence = 0;
-            for (int priorIndex = 0; priorIndex < handIndex; priorIndex++)
-            {
-                if (string.Equals(
-                        CardChoiceSupport.ChoiceCardKey(hand[priorIndex]),
-                        cardStateKey,
-                        StringComparison.Ordinal))
-                {
-                    cardStateOccurrence++;
-                }
-            }
-            foreach ((int targetIndex, Creature? target) in TargetsFor(card, simulator))
-            {
-                if (node.ActionCount == 0 && !card.Original.CanPlayTargeting(target))
-                    continue;
-                PlanAction planAction = new(
-                    PlanActionKind.PlayCard,
-                    node.Turn,
-                    card.Preview.Id.Entry,
-                    occurrence,
-                    targetIndex,
-                    target?.CombatId,
-                    displayNames.Card(card.Preview),
-                    displayNames.Creature(target),
-                    ReplayCount: Math.Max(0, card.Preview.GetEnchantedReplayCount()),
-                    CardStateKey: cardStateKey,
-                    CardStateOccurrence: cardStateOccurrence,
-                        CardEnchantmentId: card.Preview.Enchantment?.Id.Entry ?? "", CardUpgradeLevel: card.Preview.CurrentUpgradeLevel);
-                actions.Add(new PreparedCardAction(
-                    planAction,
-                    card.Preview.Type,
-                    target?.CombatId,
-                    requiresUnsupportedExistingChoice,
-                    requiredEmptyChoice));
-            }
-        }
+        List<PreparedCardAction> actions = [];
+        foreach (PreparedCardAction action in EnumeratePlannedCardActions(
+                     new ExpansionPlan(node, CardNameFirst: cardNameFirst)))
+            actions.Add(action);
         return actions;
     }
 
@@ -572,28 +497,9 @@ internal sealed partial class CombatBeamSolver
                     throw;
                 }
             }
-            CardChoiceSpec? choiceSpec = BuildPrimaryCardChoiceSpec(probeSnapshot);
-            if (choiceSpec == null && action.RequiresUnsupportedExistingChoice)
-            {
-                probeSnapshot.ReleaseSimulator();
+            if (!TryResolvePlannedCardChoices(node, action, probeSnapshot,
+                    out IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches))
                 return null;
-            }
-            CardChoiceSpec? primaryChoiceSpec = choiceSpec
-                ?? BuildRequiredEmptyChoiceSpec(action.RequiredEmptyChoice);
-            IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches =
-                HasChoiceBeforePrimary(probeSnapshot, primaryChoiceSpec)
-                    ? ResolveRoundChoiceBranches(
-                        node,
-                        action.Action,
-                        probeSnapshot,
-                        BuildPrimaryChoiceMatch(primaryChoiceSpec),
-                        budgetPrimaryChoiceSpec: primaryChoiceSpec)
-                    : ResolvePrimaryCardChoiceBranches(
-                        node,
-                        action.Action,
-                        probeSnapshot,
-                        choiceSpec,
-                        action.RequiredEmptyChoice);
             AddResolvedCardCandidates(node, action,
                 WithCardChoiceCheckpoint(cardCapture?.Take(), resolvedBranches), batch);
             return null;
@@ -610,43 +516,15 @@ internal sealed partial class CombatBeamSolver
         IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches,
         ExpansionBatch batch)
     {
-        SimulationSnapshot snapshot = node.Snapshot;
         foreach ((PlanAction finalAction, SimulationSnapshot finalSnapshot) in resolvedBranches)
         {
             bool published = false;
             try
             {
-                bool forcedTurnEnd = finalSnapshot.Turn > node.Turn;
-                PlanAction nodeAction = finalAction with { EndsPlayerTurn = forcedTurnEnd };
-                bool terminal = finalSnapshot.PlayerDead
-                    || finalSnapshot.AllEnemiesDead
-                    || finalSnapshot.BoundaryReason != SearchBoundaryReason.None;
-                SearchNode child = new(
-                    nodeAction,
-                    node.ActionCount + 1,
-                    finalSnapshot.PotionUseCount,
-                    finalSnapshot.PotionStrategicCost,
-                    forcedTurnEnd ? node.Turn + 1 : node.Turn,
-                    node.Traits,
-                    node.FutureSoldHp,
-                    ApplySoldHpPenalty(finalSnapshot.Score, node.FutureSoldHp),
-                    finalSnapshot.StateKey,
-                    finalSnapshot.HasRisk,
-                    finalSnapshot.BoundaryReason,
-                    terminal,
-                    node,
-                    finalSnapshot,
-                    forcedTurnEnd
-                        ? node.CombatProgress.Advance(finalSnapshot)
-                        : node.CombatProgress)
-                {
-                    CumulativeEnemyHpLost = AccumulateEnemyHpLost(node, finalSnapshot),
-                };
-                child = AttachCycleSchedulingEvidence(child);
-                batch.Add(new RawCardCandidate(
-                    child,
-                    action.CardType,
-                    action.TargetCombatId));
+                SearchNode child = CreatePlannedCardChild(node, finalAction, finalSnapshot);
+                RawCardCandidate candidate = new(
+                    child, action.CardType, action.TargetCombatId);
+                batch.Add(candidate);
                 published = true;
             }
             finally
@@ -777,45 +655,66 @@ internal sealed partial class CombatBeamSolver
 
     private List<PreparedPotionAction> PreparePotionActions(SearchNode node)
     {
-        SimulationSnapshot snapshot = node.Snapshot;
-        if (snapshot.PlayerDead || snapshot.AllEnemiesDead
-            || _maximumPotionUses != null
-                && ExplicitPotionUseCount(node) >= _maximumPotionUses.Value)
-        {
-            return [];
-        }
-
-        CombatPredictionSimulator simulator = (CombatPredictionSimulator)snapshot.Simulator;
-        SimulatedCombatState simulatedCombat = (SimulatedCombatState)simulator.State.CombatState;
         List<PreparedPotionAction> actions = [];
-        for (int potionSlot = 0; potionSlot < root.PotionSlotCount; potionSlot++)
-        {
-            PotionModel? potion = simulatedCombat.GetPotionAtSlot(_player, potionSlot);
-            if (potion == null
-                || !simulatedCombat.IsPotionAvailable(_player, potionSlot)
-                || !PotionOnUseSupport.CanSearch(potion)
-                || !AllowsPotionUse(potionSlot, potion.Id.Entry)
-                || PotionUsePolicy.RequiresOpeningUse(potion)
-                    && node.HasNonPotionAction)
-            {
-                continue;
-            }
-
-            foreach ((int targetIndex, Creature? target) in TargetsForPotion(potion, simulator))
-            {
-                PlanAction baseAction = new(
-                    PlanActionKind.UsePotion,
-                    node.Turn,
-                    TargetIndex: targetIndex,
-                    TargetCombatId: target?.CombatId,
-                    TargetName: displayNames.Creature(target),
-                    PotionSlot: potionSlot,
-                    PotionId: potion.Id.Entry,
-                    PotionTitle: displayNames.Potion(potion));
-                actions.Add(new PreparedPotionAction(baseAction, potion));
-            }
-        }
+        foreach (PreparedPotionAction action in EnumeratePlannedPotionActions(
+                     new ExpansionPlan(node, CardNameFirst: true)))
+            actions.Add(action);
         return actions;
+    }
+
+    private sealed class PreparedPotionChoiceWork(
+        SimulationSnapshot? probe,
+        IReadOnlyList<PlanCardChoice?> choices,
+        CardChoiceSpec? choiceSpec,
+        PotionChoiceReplayCheckpoint? checkpoint) : IDisposable
+    {
+        private SimulationSnapshot? _probe = probe;
+        private PotionChoiceReplayCheckpoint? _checkpoint = checkpoint;
+
+        public IReadOnlyList<PlanCardChoice?> Choices { get; } = choices;
+        public CardChoiceSpec? ChoiceSpec { get; } = choiceSpec;
+        public PotionChoiceReplayCheckpoint? Checkpoint => _checkpoint;
+
+        public void TransferCheckpoint() => _checkpoint = null;
+
+        public IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> Resolve(
+            CombatBeamSolver solver, SearchNode parent, PlanAction action)
+        {
+            SimulationSnapshot? ownedProbe = _probe;
+            PotionChoiceReplayCheckpoint? ownedCheckpoint = _checkpoint;
+            _probe = null;
+            _checkpoint = null;
+            foreach (var branch in solver.WithPotionChoiceCheckpoint(ownedCheckpoint,
+                         solver.ResolveExplicitCardChoiceBranches(parent, action,
+                             ownedProbe, Choices, ChoiceSpec)))
+                yield return branch;
+        }
+
+        public void Dispose()
+        {
+            _probe?.ReleaseSimulator();
+            _checkpoint?.Dispose();
+        }
+    }
+
+    private PreparedPotionChoiceWork PreparePotionChoiceWork(
+        SearchNode parent, PreparedPotionAction action)
+    {
+        PotionChoiceReplayCheckpoint? checkpoint = PreparePotionChoiceOptions(
+            parent, action.Action, action.Potion,
+            out SimulationSnapshot? probe,
+            out IReadOnlyList<PlanCardChoice?> choices,
+            out CardChoiceSpec? choiceSpec);
+        try
+        {
+            return new PreparedPotionChoiceWork(probe, choices, choiceSpec, checkpoint);
+        }
+        catch
+        {
+            probe?.ReleaseSimulator();
+            checkpoint?.Dispose();
+            throw;
+        }
     }
 
     private PrimaryChoiceReplayFrontier? GeneratePreparedPotionAction(
@@ -825,43 +724,28 @@ internal sealed partial class CombatBeamSolver
         bool allowPrimaryReplays = false)
     {
         PlanAction baseAction = action.Action;
-        SimulationSnapshot? probeSnapshot = null;
-        PotionChoiceReplayCheckpoint? checkpoint = null;
-        try
+        using PreparedPotionChoiceWork work = PreparePotionChoiceWork(node, action);
+        if (allowPrimaryReplays && work.Choices.Count >= 2)
         {
-            checkpoint = PreparePotionChoiceOptions(node, baseAction, action.Potion,
-                out probeSnapshot, out IReadOnlyList<PlanCardChoice?> choices, out CardChoiceSpec? choiceSpec);
-            if (allowPrimaryReplays && choices.Count >= 2)
+            bool identityChangingLayer = work.ChoiceSpec != null
+                && CardChoiceSupport.IsIdentityChangingPersistentChoiceEffect(work.ChoiceSpec.Effect);
+            int semanticCount = identityChangingLayer
+                ? CardChoiceSupport.CountSemanticChoices(
+                    work.Choices.Where(choice => choice != null).Cast<PlanCardChoice>().ToList())
+                : work.Choices.Count;
+            PrimaryCardChoiceLayer layer = new(work.Choices, UnregisteredPendingChoice: false,
+                semanticCount, identityChangingLayer,
+                CreateWholeActionChoiceBudget(work.ChoiceSpec, semanticCount));
+            PrimaryChoiceReplayFrontier? frontier = PreparePrimaryChoiceReplays(
+                layer, potion: action, potionCheckpoint: work.Checkpoint);
+            if (frontier != null)
             {
-                bool identityChangingLayer = choiceSpec != null
-                    && CardChoiceSupport.IsIdentityChangingPersistentChoiceEffect(choiceSpec.Effect);
-                int semanticCount = identityChangingLayer
-                    ? CardChoiceSupport.CountSemanticChoices(
-                        choices.Where(choice => choice != null).Cast<PlanCardChoice>().ToList())
-                    : choices.Count;
-                PrimaryCardChoiceLayer layer = new(choices, UnregisteredPendingChoice: false,
-                    semanticCount, identityChangingLayer,
-                    CreateWholeActionChoiceBudget(choiceSpec, semanticCount));
-                PrimaryChoiceReplayFrontier? frontier = PreparePrimaryChoiceReplays(
-                    layer, potion: action, potionCheckpoint: checkpoint);
-                if (frontier != null)
-                {
-                    checkpoint = null; // All replay producers and the ordered consumer now own it.
-                    return frontier;
-                }
+                work.TransferCheckpoint(); // The frontier owns it until all lanes drain.
+                return frontier;
             }
-            var branches = ResolveExplicitCardChoiceBranches(node, baseAction, probeSnapshot, choices, choiceSpec);
-            probeSnapshot = null;
-            var ownedCheckpoint = checkpoint;
-            checkpoint = null;
-            AddResolvedPotionCandidates(node, WithPotionChoiceCheckpoint(ownedCheckpoint, branches), batch);
-            return null;
         }
-        finally
-        {
-            checkpoint?.Dispose();
-            probeSnapshot?.ReleaseSimulator();
-        }
+        AddResolvedPotionCandidates(node, work.Resolve(this, node, baseAction), batch);
+        return null;
     }
 
     private void AddResolvedPotionCandidates(
@@ -869,32 +753,9 @@ internal sealed partial class CombatBeamSolver
         IEnumerable<(PlanAction Action, SimulationSnapshot Snapshot)> resolvedBranches,
         ExpansionBatch batch)
     {
-        SimulationSnapshot snapshot = node.Snapshot;
         foreach ((PlanAction finalAction, SimulationSnapshot finalSnapshot) in resolvedBranches)
         {
-            bool terminal = finalSnapshot.PlayerDead
-                || finalSnapshot.AllEnemiesDead
-                || finalSnapshot.BoundaryReason != SearchBoundaryReason.None;
-            SearchNode child = new(
-                finalAction,
-                node.ActionCount + 1,
-                finalSnapshot.PotionUseCount,
-                finalSnapshot.PotionStrategicCost,
-                node.Turn,
-                ClassifyPotionTraits(node.Traits, snapshot, finalSnapshot),
-                node.FutureSoldHp,
-                ApplySoldHpPenalty(finalSnapshot.Score, node.FutureSoldHp),
-                finalSnapshot.StateKey,
-                finalSnapshot.HasRisk,
-                finalSnapshot.BoundaryReason,
-                terminal,
-                node,
-                finalSnapshot,
-                node.CombatProgress)
-            {
-                CumulativeEnemyHpLost = AccumulateEnemyHpLost(node, finalSnapshot),
-            };
-            child = AttachCycleSchedulingEvidence(child);
+            SearchNode child = CreatePlannedPotionChild(node, finalAction, finalSnapshot);
             batch.AddPotion(child);
         }
     }
@@ -990,6 +851,18 @@ internal sealed partial class CombatBeamSolver
         _run.CycleProbeContinuationsExpanded += source.CycleProbeContinuationsExpanded;
         _run.CycleCandidatesProtected += source.CycleCandidatesProtected;
         _run.CycleContinuationsStopped += source.CycleContinuationsStopped;
+        _run.CycleReplayAttempts += source.CycleReplayAttempts;
+        _run.CycleReplayActions += source.CycleReplayActions;
+        _run.CycleReplayVictories += source.CycleReplayVictories;
+        _run.CycleReplayContinuations += source.CycleReplayContinuations;
+        _run.CycleStoppedUnproductive += source.CycleStoppedUnproductive;
+        _run.CycleStoppedRepetitionBudget += source.CycleStoppedRepetitionBudget;
+        _run.CycleStoppedFamilyBudget += source.CycleStoppedFamilyBudget;
+        _run.CycleStoppedExitBudget += source.CycleStoppedExitBudget;
+        _run.TurnLayerBudgetStops += source.TurnLayerBudgetStops;
+        _run.TurnLayerTimeBudgetStops += source.TurnLayerTimeBudgetStops;
+        _run.TurnLayerNodeBudgetStops += source.TurnLayerNodeBudgetStops;
+
         _run.CrossTurnCandidatesProtected += source.CrossTurnCandidatesProtected;
         _run.CrossTurnContinuationsStopped += source.CrossTurnContinuationsStopped;
         _run.StandPatProbes += source.StandPatProbes;
@@ -1034,6 +907,18 @@ internal sealed partial class CombatBeamSolver
         source.CycleProbeContinuationsExpanded = 0;
         source.CycleCandidatesProtected = 0;
         source.CycleContinuationsStopped = 0;
+        source.CycleReplayAttempts = 0;
+        source.CycleReplayActions = 0;
+        source.CycleReplayVictories = 0;
+        source.CycleReplayContinuations = 0;
+        source.CycleStoppedUnproductive = 0;
+        source.CycleStoppedRepetitionBudget = 0;
+        source.CycleStoppedFamilyBudget = 0;
+        source.CycleStoppedExitBudget = 0;
+        source.TurnLayerBudgetStops = 0;
+        source.TurnLayerTimeBudgetStops = 0;
+        source.TurnLayerNodeBudgetStops = 0;
+
         source.CrossTurnCandidatesProtected = 0;
         source.CrossTurnContinuationsStopped = 0;
         source.StandPatProbes = 0;
@@ -1052,45 +937,12 @@ internal sealed partial class CombatBeamSolver
         ExpansionBatch batch,
         Action<SearchNode> acceptChild)
     {
-        List<ActionCandidate> nonDominated = new(16);
+        // At most one candidate survives per raw card. Small batches need no 16-slot array.
+        List<ActionCandidate> nonDominated = new(Math.Min(16, batch.Cards.Count));
         List<ActionCandidate>? deferredCycleCandidates = null;
         foreach (RawCardCandidate raw in batch.Cards)
-        {
-            PromoteOrderedMutationProgressTail(raw.Node);
-            CommitCycleExitObservation(raw.Node);
-            if (ShouldPruneCrossTurnNoProgress(raw.Node))
-            {
-                _run.RepeatableNoProgressBranchesPruned++;
-                batch.Release(raw.Node.Snapshot);
-                continue;
-            }
-            ActionCandidate actionCandidate = BuildCandidate(
-                parent.Snapshot,
-                raw.Node.Snapshot,
-                raw.Node,
-                raw.CardType,
-                raw.TargetCombatId);
-            if (CanRetainOrderedMutationLease(_run, raw.Node))
-            {
-                nonDominated.Add(actionCandidate);
-                continue;
-            }
-            if (ShouldDeferCycleTranspositionUntilActionAdmission(raw.Node))
-            {
-                deferredCycleCandidates ??= [];
-                deferredCycleCandidates.Add(actionCandidate);
-                continue;
-            }
-            if (!TryAcceptTransposition(raw.Node))
-            {
-                batch.Release(raw.Node.Snapshot);
-                continue;
-            }
-            AddNonDominatedParallelCandidate(
-                nonDominated,
-                actionCandidate,
-                batch);
-        }
+            ProcessExpandedCardCandidate(parent, raw, nonDominated,
+                ref deferredCycleCandidates, batch);
 
         PruneCommittedCrossTurnCandidates(batch.Potions, batch);
         PruneCommittedCrossTurnCandidates(batch.EndTurns, batch);
@@ -1135,9 +987,7 @@ internal sealed partial class CombatBeamSolver
 
         foreach (SearchNode child in batch.Potions)
         {
-            EnsureBoundedCycleProbeLease(child);
-            if (ShouldRejectCycleCandidate(child)
-                || !TryAcceptTransposition(child))
+            if (!TryAdmitPlannedPotionChild(child, out _))
             {
                 batch.Release(child.Snapshot);
                 continue;
@@ -1146,16 +996,8 @@ internal sealed partial class CombatBeamSolver
             acceptChild(child);
         }
 
-        foreach (SearchNode child in batch.EndTurns)
-        {
-            if (!TryAcceptTransposition(child))
-            {
-                batch.Release(child.Snapshot);
-                continue;
-            }
-            batch.Transfer(child.Snapshot);
+        foreach (SearchNode child in AdmitPlannedEndTurnChildren(batch))
             acceptChild(child);
-        }
     }
 
     private void PruneCommittedCrossTurnCandidates(
@@ -1180,26 +1022,4 @@ internal sealed partial class CombatBeamSolver
             candidates.RemoveRange(writeIndex, candidates.Count - writeIndex);
     }
 
-    private void AddNonDominatedParallelCandidate(
-        List<ActionCandidate> candidates,
-        ActionCandidate candidate,
-        ExpansionBatch batch)
-    {
-        for (int index = candidates.Count - 1; index >= 0; index--)
-        {
-            ActionCandidate current = candidates[index];
-            if (Dominates(current, candidate))
-            {
-                _run.DominatedActionsPruned++;
-                batch.Release(candidate.Node.Snapshot);
-                return;
-            }
-            if (!Dominates(candidate, current))
-                continue;
-            candidates.RemoveAt(index);
-            _run.DominatedActionsPruned++;
-            batch.Release(current.Node.Snapshot);
-        }
-        candidates.Add(candidate);
-    }
 }

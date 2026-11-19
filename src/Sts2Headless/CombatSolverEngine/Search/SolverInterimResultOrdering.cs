@@ -31,57 +31,19 @@ internal static class SolverInterimResultOrdering
         int currentGrowthRewardCount = 0,
         int candidateDeathSaveUseCount = 0,
         int currentDeathSaveUseCount = 0)
-    {
-        int comparison = currentCompleteVictory.CompareTo(candidateCompleteVictory);
-        if (comparison != 0)
-            return comparison;
-        comparison = candidateDeathSaveUseCount.CompareTo(currentDeathSaveUseCount);
-        if (comparison != 0)
-            return comparison;
-        comparison = candidateStrategicHpDeficit.CompareTo(currentStrategicHpDeficit);
-        if (comparison != 0)
-            return comparison;
-        comparison = currentGrowthHpCredit.CompareTo(candidateGrowthHpCredit);
-        if (comparison != 0)
-            return comparison;
-        comparison = currentGrowthRewardCount.CompareTo(candidateGrowthRewardCount);
-        if (comparison != 0)
-            return comparison;
-        return (candidateCombatEndedTurn ?? int.MaxValue)
-            .CompareTo(currentCombatEndedTurn ?? int.MaxValue);
-    }
+        => RouteQualityPolicy.Compare(
+            RouteQuality.Primary(candidateCompleteVictory, candidateStrategicHpDeficit,
+                candidateCombatEndedTurn, candidateGrowthHpCredit, candidateGrowthRewardCount,
+                candidateDeathSaveUseCount),
+            RouteQuality.Primary(currentCompleteVictory, currentStrategicHpDeficit,
+                currentCombatEndedTurn, currentGrowthHpCredit, currentGrowthRewardCount,
+                currentDeathSaveUseCount),
+            RouteQualityProjection.Primary);
 
     public static bool IsBetter(SolverInterimResult candidate, SolverInterimResult current)
-    {
-        int comparison = current.Won.CompareTo(candidate.Won);
-        if (comparison != 0)
-            return comparison < 0;
-        comparison = current.Survives.CompareTo(candidate.Survives);
-        if (comparison != 0)
-            return comparison < 0;
-        if (candidate.DeathSaveUseCount != current.DeathSaveUseCount)
-            return candidate.DeathSaveUseCount < current.DeathSaveUseCount;
-        if (candidate.TheftPolicy == SolverTheftPolicy.PreserveResources
-            && candidate.OutstandingStolenResource != current.OutstandingStolenResource)
-            return candidate.OutstandingStolenResource < current.OutstandingStolenResource;
-        if (IsResourceTradeImprovement(candidate, current))
-            return true;
-        if (IsResourceTradeImprovement(current, candidate))
-            return false;
-        if (candidate.GrowthHpCredit != current.GrowthHpCredit)
-            return candidate.GrowthHpCredit > current.GrowthHpCredit;
-        if (candidate.GrowthRewardCount != current.GrowthRewardCount)
-            return candidate.GrowthRewardCount > current.GrowthRewardCount;
-        comparison = (candidate.CombatEndedTurn ?? int.MaxValue)
-            .CompareTo(current.CombatEndedTurn ?? int.MaxValue);
-        if (comparison != 0)
-            return comparison < 0;
-        if (candidate.ProjectedBattlePotionCount != current.ProjectedBattlePotionCount)
-            return candidate.ProjectedBattlePotionCount < current.ProjectedBattlePotionCount;
-        if (candidate.EnemyHp != current.EnemyHp)
-            return candidate.EnemyHp < current.EnemyHp;
-        return candidate.Score > current.Score;
-    }
+        => RouteQualityPolicy.Compare(
+            RouteQuality.FromInterim(candidate), RouteQuality.FromInterim(current),
+            RouteQualityProjection.Interim) < 0;
 
     public static bool CanPromoteDisplayedResult(
         SolverInterimResult candidate,
@@ -108,12 +70,4 @@ internal static class SolverInterimResultOrdering
             || candidateBurden == currentBurden && candidateHpDeficit < currentHpDeficit;
     }
 
-    private static bool IsResourceTradeImprovement(
-        SolverInterimResult candidate,
-        SolverInterimResult current)
-        => IsResourceTradeImprovement(
-            candidate.StrategicHpDeficit,
-            candidate.PotionStrategicCost,
-            current.StrategicHpDeficit,
-            current.PotionStrategicCost);
 }

@@ -12,48 +12,6 @@ namespace CombatSolver;
 
 internal sealed partial class SimulatedCombatState
 {
-    public bool TryPrepareExtraPlayerTurn(
-        CombatPredictionSimulator simulator,
-        Player player,
-        out bool extraTurn,
-        out bool hasActiveEmotionChip)
-    {
-        extraTurn = GetAmount<AmbergrisPower>(player.Creature) > 0;
-        hasActiveEmotionChip = false;
-        foreach (RelicModel relic in RelicsOf(player))
-        {
-            if (relic.IsMelted)
-                continue;
-            if (relic is EmotionChip)
-                hasActiveEmotionChip = true;
-            if (relic is not PaelsEye paelsEye || !ShouldTriggerPaelsEye(paelsEye))
-                continue;
-            if (!TriggerPaelsEye(simulator, player, paelsEye))
-                return false;
-            extraTurn = true;
-        }
-        return true;
-    }
-
-    public bool TryPrepareLiveExtraPlayerTurn(
-        CombatPredictionSimulator simulator,
-        Player player,
-        bool paelsEyeTriggers,
-        out bool extraTurn)
-    {
-        extraTurn = GetAmount<AmbergrisPower>(player.Creature) > 0;
-        if (!paelsEyeTriggers)
-            return true;
-
-        PaelsEye relic = RelicsOf(player)
-            .OfType<PaelsEye>()
-            .Single(static relic => !relic.IsMelted);
-        if (!TriggerPaelsEye(simulator, player, relic))
-            return false;
-        extraTurn = true;
-        return true;
-    }
-
     public bool ShouldTriggerPaelsEye(PaelsEye relic)
     {
         Player player = relic.Owner;
@@ -68,7 +26,13 @@ internal sealed partial class SimulatedCombatState
     public bool IsPaelsEyeUnused(PaelsEye relic)
         => GetStatefulRelicState(relic).Current == 0;
 
-    private static bool TriggerPaelsEye(
+    public void MarkPaelsEyeUsed(PaelsEye relic)
+    {
+        StatefulRelicState state = GetStatefulRelicState(relic);
+        SetStatefulRelicState(relic, state with { Current = 1 });
+    }
+
+    public static bool TriggerPaelsEye(
         CombatPredictionSimulator simulator,
         Player player,
         PaelsEye relic)
@@ -82,23 +46,6 @@ internal sealed partial class SimulatedCombatState
         if (simulator.IsRecordingActionRelicTriggers)
             simulator.RecordRelicTrigger(relic, "：额外回合");
         return true;
-    }
-
-    public void ConsumeExtraTurnSources(Player player)
-    {
-        int ambergris = GetAmount<AmbergrisPower>(player.Creature);
-        if (ambergris > 0)
-            SetAmount<AmbergrisPower>(player.Creature, ambergris - 1);
-        foreach (PaelsEye relic in RelicsOf(player).OfType<PaelsEye>().Where(static relic => !relic.IsMelted))
-        {
-            StatefulRelicState state = GetStatefulRelicState(relic);
-            if (state.Current == 0
-                && state.Previous != 0
-                && GetManualCardsPlayedThisTurn(player.Creature) == 0)
-            {
-                SetStatefulRelicState(relic, state with { Current = 1 });
-            }
-        }
     }
 
     public void TriggerRelicsAfterPotionUsed(
@@ -155,6 +102,8 @@ internal sealed partial class SimulatedCombatState
         Player player)
     {
         SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
+        if (!simulator.IsInProgress || simulator.IsExecutingCardOrPotionEffect(player))
+            return;
         if (state.Phase is not (MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.AutoPrePlay
             or MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.Play
             or MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.AutoPostPlay))
@@ -229,11 +178,12 @@ internal sealed partial class SimulatedCombatState
         {
             switch (relic)
             {
-                case JossPaper value when etherealExhaustCount > 0:
+                case JossPaper value:
                 {
                     int threshold = value.DynamicVars["ExhaustAmount"].IntValue;
                     int exhausted = RelicPredictionStateSupport.GetJossPaperCardsExhausted(simulator, value)
-                        + etherealExhaustCount;
+                        + RelicPredictionStateSupport.GetJossPaperEtherealCount(simulator, value);
+                    RelicPredictionStateSupport.SetJossPaperEtherealCount(simulator, value, 0);
                     int draws = exhausted / threshold;
                     RelicPredictionStateSupport.SetJossPaperCardsExhausted(
                         simulator,

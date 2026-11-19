@@ -20,6 +20,7 @@ internal sealed partial class CombatPredictionSimulator
 {
     private readonly PredictionTrace _trace;
     private CombatDamageSource? _damageSource;
+    private Dictionary<PredictedCard, PredictedCard>? _transformedCardResults;
 
     public CombatPredictionState State { get; }
 
@@ -117,9 +118,9 @@ internal sealed partial class CombatPredictionSimulator
         State = new CombatPredictionState(combatState);
         Rng = combatState is ICombatPredictionRunSnapshot runSnapshot
             ? runSnapshot.CreatePredictionRngSet()
-            : CombatPredictionRngSet.From(combatState.RunState.Rng);
+            : CombatPredictionRngSet.From(combatState.RunState.Rng, combatState.Players);
         StateStore = new PredictionStateStore();
-        History = new CombatPredictionHistory(_trace);
+        History = new CombatPredictionHistory(_trace, combatState.Players.Count == 1 ? combatState.Players[0] : null);
         if (combatState is ICombatPredictionRootMaterializable materializable)
             materializable.MaterializeRoot(this);
     }
@@ -174,6 +175,8 @@ internal sealed partial class CombatPredictionSimulator
 
     internal void AssertForkable()
     {
+        if (_transformedCardResults is { Count: > 0 })
+            throw new InvalidOperationException("A transformed card is awaiting its result pile.");
         // 只是判断有没有活动作用域，不需要把帧物化出来。
         if (_trace.HasCurrentFrame)
             throw new InvalidOperationException("Combat prediction can only be forked between completed actions.");
@@ -181,6 +184,8 @@ internal sealed partial class CombatPredictionSimulator
             throw new InvalidOperationException("Combat prediction cannot be forked while a damage source is active.");
         if (_activeDrawDepth != 0)
             throw new InvalidOperationException("Combat prediction cannot be forked during draw resolution.");
+        if (_activeCardOrPotionEffects is { Count: > 0 })
+            throw new InvalidOperationException("Combat prediction cannot be forked during a card or potion effect.");
         if (ActionRelicTriggers is not null)
             throw new InvalidOperationException("Combat prediction cannot be forked while action relic triggers are being recorded.");
         if (State.CombatState is IPredictionForkBoundary combatBoundary)

@@ -36,8 +36,7 @@ internal static class RelicPredictionStateSupport
             or Shuriken
             or ThrowingAxe
             or TuningFork
-            or Vambrace
-            or VelvetChoker;
+            or Vambrace;
 
     public static void CaptureRootState(
         CombatPredictionSimulator simulator,
@@ -92,7 +91,9 @@ internal static class RelicPredictionStateSupport
                 CaptureCounter(target, source._attacksPlayedThisTurn);
                 break;
             case (PaelsLegion target, PaelsLegion source):
-                _ = simulator.StateStore.GetReadOnly((AbstractModel)target, () => new PaelsLegionPredictionState(source));
+                _ = simulator.StateStore.GetReadOnly((AbstractModel)target, () => new PaelsLegionPredictionState(source,
+                    source._affectedCardPlay is { } play
+                    && ((SimulatedCombatState)simulator.State.CombatState).WasCardPlayFinishedBeforePrediction(play)));
                 break;
             case (PenNib target, PenNib source):
                 _ = simulator.StateStore.GetReadOnly((AbstractModel)target, () => new PenNibPredictionState(source));
@@ -117,9 +118,6 @@ internal static class RelicPredictionStateSupport
                 break;
             case (Vambrace target, Vambrace source):
                 _ = simulator.StateStore.GetReadOnly((AbstractModel)target, () => new VambracePredictionState(source));
-                break;
-            case (VelvetChoker target, VelvetChoker source):
-                CaptureCounter(target, source._cardsPlayedThisTurn);
                 break;
             case (_, _) when !IsTracked(predicted):
                 break;
@@ -184,9 +182,6 @@ internal static class RelicPredictionStateSupport
                 break;
             case Shuriken value:
                 Counter(simulator, value, value._attacksPlayedThisTurn).Value = 0;
-                break;
-            case VelvetChoker value:
-                Counter(simulator, value, value._cardsPlayedThisTurn).Value = 0;
                 break;
         }
     }
@@ -258,6 +253,14 @@ internal static class RelicPredictionStateSupport
                 break;
             case JossPaper value:
                 fingerprint.Add(JossPaperValueReadOnly(simulator, value));
+                int etherealCount = GetJossPaperEtherealCount(simulator, value);
+                // Preserve the established key when no deferred effect is pending.
+                // Nonzero deferred state still distinguishes future draw behavior.
+                if (etherealCount != 0)
+                {
+                    fingerprint.Add("JossPaper.EtherealCount");
+                    fingerprint.Add(etherealCount);
+                }
                 break;
             case Kusarigama value:
                 fingerprint.Add(CounterValueReadOnly(simulator, value, value._attacksPlayedThisTurn));
@@ -303,7 +306,7 @@ internal static class RelicPredictionStateSupport
                         .Peek(value, static relic => new PaelsLegionPredictionState(relic));
                     fingerprint.Add(state.Cooldown);
                     fingerprint.Add(state.TriggeredBlockLastTurn);
-                    fingerprint.Add(state.AffectedCardPlay != null);
+                    fingerprint.Add(state.HasAffectedCardPlay);
                     break;
                 }
             case PenNib value:
@@ -347,9 +350,6 @@ internal static class RelicPredictionStateSupport
                     .Peek(value, static relic => new VambracePredictionState(relic))
                     .BlockGainedThisCombat);
                 break;
-            case VelvetChoker value:
-                fingerprint.Add(CounterValueReadOnly(simulator, value, value._cardsPlayedThisTurn));
-                break;
         }
     }
 
@@ -388,6 +388,17 @@ internal static class RelicPredictionStateSupport
         JossPaper relic,
         int value)
         => JossPaperState(simulator, relic).CardsExhausted = value;
+
+    public static int GetJossPaperEtherealCount(CombatPredictionSimulator simulator, JossPaper relic)
+        => simulator.StateStore.TryGetReadOnly((AbstractModel)relic, out JossPaperPredictionState? state)
+            ? state!.EtherealCount
+            : relic._etherealCount;
+
+    public static void SetJossPaperEtherealCount(CombatPredictionSimulator simulator, JossPaper relic, int value)
+        => JossPaperState(simulator, relic).EtherealCount = value;
+
+    private static string JossPaperText(int exhausted, int ethereal)
+        => ethereal == 0 ? exhausted.ToString() : $"{exhausted}:ethereal={ethereal}";
 
     private static JossPaperPredictionState JossPaperState(
         CombatPredictionSimulator simulator,
@@ -448,7 +459,7 @@ internal static class RelicPredictionStateSupport
             CentennialPuzzle value => Bool(value.UsedThisCombat),
             DemonTongue value => Bool(value._triggeredThisTurn),
             IronClub value => value.CardsPlayed.ToString(),
-            JossPaper value => value.CardsExhausted.ToString(),
+            JossPaper value => JossPaperText(value.CardsExhausted, value._etherealCount),
             Kunai value => value._attacksPlayedThisTurn.ToString(),
             Kusarigama value => value._attacksPlayedThisTurn.ToString(),
             LetterOpener value => value._skillsPlayedThisTurn.ToString(),
@@ -466,7 +477,6 @@ internal static class RelicPredictionStateSupport
             ThrowingAxe value => Bool(value._usedThisCombat),
             TuningFork value => value.SkillsPlayed.ToString(),
             Vambrace value => Bool(value._blockGainedThisCombat),
-            VelvetChoker value => value._cardsPlayedThisTurn.ToString(),
             _ => throw new ArgumentOutOfRangeException(nameof(relic), relic.GetType().FullName),
         };
 
@@ -484,7 +494,8 @@ internal static class RelicPredictionStateSupport
             DemonTongue value => Bool(simulator.StateStore
                 .Peek((AbstractModel)value, () => new DemonTonguePredictionState(value)).TriggeredThisTurn),
             IronClub value => CounterValueReadOnly(simulator, value, value.CardsPlayed).ToString(),
-            JossPaper value => JossPaperValueReadOnly(simulator, value).ToString(),
+            JossPaper value => JossPaperText(JossPaperValueReadOnly(simulator, value),
+                GetJossPaperEtherealCount(simulator, value)),
             Kunai value => CounterValueReadOnly(simulator, value, value._attacksPlayedThisTurn).ToString(),
             Kusarigama value => CounterValueReadOnly(simulator, value, value._attacksPlayedThisTurn).ToString(),
             LetterOpener value => CounterValueReadOnly(simulator, value, value._skillsPlayedThisTurn).ToString(),
@@ -512,12 +523,11 @@ internal static class RelicPredictionStateSupport
             TuningFork value => CounterValueReadOnly(simulator, value, value.SkillsPlayed).ToString(),
             Vambrace value => Bool(simulator.StateStore
                 .Peek((AbstractModel)value, () => new VambracePredictionState(value)).BlockGainedThisCombat),
-            VelvetChoker value => CounterValueReadOnly(simulator, value, value._cardsPlayedThisTurn).ToString(),
             _ => throw new ArgumentOutOfRangeException(nameof(relic), relic.GetType().FullName),
         };
 
     private static string PaelsLegionText(PaelsLegionPredictionState state)
-        => $"{state.Cooldown}:{Bool(state.TriggeredBlockLastTurn)}";
+        => $"{state.Cooldown}:{Bool(state.TriggeredBlockLastTurn)}:{Bool(state.HasAffectedCardPlay)}";
 
     private static string RainbowRingText(RainbowRingPredictionState state)
         => $"{state.AttacksPlayedThisTurn}:{state.SkillsPlayedThisTurn}:{state.PowersPlayedThisTurn}:{state.ActivationCountThisTurn}";

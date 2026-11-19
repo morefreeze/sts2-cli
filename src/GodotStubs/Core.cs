@@ -197,13 +197,15 @@ public static partial class OS
     public static bool HasFeature(string feature) => false;
     public static bool IsDebugBuild() => false;
     public static string GetDataDir() => ".";
-    public static string GetUserDataDir() => ".";
+    internal static readonly string HeadlessUserDataDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "sts2-cli", "userdata-" + Environment.ProcessId);
+    public static string GetUserDataDir() => HeadlessUserDataDir;
     public static string[] GetCmdlineArgs() => Array.Empty<string>();
 }
 
 public static partial class ProjectSettings
 {
-    public static string GlobalizePath(string path) => path;
+    public static string GlobalizePath(string path) => path.StartsWith("user://", StringComparison.Ordinal)
+        ? System.IO.Path.Combine(OS.GetUserDataDir(), path[7..]) : path;
     public static Variant GetSetting(string name, Variant @default = default) => @default;
     public static bool LoadResourcePack(string path) => false;
 }

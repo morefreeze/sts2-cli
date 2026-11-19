@@ -3,6 +3,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Models;
 using CombatSolver.Engine.Common;
+using CombatSolver.Engine.InCombat.Extensions;
 using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
@@ -188,7 +189,14 @@ internal static partial class TurnStartChoiceSupport
     {
         if (options.Count == 0)
             return true;
-
+        if (combat.PendingTurnStartChoice is { } pending && pending.SourceId != sourceId)
+        {
+            string detail = $"Prediction callback must finish the pending choice before requesting another: pending={pending.SourceId} new={sourceId}.";
+            NotSupportedException failure = PredictionUnsupportedException.ForContent(detail,
+                simulator.CurrentFrame?.Ancestors().Select(frame => frame.Source.GetType()).ToArray() ?? []);
+            if (failure is IncompatibleGameplayModException) throw failure;
+            throw new InvalidOperationException(detail);
+        }
         SimPlayerCombatState state = simulator.State.GetPlayerCombatState(player);
         IReadOnlyList<PredictedCard> sourceCards = state.GetCardPile(sourcePile)?.Cards
             ?? throw new InvalidOperationException($"丢弃选择不支持牌堆 {sourcePile}。");
@@ -316,11 +324,14 @@ internal static partial class TurnStartChoiceSupport
             }
             return false;
         }
-        IReadOnlyList<PredictedCard> selected = request.Effect is PlanChoiceEffect.GenerateToHand or PlanChoiceEffect.DiscardAndDraw
+        IReadOnlyList<PredictedCard> selected = request.Effect is PlanChoiceEffect.GenerateToHand or PlanChoiceEffect.DiscardAndDraw or PlanChoiceEffect.ApplyKnowledgeCurse
             ? ResolveTokens(choice!, spec.Options, spec.MinCount, spec.MaxCount)
             : CardChoiceSupport.ResolveStandaloneChoice(simulator, choice!, spec.Options, request.Count, request.SourcePile);
         switch (request.Effect)
         {
+            case PlanChoiceEffect.ApplyKnowledgeCurse:
+                KnowledgeDemonChoiceSupport.ApplyCurse(combat, player.Creature, selected.Single().Preview.Id.Entry, 0);
+                break;
             case PlanChoiceEffect.GenerateToHand:
                 simulator.AddGeneratedCardsToCombat(selected, PileType.Hand, player,
                     CardPilePosition.Bottom, CardGenerationResultKind.Random);
@@ -337,8 +348,8 @@ internal static partial class TurnStartChoiceSupport
             case PlanChoiceEffect.Transform:
                 foreach (PredictedCard card in selected)
                 {
-                    CardModel replacement = CardFactory.CreateRandomCardForTransform(
-                        card.Preview, isInCombat: true, simulator.Rng.CombatCardSelection);
+                    CardModel replacement = simulator.CreateRandomCardForTransform(
+                        card.Preview, isInCombat: true, simulator.Rng.CombatCardGeneration);
                     CardChoiceSupport.TransformCardToGeneratedReplacement(simulator, card, replacement);
                     if (combat.HasPendingChoice)
                     {

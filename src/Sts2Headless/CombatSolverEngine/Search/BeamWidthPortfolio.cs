@@ -4,14 +4,23 @@ namespace CombatSolver;
 /// 一个组合成员的定义：Beam 宽度，以及排序方式。次段成员的宽度与基线相同，但全局剪枝的普通席位取
 /// 分数排名第 W+1 至 2W 位（见 <see cref="SolverSearchProfile.SecondRankBand" />）；基础分成员的宽度也与
 /// 基线相同，但中途排序只用基础分（见 <see cref="SolverSearchProfile.BaseScoreOnly" />）。
+/// 实验性进攻成员使用独立的窄宽度与敌方血量项倍率，不修改其他成员。
 /// </summary>
 internal readonly record struct BeamWidthPortfolioMemberSpec(
     int BeamWidth,
     bool SecondRankBand = false,
-    bool BaseScoreOnly = false)
+    bool BaseScoreOnly = false,
+    bool AggressivePowerCommitment = false,
+    bool OffensiveRefinement = false,
+    bool BoundedRefinement = false)
 {
     public override string ToString()
-        => BeamWidth + (SecondRankBand ? "+band" : string.Empty) + (BaseScoreOnly ? "+base" : string.Empty);
+        => BeamWidth
+            + (AggressivePowerCommitment ? "+power" : string.Empty)
+            + (OffensiveRefinement ? "+offense" : string.Empty)
+            + (BoundedRefinement ? "+bounded" : string.Empty)
+            + (SecondRankBand ? "+band" : string.Empty)
+            + (BaseScoreOnly ? "+base" : string.Empty);
 }
 
 /// <summary>
@@ -35,6 +44,12 @@ internal readonly record struct BeamWidthPortfolioRun<TResult>(
     /// 后续成员不再运行，保持协调器遇到非 SearchCompletion 时立刻返回的既有规则。
     /// </summary>
     public bool StopPortfolio { get; init; }
+
+    /// <summary>
+    /// 该成员被连续无进展的内存回收提前截断（见 <see cref="SearchBoundaryReason.MemoryNoProgress" />）。
+    /// 它仍可作回退结果发布，但不能像完整结果那样参与成员间的整条选优。
+    /// </summary>
+    public bool MemoryTruncated { get; init; }
 }
 
 /// <summary>一个成员的明细；未运行的成员也保留一行，附不运行的原因。</summary>
@@ -42,6 +57,7 @@ internal sealed record BeamWidthPortfolioMember(
     int BeamWidth,
     bool SecondRankBand,
     bool BaseScoreOnly,
+    bool AggressivePowerCommitment,
     int NodeBudget,
     bool Ran,
     long ExpandedNodes,
@@ -52,7 +68,11 @@ internal sealed record BeamWidthPortfolioMember(
     int? BattleHpLost,
     int? PotionCount,
     bool Compared,
-    string? SkippedReason);
+    string? SkippedReason)
+{
+    public bool OffensiveRefinement { get; init; }
+    public bool BoundedRefinement { get; init; }
+}
 
 internal sealed record BeamWidthPortfolioOutcome<TResult>(
     TResult Selected,
@@ -65,12 +85,12 @@ internal sealed record BeamWidthPortfolioOutcome<TResult>(
 /// <summary>
 /// 按顺序在同一个根上跑若干个成员，共享一份节点预算，取最优结果。成员之间只有 Beam 宽度不同，
 /// 或者是与基线同宽度、只改中途排序的成员：「次段」（普通席位取分数排名第 W+1 至 2W 位）或
-/// 「基础分」（排序不加附加分）。
+/// 「基础分」（排序不加附加分），或显式启用的窄进攻精炼。
 /// </summary>
 /// <remarks>
 /// <para>
 /// 动机是已测到的噪声：同一根只改 Beam 宽度就能让结果双向变化，且没有"更宽必然更好"的方向性
-/// （数据来源见 <c>docs/strategy/beam-width-portfolio.md</c>）。既然宽度差一格不是单调的，
+/// （数据来源见 <c>docs/archive/strategy/beam-width-portfolio.md</c>）。既然宽度差一格不是单调的，
 /// 那就把若干次搜索当成若干个抽样，按既有比较规则整条选优。
 /// </para>
 /// <para>
@@ -90,9 +110,13 @@ internal static class BeamWidthPortfolio
 
     /// <summary>撞节点上限而且没打到终局：这一条不是完整结果，不参与比较。</summary>
     internal const string SkippedNodeLimitNotTerminal = "NodeLimitNotTerminal";
+    internal const string SkippedPowerMemberNotTerminal = "PowerMemberNotTerminal";
 
     /// <summary>与 <c>SearchBoundaryReason.NodeLimit</c> 的名称一致。</summary>
     internal const string NodeLimitTermination = "NodeLimit";
+
+    /// <summary>被内存回收提前截断：这一条不是完整结果，仍然保留在成员明细里。</summary>
+    internal const string SkippedMemoryTruncated = "MemoryTruncated";
 
     /// <summary>没有任何成员可比时退回第一个真正跑过的成员。</summary>
     internal const string SelectionBaselineFallback = "BaselineFallback";
@@ -103,20 +127,54 @@ internal static class BeamWidthPortfolio
     /// <summary>默认成员相对基线宽度的比例：先窄后宽。</summary>
     internal const double NarrowRefinementRatio = 2d / 3d;
     internal const double WideRefinementRatio = 3d / 2d;
+    // Frozen experimental candidate, motivated by the width-24 offensive witness
+    // versus Medium's width 60. Both experimental modes share the original node
+    // remainder; only the bounded mode appends a member, with no dedicated reserve.
+    internal const double OffensiveRefinementRatio = 2d / 5d;
+    internal const int BoundedRefinementWorkDivisor = 8;
 
     /// <summary>
-    /// 生产成员列表。首项强制是基线宽度（基线成员必须逐位等于今天的单次搜索），其后按给定顺序
+    /// 基线把配置节点用尽时，能力成员仍取得请求节点上限的五分之一作为专用预留。该预留只供能力
+    /// 成员使用，因此组合总展开数允许高于原共享上限；普通精炼仍严格共享原余量。
+    /// </summary>
+    internal static int DedicatedPowerNodeReserve(int sharedMaxExpandedNodes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sharedMaxExpandedNodes);
+        return Math.Max(1, sharedMaxExpandedNodes / 5);
+    }
+
+    /// <summary>
+    /// 生产成员列表。首项默认强制是基线宽度（基线成员必须逐位等于今天的单次搜索），其后按给定顺序
     /// 去重追加，丢掉小于 1 的值。<paramref name="configuredWidths" /> 为空时用默认的
     /// [基线, 基线×2/3, 基线×3/2, 次段 基线, 基础分 基线]（四舍五入，例如基线 24 是
     /// [24, 16, 36, 24+band, 24+base]，基线 135 是 [135, 90, 203, 135+band, 135+base]）；
     /// 显式给出宽度列表时只有宽度成员，不追加次段与基础分成员。
+    /// 替换实验可把3/2宽成员改为2/5宽、EnemyHp项1.5倍的独立成员；不增加成员或专用预算。
+    /// 互斥的追加实验保留原列表，在末尾新增同类成员，消费既有共享余量并按此前实际展开限额。
+    /// <paramref name="includePlainBaseline" /> 为 false 时不再追加那个只带基线宽度、不带任何排序修饰的
+    /// 成员，真实搜索因此少跑一次；此时候选比较不再保证"不差于今天的单次搜索"。
+    /// 实测依据：该成员在 152 场里只有 5 场严格优于其余全部成员（合计 19 HP），
+    /// 49% 的场次是与其余最好成员并列、靠"先出现者胜"判给自己，另有 48% 的场次更差。
     /// </summary>
     internal static IReadOnlyList<BeamWidthPortfolioMemberSpec> ProductionMembers(
         int baselineBeamWidth,
-        IReadOnlyList<int>? configuredWidths)
+        IReadOnlyList<int>? configuredWidths,
+        bool includePlainBaseline = true,
+        bool includePowerCommitmentMember = false,
+        bool useOffensiveRefinement = false,
+        bool appendBoundedOffensiveRefinement = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(baselineBeamWidth);
-        List<BeamWidthPortfolioMemberSpec> members = [new(baselineBeamWidth)];
+        if (useOffensiveRefinement && appendBoundedOffensiveRefinement)
+            throw new ArgumentException("替换与追加精炼实验不能同时启用。");
+        List<BeamWidthPortfolioMemberSpec> members =
+            includePlainBaseline ? [new(baselineBeamWidth)] : [];
+        if (includePowerCommitmentMember)
+        {
+            members.Add(new BeamWidthPortfolioMemberSpec(
+                baselineBeamWidth,
+                AggressivePowerCommitment: true));
+        }
         if (configuredWidths is { Count: > 0 })
         {
             foreach (int width in configuredWidths)
@@ -127,18 +185,24 @@ internal static class BeamWidthPortfolio
             }
             return members;
         }
-        foreach (int width in new[]
+        foreach (BeamWidthPortfolioMemberSpec member in new[]
                  {
-                     ScaledWidth(baselineBeamWidth, NarrowRefinementRatio),
-                     ScaledWidth(baselineBeamWidth, WideRefinementRatio),
+                     new BeamWidthPortfolioMemberSpec(ScaledWidth(baselineBeamWidth, NarrowRefinementRatio)),
+                     useOffensiveRefinement
+                         ? new BeamWidthPortfolioMemberSpec(
+                             ScaledWidth(baselineBeamWidth, OffensiveRefinementRatio), OffensiveRefinement: true)
+                         : new BeamWidthPortfolioMemberSpec(ScaledWidth(baselineBeamWidth, WideRefinementRatio)),
                  })
         {
-            BeamWidthPortfolioMemberSpec member = new(width);
             if (!members.Contains(member))
                 members.Add(member);
         }
         members.Add(new BeamWidthPortfolioMemberSpec(baselineBeamWidth, SecondRankBand: true));
         members.Add(new BeamWidthPortfolioMemberSpec(baselineBeamWidth, BaseScoreOnly: true));
+        if (appendBoundedOffensiveRefinement)
+            members.Add(new BeamWidthPortfolioMemberSpec(
+                ScaledWidth(baselineBeamWidth, OffensiveRefinementRatio),
+                OffensiveRefinement: true, BoundedRefinement: true));
         return members;
     }
 
@@ -189,6 +253,11 @@ internal static class BeamWidthPortfolio
         {
             if (memberSpecs[index].BeamWidth <= 0)
                 throw new ArgumentOutOfRangeException(nameof(memberSpecs), "成员 Beam 宽度必须为正。");
+            if (memberSpecs[index] is { BoundedRefinement: true, OffensiveRefinement: false })
+                throw new ArgumentException("有界精炼必须使用进攻成员。", nameof(memberSpecs));
+            if (memberSpecs[index] is { OffensiveRefinement: true } invalid
+                && (invalid.SecondRankBand || invalid.BaseScoreOnly || invalid.AggressivePowerCommitment))
+                throw new ArgumentException("进攻精炼成员不能叠加其他成员策略。", nameof(memberSpecs));
         }
 
         List<BeamWidthPortfolioMember> members = new(memberSpecs.Count);
@@ -209,7 +278,12 @@ internal static class BeamWidthPortfolio
                 members.Add(Skipped(spec, rejection));
                 continue;
             }
-            if (remainingNodes <= 0)
+            long memberNodeBudget = spec.AggressivePowerCommitment
+                ? Math.Max(remainingNodes, DedicatedPowerNodeReserve(sharedMaxExpandedNodes))
+                : remainingNodes;
+            if (spec.BoundedRefinement)
+                memberNodeBudget = Math.Min(memberNodeBudget, totalExpanded / BoundedRefinementWorkDivisor);
+            if (memberNodeBudget <= 0)
             {
                 members.Add(Skipped(spec, SkippedBudgetExhausted));
                 continue;
@@ -220,13 +294,17 @@ internal static class BeamWidthPortfolio
                 BeamWidth = spec.BeamWidth,
                 SecondRankBand = spec.SecondRankBand,
                 BaseScoreOnly = spec.BaseScoreOnly,
-                MaxExpandedNodes = (int)remainingNodes,
+                AggressivePowerCommitment = spec.AggressivePowerCommitment,
+                BeamWeightPerturbation = spec.OffensiveRefinement
+                    ? new BeamWeightPerturbation(BeamWeightTerm.EnemyHp, 1.5d)
+                    : baseProfile.BeamWeightPerturbation,
+                MaxExpandedNodes = (int)Math.Min(int.MaxValue, memberNodeBudget),
             };
             BeamWidthPortfolioRun<TResult> run = solve(memberProfile);
             ArgumentOutOfRangeException.ThrowIfNegative(run.ExpandedNodes);
             ArgumentOutOfRangeException.ThrowIfNegative(run.TransitionCount);
             ArgumentNullException.ThrowIfNull(run.Termination);
-            remainingNodes -= run.ExpandedNodes;
+            remainingNodes = Math.Max(0, remainingNodes - run.ExpandedNodes);
             totalExpanded += run.ExpandedNodes;
             totalTransitions += run.TransitionCount;
             if (firstRanIndex < 0)
@@ -244,8 +322,12 @@ internal static class BeamWidthPortfolio
                 break;
             }
 
-            bool comparable = run.Terminal
-                || !string.Equals(run.Termination, NodeLimitTermination, StringComparison.Ordinal);
+            // 与节点上限同一条处理：被内存截断的成员不参与整条选优，只在没有可比结果时作回退。
+            bool comparable = spec.AggressivePowerCommitment
+                ? run.Terminal
+                : run.Terminal
+                    || (!run.MemoryTruncated
+                        && !string.Equals(run.Termination, NodeLimitTermination, StringComparison.Ordinal));
             if (comparable && (selectedIndex < 0 || isBetter(run.Result, selected!)))
             {
                 selected = run.Result;
@@ -253,7 +335,13 @@ internal static class BeamWidthPortfolio
             }
             members.Add(Ran(spec, memberProfile.MaxExpandedNodes, run,
                 compared: comparable,
-                skippedReason: comparable ? null : SkippedNodeLimitNotTerminal));
+                skippedReason: comparable
+                    ? null
+                    : run.MemoryTruncated
+                        ? SkippedMemoryTruncated
+                        : spec.AggressivePowerCommitment
+                            ? SkippedPowerMemberNotTerminal
+                            : SkippedNodeLimitNotTerminal));
             // 顺序执行的代价只有在上一位成员真的放手之后才成立：明细已经记完，这里把这一轮的
             // 结果引用清掉，别让它活到下一位成员跑完。
             run = default;
@@ -287,6 +375,9 @@ internal static class BeamWidthPortfolio
             $"selected_index={selectedIndex} selected_beam={members[selectedIndex].BeamWidth} " +
             $"selected_second_rank_band={members[selectedIndex].SecondRankBand} " +
             $"selected_base_score_only={members[selectedIndex].BaseScoreOnly} " +
+            $"selected_power_commitment={members[selectedIndex].AggressivePowerCommitment} " +
+            $"selected_offensive_refinement={members[selectedIndex].OffensiveRefinement} " +
+            $"selected_bounded_refinement={members[selectedIndex].BoundedRefinement} " +
             $"reason={selectionReason} shared_nodes={sharedMaxExpandedNodes} " +
             $"total_expanded={totalExpanded} total_transitions={totalTransitions}");
         return new BeamWidthPortfolioOutcome<TResult>(
@@ -298,7 +389,9 @@ internal static class BeamWidthPortfolio
             totalTransitions);
 
         static BeamWidthPortfolioMember Skipped(BeamWidthPortfolioMemberSpec spec, string reason)
-            => new(spec.BeamWidth, spec.SecondRankBand, spec.BaseScoreOnly, 0, false, 0, 0, null, null, null, null, null, false, reason);
+            => new(spec.BeamWidth, spec.SecondRankBand, spec.BaseScoreOnly,
+                spec.AggressivePowerCommitment, 0, false, 0, 0, null, null, null, null, null, false, reason)
+            { OffensiveRefinement = spec.OffensiveRefinement, BoundedRefinement = spec.BoundedRefinement };
 
         static BeamWidthPortfolioMember Ran(
             BeamWidthPortfolioMemberSpec spec,
@@ -306,8 +399,10 @@ internal static class BeamWidthPortfolio
             BeamWidthPortfolioRun<TResult> run,
             bool compared,
             string? skippedReason)
-            => new(spec.BeamWidth, spec.SecondRankBand, spec.BaseScoreOnly, nodeBudget, true, run.ExpandedNodes, run.TransitionCount,
+            => new(spec.BeamWidth, spec.SecondRankBand, spec.BaseScoreOnly,
+                spec.AggressivePowerCommitment, nodeBudget, true, run.ExpandedNodes, run.TransitionCount,
                 run.Termination, run.Terminal, run.Won, run.BattleHpLost, run.PotionCount,
-                compared, skippedReason);
+                compared, skippedReason)
+            { OffensiveRefinement = spec.OffensiveRefinement, BoundedRefinement = spec.BoundedRefinement };
     }
 }

@@ -102,14 +102,13 @@ internal static class AfterCardExhaustedMirrors
     {
         if (context.PreviewCard.Owner == relic.Owner)
         {
+            var state = context.StateStore.Get(relic, () => new JossPaperPredictionState(relic));
             if (context.CausedByEthereal)
             {
-                // Ethereal exhaust only records the count here in vanilla; the actual draw happens
-                // later in end-turn cleanup, which this simulation path does not include.
+                state.EtherealCount++;
             }
             else
             {
-                var state = context.StateStore.Get(relic, () => new JossPaperPredictionState(relic));
                 var threshold = relic.DynamicVars[JossPaper._exhaustAmountKey].IntValue;
 
                 state.CardsExhausted++;
@@ -187,6 +186,7 @@ internal sealed class BurningSticksPredictionState(BurningSticks relic) : IPredi
 internal sealed class JossPaperPredictionState(JossPaper relic) : IPredictionStateForkable
 {
     public int CardsExhausted { get; set; } = relic.CardsExhausted;
+    public int EtherealCount { get; set; } = relic._etherealCount;
 
     public object Fork(PredictionForkContext context) => MemberwiseClone();
 }

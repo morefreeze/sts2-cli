@@ -29,15 +29,8 @@ internal static class PersistentRelicSupport
 
     public static bool ShouldFlush(SimulatedCombatState combat, Player player)
     {
-        int simulatedTurn = combat.GetPlayerTurnNumber(player);
         foreach (AbstractModel listener in combat.IterateHookListeners())
         {
-            if (listener is RingingTriangle triangle && ReferenceEquals(triangle.Owner, player))
-            {
-                if (simulatedTurn <= 1)
-                    return false;
-                continue;
-            }
             if (!listener.ShouldFlush(player))
                 return false;
         }
@@ -66,14 +59,15 @@ internal static class PersistentRelicSupport
         AbstractModel? preventer,
         Creature creature)
     {
-        if (preventer is not SturdyClamp clamp
-            || !ReferenceEquals(clamp.Owner.Creature, creature))
-        {
-            return;
-        }
-
         SimCreatureState state = simulator.State.GetCreature(creature);
-        if (state.Block > clamp.DynamicVars.Block.IntValue)
-            state.DamageBlock(state.Block - clamp.DynamicVars.Block.IntValue, ValueProp.Unpowered);
+        int retained = BlockAfterPreventingClear(preventer, creature, state.Block);
+        if (retained < state.Block)
+            state.DamageBlock(state.Block - retained, ValueProp.Unpowered);
     }
+    // Shared pure projection of the existing clear-prevention settlement, including capped retention.
+    public static int BlockAfterPreventingClear(AbstractModel? preventer, Creature creature, int block)
+        => preventer is SturdyClamp clamp && ReferenceEquals(clamp.Owner.Creature, creature)
+            ? Math.Min(block, clamp.DynamicVars.Block.IntValue)
+            : block;
+
 }

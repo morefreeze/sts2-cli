@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Orbs;
@@ -33,6 +34,40 @@ internal static partial class EndTurnPowerSupport
             bool ownerParticipates = participantSet.Contains(owner);
             switch (power)
             {
+                case TemporaryThornsPower when owner.Side != side:
+                    combat.RetireTemporaryStat(power);
+                    break;
+                case KiVersePower or QuietusPower or EncorePower or ShowOffPower when ownerParticipates:
+                    combat.SetPowerAmount(power, 0);
+                    break;
+                case DislikeYouPower when side == CombatSide.Player:
+                    combat.SetPowerAmount(power, 0);
+                    break;
+                case AmnesiaPower when side != CombatSide.Enemy:
+                    combat.SetPowerAmount(power, 0);
+                    break;
+                case LagavulinMatriarchDominionPower when side == CombatSide.Player && ownerParticipates:
+                    combat.Apply<StrengthPower>(owner, -power.Amount);
+                    combat.Apply<DexterityPower>(owner, -power.Amount);
+                    combat.SetPowerAmount(power, 0);
+                    break;
+                case TunePower when side != CombatSide.Enemy && combat.PlayedMelody(owner.Player!, CardTag.Ki):
+                    combat.Apply<FreeCardPower>(owner, power.Amount, owner);
+                    break;
+                // 原版按监听器顺序分发 AfterSideTurnEnd，临时属性回收排在该能力自己的位置：
+                // TemporaryFocusPower 的回收可能晚于同侧其它 Power（例如 ConsumingShadowPower 的末球激发）。
+                case TemporaryFocusPower temporaryFocus when ownerParticipates:
+                    combat.RetireTemporaryStat(temporaryFocus);
+                    break;
+                case TemporaryDexterityPower temporaryDexterity when ownerParticipates:
+                    combat.RetireTemporaryStat(temporaryDexterity);
+                    break;
+                case TemporaryStrengthPower temporaryStrength when ownerParticipates:
+                    combat.RetireTemporaryStat(temporaryStrength);
+                    break;
+                case RitualPower when ownerParticipates:
+                    PersistentPowerSupport.TriggerRitual(combat, owner);
+                    break;
                 case ColossusPower when side == CombatSide.Enemy:
                     combat.SetAmount<ColossusPower>(owner, power.Amount - 1);
                     break;
@@ -76,7 +111,7 @@ internal static partial class EndTurnPowerSupport
                     break;
                 case JugglingPower juggling when ownerParticipates:
                     simulator.StateStore
-                        .Get(juggling, () => new JugglingPredictionState(juggling))
+                        .Get(juggling, static model => new JugglingPredictionState(model))
                         .AttacksPlayedThisTurn = 0;
                     break;
                 case TenderPower when ownerParticipates:
@@ -118,7 +153,7 @@ internal static partial class EndTurnPowerSupport
                 case DarkEmbracePower darkEmbrace when ownerParticipates && owner.Player is { } player:
                 {
                     var state = simulator.StateStore.Get(darkEmbrace,
-                        () => new CombatSolver.Engine.InCombat.Mirrors.Hooks.Card.DarkEmbracePredictionState(darkEmbrace));
+                        static model => new CombatSolver.Engine.InCombat.Mirrors.Hooks.Card.DarkEmbracePredictionState(model));
                     simulator.Draw(player, power.Amount * state.EtherealCount);
                     if (simulator.HasPendingChoice)
                         return false;

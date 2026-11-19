@@ -57,6 +57,16 @@ internal static class AfterDamageReceivedMirrors
     private static Registry CreateRegistry()
     {
         var registry = new Registry(AfterDamageReceived);
+        registry.Register<ImpaledPower>((power, context) =>
+        {
+            if (context.Target != power.Owner || context.Dealer != power.Applier || !context.Props.IsPoweredAttack()) return;
+            power.HitCounter--;
+            if (power.HitCounter > 0) return;
+            power.HitCounter = 3;
+            context.Simulator.DislodgeArrow(power, context.Source);
+            if (!context.Simulator.HasPendingChoice)
+                context.Simulator.RemoveEmptyImpaled(power);
+        });
 
         registry.Register<AsleepPower>(HandleAsleepPower);
         registry.Register<BeatingRemnant>(HandleBeatingRemnant);
@@ -269,11 +279,18 @@ internal static class AfterDamageReceivedMirrors
         {
             effects.SetPowerAmount(current, 0);
         }
-        effects.SetPowerAmount(power, 0);
-        string? nextMove = power.Owner.Monster is CeremonialBeast beast
-            ? beast.BeastCryState.StateId
-            : null;
+        string? nextMove = null;
+        if (power.Owner.Monster is CeremonialBeast beast)
+        {
+            if (context.CombatState is not ICombatPredictionMonsterStateSink monsterState)
+                throw new InvalidOperationException("Plow requires frozen monster parameters.");
+            int ritualAmount = monsterState.GetMonsterStaticInt(power.Owner, "RitualAmount");
+            if (ritualAmount > 0)
+                effects.ApplyPower(typeof(RitualPower), power.Owner, ritualAmount, power.Owner);
+            nextMove = beast.BeastCryState.StateId;
+        }
         effects.ForceStunnedMove(power.Owner, nextMove);
+        effects.SetPowerAmount(power, 0);
     }
 
     private static void HandleShriekPower(ShriekPower power, AfterDamageReceivedMirrorContext context)
@@ -308,7 +325,8 @@ internal static class AfterDamageReceivedMirrors
             }
             else
             {
-                Effects(context).ApplyPower(typeof(StrengthPower), power.Owner, power.Amount, power.Owner);
+                // 原版 RupturePower.AfterDamageReceived 传 cardSource: null。
+                Effects(context).ApplyPowerFromSource(typeof(StrengthPower), power.Owner, power.Amount, power.Owner, cardSource: null);
             }
         }
     }
@@ -317,11 +335,13 @@ internal static class AfterDamageReceivedMirrors
     {
         if (context.Target == relic.Owner.Creature && context.Result.UnblockedDamage > 0)
         {
-            Effects(context).ApplyPower(
+            // 原版 SelfFormingClay 走遗物来源，cardSource 是 null。
+            Effects(context).ApplyPowerFromSource(
                 typeof(SelfFormingClayPower),
                 relic.Owner.Creature,
                 relic.DynamicVars["BlockNextTurn"].IntValue,
-                relic.Owner.Creature);
+                relic.Owner.Creature,
+                cardSource: null);
         }
     }
 

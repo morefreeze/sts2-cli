@@ -1,8 +1,5 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
-using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
@@ -15,9 +12,7 @@ using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
-using CombatSolver.Engine.InCombat.Mirrors;
 using CombatSolver.Engine.InCombat.Simulation;
-using BufferCard = MegaCrit.Sts2.Core.Models.Cards.Buffer;
 
 namespace CombatSolver;
 
@@ -96,11 +91,19 @@ internal sealed partial class CombatBeamSolver
         SearchFramePressureSignal framePressureSignal)
     {
         public NoveltySearchRun? Novelty;
+        public BossTempoRun? BossTempo;
         public Guid PathDiagnosticsSolverId;
         public int PathDiagnosticsBoundaryId;
         public long RoutingChoiceSummaryBuilds;
         public long RoutingChoiceSummaryHits;
         public long RoutingChoiceSummaryBypasses;
+        public long PowerValuationCandidates;
+        public long PowerFrontierEvaluations;
+        public int PowerCommitmentsCreated;
+        public int PowerCommitmentsAdmitted;
+        public int PowerCommitmentsExpired;
+        public int PowerCommitmentsRealized;
+        public int PowerCommitmentSeatsPeak;
         public readonly SearchPerformanceMetrics Performance = new(measurePhasePerformance);
         public readonly SearchWorkPacer WorkPacer = new(framePressureSignal);
         public readonly OwnedExpansionBatch<SimulationSnapshot, RawCardCandidate, SearchNode>.Pool
@@ -109,6 +112,9 @@ internal sealed partial class CombatBeamSolver
         public ParallelExpansionExecutor? ActiveParallelExpansion;
         public Dictionary<StateFingerprint, TranspositionFrontier> Transpositions = [];
         public Dictionary<StateFingerprint, TranspositionFrontier> ExpandedTranspositions = [];
+        /// <summary>诊断计数：因为合并条目上限而没有写入的新转置状态数。</summary>
+        public int TranspositionLimitBypasses;
+        public readonly TranspositionCapDiagnostics TranspositionDiagnostics = new();
         public Dictionary<StateFingerprint, StandPatEvaluation> StandPatCache = [];
         // Only the coordinator owns a prune checkpoint; probe lanes never receive it.
         public Action<long>? EnsurePruneMemory;
@@ -200,7 +206,19 @@ internal sealed partial class CombatBeamSolver
         public int CycleShapesDetected;
         public int CycleProbeContinuationsExpanded;
         public int CycleCandidatesProtected;
+        public readonly HashSet<CycleRegionKey> CycleReplayRegions = [];
+        public int CycleReplayAttempts;
+        public int CycleReplayActions;
+        public int CycleReplayVictories;
+        public int CycleReplayContinuations;
         public int CycleContinuationsStopped;
+        public int CycleStoppedUnproductive;
+        public int CycleStoppedRepetitionBudget;
+        public int CycleStoppedFamilyBudget;
+        public int CycleStoppedExitBudget;
+        public int TurnLayerBudgetStops;
+        public int TurnLayerTimeBudgetStops;
+        public int TurnLayerNodeBudgetStops;
         public int CycleRegionsDetected;
         public int CycleRegionCandidatesConsidered;
         public int CycleRegionCandidatesAdmitted;
@@ -212,6 +230,7 @@ internal sealed partial class CombatBeamSolver
         public int CrossTurnCandidatesProtected;
         public int CrossTurnContinuationsStopped;
         public int PrimaryIncumbentBranchesPruned;
+        public int PrimaryIncumbentCertifiedHealingBoundBranchesPruned;
         public int PrimaryIncumbentUpdates;
         public int StandPatProbes;
         public long OffThreadAllocatedBytes;

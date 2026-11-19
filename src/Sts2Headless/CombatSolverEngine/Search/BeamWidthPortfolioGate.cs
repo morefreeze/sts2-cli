@@ -10,22 +10,20 @@ namespace CombatSolver;
 /// <param name="ProvenZeroDamage">基线已经拿到零战损、零用药、满血的完整胜利，没有可精炼的余地。</param>
 /// <param name="ElapsedMilliseconds">基线自己的墙钟。</param>
 /// <param name="ExpandedNodes">基线实际展开数。</param>
-/// <param name="AllocatedBytes">基线期间的托管分配增量。</param>
 /// <param name="BeamWidth">基线 Beam 宽度，作为按宽度线性外推的分母。</param>
 internal readonly record struct BeamWidthPortfolioBaseline(
     bool FrontierExhausted,
     bool ProvenZeroDamage,
     long ElapsedMilliseconds,
     long ExpandedNodes,
-    long AllocatedBytes,
     int BeamWidth);
 
 /// <summary>
-/// 精炼成员的门控。规则出自「性能不变」的四条定义：基线早早耗尽才精炼、精炼不得越过已配置的
-/// 时间预算、共享节点预算要还够一轮、内存余量不足就不精炼。
+/// 组合入口按基线完成情况及共享节点、时间余量准入补搜。成员执行期间的内存预约、回收和停止
+/// 由 CombatBeamSolver 的提交边界与 Runtime 内存检查点负责，成员可以跨多个回收区域完成。
 /// </summary>
 /// <remarks>
-/// 这里只做算术与比较，没有任何搜索状态，因此可以被 <c>tools/BeamWidthPortfolioChecks</c> 原样编译检查。
+/// 这里只做算术与比较，没有任何搜索状态，因此可以被 <c>tools/testing/checks/BeamWidthPortfolioChecks</c> 原样编译检查。
 /// 门控只决定「跑不跑」，跑起来之后的比较仍是 <c>BeamWidthPortfolio</c> 里既有的那一条规则。
 /// </remarks>
 internal static class BeamWidthPortfolioGate
@@ -45,9 +43,6 @@ internal static class BeamWidthPortfolioGate
     /// <summary>按宽度外推的估算耗时超过剩余时间预算。</summary>
     internal const string SkippedTimeHeadroom = "TimeHeadroomInsufficient";
 
-    /// <summary>现有内存压力信号报告的余量装不下按宽度外推的估算分配。</summary>
-    internal const string SkippedMemoryHeadroom = "MemoryHeadroomInsufficient";
-
     /// <summary>基线耗时允许占用的时间预算份额的倒数：1/4。</summary>
     internal const int BaselineTimeShareDivisor = 4;
 
@@ -58,7 +53,7 @@ internal static class BeamWidthPortfolioGate
     internal const int SafetyDenominator = 2;
 
     /// <summary>
-    /// 估算 = 基线实测 × 成员宽度 / 基线宽度 × 3/2，向上取整。乘法先做，免得整数除法先把比例抹平。
+    /// 估算耗时 = 基线实测耗时 × 成员宽度 / 基线宽度 × 3/2，向上取整。
     /// </summary>
     internal static long EstimateMemberCost(long baselineCost, int baselineBeamWidth, int memberBeamWidth)
     {
@@ -79,22 +74,16 @@ internal static class BeamWidthPortfolioGate
     /// <param name="remainingNodes">共享节点预算的余量。</param>
     /// <param name="remainingMilliseconds">时间预算的余量。</param>
     /// <param name="timeBudgetMilliseconds">本轮已配置的时间预算。</param>
-    /// <param name="remainingMemoryBytes">
-    /// 现有 <c>SearchMemoryPressureSignal.RemainingBytes</c>；信号没配置时是 <see cref="long.MaxValue" />，
-    /// 此时不按内存拦截。
-    /// </param>
     internal static string? RejectRefinement(
         in BeamWidthPortfolioBaseline baseline,
         int memberBeamWidth,
         long remainingNodes,
         long remainingMilliseconds,
-        long timeBudgetMilliseconds,
-        long remainingMemoryBytes)
+        long timeBudgetMilliseconds)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(memberBeamWidth);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(baseline.BeamWidth);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(timeBudgetMilliseconds);
-        ArgumentOutOfRangeException.ThrowIfNegative(remainingMemoryBytes);
         if (baseline.ProvenZeroDamage)
             return SkippedBaselineProvenZeroDamage;
         if (!baseline.FrontierExhausted)
@@ -107,12 +96,6 @@ internal static class BeamWidthPortfolioGate
             > remainingMilliseconds)
         {
             return SkippedTimeHeadroom;
-        }
-        if (remainingMemoryBytes != long.MaxValue
-            && EstimateMemberCost(baseline.AllocatedBytes, baseline.BeamWidth, memberBeamWidth)
-                > remainingMemoryBytes)
-        {
-            return SkippedMemoryHeadroom;
         }
         return null;
     }

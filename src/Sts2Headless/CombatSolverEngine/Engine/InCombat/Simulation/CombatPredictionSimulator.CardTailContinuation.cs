@@ -47,6 +47,7 @@ internal sealed partial class CombatPredictionSimulator
         {
             completionHistoryStart = History.Entries.Count;
             History.CardPlayFinished(card, play, card.HasKeyword(State, CardKeyword.Ethereal));
+            ((SimulatedCombatState)State.CombatState).RecordMelodyFinished(play);
             HookMirrors.AfterCardPlayed(this, card, play);
             if (HasPendingChoice) return Suspend(CardPlayTailStage.AfterPlayed);
             stage = CardPlayTailStage.AfterPlayed;
@@ -85,6 +86,15 @@ internal sealed partial class CombatPredictionSimulator
 
     private bool ContinueCardResultExecution(PredictedCard card, Player originalOwner, CardLocation result, CardResultStage stage)
     {
+        if (stage == CardResultStage.Transfer && _transformedCardResults?.Remove(card, out var replacement) == true)
+        {
+            card.MutablePreview.EnergyCost.AfterCardPlayedCleanup();
+            card.MutablePreview._temporaryStarCosts.RemoveAll(cost => cost.ClearsWhenCardIsPlayed);
+            card.MutablePreview.CurrentTarget = null;
+            card.MutablePreview.CurrentPlayIndex = 0;
+            card.InvalidateCaches();
+            card = replacement;
+        }
         var preview = card.MutablePreview;
         if (stage == CardResultStage.Transfer)
         {
@@ -109,7 +119,9 @@ internal sealed partial class CombatPredictionSimulator
             if (HasPendingChoice) return Suspend(CardResultStage.HandEmpty);
             stage = CardResultStage.HandEmpty;
         }
-        if (stage == CardResultStage.HandEmpty && State.CombatState is ICombatPredictionCardEventSink handSink)
+        if (stage == CardResultStage.HandEmpty && IsInProgress
+            && !IsExecutingCardOrPotionEffect(originalOwner)
+            && State.CombatState is ICombatPredictionCardEventSink handSink)
         {
             using (BeginExecutionDispatch()) handSink.AfterHandEmptied(this, originalOwner);
             if (HasPendingChoice) return Suspend(CardResultStage.Cleanup);
@@ -134,6 +146,8 @@ internal sealed partial class CombatPredictionSimulator
     {
         public ICombatPredictionExecutionFrame Fork(PredictionForkContext context)
             => this with { Card = context.RequireRemap(Card) };
-        public bool Resume(CombatPredictionSimulator simulator) => simulator.ContinueCardResultExecution(Card, Owner, Result, Stage);
+        public bool Resume(CombatPredictionSimulator simulator)
+            => simulator.State.GetCreature(Owner.Creature).IsDead
+                || simulator.ContinueCardResultExecution(Card, Owner, Result, Stage);
     }
 }

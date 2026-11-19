@@ -20,6 +20,7 @@ internal sealed partial class CombatBeamSolver
 
     private SearchNode AttachCycleSchedulingEvidence(SearchNode child)
     {
+        AttachPowerCommitment(child);
         child = AttachOrderedMutationLineage(child);
         child = AttachCycleEvidence(child);
         AttachPropagatedCycleExitProbe(child);
@@ -597,27 +598,7 @@ internal sealed partial class CombatBeamSolver
         SearchNode right,
         int bestMaxHp)
     {
-        int comparison = CycleHealthRisk(left, bestMaxHp)
-            .CompareTo(CycleHealthRisk(right, bestMaxHp));
-        if (comparison != 0)
-            return comparison;
-        comparison = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
-        if (comparison != 0)
-            return comparison;
-        comparison = left.Turn.CompareTo(right.Turn);
-        if (comparison != 0)
-            return comparison;
-        comparison = left.ActionCount.CompareTo(right.ActionCount);
-        if (comparison != 0)
-            return comparison;
-        comparison = right.Snapshot.ProjectedPlayerHp.CompareTo(
-            left.Snapshot.ProjectedPlayerHp);
-        if (comparison != 0)
-            return comparison;
-        comparison = right.Score.CompareTo(left.Score);
-        return comparison != 0
-            ? comparison
-            : CompareCycleCandidateDeterministicFingerprints(left, right);
+        return CompareCycleExitQuality(left, right, bestMaxHp);
     }
 
     private static CycleExitQuality MeasureCycleExitQuality(
@@ -667,15 +648,7 @@ internal sealed partial class CombatBeamSolver
     }
 
     private static int UsefulDefensiveBlockReserve(SimulationSnapshot snapshot)
-    {
-        // ProjectedPlayerHp already prices the known incoming attack, and block-to-damage
-        // conversions are included in OffensiveProgressValue. Preserve a finite additional
-        // reserve for retained block and later attacks without treating unbounded same-turn
-        // block accumulation as endlessly improving search quality.
-        return Math.Min(
-            Math.Max(0, snapshot.PlayerBlock),
-            Math.Max(0, snapshot.PlayerMaxHp));
-    }
+        => snapshot.DefensiveBlockValue;
 
     private static int ScaleCycleFamilyBudget(
         int baseBudget,
@@ -2547,6 +2520,9 @@ internal sealed partial class CombatBeamSolver
         if (stoppedAsUnproductive || stoppedAtBudget || stoppedAtFamilyBudget)
         {
             _run.CycleContinuationsStopped++;
+            if (stoppedAsUnproductive) _run.CycleStoppedUnproductive++;
+            else if (stoppedAtBudget) _run.CycleStoppedRepetitionBudget++;
+            else _run.CycleStoppedFamilyBudget++;
             return true;
         }
         if (unproductiveCycle
@@ -2558,19 +2534,50 @@ internal sealed partial class CombatBeamSolver
         return false;
     }
 
+    // First minimum under CompareCycleAdmissionPreference, i.e. the element the former stable
+    // OrderBy/ThenBy chain returned from FirstOrDefault, without building that chain per call.
     private static ActionCandidate? SelectPreferredCycleAdmissionCandidate(
         IEnumerable<ActionCandidate> candidates,
         int bestMaxHp)
-        => candidates
-            .OrderBy(candidate => CycleHealthRisk(candidate.Node, bestMaxHp))
-            .ThenBy(candidate => candidate.Node.PotionStrategicCost)
-            .ThenBy(candidate => candidate.Node.Turn)
-            .ThenBy(candidate => candidate.Node.ActionCount)
-            .ThenByDescending(candidate => candidate.Node.Snapshot.ProjectedPlayerHp)
-            .ThenByDescending(candidate => candidate.Node.Score)
-            .ThenBy(candidate => candidate.Node, CycleCandidateDeterministicComparer.Instance)
-            .Select(candidate => (ActionCandidate?)candidate)
-            .FirstOrDefault();
+    {
+        bool found = false;
+        ActionCandidate best = default;
+        foreach (ActionCandidate candidate in candidates)
+        {
+            if (!found || CompareCycleAdmissionPreference(candidate, best, bestMaxHp) < 0)
+            {
+                best = candidate;
+                found = true;
+            }
+        }
+        return found ? best : null;
+    }
+
+    // Lower is preferred: health risk, potion cost, turn and action count ascending, then
+    // projected HP and score descending, then the deterministic fingerprint order. Keys use the
+    // default comparers of their types, as the ordered enumerable did.
+    private static int CompareCycleAdmissionPreference(
+        ActionCandidate candidate,
+        ActionCandidate current,
+        int bestMaxHp)
+    {
+        SearchNode left = candidate.Node;
+        SearchNode right = current.Node;
+        int order = CycleHealthRisk(left, bestMaxHp).CompareTo(CycleHealthRisk(right, bestMaxHp));
+        if (order == 0)
+            order = left.PotionStrategicCost.CompareTo(right.PotionStrategicCost);
+        if (order == 0)
+            order = left.Turn.CompareTo(right.Turn);
+        if (order == 0)
+            order = left.ActionCount.CompareTo(right.ActionCount);
+        if (order == 0)
+            order = right.Snapshot.ProjectedPlayerHp.CompareTo(left.Snapshot.ProjectedPlayerHp);
+        if (order == 0)
+            order = right.Score.CompareTo(left.Score);
+        if (order == 0)
+            order = CycleCandidateDeterministicComparer.Instance.Compare(left, right);
+        return order;
+    }
 
     private static bool AdmitExistingCycleProbeLease(
         IReadOnlyList<ActionCandidate> candidates,
@@ -2670,23 +2677,34 @@ internal sealed partial class CombatBeamSolver
         if (selected.Any(candidate => candidate.Node.CycleExitProbe != null))
             return;
         int bestMaxHp = candidates.Max(candidate => candidate.Node.Snapshot.PlayerMaxHp);
-        ActionCandidate? retained = candidates
-            .Where(candidate => candidate.Node.CycleExitProbe != null
-                && !selected.Any(current => ReferenceEquals(current.Node, candidate.Node)))
-            .OrderBy(candidate => CycleHealthRisk(candidate.Node, bestMaxHp))
-            .ThenBy(candidate => candidate.Node.PotionStrategicCost)
-            .ThenBy(candidate => candidate.Node.Turn)
-            .ThenBy(candidate => candidate.Node.ActionCount)
-            .ThenByDescending(candidate => candidate.Node.Snapshot.ProjectedPlayerHp)
-            .ThenByDescending(candidate => candidate.Node.Score)
-            .ThenBy(candidate => candidate.Node, CycleCandidateDeterministicComparer.Instance)
-            .Select(candidate => (ActionCandidate?)candidate)
-            .FirstOrDefault();
-        if (retained is { } candidate)
-            selected.Add(candidate);
+        bool found = false;
+        ActionCandidate retained = default;
+        for (int index = 0; index < candidates.Count; index++)
+        {
+            ActionCandidate candidate = candidates[index];
+            if (candidate.Node.CycleExitProbe == null || ContainsCandidateNode(selected, candidate.Node))
+                continue;
+            if (!found || CompareCycleAdmissionPreference(candidate, retained, bestMaxHp) < 0)
+            {
+                retained = candidate;
+                found = true;
+            }
+        }
+        if (found)
+            selected.Add(retained);
     }
 
-    private SearchNode AttachCycleProbeLease(SearchNode child)
+    private static bool ContainsCandidateNode(List<ActionCandidate> candidates, SearchNode node)
+    {
+        foreach (ActionCandidate candidate in candidates)
+        {
+            if (ReferenceEquals(candidate.Node, node))
+                return true;
+        }
+        return false;
+    }
+
+    private static SearchNode AttachCycleProbeLease(SearchNode child)
     {
         if (child.Parent?.CycleProbeLease is not { } lease
             || child.Action is not { } action
@@ -2754,7 +2772,7 @@ internal sealed partial class CombatBeamSolver
             0);
     }
 
-    private static StateFingerprint BuildCycleActionKey(PlanAction action)
+    internal static StateFingerprint BuildCycleActionKey(PlanAction action)
     {
         StateFingerprintBuilder key = new();
         AppendCycleActionKey(ref key, action);

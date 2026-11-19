@@ -27,6 +27,11 @@ internal static class AfterCurrentHpChangedMirrors
     private static Registry CreateRegistry()
     {
         var registry = new Registry(AfterCurrentHpChanged);
+        registry.Register<MegaCrit.Sts2.Core.Models.Relics.Wuppy>((relic, c) =>
+        {
+            if (c.Creature == relic.CombatWuppy)
+                ((SimulatedCombatState)c.CombatState).SetWuppyHp(relic, c.State.GetCreature(c.Creature).CurrentHp);
+        });
 
         registry.RegisterIgnored<Crusher>();
         registry.RegisterIgnored<Rocket>();
@@ -47,11 +52,13 @@ internal static class AfterCurrentHpChangedMirrors
         bool applied = effects.GetRedSkullStrengthApplied(relic);
         if (shouldApplyStrength != applied)
         {
-            effects.ApplyPower(
+            // 原版红头骨同样传 cardSource: null（遗物来源）。
+            effects.ApplyPowerFromSource(
                 typeof(StrengthPower),
                 relic.Owner.Creature,
                 shouldApplyStrength ? relic.DynamicVars.Strength.IntValue : -relic.DynamicVars.Strength.IntValue,
-                relic.Owner.Creature);
+                relic.Owner.Creature,
+                cardSource: null);
             effects.SetRedSkullStrengthApplied(relic, shouldApplyStrength);
         }
     }

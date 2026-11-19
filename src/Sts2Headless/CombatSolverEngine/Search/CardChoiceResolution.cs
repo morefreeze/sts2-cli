@@ -1,4 +1,3 @@
-using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -11,6 +10,8 @@ namespace CombatSolver;
 
 internal static partial class CardChoiceSupport
 {
+    internal const int NightmareCopyCount = 3;
+
     public static bool Apply(
         CombatPredictionSimulator simulator,
         SimulatedCombatState combat,
@@ -43,12 +44,32 @@ internal static partial class CardChoiceSupport
         switch (choice.Effect)
         {
             case PlanChoiceEffect.MoveToHand:
+                if (playedCard.Preview is KiChant chant)
+                {
+                    var top = owner.DrawPile.Cards.Take(chant.DynamicVars.Cards.IntValue).ToArray();
+                    simulator.AddToPile(selected, PileType.Hand);
+                    if (!simulator.HasPendingChoice)
+                        simulator.Discard(top.Except(selected).Where(card => card.GetPile(simulator.State) == owner.DrawPile).ToArray());
+                    if (simulator.HasPendingChoice) { simulator.RejectExecutionContinuation(); return false; }
+                    break;
+                }
                 simulator.AddToPile(selected, PileType.Hand);
                 break;
             case PlanChoiceEffect.MoveToDrawTop:
                 simulator.AddToPile(selected, PileType.Draw, CardPilePosition.Top);
                 break;
             case PlanChoiceEffect.Discard:
+                if (playedCard.Preview is TheHermit hermit)
+                {
+                    foreach (var card in selected)
+                    {
+                        if (card.Preview.Type == CardType.Curse) simulator.Exhaust(card); else simulator.Discard([card]);
+                        if (simulator.HasPendingChoice) { simulator.RejectExecutionContinuation(); return false; }
+                    }
+                    simulator.Draw(hermit.Owner, hermit.DynamicVars.Cards.IntValue);
+                    if (simulator.HasPendingChoice) { simulator.RejectExecutionContinuation(); return false; }
+                    break;
+                }
                 simulator.Discard(selected);
                 break;
             case PlanChoiceEffect.Exhaust:
@@ -149,10 +170,40 @@ internal static partial class CardChoiceSupport
             PredictedCard replacement = PredictedCard.Create(replacementCanonical, original.Preview.Owner);
             if (upgradeReplacement)
                 replacement.Upgrade();
-            if (!ReplaceTransformedCard(
+            if (!ReplaceTransformedCard(simulator, original, replacement, CardGenerationResultKind.Fixed))
+                return false;
+        }
+        return true;
+    }
+
+    public static bool TransformCardBatch(
+        CombatPredictionSimulator simulator,
+        IEnumerable<PredictedCard> cards,
+        CardModel replacementCanonical,
+        bool upgradeReplacement)
+    {
+        List<(PredictedCard Original, PredictedCard Replacement, SimCardPile Pile, int Index)> transformations = [];
+        foreach (PredictedCard original in cards.ToList())
+        {
+            PredictedCard replacement = PredictedCard.Create(replacementCanonical, original.Preview.Owner);
+            if (upgradeReplacement)
+                replacement.Upgrade();
+            (SimCardPile pile, int index) = RemoveTransformedCard(simulator, original);
+            transformations.Add((original, replacement, pile, index));
+        }
+        // CardCmd.Transform removes every original before inserting the replacements, and records
+        // each index in the shrinking pile. Its pile/index sort determines insertion and hook order.
+        transformations.Sort(static (left, right) => left.Pile.Type != right.Pile.Type
+            ? left.Pile.Type.CompareTo(right.Pile.Type)
+            : left.Index.CompareTo(right.Index));
+        foreach (var transformation in transformations)
+        {
+            if (!AddTransformedCard(
                 simulator,
-                original,
-                replacement,
+                transformation.Original,
+                transformation.Replacement,
+                transformation.Pile,
+                transformation.Index,
                 CardGenerationResultKind.Fixed))
             {
                 return false;
@@ -194,6 +245,14 @@ internal static partial class CardChoiceSupport
         PredictedCard replacement,
         CardGenerationResultKind resultKind)
     {
+        (SimCardPile pile, int index) = RemoveTransformedCard(simulator, original);
+        return AddTransformedCard(simulator, original, replacement, pile, index, resultKind);
+    }
+
+    private static (SimCardPile Pile, int Index) RemoveTransformedCard(
+        CombatPredictionSimulator simulator,
+        PredictedCard original)
+    {
         SimCardPile pile = original.GetPile(simulator.State)
             ?? throw new InvalidOperationException($"变换时找不到 {original.Preview.Id.Entry} 所在牌堆。");
         int index = -1;
@@ -208,6 +267,17 @@ internal static partial class CardChoiceSupport
             throw new InvalidOperationException($"变换时找不到 {original.Preview.Id.Entry} 的牌堆位置。");
 
         simulator.RemoveFromCombat(original);
+        return (pile, index);
+    }
+
+    private static bool AddTransformedCard(
+        CombatPredictionSimulator simulator,
+        PredictedCard original,
+        PredictedCard replacement,
+        SimCardPile pile,
+        int index,
+        CardGenerationResultKind resultKind)
+    {
         replacement.MutablePreview.HasBeenRemovedFromState = false;
         replacement.NotifyHookListenerStructureChanged();
         pile.Insert(Math.Min(index, pile.Cards.Count), replacement);
@@ -221,8 +291,8 @@ internal static partial class CardChoiceSupport
             if (simulator.HasPendingChoice)
                 return false;
         }
-        original.MutablePreview.AfterTransformedFrom();
-        replacement.MutablePreview.AfterTransformedTo();
+        original.MutablePreview.AfterThisWasTransformedInto(replacement.MutablePreview);
+        replacement.MutablePreview.AfterThisWasTransformedFrom(original.MutablePreview);
         HookMirrors.AfterCardGeneratedForCombat(
             simulator,
             replacement,
@@ -302,7 +372,7 @@ internal static partial class CardChoiceSupport
             return;
         NightmarePower power = combat.AddPowerInstance<NightmarePower>(
             source.Owner.Creature,
-            3,
+            NightmareCopyCount,
             source.Owner.Creature);
         combat.SetNightmareSelection(power, selected[0]);
     }

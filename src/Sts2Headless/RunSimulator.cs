@@ -187,7 +187,7 @@ public class RunSimulator
             Log("Entered Act 0");
 
             // Register card selector for cards that need player choice
-            CardSelectCmd.UseSelector(_cardSelector);
+            RunManager.Instance.CardSelectorStack.UseLocalSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
@@ -432,7 +432,7 @@ public class RunSimulator
 
             CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
             CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
-            CardSelectCmd.UseSelector(_cardSelector);
+            RunManager.Instance.CardSelectorStack.UseLocalSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
 
             var savedRoom = _runState.CurrentRoom;
@@ -1017,6 +1017,16 @@ public class RunSimulator
 
     private static int? ResolveSolverBudgetAndLog()
     {
+        // Explicit CLI-only corpus profile. Normal STS2_SOLVER_BUDGET tiers keep
+        // their existing meaning; collection results report this exact ms value.
+        var collectionRaw = Environment.GetEnvironmentVariable("STS2_COLLECTION_BUDGET_MS");
+        if (!string.IsNullOrWhiteSpace(collectionRaw))
+        {
+            if (!int.TryParse(collectionRaw, out var collectionMs) || collectionMs is < 1000 or > 30_000)
+                throw new ArgumentException("STS2_COLLECTION_BUDGET_MS must be between 1000 and 30000");
+            Console.Error.WriteLine($"[Sts2Headless] Offline collection Solver budget: {collectionMs}ms");
+            return collectionMs;
+        }
         var raw = Environment.GetEnvironmentVariable("STS2_SOLVER_BUDGET");
         var resolved = ResolveSolverBudget(raw, out var warning);
         if (warning != null)
@@ -1490,7 +1500,7 @@ public class RunSimulator
                 _syncCtx.Pump();
 
                 // Reset the player ready state and try again with SuppressYield
-                CombatManager.Instance.UndoReadyToEndTurn(player);
+                CombatManager.Instance.TryUndoReadyToEndTurn(player);
                 _syncCtx.Pump();
 
                 YieldPatches.SuppressYield = true;
@@ -1539,7 +1549,7 @@ public class RunSimulator
                     // Cancel again and undo
                     RunManager.Instance.ActionExecutor.Cancel();
                     _syncCtx.Pump();
-                    CombatManager.Instance.UndoReadyToEndTurn(player);
+                    CombatManager.Instance.TryUndoReadyToEndTurn(player);
                     _syncCtx.Pump();
                     Thread.Sleep(50);
 
@@ -1688,8 +1698,8 @@ public class RunSimulator
             return Error("buy_card requires 'card_index'");
 
         var idx = Convert.ToInt32(args["card_index"]);
-        var allEntries = merchantRoom.GetLocalInventory().CharacterCardEntries
-            .Concat(merchantRoom.GetLocalInventory().ColorlessCardEntries).ToList();
+        var allEntries = RunManager.Instance.MerchantSynchronizer.GetLocalInventory().CharacterCardEntries
+            .Concat(RunManager.Instance.MerchantSynchronizer.GetLocalInventory().ColorlessCardEntries).ToList();
         if (idx < 0 || idx >= allEntries.Count)
             return Error($"Invalid card index {idx}");
 
@@ -1699,7 +1709,7 @@ public class RunSimulator
 
         try
         {
-            entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
+            entry.OnTryPurchaseUnsynchronized(RunManager.Instance.MerchantSynchronizer.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
             Log($"Bought card: {entry.CreationResult?.Card?.GetType().Name ?? "?"} for {entry.Cost}g");
         }
@@ -1716,7 +1726,7 @@ public class RunSimulator
             return Error("buy_relic requires 'relic_index'");
 
         var idx = Convert.ToInt32(args["relic_index"]);
-        var entries = merchantRoom.GetLocalInventory().RelicEntries;
+        var entries = RunManager.Instance.MerchantSynchronizer.GetLocalInventory().RelicEntries;
         if (idx < 0 || idx >= entries.Count) return Error($"Invalid relic index {idx}");
 
         var entry = entries[idx];
@@ -1732,8 +1742,8 @@ public class RunSimulator
             // Adroit, #80). Run the purchase on a background task and yield as soon as a
             // pending selection appears so the caller can resolve it; the background task
             // continues once the selector's TCS is fed by select_cards.
-            var inv = merchantRoom.GetLocalInventory();
-            var task = Task.Run(() => entry.OnTryPurchaseWrapper(inv));
+            var inv = RunManager.Instance.MerchantSynchronizer.GetLocalInventory();
+            var task = Task.Run(() => entry.OnTryPurchaseUnsynchronized(inv));
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -1764,7 +1774,7 @@ public class RunSimulator
             return Error("buy_potion requires 'potion_index'");
 
         var idx = Convert.ToInt32(args["potion_index"]);
-        var entries = merchantRoom.GetLocalInventory().PotionEntries;
+        var entries = RunManager.Instance.MerchantSynchronizer.GetLocalInventory().PotionEntries;
         if (idx < 0 || idx >= entries.Count) return Error($"Invalid potion index {idx}");
 
         var entry = entries[idx];
@@ -1775,7 +1785,7 @@ public class RunSimulator
         {
             // BUG-046: the purchase clears entry.Model -- capture the name before buying.
             var potionName = entry.Model?.GetType().Name ?? "?";
-            entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
+            entry.OnTryPurchaseUnsynchronized(RunManager.Instance.MerchantSynchronizer.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
             Log($"Bought potion: {potionName} for {entry.Cost}g");
         }
@@ -1793,14 +1803,14 @@ public class RunSimulator
         if (_runState?.CurrentRoom is not MerchantRoom merchantRoom)
             return Error("Not in a shop");
 
-        var removal = merchantRoom.GetLocalInventory().CardRemovalEntry;
+        var removal = RunManager.Instance.MerchantSynchronizer.GetLocalInventory().CardRemovalEntry;
         if (removal == null) return Error("No card removal available");
         if (player.Gold < removal.Cost) return Error("Not enough gold");
 
         try
         {
             // Run on background thread so card selection can pause (same pattern as event options)
-            var task = Task.Run(() => removal.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
+            var task = Task.Run(() => removal.OnTryPurchaseUnsynchronized(RunManager.Instance.MerchantSynchronizer.GetLocalInventory()));
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -2110,7 +2120,7 @@ public class RunSimulator
     private Dictionary<string, object?> DoLeaveRoom(Player player)
     {
         Log("Leaving room");
-        try { RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult(); }
+        try { RunManager.Instance.ProceedFromTerminalRewardsScreen(); }
         catch { }
         _syncCtx.Pump();
         WaitForActionExecutor();
@@ -2184,7 +2194,7 @@ public class RunSimulator
             }
         }
 
-        RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
+        RunManager.Instance.ProceedFromTerminalRewardsScreen();
         WaitForActionExecutor();
         return DetectDecisionPoint();
     }
@@ -3123,6 +3133,29 @@ public class RunSimulator
                 result["stars"] = pcs.Stars;
             }
 
+            // Fool's arrow belt is branch state, just like Regent stars and Defect orbs.
+            if (pcs != null && player.Character?.Id.Entry == "FOOL")
+            {
+                result["available_arrows"] = pcs.AvailableArrowCount;
+                result["arrows"] = pcs.Arrows.Select((arrow, index) => new Dictionary<string, object?>
+                {
+                    ["index"] = index,
+                    ["status"] = arrow.Status.ToString(),
+                    ["destroy_after_impaled"] = arrow.DestroyAfterImpaled,
+                }).ToList();
+                var arrows = pcs.Arrows;
+                result["impaled_arrows"] = combatState!.Creatures
+                    .SelectMany(creature => creature.Powers.OfType<MegaCrit.Sts2.Core.Models.Powers.ImpaledPower>())
+                    .Where(power => power.Amount > 0 && power.Applier == player.Creature)
+                    .Select(power => new Dictionary<string, object?>
+                    {
+                        ["target_combat_id"] = power.Owner.CombatId,
+                        ["arrow_indices"] = power.Arrows.Select(arrow =>
+                            Enumerable.Range(0, arrows.Count).Single(index => ReferenceEquals(arrows[index], arrow))).ToList(),
+                        ["hit_counter"] = power.HitCounter,
+                    }).ToList();
+            }
+
             // Necrobinder: Osty (minion)
             var osty = player.Osty;
             if (osty != null)
@@ -3240,7 +3273,7 @@ public class RunSimulator
     {
         try
         {
-            RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
+            RunManager.Instance.ProceedFromTerminalRewardsScreen();
             _syncCtx.Pump();
         }
         catch { }
@@ -3269,7 +3302,7 @@ public class RunSimulator
             Log($"Event {localEvent?.GetType().Name ?? "null"} finished, proceeding");
             try
             {
-                RunManager.Instance.ProceedFromTerminalRewardsScreen().GetAwaiter().GetResult();
+                RunManager.Instance.ProceedFromTerminalRewardsScreen();
                 _syncCtx.Pump();
             }
             catch { }
@@ -3311,7 +3344,7 @@ public class RunSimulator
 
     private Dictionary<string, object?> ShopState(MerchantRoom merchantRoom, Player player)
     {
-        var inv = merchantRoom.GetLocalInventory();
+        var inv = RunManager.Instance.MerchantSynchronizer.GetLocalInventory();
         if (inv == null) { ForceToMap(); return MapSelectState(); }
 
         return DecisionSerializer.Shop(inv, player, _runState!, _loc);
@@ -3341,7 +3374,7 @@ public class RunSimulator
                 // results, then grant them ourselves after the pick resolves (granting inside the
                 // event — mid action-execution — risks re-entrancy).
                 List<MegaCrit.Sts2.Core.Entities.TreasureRelicPicking.RelicPickingResult>? awarded = null;
-                Action<List<MegaCrit.Sts2.Core.Entities.TreasureRelicPicking.RelicPickingResult>> capture = r => awarded = r;
+                Action<List<MegaCrit.Sts2.Core.Entities.TreasureRelicPicking.RelicPickingResult>, bool> capture = (r, _) => awarded = r;
                 relicSync.RelicsAwarded += capture;
                 try
                 {
@@ -3509,6 +3542,7 @@ public class RunSimulator
         _modelDbInitialized = true;
 
         TestMode.IsOn = true;
+        Log($"Headless user data: {Godot.OS.GetUserDataDir()} (profile 0)");
 
         // Install inline sync context on main thread
         SynchronizationContext.SetSynchronizationContext(_syncCtx);
@@ -3629,6 +3663,7 @@ public class RunSimulator
             "defect" => Player.CreateForNewRun<Defect>(UnlockState.all, 1uL),
             "regent" => Player.CreateForNewRun<Regent>(UnlockState.all, 1uL),
             "necrobinder" => Player.CreateForNewRun<Necrobinder>(UnlockState.all, 1uL),
+            "fool" => Player.CreateForNewRun<Fool>(UnlockState.all, 1uL),
             _ => null
         };
     }

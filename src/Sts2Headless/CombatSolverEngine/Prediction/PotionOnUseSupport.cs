@@ -102,7 +102,7 @@ internal static class PotionOnUseSupport
                     playerTarget,
                     simulator.State.GetCreature(playerTarget).MaxHp
                         * value.DynamicVars["HealPercent"].BaseValue / 100m);
-                combat.Apply<AmbergrisPower>(playerTarget, 1, owner);
+                combat.Apply<ExtraTurnPower>(playerTarget, 1, owner);
                 break;
             case Ashwater or DropletOfPrecognition or GamblersBrew or LiquidMemories or TouchOfInsanity:
                 break;
@@ -154,8 +154,8 @@ internal static class PotionOnUseSupport
                 {
                     PotionModel generated = PotionFactory.CreateRandomPotionOutOfCombat(
                         recipient,
-                        simulator.Rng.CombatPotionGeneration);
-                    if (!combat.TryProcurePotion(recipient, generated))
+                        simulator.Rng.NonCombatGeneration(recipient));
+                    if (!combat.TryProcurePotion(recipient, generated, freeFromEntropic: true))
                         break;
                 }
                 break;
@@ -197,10 +197,8 @@ internal static class PotionOnUseSupport
                 break;
             case FruitJuice value:
             {
-                SimCreatureState creature = simulator.State.GetCreature(playerTarget);
                 int gained = value.DynamicVars.MaxHp.IntValue;
-                creature.SetMaxHp(creature.MaxHp + gained);
-                creature.Heal(gained);
+                simulator.GainMaxHp(playerTarget, gained);
                 break;
             }
             case FyshOil value:
@@ -326,7 +324,8 @@ internal static class PotionOnUseSupport
                     break;
                 }
 
-                throw new NotSupportedException($"药水 {potion.Id.Entry} 尚未进入确定性搜索支持表。");
+                throw PredictionUnsupportedException.ForContent(
+                    $"药水 {potion.Id.Entry} 尚未进入确定性搜索支持表。", potion.GetType());
         }
         return !simulator.HasPendingChoice;
     }

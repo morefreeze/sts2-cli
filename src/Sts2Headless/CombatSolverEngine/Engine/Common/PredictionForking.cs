@@ -59,11 +59,23 @@ internal interface ICombatPredictionCardGenerationPoolSnapshot
         MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
         out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
 
+    bool TryGetRootEligibleAllCharacterCards(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
+        MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
+
     bool TryGetRootEligibleCharacterCards(
         MegaCrit.Sts2.Core.Entities.Players.Player player,
         MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
         MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
         CharacterCombatGenerationPool selection,
+        out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
+
+    bool TryGetRootUnlockedTransformationCards(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        MegaCrit.Sts2.Core.Models.CardPoolModel cardPool,
+        MegaCrit.Sts2.Core.Entities.Cards.CardMultiplayerConstraint multiplayerConstraint,
         out IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel> cards);
 }
 
@@ -358,6 +370,8 @@ internal interface ICombatPredictionCreatureSemantics
 
 internal interface ICombatPredictionMonsterStateSink
 {
+    int GetMonsterStaticInt(MegaCrit.Sts2.Core.Entities.Creatures.Creature creature, string name);
+
     bool GetMonsterBool(MegaCrit.Sts2.Core.Entities.Creatures.Creature creature, string name);
 
     int GetAeonglassWitherUpgradeCount(MegaCrit.Sts2.Core.Entities.Creatures.Creature creature);

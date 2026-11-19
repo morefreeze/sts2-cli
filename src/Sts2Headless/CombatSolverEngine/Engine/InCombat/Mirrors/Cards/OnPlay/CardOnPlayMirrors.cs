@@ -62,15 +62,32 @@ internal static partial class CardOnPlayMirrors
                 CardPlay = cardPlay
             });
         if (simulator.HasPendingChoice)
-            simulator.AppendExecutionContinuation(new CardSpecExecutionFrame(card, cardPlay.Target));
+            simulator.AppendExecutionContinuation(new CardSpecExecutionFrame(card, cardPlay));
         else
-            ApplyRemainingCardSpec(simulator, card, cardPlay.Target);
+            ApplyRemainingCardSpec(simulator, card, cardPlay);
         return result;
     }
 
     private static Registry CreateRegistry()
     {
         var registry = new Registry(OnPlay);
+        FoolCardMirrors.Register(registry);
+        TarotCardMirrors.Register(registry);
+        registry.Register<FoolishShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<TheShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<HeavyShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<DivineShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<HobblingShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<QuickShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<RapidShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<RepeatShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<SkyShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<MelodicShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<TrickShot>(FoolArrowCardMirrors.Shoot);
+        registry.Register<Nock>(FoolArrowCardMirrors.Nock);
+        registry.Register<Quiver>(FoolArrowCardMirrors.Quiver);
+        registry.Register<ExpectAFight>(BespokeCardMirrors.ExpectAFightOnPlay);
+        registry.Register<MementoMori>(BespokeCardMirrors.MementoMoriOnPlay);
 
         registry.Register<HowlFromBeyond>(GeneralCardMirrors.GeneralAttackOnPlay);
         registry.Register<Mangle>(GeneralCardMirrors.GeneralAttackOnPlay);
@@ -86,6 +103,7 @@ internal static partial class CardOnPlayMirrors
         registry.Register<FiendFire>(BespokeCardMirrors.FiendFireOnPlay);
         registry.Register<LeadingStrike>(BespokeCardMirrors.LeadingStrikeOnPlay);
         registry.Register<Maul>(BespokeCardMirrors.MaulOnPlay);
+        registry.Register<Misery>(BespokeCardMirrors.MiseryOnPlay);
         registry.Register<Sacrifice>(BespokeCardMirrors.SacrificeOnPlay);
         registry.Register<Spite>(BespokeCardMirrors.SpiteOnPlay);
         registry.Register<TheScythe>(BespokeCardMirrors.TheScytheOnPlay);

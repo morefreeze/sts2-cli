@@ -29,6 +29,15 @@ internal static class AfterAttackMirrors
         Registry.Invoke(listener, context);
     }
 
+    // Listener-mask verification only: what the unfiltered path would have resolved for this listener.
+    internal static MirrorDispatchKind ResolveDispatchKind(AbstractModel listener)
+        => Registry.ResolveDispatchKind(listener);
+
+    // Listener-mask verification only: the paired-state cleanup below is a type switch rather than a
+    // registry dispatch, so it needs its own "would this listener have done anything" predicate.
+    internal static bool HasPairedState(AbstractModel listener)
+        => listener is GigantificationPower or VigorPower or AimPower or QuietusPower;
+
     // BeforeAttack stores command-scoped state for these powers. Pending-choice
     // suspension must make that state forkable without firing ordinary AfterAttack
     // effects or consuming the power; completed dispatch uses the same idempotent
@@ -40,11 +49,17 @@ internal static class AfterAttackMirrors
     {
         switch (listener)
         {
+            case QuietusPower power:
+                QuietusPowerMirrors.CompleteOrAbort(power, context, completed);
+                break;
             case GigantificationPower power:
                 GigantificationPowerMirrors.CompleteOrAbort(power, context, completed);
                 break;
             case VigorPower power:
                 VigorPowerMirrors.CompleteOrAbort(power, context, completed);
+                break;
+            case AimPower power:
+                AimPowerMirrors.CompleteOrAbort(power, context, completed);
                 break;
         }
     }
@@ -52,6 +67,8 @@ internal static class AfterAttackMirrors
     private static Registry CreateRegistry()
     {
         var registry = new Registry(AfterAttack);
+        registry.Register<AimPower>(AimPowerMirrors.AfterAttack);
+        registry.Register<QuietusPower>(QuietusPowerMirrors.AfterAttack);
 
         registry.Register<BoneFlute>(HandleBoneFlute);
         registry.Register<Flatten>(HandleFlatten);
@@ -153,11 +170,13 @@ internal static class AfterAttackMirrors
         {
             if (context.CombatState is not ICombatPredictionEffectSink effects)
                 throw new InvalidOperationException("吸取效果缺少可写的预测状态。");
-            effects.ApplyPower(
+            // 原版吸取（SuckPower.AfterAttack）传 cardSource: null。
+            effects.ApplyPowerFromSource(
                 typeof(StrengthPower),
                 power.Owner,
                 power.Amount * triggeredHits,
-                power.Owner);
+                power.Owner,
+                cardSource: null);
         }
     }
 }

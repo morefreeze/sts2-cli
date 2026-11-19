@@ -1,6 +1,5 @@
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
-using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using CombatSolver.Engine.Common;
@@ -57,14 +56,6 @@ internal readonly record struct StrategicEffectVector(
             SaturatingAdd(left.ResourcePotential, right.ResourcePotential),
             SaturatingAdd(left.CardAccessPotential, right.CardAccessPotential),
             SaturatingAdd(left.ScalingPotential, right.ScalingPotential));
-
-    private static int SaturatingSum(params int[] values)
-    {
-        long total = 0;
-        foreach (int value in values)
-            total += value;
-        return (int)Math.Clamp(total, 0L, int.MaxValue);
-    }
 
     private static int SaturatingAdd(int left, int right)
         => (int)Math.Clamp((long)left + right, 0L, int.MaxValue);
@@ -228,9 +219,9 @@ internal readonly record struct StrategicEffectContext(
             bool hasDebuffDynamicVar = false;
             if ((needsBlockSkillCount && cardType == CardType.Skill) || needsDebuffCount)
             {
-                // DynamicVarSet 的 GetEnumerator 会把内部 Dictionary 的结构体枚举器装箱，
-                // 每张牌每次快照都要跑一遍；直接枚举其（已 publicize 的）内部字典。
-                foreach (KeyValuePair<string, MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar> dynamicVar in card.DynamicVars._vars)
+                // DynamicVarSet 的公开 GetEnumerator 会把内部字典枚举器装箱；经访问桥读取
+                // 已 publicize 的 _vars（缺失时自动回退公开枚举），搜索热路径保持零装箱。
+                foreach (KeyValuePair<string, MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar> dynamicVar in new DynamicVarSetAccess.EntryEnumerable(card.DynamicVars))
                 {
                     if (ObserveDynamicVarKey(
                             dynamicVar.Key,

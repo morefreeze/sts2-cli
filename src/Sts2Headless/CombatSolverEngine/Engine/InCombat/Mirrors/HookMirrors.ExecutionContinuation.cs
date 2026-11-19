@@ -9,10 +9,21 @@ namespace CombatSolver.Engine.InCombat.Mirrors;
 
 internal static partial class HookMirrors
 {
-    private static IReadOnlyList<AbstractModel> CaptureUnfilteredExecutionHookListeners(CombatPredictionSimulator simulator)
+    private static IReadOnlyList<AbstractModel> CaptureAfterPlayExecutionHookListeners(
+        CombatPredictionSimulator simulator, bool late)
     {
+        // AfterCardPlayed deliberately runs through terminal combat. Match the ordinary
+        // facade's unguarded source and mask, rather than the ending-guarded iterator.
+        IReadOnlyList<AbstractModel> source = MirroredCombatHookListeners(simulator);
+        MirroredHookMask mask = late ? MirroredHookMask.AfterCardPlayedLate : MirroredHookMask.AfterCardPlayed;
+        if (VerifyHookListenerMask)
+            VerifyMaskedListenersAreNoOps(source, mask,
+                late ? nameof(AbstractModel.AfterCardPlayedLate) : nameof(AbstractModel.AfterCardPlayed),
+                late ? static listener => IsDispatched(AfterCardPlayedMirrors.ResolveLateDispatchKind(listener))
+                    : static listener => IsDispatched(AfterCardPlayedMirrors.ResolveDispatchKind(listener)));
         List<AbstractModel> listeners = [];
-        foreach (AbstractModel listener in simulator.State.IterateHookListeners()) listeners.Add(listener);
+        foreach (AbstractModel listener in new HookListenerEnumerable(simulator, source, mask))
+            listeners.Add(listener);
         return listeners;
     }
 
@@ -32,7 +43,7 @@ internal static partial class HookMirrors
             }
             phase++;
             next = 0;
-            if (phase == 1) listeners = CaptureUnfilteredExecutionHookListeners(simulator);
+            if (phase == 1) listeners = CaptureAfterPlayExecutionHookListeners(simulator, late: true);
         }
         BeforeCardPlayedMirrors.CompleteOrAbort(simulator, play);
         AfterCardPlayedMirrors.CompleteOrAbort(simulator, play, completed: true);

@@ -1,10 +1,25 @@
 namespace CombatSolver;
 
+internal enum DirectSearchPurpose
+{
+    PrimaryBeam,
+    RefinementBeam,
+    PotionFreeAudit,
+    RequiredPotionAudit,
+    SmartPotionGradient,
+    TurnBoundaryDiscovery,
+    EarlyTurnScout,
+    NoveltyExploration,
+    AdaptiveNoveltyRefinement,
+    NarrowOpeningIncumbent,
+    BossTempo,
+}
+
 internal readonly record struct SearchRequestWorkSnapshot(
     long ExpandedNodes, long TransitionCount, long ChoiceBranchesEvaluated,
     TimeSpan Elapsed, long WorkerAllocatedBytes,
     long Gen0Collections, long Gen1Collections, long Gen2Collections,
-    TimeSpan GcPauseDuration, TimeSpan MaxObservedGcPause, int RecordedSolverCount);
+    TimeSpan GcPauseDuration, TimeSpan MaxObservedGcPause, int RecordedSolverCount, int CycleReplayActions = 0);
 
 internal readonly record struct SearchSolverWorkContribution(
     int ExpandedNodes, int TransitionCount, int ChoiceBranchesEvaluated,
@@ -12,15 +27,50 @@ internal readonly record struct SearchSolverWorkContribution(
     int Gen0Collections, int Gen1Collections, int Gen2Collections,
     TimeSpan GcPauseDuration, TimeSpan MaxObservedGcPause);
 
+internal readonly record struct SearchWorkAttribution(
+    string Mechanism,
+    long ExpandedNodes,
+    long Transitions,
+    long ChoiceBranches,
+    double ElapsedMilliseconds,
+    long WorkerAllocatedBytes,
+    long Gen0Collections,
+    long Gen1Collections,
+    long Gen2Collections,
+    double GcPauseMilliseconds,
+    double MaxObservedGcPauseMilliseconds,
+    int RecordedSolverCount);
+
 /// <summary>Each solver contributes once, including cancellation and failed policy searches.</summary>
 internal sealed class SearchRequestWorkTotals
 {
+    internal const int MaximumCycleReplayActions = 4096;
+    private int _cycleReplayActions;
+    internal int RemainingCycleReplayActions => MaximumCycleReplayActions - Volatile.Read(ref _cycleReplayActions);
+
+    internal bool TryConsumeCycleReplayAction()
+    {
+        int used = Volatile.Read(ref _cycleReplayActions);
+        while (used < MaximumCycleReplayActions)
+        {
+            int observed = Interlocked.CompareExchange(ref _cycleReplayActions, used + 1, used);
+            if (observed == used) return true;
+            used = observed;
+        }
+        return false;
+    }
+
     private readonly Lock _gate = new();
     private SearchRequestWorkSnapshot _totals;
+    private readonly Dictionary<string, SearchWorkAttribution> _attributions =
+        new(StringComparer.Ordinal);
     internal int RecordedSolverCountForTesting { get { lock (_gate) return _totals.RecordedSolverCount; } }
 
-    public void Record(SearchSolverWorkContribution work)
+    public void Record(SearchSolverWorkContribution work, ContinuationPurpose? purpose = null,
+        DirectSearchPurpose? directSearchPurpose = null)
     {
+        if (purpose != null && directSearchPurpose != null)
+            throw new ArgumentException("A search contribution cannot have two purposes.");
         ArgumentOutOfRangeException.ThrowIfNegative(work.ExpandedNodes);
         ArgumentOutOfRangeException.ThrowIfNegative(work.TransitionCount);
         ArgumentOutOfRangeException.ThrowIfNegative(work.ChoiceBranchesEvaluated);
@@ -37,16 +87,46 @@ internal sealed class SearchRequestWorkTotals
                 ChoiceBranchesEvaluated = _totals.ChoiceBranchesEvaluated + work.ChoiceBranchesEvaluated,
                 RecordedSolverCount = _totals.RecordedSolverCount + 1,
             };
+            RecordAttribution(purpose?.ToString()
+                ?? directSearchPurpose?.ToString()
+                ?? "UnattributedDirect", work, 1);
         }
     }
 
     public void RecordCoordinatorOverhead(TimeSpan elapsed, long allocatedBytes,
         int gen0Collections, int gen1Collections, int gen2Collections,
-        TimeSpan gcPauseDuration, TimeSpan maxObservedGcPause)
+        TimeSpan gcPauseDuration, TimeSpan? maxObservedGcPause)
     {
-        ValidateWork(elapsed, allocatedBytes, gen0Collections, gen1Collections, gen2Collections, gcPauseDuration, maxObservedGcPause);
+        // An absent sample contributes no pause to the observed-maximum aggregate.
+        TimeSpan observedMaximum = maxObservedGcPause is { } observed ? observed : TimeSpan.Zero;
+        ValidateWork(elapsed, allocatedBytes, gen0Collections, gen1Collections, gen2Collections, gcPauseDuration, observedMaximum);
         lock (_gate)
-            Accumulate(elapsed, allocatedBytes, gen0Collections, gen1Collections, gen2Collections, gcPauseDuration, maxObservedGcPause);
+        {
+            Accumulate(elapsed, allocatedBytes, gen0Collections, gen1Collections, gen2Collections, gcPauseDuration, observedMaximum);
+            RecordAttribution("CoordinatorOverhead", new SearchSolverWorkContribution(
+                0, 0, 0, elapsed, allocatedBytes, gen0Collections, gen1Collections,
+                gen2Collections, gcPauseDuration, observedMaximum), 0);
+        }
+    }
+
+    private void RecordAttribution(
+        string mechanism, SearchSolverWorkContribution work, int solverCount)
+    {
+        SearchWorkAttribution prior = _attributions.GetValueOrDefault(mechanism);
+        _attributions[mechanism] = new SearchWorkAttribution(
+            mechanism,
+            prior.ExpandedNodes + work.ExpandedNodes,
+            prior.Transitions + work.TransitionCount,
+            prior.ChoiceBranches + work.ChoiceBranchesEvaluated,
+            prior.ElapsedMilliseconds + work.Elapsed.TotalMilliseconds,
+            prior.WorkerAllocatedBytes + work.WorkerAllocatedBytes,
+            prior.Gen0Collections + work.Gen0Collections,
+            prior.Gen1Collections + work.Gen1Collections,
+            prior.Gen2Collections + work.Gen2Collections,
+            prior.GcPauseMilliseconds + work.GcPauseDuration.TotalMilliseconds,
+            Math.Max(prior.MaxObservedGcPauseMilliseconds,
+                work.MaxObservedGcPause.TotalMilliseconds),
+            prior.RecordedSolverCount + solverCount);
     }
 
     private static void ValidateWork(TimeSpan elapsed, long allocatedBytes, int gen0Collections,
@@ -75,5 +155,11 @@ internal sealed class SearchRequestWorkTotals
         };
     }
 
-    public SearchRequestWorkSnapshot Snapshot() { lock (_gate) return _totals; }
+    public SearchRequestWorkSnapshot Snapshot() { lock (_gate) return _totals with { CycleReplayActions = Volatile.Read(ref _cycleReplayActions) }; }
+
+    public SearchWorkAttribution[] AttributionSnapshot()
+    {
+        lock (_gate)
+            return _attributions.Values.OrderBy(item => item.Mechanism, StringComparer.Ordinal).ToArray();
+    }
 }

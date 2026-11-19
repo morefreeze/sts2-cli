@@ -385,7 +385,7 @@ public partial class GpuParticles2D : Node2D
     public float LifetimeRandomness { get; set; }
     public bool OneShot { get; set; }
     public bool LocalCoords { get; set; }
-    public float SpeedScale { get; set; }
+    public double SpeedScale { get; set; }
     public float Explosiveness { get; set; }
     public Material? ProcessMaterial { get; set; }
     public void Restart() { }

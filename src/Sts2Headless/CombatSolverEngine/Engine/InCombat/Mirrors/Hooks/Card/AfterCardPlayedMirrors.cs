@@ -48,11 +48,19 @@ internal static class AfterCardPlayedMirrors
         LateRegistry.Invoke(listener, context);
     }
 
+    // Listener-mask verification only: what the unfiltered path would have resolved for this listener.
+    internal static MirrorDispatchKind ResolveDispatchKind(AbstractModel listener)
+        => Registry.ResolveDispatchKind(listener);
+
+    internal static MirrorDispatchKind ResolveLateDispatchKind(AbstractModel listener)
+        => LateRegistry.ResolveDispatchKind(listener);
+
     public static void CompleteOrAbort(
         CombatPredictionSimulator simulator,
         CardPlay cardPlay,
         bool completed)
     {
+        Block.StretchPowerMirrors.Cleanup(simulator, cardPlay, completed);
         if (!simulator.StateStore.HasEntries<PaelsLegionPredictionState>())
             return;
         foreach ((AbstractModel model, PaelsLegionPredictionState state) in
@@ -74,6 +82,19 @@ internal static class AfterCardPlayedMirrors
     private static Registry CreateRegistry()
     {
         var registry = new Registry(AfterCardPlayed);
+        registry.Register<Byrdpip>((relic, c) =>
+        {
+            if (c.PreviewCard is ByrdSwoop && c.PreviewCard.Owner == relic.Owner)
+                ((SimulatedCombatState)c.CombatState).RecordByrdpipSwoop(relic);
+        });
+        registry.Register<Sown>(DisableSingleUseEnchantment);
+        registry.Register<Swift>(DisableSingleUseEnchantment);
+        registry.Register<ConductorsBaton>((relic, c) =>
+        {
+            var combat = (SimulatedCombatState)c.CombatState;
+            if (c.PreviewCard.Owner == relic.Owner && c.Simulator.IsInProgress && combat.TryTriggerConductorsBaton(relic))
+                combat.ApplyPowerFromSource(typeof(ConductorsBatonPower), relic.Owner.Creature, 1, relic.Owner.Creature, null);
+        });
 
         registry.RegisterIgnored<Play20CardsSingleTurnAchievement>();
         registry.RegisterIgnored<SkillSilent1Achievement>();
@@ -98,6 +119,40 @@ internal static class AfterCardPlayedMirrors
         registry.Register<GravityPower>(HandleGravityPower);
         registry.Register<HauntPower>(HandleHauntPower);
         registry.Register<ImitationLearningPower>(HandleImitationLearningPower);
+        registry.Register<StretchPower>(Block.StretchPowerMirrors.After);
+        registry.Register<EncorePower>((power, c) =>
+        {
+            var data = power.GetInternalData<EncorePower.Data>();
+            if (c.PreviewCard.Owner.Creature != power.Owner || !data.cardsBeingPlayed.Remove(c.PreviewCard)) return;
+            data.numberOfCardsPlayedSinceApplied++;
+            power.DynamicVars["PlaysRemaining"].BaseValue = Math.Max(0, power.Amount - data.numberOfCardsPlayedSinceApplied);
+        });
+        registry.Register<LullabyPower>((power, c) =>
+        {
+            if (c.PreviewCard.Owner.Creature == power.Owner && !power._proccdThisTurn
+                && ((SimulatedCombatState)c.CombatState).MelodyCount(c.PreviewCard.Owner) == 3)
+            {
+                power._proccdThisTurn = true;
+                c.Simulator.GainBlock(power.Owner, power.Amount, ValueProp.Unpowered);
+            }
+        });
+        registry.Register<SongPathPower>((power, c) =>
+        {
+            var combat = (SimulatedCombatState)c.CombatState;
+            if (c.PreviewCard.Owner.Creature == power.Owner && c.PreviewCard.Tags.Contains(CardTag.Cho)
+                && combat.IsFirstMelodyPlay(c.CardPlay, CardTag.Cho))
+                c.Simulator.GainBlock(power.Owner, power.Amount, ValueProp.Unpowered);
+        });
+        registry.Register<ViolentChordPower>((power, c) =>
+        {
+            var combat = (SimulatedCombatState)c.CombatState;
+            if (c.PreviewCard.Owner.Creature == power.Owner && c.PreviewCard.Tags.Contains(CardTag.Wah)
+                && combat.IsFirstMelodyPlay(c.CardPlay, CardTag.Wah))
+                c.Simulator.Damage(c.State.HittableEnemies.ToArray(), power.Amount, ValueProp.Unpowered, power.Owner);
+        });
+        registry.Register<MotifPower>((power, c) => ApplyMelodyFirstCount(power, c, false));
+        registry.Register<LostLutePower>((power, c) => ApplyMelodyFirstCount(power, c, true));
+        registry.Register<JugglingPower>(HandleJugglingPower);
         registry.Register<MasterPlannerPower>(HandleMasterPlannerPower);
         registry.Register<MonologuePower>(HandleMonologuePower);
         registry.Register<OblivionPower>(HandleOblivionPower);
@@ -156,6 +211,12 @@ internal static class AfterCardPlayedMirrors
         registry.Register<RightHandHand>(HandleRightHandHand);
 
         return registry;
+    }
+
+    private static void DisableSingleUseEnchantment(EnchantmentModel enchantment, AfterCardPlayedMirrorContext c)
+    {
+        if (c.Card.References(enchantment.Card))
+            c.MutablePreviewCard.Enchantment!._status = EnchantmentStatus.Disabled;
     }
 
     private static void HandleDaughterOfTheWind(DaughterOfTheWind relic, AfterCardPlayedMirrorContext context)
@@ -334,7 +395,7 @@ internal static class AfterCardPlayedMirrors
         }
 
         var clone = context.Card.CreateClone();
-        clone.MutablePreview.LocalKeywords.Add(CardKeyword.Ethereal);
+        clone.MutablePreview.AddKeyword(CardKeyword.Ethereal);
         context.Simulator.AddGeneratedCardToCombat(
             clone,
             PileType.Hand,
@@ -486,11 +547,7 @@ internal static class AfterCardPlayedMirrors
 
     private static void HandleVelvetChoker(VelvetChoker relic, AfterCardPlayedMirrorContext context)
     {
-        if (context.PreviewCard.Owner == relic.Owner)
-        {
-            var state = context.StateStore.Get(relic, () => new CounterPredictionState(relic._cardsPlayedThisTurn));
-            state.Value++;
-        }
+        // The native callback refreshes the counter display; gameplay reads started-play history.
     }
 
     private static void HandleShuriken(Shuriken relic, AfterCardPlayedMirrorContext context)
@@ -514,7 +571,8 @@ internal static class AfterCardPlayedMirrors
             return false;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("遗物属性效果缺少可写的预测状态。");
-        effects.ApplyPower(powerType, relic.Owner.Creature, amount, relic.Owner.Creature);
+        // 原版手里剑走遗物来源，cardSource 是 null。
+        effects.ApplyPowerFromSource(powerType, relic.Owner.Creature, amount, relic.Owner.Creature, cardSource: null);
         return true;
     }
 
@@ -543,13 +601,12 @@ internal static class AfterCardPlayedMirrors
             return;
         }
 
-        var cards = player.GetUnlockedCharacterCards(context.CardMultiplayerConstraint)
-            .Where(card => card.Type == CardType.Attack)
-            .GetForCombat(
+        var cards = context.Simulator.GetUnlockedCharacterCardsForCombat(
                 player,
                 power.Amount,
                 context.Rng.CombatCardGeneration,
-                context.CardMultiplayerConstraint)
+                context.CardMultiplayerConstraint,
+                static card => card.Type == CardType.Attack)
             .ToList();
         context.Simulator.AddGeneratedCardsToCombat(cards, PileType.Hand, player);
     }
@@ -586,7 +643,8 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("激怒效果缺少可写的预测状态。");
-        effects.ApplyPower(typeof(StrengthPower), power.Owner, power.Amount, power.Owner);
+        // 原版激怒（EnragePower.AfterCardPlayed）传 cardSource: null。
+        effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, power.Amount, power.Owner, cardSource: null);
     }
 
     private static void HandleGalvanicPower(GalvanicPower power, AfterCardPlayedMirrorContext context)
@@ -625,7 +683,33 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.PreviewCard.Owner == power.Owner.Player && context.PreviewCard.Type == CardType.Skill)
         {
-            context.MutablePreviewCard.LocalKeywords.Add(CardKeyword.Sly);
+            context.MutablePreviewCard.AddKeyword(CardKeyword.Sly);
+        }
+    }
+
+    private static void ApplyMelodyFirstCount(PowerModel power, AfterCardPlayedMirrorContext c, bool autoPlay)
+    {
+        if (c.PreviewCard.Owner.Creature != power.Owner) return;
+        var combat = (SimulatedCombatState)c.CombatState;
+        int count = SimulatedCombatState.MelodyTags.Count(tag => c.PreviewCard.Tags.Contains(tag)
+            && combat.MelodyStartedCount(c.PreviewCard.Owner, tag) == 1) * power.Amount;
+        if (count <= 0) return;
+        if (autoPlay) c.Simulator.AutoPlayFromDrawPile(c.PreviewCard.Owner, count, CardPilePosition.Top);
+        else c.Simulator.Draw(c.PreviewCard.Owner, count);
+    }
+
+    private static void HandleJugglingPower(JugglingPower power, AfterCardPlayedMirrorContext context)
+    {
+        var state = context.StateStore.Get(power, () => new JugglingPredictionState(power));
+        if (state.CardToClone != context.Card)
+            return;
+        state.CardToClone = null;
+        for (int index = 0; index < power.Amount; index++)
+        {
+            context.Simulator.AddGeneratedCardToCombat(context.Card.CreateClone(), PileType.Hand,
+                power.Owner.Player, resultKind: CardGenerationResultKind.Contextual);
+            if (context.Simulator.HasPendingChoice)
+                return;
         }
     }
 
@@ -648,7 +732,8 @@ internal static class AfterCardPlayedMirrors
         var clone = state.CardAndClones[index].Clone;
         state.CardAndClones.RemoveAt(index);
 
-        state.Amount--;
+        if (HookMirrors.ShouldPlay(context.Simulator, clone, out _, AutoPlayType.Default))
+            state.Amount--;
         context.Simulator.AutoPlay(
             clone,
             nestedChoiceSourceId: power.Id.Entry);
@@ -665,7 +750,8 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("湮灭效果缺少可写的预测状态。");
-        effects.ApplyPower(typeof(DoomPower), power.Owner, amount, power.Applier);
+        // 原版湮灭（OblivionPower.AfterCardPlayed）传 cardSource: null。
+        effects.ApplyPowerFromSource(typeof(DoomPower), power.Owner, amount, power.Applier, cardSource: null);
     }
 
     private static void HandlePanachePower(PanachePower power, AfterCardPlayedMirrorContext context)
@@ -718,7 +804,8 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("撕裂效果缺少可写的预测状态。");
-        effects.ApplyPower(typeof(StrengthPower), power.Owner, amount, power.Owner);
+        // 原版撕裂（RupturePower.AfterCardPlayed）传 cardSource: null。
+        effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, amount, power.Owner, cardSource: null);
     }
 
     private static void HandleSmoggyPower(SmoggyPower power, AfterCardPlayedMirrorContext context)
@@ -794,9 +881,10 @@ internal static class AfterCardPlayedMirrors
             throw new InvalidOperationException("温柔效果缺少可写的预测状态。");
         effects.RecordTenderCardPlayed(power.Owner);
         if (!context.Simulator.IsEnding)
-            effects.ApplyPower(typeof(StrengthPower), power.Owner, -1, power.Applier);
+            // 原版温柔（TenderPower）始终传 cardSource: null。
+            effects.ApplyPowerFromSource(typeof(StrengthPower), power.Owner, -1, power.Applier, cardSource: null);
         if (!context.Simulator.IsEnding)
-            effects.ApplyPower(typeof(DexterityPower), power.Owner, -1, power.Applier);
+            effects.ApplyPowerFromSource(typeof(DexterityPower), power.Owner, -1, power.Applier, cardSource: null);
     }
 
     private static void HandleVitalSparkPower(VitalSparkPower power, AfterCardPlayedMirrorContext context)
@@ -805,11 +893,13 @@ internal static class AfterCardPlayedMirrors
             return;
         if (context.CombatState is not ICombatPredictionEffectSink effects)
             throw new InvalidOperationException("生命火花效果缺少可写的预测状态。");
-        effects.ApplyPower(
+        // 原版生命火花（VitalSparkPower）传 cardSource: null。
+        effects.ApplyPowerFromSource(
             typeof(TaintedPower),
             context.PreviewCard.Owner.Creature,
             power.Amount,
-            applier: null);
+            applier: null,
+            cardSource: null);
     }
 
     private static void HandleWitheringPresencePower(WitheringPresencePower power, AfterCardPlayedMirrorContext context)
@@ -879,7 +969,6 @@ internal static class AfterCardPlayedMirrors
     {
         if (context.Card.References(enchantment.Card) && context.MutablePreviewCard.Enchantment is Glam preview)
         {
-            preview._usedThisCombat = true;
             preview._status = EnchantmentStatus.Disabled;
         }
     }

@@ -1,9 +1,7 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
-using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
@@ -17,7 +15,6 @@ using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Mirrors;
 using CombatSolver.Engine.InCombat.Simulation;
-using BufferCard = MegaCrit.Sts2.Core.Models.Cards.Buffer;
 
 namespace CombatSolver;
 
@@ -142,20 +139,44 @@ internal sealed partial class CombatBeamSolver
         {
             FutureSoldHp = futureSold,
             Score = ApplySoldHpPenalty(scoreWithoutSoldPenalty, futureSold),
-            Outcome = new TurnOutcome(
-                outcome.Turn,
-                outcome.HpLost,
-                Math.Max(
-                    0,
-                    outcome.Node.Snapshot.RecoveredPlayerHp
-                        - outcome.TurnStart.Snapshot.RecoveredPlayerHp),
-                outcome.Node.CumulativeEnemyHpLost
-                    - outcome.TurnStart.CumulativeEnemyHpLost,
-                soldThisTurn,
-                maxBlock,
-                outcome.ActualBlock,
-                outcome.EnergyLeft),
+            Outcome = CreateTurnOutcome(
+                outcome.Node, outcome.TurnStart, outcome.HpLost, soldThisTurn,
+                maxBlock, outcome.ActualBlock, outcome.EnergyLeft),
         };
+    }
+
+    private static TurnOutcome CreateTurnOutcome(
+        SearchNode node,
+        SearchNode turnStart,
+        int hpLost,
+        int soldThisTurn,
+        int maxBlock,
+        int actualBlock,
+        int energyLeft)
+        => new(
+            node.Action!.Turn,
+            hpLost,
+            Math.Max(0, node.Snapshot.RecoveredPlayerHp - turnStart.Snapshot.RecoveredPlayerHp),
+            node.CumulativeEnemyHpLost - turnStart.CumulativeEnemyHpLost,
+            soldThisTurn,
+            maxBlock,
+            actualBlock,
+            energyLeft);
+
+    private static TurnOutcome CreateUncomparedTurnOutcome(SearchNode node)
+    {
+        SearchNode parent = node.Parent
+            ?? throw new InvalidOperationException("回合结果节点没有父节点。");
+        SearchNode turnStart = FindTurnStart(parent);
+        bool endedByTurn = node.Action!.Kind == PlanActionKind.EndTurn || node.Turn > parent.Turn;
+        int block = endedByTurn ? parent.Snapshot.PlayerBlock : node.Snapshot.PlayerBlock;
+        int energy = endedByTurn ? parent.Snapshot.Energy : node.Snapshot.Energy;
+        int soldThisTurn = node.FutureSoldHp - parent.FutureSoldHp;
+        if (soldThisTurn < 0)
+            throw new InvalidOperationException("路线回合累计卖血不能减少。");
+        return CreateTurnOutcome(node, turnStart,
+            Math.Max(0, node.Snapshot.CumulativePlayerHpLost - turnStart.Snapshot.CumulativePlayerHpLost),
+            soldThisTurn, block, block, energy);
     }
 
     private static ulong CurrentTurnPotionSlotsUsed(SearchNode turnStart, SearchNode outcome)
@@ -180,7 +201,8 @@ internal sealed partial class CombatBeamSolver
 
     private RouteAnnotations BuildRouteAnnotations(
         SearchNode best,
-        ActionRelicTriggerRecorder? killRecorder = null)
+        ActionRelicTriggerRecorder? killRecorder = null,
+        IReadOnlyList<Creature>? annotationEnemies = null)
     {
         List<SearchNode> path = [];
         for (SearchNode? node = best; node?.Parent != null; node = node.Parent)
@@ -225,7 +247,11 @@ internal sealed partial class CombatBeamSolver
             }
             aliveMask = node.Snapshot.AliveEnemyMask;
 
-            if (node.Outcome is { } outcome)
+            TurnOutcome? turnOutcome = node.Outcome;
+            // Boundary fallbacks can retain the original node rather than its ranked annotation clone.
+            if (turnOutcome == null && (node.IsTerminal || node.Turn > parent.Turn))
+                turnOutcome = CreateUncomparedTurnOutcome(node);
+            if (turnOutcome is { } outcome)
             {
                 losses[outcome.Turn] = outcome.HpLost;
                 recoveries[outcome.Turn] = outcome.HpRecovered;
@@ -250,6 +276,7 @@ internal sealed partial class CombatBeamSolver
         }
         if (killRecorder != null)
         {
+            ArgumentNullException.ThrowIfNull(annotationEnemies);
             Dictionary<int, IReadOnlyList<string>> attributedKills = [];
             foreach (SearchNode node in path)
             {
@@ -260,8 +287,8 @@ internal sealed partial class CombatBeamSolver
                     attributedKills[actionIndex] = recorded
                         .Select(kill =>
                         {
-                            Creature? enemy = root.Enemies.FirstOrDefault(candidate => candidate.CombatId == kill.CombatId);
-                            string targetName = enemy is null ? displayNames.Monster(kill.TargetId) : displayNames.Creature(enemy);
+                            Creature enemy = annotationEnemies.First(candidate => candidate.CombatId == kill.CombatId);
+                            string targetName = displayNames.Creature(enemy, annotationEnemies);
                             if (string.IsNullOrEmpty(targetName))
                                 targetName = kill.TargetId;
                             return $"{targetName}（{displayNames.DamageSource(kill.Source)}）";
@@ -307,61 +334,60 @@ internal sealed partial class CombatBeamSolver
     private static double SoldHpPenalty()
         => SolverWeights.SoldHpPenalty;
 
-    private IReadOnlyList<CachedContinuation> BuildContinuations(SearchNode best)
+    private static ContinuationCapture PrepareContinuationCapture(SearchNode best)
     {
-        List<CachedContinuation> continuations = [];
-        List<SearchNode> path = [];
+        List<(int ActionIndex, int Turn)> boundaries = [];
+        HashSet<int> laterActionTurns = [];
         for (SearchNode? node = best; node?.Parent != null; node = node.Parent)
-            path.Add(node);
-        path.Reverse();
-        for (int pathIndex = 0; pathIndex < path.Count; pathIndex++)
         {
-            SearchNode node = path[pathIndex];
             PlanAction action = node.Action
                 ?? throw new InvalidOperationException("续用路径节点缺少动作。");
-            if (action.Kind != PlanActionKind.EndTurn && !action.EndsPlayerTurn
-                || node.Snapshot.PlayerDead
-                || node.Snapshot.AllEnemiesDead
-                || node.Snapshot.BoundaryReason != SearchBoundaryReason.None)
+            if ((action.Kind == PlanActionKind.EndTurn || action.EndsPlayerTurn)
+                && !node.Snapshot.PlayerDead
+                && !node.Snapshot.AllEnemiesDead
+                && node.Snapshot.BoundaryReason == SearchBoundaryReason.None
+                && laterActionTurns.Contains(node.Turn))
             {
-                continue;
+                boundaries.Add((node.ActionCount - 1, node.Turn));
             }
-            bool hasPlannedNextTurn = path
-                .Skip(pathIndex + 1)
-                .Any(later => later.Action?.Turn == node.Turn);
-            if (!hasPlannedNextTurn)
-                continue;
-            int forecastOffset = node.Turn - _startTurnNumber;
-            ContinuationStamp? expected = node.Snapshot.Continuation;
-            if (expected == null)
-            {
-                SimulationSnapshot? turnSetupRoot = _includeTurnSetup
-                    ? ReplayTurnSetup(node.GetTurnSetupChoices())
-                    : null;
-                SimulationSnapshot? replayed = null;
-                try
-                {
-                    replayed = Replay(
-                        node.Actions,
-                        turnSetupRoot,
-                        _startTurnNumber,
-                        priorActionCount: 0);
-                    expected = ContinuationStamp.CapturePredicted(
-                        _player,
-                        replayed.Simulator,
-                        node.Turn,
-                        _forecast,
-                        _startTurnNumber);
-                }
-                finally
-                {
-                    replayed?.ReleaseSimulator();
-                    turnSetupRoot?.ReleaseSimulator();
-                }
-            }
-            continuations.Add(new CachedContinuation(expected, node.Turn, forecastOffset));
+            laterActionTurns.Add(action.Turn);
         }
-        return continuations;
+        boundaries.Reverse();
+        return new ContinuationCapture(boundaries);
+    }
+
+    private sealed class ContinuationCapture(IReadOnlyList<(int ActionIndex, int Turn)> boundaries)
+    {
+        private readonly List<CachedContinuation> _continuations = new(boundaries.Count);
+
+        public void Observe(CombatBeamSolver solver, CombatPredictionSimulator simulator,
+            int actionIndex, int turn, SearchBoundaryReason boundary)
+        {
+            if (_continuations.Count == boundaries.Count)
+                return;
+            var expected = boundaries[_continuations.Count];
+            if (actionIndex < expected.ActionIndex)
+                return;
+            if (actionIndex != expected.ActionIndex || turn != expected.Turn
+                || boundary != SearchBoundaryReason.None || simulator.HasPendingChoice
+                || simulator.TerminalStamp != null)
+            {
+                throw new InvalidOperationException(
+                    $"续用回放未抵达预期稳定边界：action={actionIndex}/{expected.ActionIndex} " +
+                    $"turn={turn}/{expected.Turn} boundary={boundary}。");
+            }
+            ((SimulatedCombatState)simulator.State.CombatState).AssertForkable();
+            ContinuationStamp stamp = ContinuationStamp.CapturePredicted(
+                solver._player, simulator, turn, solver._forecast, solver._startTurnNumber);
+            _continuations.Add(new CachedContinuation(stamp, turn, turn - solver._startTurnNumber));
+        }
+
+        public IReadOnlyList<CachedContinuation> Complete()
+        {
+            if (_continuations.Count != boundaries.Count)
+                throw new InvalidOperationException("最终路线回放缺少预期续用边界。");
+            return _continuations;
+        }
     }
 
 }

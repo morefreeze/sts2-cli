@@ -4,6 +4,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Achievements;
 using MegaCrit.Sts2.Core.Models.Monsters;
 using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.ValueProps;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.Common.Mirrors;
@@ -36,6 +37,14 @@ internal static class AfterDamageGivenMirrors
     private static Registry CreateRegistry()
     {
         var registry = new Registry(AfterDamageGiven);
+        registry.Register<MightyWings>((relic, c) =>
+        {
+            if (c.Props.IsPoweredAttack() && c.Dealer is not null
+                && (c.Dealer == relic.Owner.Creature || c.Dealer == c.State.GetOsty(relic.Owner))
+                && c.Result.TotalDamage >= relic.DynamicVars["DamageThreshold"].BaseValue)
+                Effects(c).ApplyPowerFromSource(typeof(StrengthPower), relic.Owner.Creature,
+                    relic.DynamicVars["StrengthPower"].IntValue, null, null);
+        });
 
         registry.RegisterIgnored<SkillIronclad2Achievement>();
         registry.Register<ConcoctPower>(HandleConcoctPower);
@@ -90,11 +99,14 @@ internal static class AfterDamageGivenMirrors
             context.Props.IsPoweredAttack() &&
             context.Result.TotalDamage > 0)
         {
-            Effects(context).ApplyPower(
+            // 原版 ReaperFormPower／UnderworldPower 那两条都传 cardSource: null（来源是能力本身），
+            // 不能继承外层卡牌作用域：否则会被当成卡牌直接施加，误触发不安油灯一类卡牌来源判据。
+            Effects(context).ApplyPowerFromSource(
                 typeof(DoomPower),
                 context.Target,
                 context.Result.TotalDamage * power.Amount,
-                power.Owner);
+                power.Owner,
+                cardSource: null);
         }
     }
 
@@ -148,11 +160,14 @@ internal static class AfterDamageGivenMirrors
             context.Props.IsPoweredAttack() &&
             context.Result.TotalDamage > 0)
         {
-            Effects(context).ApplyPower(
+            // 原版 ReaperFormPower／UnderworldPower 那两条都传 cardSource: null（来源是能力本身），
+            // 不能继承外层卡牌作用域：否则会被当成卡牌直接施加，误触发不安油灯一类卡牌来源判据。
+            Effects(context).ApplyPowerFromSource(
                 typeof(DoomPower),
                 context.Target,
                 context.Result.TotalDamage * power.Amount,
-                power.Owner);
+                power.Owner,
+                cardSource: null);
         }
     }
 

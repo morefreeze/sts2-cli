@@ -94,5 +94,15 @@
   "SUMMON_STATIC.title": "召唤",
   "TRANSFORM.description": "卡牌被变化时会变成任意稀有度的随机牌。",
   "TRANSFORM.title": "变化",
-  "TURN_NUMBER.description": "这场战斗的回合数。"
+  "TURN_NUMBER.description": "这场战斗的回合数。",
+  "ARROW.count": "{Arrows:cond:>0?（你有[blue]{Arrows}[/blue]支箭矢）|[red]（你没有箭矢）[/red]}",
+  "ARROW.description": "可以发射箭矢来[gold]扎穿[/gold]一名目标。{ShowArrowCount:\n{ArrowCount}|}",
+  "ARROW.missing.description": "箭矢目前[gold]扎穿[/gold]了一名目标。攻击那名敌人来使箭矢[gold]松脱[/gold]。{ShowArrowCount:\n{ArrowCount}|}",
+  "ARROW.title": "箭矢",
+  "CHO_MELODY.description": "打出“啾”卡牌时，在本回合中激活。",
+  "CHO_MELODY.title": "啾 旋律",
+  "KI_MELODY.description": "打出“叽”卡牌时，在本回合中激活。",
+  "KI_MELODY.title": "叽 旋律",
+  "WAH_MELODY.description": "打出“哇”卡牌时，在本回合中激活。",
+  "WAH_MELODY.title": "哇 旋律"
 }

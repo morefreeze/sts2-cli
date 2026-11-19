@@ -55,44 +55,57 @@ internal sealed partial class SimulatedCombatState
     {
         foreach (RelicModel relic in RelicsParticipatingInSideTurn(participants))
         {
-            RelicPredictionStateSupport.ResetBeforeSideTurnStart(simulator, relic);
-            switch (relic)
-            {
-                case Pocketwatch:
-                {
-                    StatefulRelicState state = GetStatefulRelicState(relic);
-                    SetStatefulRelicState(relic, new StatefulRelicState(0, state.Current));
-                    break;
-                }
-                case BagOfMarbles:
-                    if (GetPlayerTurnNumber(relic.Owner) <= 1)
-                    {
-                        foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
-                            Apply<VulnerablePower>(enemy, relic.DynamicVars.Vulnerable.IntValue, relic.Owner.Creature);
-                    }
-                    break;
-                case CrackedCore:
-                    if (GetPlayerTurnNumber(relic.Owner) <= 1)
-                        simulator.OrbChannel<LightningOrb>(relic.Owner, relic.DynamicVars["Lightning"].IntValue);
-                    break;
-                case MiniRegent:
-                    SetStatefulRelicState(relic, default);
-                    break;
-                case RainbowRing:
-                    SetStatefulRelicState(relic, default);
-                    break;
-                case RedMask:
-                    if (GetPlayerTurnNumber(relic.Owner) <= 1)
-                    {
-                        foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
-                            Apply<WeakPower>(enemy, relic.DynamicVars["WeakPower"].IntValue, relic.Owner.Creature);
-                    }
-                    break;
-            }
+            PrepareRelicBeforeSideTurnStart(simulator, relic);
             if (simulator.HasPendingChoice)
                 return false;
         }
         return true;
+    }
+
+    // 单项结算与原有无扩展路径共用，避免两套原版状态写入合同。
+    internal void PrepareRelicBeforeSideTurnStart(CombatPredictionSimulator simulator, RelicModel relic)
+    {
+        RelicPredictionStateSupport.ResetBeforeSideTurnStart(simulator, relic);
+        switch (relic)
+        {
+            case Pocketwatch:
+            {
+                StatefulRelicState state = GetStatefulRelicState(relic);
+                SetStatefulRelicState(relic, new StatefulRelicState(0, state.Current));
+                break;
+            }
+            case ConductorsBaton:
+                SetStatefulRelicState(relic, default);
+                break;
+            case TormentousCollar when _currentRoomType == RoomType.Elite && GetPlayerTurnNumber(relic.Owner) <= 1:
+                foreach (Creature enemy in HittableEnemies)
+                    ApplyPowerFromSource(typeof(WeakPower), enemy, relic.DynamicVars.Weak.IntValue, relic.Owner.Creature, null);
+                break;
+            case BagOfMarbles:
+                if (GetPlayerTurnNumber(relic.Owner) <= 1)
+                {
+                    foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
+                        Apply<VulnerablePower>(enemy, relic.DynamicVars.Vulnerable.IntValue, relic.Owner.Creature);
+                }
+                break;
+            case CrackedCore:
+                if (GetPlayerTurnNumber(relic.Owner) <= 1)
+                    simulator.OrbChannel<LightningOrb>(relic.Owner, relic.DynamicVars["Lightning"].IntValue);
+                break;
+            case MiniRegent:
+                SetStatefulRelicState(relic, default);
+                break;
+            case RainbowRing:
+                SetStatefulRelicState(relic, default);
+                break;
+            case RedMask:
+                if (GetPlayerTurnNumber(relic.Owner) <= 1)
+                {
+                    foreach (Creature enemy in LivingOpponents(simulator, relic.Owner.Creature))
+                        Apply<WeakPower>(enemy, relic.DynamicVars["WeakPower"].IntValue, relic.Owner.Creature);
+                }
+                break;
+        }
     }
 
     public void TriggerRelicsAfterEnergyReset(
@@ -131,6 +144,10 @@ internal sealed partial class SimulatedCombatState
         TurnStartChoiceCursor choices)
         => ContinueRelicsAfterPlayerTurnStart(simulator, player, choices, RelicsOf(player).ToArray(), GetPlayerTurnNumber(player), 0);
 
+    internal bool ApplyRelicAfterPlayerTurnStart(CombatPredictionSimulator simulator, Player player,
+        TurnStartChoiceCursor choices, RelicModel relic)
+        => ContinueRelicsAfterPlayerTurnStart(simulator, player, choices, [relic], GetPlayerTurnNumber(player), 0);
+
     private bool ContinueRelicsAfterPlayerTurnStart(CombatPredictionSimulator simulator, Player player,
         TurnStartChoiceCursor choices, IReadOnlyList<RelicModel> relics, int turn, int nextIndex, bool applyMittensStrength = false)
     {
@@ -165,6 +182,7 @@ internal sealed partial class SimulatedCombatState
                     break;
                 }
                 case BloodVial when turn <= 1:
+                case BathTowel when turn <= 1:
                 case FakeBloodVial when turn <= 1:
                     simulator.Heal(player.Creature, relic.DynamicVars.Heal.BaseValue);
                     break;
@@ -176,7 +194,7 @@ internal sealed partial class SimulatedCombatState
                             player,
                             relic.DynamicVars.Cards.IntValue,
                             simulator.Rng.CombatCardGeneration,
-                            _cardMultiplayerConstraint)
+                            _cardMultiplayerConstraint, Rules)
                         .ToArray();
                     foreach (PredictedCard option in options)
                         option.MutablePreview.AddKeyword(CardKeyword.Retain);
@@ -281,7 +299,7 @@ internal sealed partial class SimulatedCombatState
                             player,
                             1,
                             simulator.Rng.CombatCardGeneration,
-                            _cardMultiplayerConstraint)
+                            _cardMultiplayerConstraint, Rules)
                         .First();
                     generated.SetToFreeThisTurn();
                     simulator.AddGeneratedCardsToCombat(
@@ -366,17 +384,26 @@ internal sealed partial class SimulatedCombatState
                         simulator.GainEnergy(relic.Owner, relic.DynamicVars.Energy.BaseValue);
                     break;
                 }
+                case InfusedCore when turn <= 1:
+                    simulator.OrbChannel<LightningOrb>(
+                        relic.Owner,
+                        relic.DynamicVars["Lightning"].IntValue);
+                    break;
                 case Lantern when turn <= 1:
                     simulator.GainEnergy(relic.Owner, relic.DynamicVars.Energy.BaseValue);
                     break;
                 case Crossbow:
-                    GenerateRelicCards(
+                    // 根快照命中时复用已按战斗/人数过滤的角色攻击牌序列，未命中回退原版
+                    // GetUnlockedCards 路径；筛选集合与顺序、随机选择与 RNG 消耗都不变。
+                    AddGeneratedRelicCards(
                         simulator,
                         relic,
-                        relic.Owner.Character.CardPool
-                            .GetUnlockedCards(relic.Owner.UnlockState, _cardMultiplayerConstraint)
-                            .Where(card => card.Type == CardType.Attack),
-                        1,
+                        simulator.GetDistinctUnlockedCharacterAttacksForCombat(
+                                relic.Owner,
+                                1,
+                                simulator.Rng.CombatCardGeneration,
+                                _cardMultiplayerConstraint)
+                            .ToList(),
                         setFreeThisTurn: true);
                     break;
                 case OrangeDough when turn <= 1:
@@ -393,6 +420,10 @@ internal sealed partial class SimulatedCombatState
                     SetStatefulRelicState(relic, state with { Previous = 1 });
                     break;
                 }
+                case ExerciseMat when turn <= 1:
+                    ApplyPowerFromSource(typeof(StretchPower), relic.Owner.Creature,
+                        relic.DynamicVars["StretchPower"].IntValue, relic.Owner.Creature, null);
+                    break;
                 case PaelsTears:
                 {
                     StatefulRelicState state = GetStatefulRelicState(relic);
@@ -434,6 +465,27 @@ internal sealed partial class SimulatedCombatState
         return true;
     }
 
+    // 候选的取得方式由调用方决定：命中根快照时用 simulator 的缓存 helper，未命中时
+    // 回退原版 GetUnlockedCards。这里只保留原版的加牌与“本回合免费”语义。
+    private void AddGeneratedRelicCards(
+        CombatPredictionSimulator simulator,
+        RelicModel relic,
+        IReadOnlyList<PredictedCard> generated,
+        bool setFreeThisTurn = false)
+    {
+        if (setFreeThisTurn)
+        {
+            foreach (PredictedCard card in generated)
+                card.SetToFreeThisTurn();
+        }
+        simulator.AddGeneratedCardsToCombat(
+            generated,
+            PileType.Hand,
+            relic.Owner,
+            CardPilePosition.Bottom,
+            CardGenerationResultKind.Random);
+    }
+
     private void GenerateRelicCards(
         CombatPredictionSimulator simulator,
         RelicModel relic,
@@ -446,19 +498,9 @@ internal sealed partial class SimulatedCombatState
                 relic.Owner,
                 count,
                 simulator.Rng.CombatCardGeneration,
-                _cardMultiplayerConstraint)
+                _cardMultiplayerConstraint, Rules)
             .ToList();
-        if (setFreeThisTurn)
-        {
-            foreach (PredictedCard card in generated)
-                card.SetToFreeThisTurn();
-        }
-        simulator.AddGeneratedCardsToCombat(
-            generated,
-            PileType.Hand,
-            relic.Owner,
-            CardPilePosition.Bottom,
-            CardGenerationResultKind.Random);
+        AddGeneratedRelicCards(simulator, relic, generated, setFreeThisTurn);
     }
 
     public void PrepareRelicsBeforeSideTurnEnd(

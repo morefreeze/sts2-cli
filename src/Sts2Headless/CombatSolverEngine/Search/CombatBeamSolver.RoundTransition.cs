@@ -1,9 +1,7 @@
 using MegaCrit.Sts2.Core.Combat;
-using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.ValueProps;
-using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Simulation;
 
 namespace CombatSolver;
@@ -31,17 +29,8 @@ internal sealed partial class CombatBeamSolver
         simulatedCombat.BeginSideTurn(_player.Creature);
         simulatedCombat.SnapshotPowerAmountsAtTurnStart([_player.Creature]);
 
-        if (!TurnStartRelicSupport.TriggerBeforeSideTurnStart(
-                simulator,
-                simulatedCombat,
-                [_player.Creature]))
-        {
-            return SearchBoundaryReason.PendingChoice;
-        }
-        if (TurnStartPowerSupport.TriggerBeforeSideTurnStart(
-                simulator,
-                simulatedCombat,
-                [_player.Creature]))
+        if (!CombatSolver.Engine.InCombat.Mirrors.HookMirrors.BeforeSideTurnStart(
+                simulator, simulatedCombat.CurrentSide, [_player.Creature]))
         {
             return SearchBoundaryReason.PendingChoice;
         }
@@ -210,7 +199,7 @@ internal sealed partial class CombatBeamSolver
                 && action.Turn == parent.Turn
                 && action.TurnStartChoices is { Count: > 0 } choices
                 && choices.All(choice => choice.Timing == PlanChoiceTiming.PlayerTurnStart
-                    && choice.Effect != PlanChoiceEffect.ApplyKnowledgeCurse);
+                    && (choice.Effect != PlanChoiceEffect.ApplyKnowledgeCurse || choice.Timing != PlanChoiceTiming.EnemyTurn));
 
         public ReplayForkSeed Fork(CombatBeamSolver owner, object gate, CancellationToken cancellationToken)
         {

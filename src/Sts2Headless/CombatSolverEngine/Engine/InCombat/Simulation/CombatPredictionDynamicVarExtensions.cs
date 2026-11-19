@@ -2,7 +2,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using CombatSolver.Engine.Common;
-using MegaCrit.Sts2.Core.Modding;
+using STS2RitsuLib.Cards.DynamicVars;
 
 namespace CombatSolver.Engine.InCombat.Simulation;
 
@@ -22,16 +22,12 @@ internal static class CombatPredictionDynamicVarExtensions
         PredictedCard card,
         Creature? target)
     {
-        // Upstream also matches STS2RitsuLib.Cards.DynamicVars.IComputedDynamicVar here, for
-        // RitsuLib-authored custom cards' computed dynamic values. This headless build never
-        // loads RitsuLib, so no DynamicVar instance can ever implement that interface; the
-        // branch is unreachable dead code here and is dropped rather than stubbed. Any
-        // non-CalculatedVar (including what would have been a computed var) already falls
-        // back to BaseValue below, which is the same effective behavior.
         return dynamicVar switch
         {
             CalculatedVar calculatedVar =>
                 calculatedVar.InvokeCalculate(simulator, card, target),
+            IComputedDynamicVar computedDynamicVar =>
+                computedDynamicVar.InvokeCalculate(simulator, card, target),
             _ => dynamicVar.BaseValue
         };
     }
@@ -46,11 +42,26 @@ internal static class CombatPredictionDynamicVarExtensions
         if (CalculatedVarSpecRegistry.TryCalculate(calculatedVar, simulator, card, target, out decimal value))
             return value;
         simulator.History.RecordRisk(PredictionRiskReason.MethodMirrorIncomplete);
-        var mod = AssemblyInfo.ModForType(card.Preview.GetType(), out bool isBaseGame);
-        if (!isBaseGame && mod?.manifest?.id is { Length: > 0 } modId)
-            throw new IncompatibleGameplayModException(modId, mod.manifest.name ?? modId,
-                $"card {card.Preview.Id.Entry}: calculated variable has no branch-local specification", "combat");
-        throw new NotSupportedException(
-            $"Card {card.Preview.Id.Entry} has no branch-local calculated variable specification.");
+        throw PredictionUnsupportedException.ForContent(
+            $"Card {card.Preview.Id.Entry} has no branch-local calculated variable specification.",
+            card.Preview.GetType());
+    }
+
+    public static decimal InvokeCalculate(
+        this IComputedDynamicVar computedDynamicVar,
+        CombatPredictionSimulator simulator,
+        PredictedCard card,
+        Creature? target)
+    {
+        using var _ = simulator.PushActionSource(card.Original, PredictionActionKind.DynamicVariableCalculation);
+        simulator.History.RecordRisk(PredictionRiskReason.MethodMirrorIncomplete);
+        Type variableType = computedDynamicVar.GetType();
+        Type cardType = card.Preview.GetType();
+        // The shared wrapper identifies the calculation framework; the card owns its content.
+        Type contentType = variableType == typeof(ComputedDynamicVar) ? cardType : variableType;
+        throw PredictionUnsupportedException.ForContent(
+            $"Card {card.Preview.Id.Entry} uses computed dynamic variable " +
+            $"{variableType.FullName}, which has no branch-local calculation mirror.",
+            cardType, contentType);
     }
 }

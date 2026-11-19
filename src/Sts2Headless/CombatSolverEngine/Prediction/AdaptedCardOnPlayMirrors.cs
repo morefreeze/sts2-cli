@@ -68,6 +68,12 @@ internal static class AdaptedCardOnPlayMirrors
         return Registrations.Count != 0;
     }
 
+    internal static Type[] RegisteredTypes()
+    {
+        lock (Gate)
+            return Registrations.Keys.ToArray();
+    }
+
     internal static MethodInfo? ResolveOnPlay(Type type)
         => AccessTools.Method(type, "OnPlay", [typeof(PlayerChoiceContext), typeof(CardPlay)]);
 
@@ -84,7 +90,7 @@ internal static class AdaptedCardOnPlayMirrors
 
     // A configuration stamp belongs to Runtime's live boundaries. Workers only use the frozen string.
     // Include all patched card OnPlay methods so later additions invalidate old plans as well.
-    internal static string? CaptureLiveStamp()
+    internal static string? CaptureLiveStamp(ISet<MethodInfo>? patchedOnPlayTargets = null)
     {
         if (!Seal()) return null;
         StringBuilder text = new();
@@ -103,6 +109,8 @@ internal static class AdaptedCardOnPlayMirrors
         {
             string patches = DescribeActual(method, Harmony.GetPatchInfo(method), includeIndex: true);
             if (patches.Length == 0) continue;
+            if (method is MethodInfo target)
+                patchedOnPlayTargets?.Add(target);
             Field(text, MethodIdentity(method));
             Field(text, patches);
         }
@@ -207,7 +215,8 @@ internal static class AdaptedCardOnPlayMirrors
 }
 
 internal sealed class AdaptedOnPlaySnapshot(
-    Dictionary<Type, AdaptedCardOnPlayMirrors.Registration?> selections, string stamp)
+    Dictionary<Type, AdaptedCardOnPlayMirrors.Registration?> selections, string stamp,
+    HashSet<MethodInfo> patchedOnPlayTargets, Dictionary<Type, string> deferredFailures)
 {
     public string Stamp { get; } = stamp;
 
@@ -215,8 +224,18 @@ internal sealed class AdaptedOnPlaySnapshot(
         out MirrorDispatchResult result)
     {
         result = default;
-        if (!selections.TryGetValue(card.Preview.GetType(), out var registration))
-            throw new PredictionUnsupportedException("Card type was not audited in this adapted OnPlay root.");
+        Type type = card.Preview.GetType();
+        if (deferredFailures.TryGetValue(type, out string? failure))
+            throw new PredictionUnsupportedException(failure);
+        if (!selections.TryGetValue(type, out var registration))
+        {
+            MethodInfo target = AdaptedCardOnPlayMirrors.ResolveOnPlay(type)
+                ?? throw new PredictionUnsupportedException($"Missing OnPlay for {type.FullName}.");
+            if (patchedOnPlayTargets.Contains(target))
+                throw new PredictionUnsupportedException(
+                    $"Card type {type.FullName} has a patched OnPlay that was not adapted in this captured root.");
+            return false;
+        }
         if (registration is null) return false;
         result = registration.Mirror.Invoke(card.MutablePreview, new() { Simulator = simulator, Card = card, CardPlay = play });
         return true;

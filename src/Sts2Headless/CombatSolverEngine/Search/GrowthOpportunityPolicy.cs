@@ -73,17 +73,27 @@ internal static class GrowthOpportunityPolicy
             .SelectMany(player => player.PlayerCombatState!.AllCards)
             .Where(IsAvailable)
             .ToArray();
+        int madScienceUpgradeCapacity = MadScienceGrowth.CaptureRemainingCapacity(state);
         bool hasAnyTargets = availableCards.Any(GrowthValues.HasTarget);
         string? dynamicRisk = null;
         if (hasAnyTargets)
             HasDynamicCardCountRisk(state, availableCards, out dynamicRisk);
-        return CaptureTargets(availableCards, state.Enemies.Count, dynamicRisk);
+        GrowthOpportunityTargets targets = CaptureTargets(availableCards, state.Enemies.Count, dynamicRisk,
+            madScienceUpgradeCapacity);
+        int activeShowOff = state.Players.SelectMany(player => player.Creature.Powers)
+            .OfType<ShowOffPower>().Count(power => power.ShowOffInstance?.DeckVersion != null);
+        return activeShowOff == 0 ? targets : targets with
+        {
+            RequiredRewards = targets.RequiredRewards.With(GrowthSource.ShowOff,
+                checked(targets.RequiredRewards.ShowOff + activeShowOff)),
+        };
     }
 
     private static GrowthOpportunityTargets CaptureTargets(
         IReadOnlyList<CardModel> availableCards,
         int enemyCount,
-        string? dynamicRisk)
+        string? dynamicRisk,
+        int madScienceUpgradeCapacity)
     {
         GrowthValues required = default;
         List<GrowthOpportunityUnboundedSource> unbounded = [];
@@ -91,13 +101,15 @@ internal static class GrowthOpportunityPolicy
         if (dynamicRisk != null)
         {
             foreach (GrowthSource source in Enum.GetValues<GrowthSource>()
-                         .Where(source => availableCards.Any(card => MatchesSource(card, source))))
+                         .Where(source => (source != GrowthSource.MadScience || madScienceUpgradeCapacity > 0)
+                             && availableCards.Any(card => MatchesSource(card, source))))
             {
                 unbounded.Add(new GrowthOpportunityUnboundedSource(source.ToString(), dynamicRisk));
             }
         }
         else
-            CaptureBuiltInTargets(availableCards, enemyCount, ref required, unbounded);
+            CaptureBuiltInTargets(availableCards, enemyCount, madScienceUpgradeCapacity,
+                ref required, unbounded);
 
         foreach (GrowthSourceMirrors.Entry entry in GrowthSourceMirrors.All)
         {
@@ -141,11 +153,13 @@ internal static class GrowthOpportunityPolicy
 
     internal static GrowthOpportunityTargets CaptureBuiltInForTesting(
         IReadOnlyList<CardModel> availableCards,
-        int enemyCount)
+        int enemyCount,
+        int madScienceUpgradeCapacity)
     {
         GrowthValues required = default;
         List<GrowthOpportunityUnboundedSource> unbounded = [];
-        CaptureBuiltInTargets(availableCards, enemyCount, ref required, unbounded);
+        CaptureBuiltInTargets(availableCards, enemyCount, madScienceUpgradeCapacity,
+            ref required, unbounded);
         return required.Total == 0 && unbounded.Count == 0
             ? GrowthOpportunityTargets.Empty
             : new GrowthOpportunityTargets(required, Array.AsReadOnly(unbounded.ToArray()));
@@ -153,12 +167,14 @@ internal static class GrowthOpportunityPolicy
 
     internal static GrowthOpportunityTargets CaptureAvailableForTesting(
         IReadOnlyList<CardModel> availableCards,
-        int enemyCount)
-        => CaptureTargets(availableCards, enemyCount, dynamicRisk: null);
+        int enemyCount,
+        int madScienceUpgradeCapacity)
+        => CaptureTargets(availableCards, enemyCount, dynamicRisk: null, madScienceUpgradeCapacity);
 
     private static void CaptureBuiltInTargets(
         IReadOnlyList<CardModel> cards,
         int enemyCount,
+        int madScienceUpgradeCapacity,
         ref GrowthValues required,
         List<GrowthOpportunityUnboundedSource> unbounded)
     {
@@ -197,7 +213,11 @@ internal static class GrowthOpportunityPolicy
             .With(GrowthSource.Goopy, CountFixedPlays(cards,
                 card => card.DeckVersion != null && card.Enchantment is Goopy))
             .With(GrowthSource.ForbiddenGrimoire, CountFixedPlays(cards,
-                card => card is ForbiddenGrimoire));
+                card => card is ForbiddenGrimoire))
+            .With(GrowthSource.MadScience, Math.Min(madScienceUpgradeCapacity,
+                CountFixedPlays(cards, MadScienceGrowth.IsImprovementCard)))
+            .With(GrowthSource.ShowOff, CountFixedPlays(cards,
+                card => card is ShowOff && card.DeckVersion != null));
     }
 
     private static int CountFixedPlays(
@@ -250,6 +270,8 @@ internal static class GrowthOpportunityPolicy
             GrowthSource.TheScythe => card is TheScythe && card.DeckVersion != null,
             GrowthSource.Goopy => card.DeckVersion != null && card.Enchantment is Goopy,
             GrowthSource.ForbiddenGrimoire => card is ForbiddenGrimoire,
+            GrowthSource.MadScience => MadScienceGrowth.IsImprovementCard(card),
+            GrowthSource.ShowOff => card is ShowOff && card.DeckVersion != null,
             _ => throw new ArgumentOutOfRangeException(nameof(source)),
         };
 
@@ -262,7 +284,7 @@ internal static class GrowthOpportunityPolicy
         IReadOnlyList<CardModel> cards,
         out string? reason)
     {
-        if (cards.Any(card => card is Burst or EchoForm or OneTwoPunch or SignalBoost or TagTeam
+        if (cards.Any(card => card is Burst or EchoForm or OneTwoPunch or SignalBoost or TagTeam or KiVerse
                 or Nightmare or DualWield or HeirloomHammer or Juggling or ImitationLearning
                 or HowlFromBeyond))
         {
@@ -272,7 +294,7 @@ internal static class GrowthOpportunityPolicy
         if (state.Players.SelectMany(player => player.Creature.Powers).Any(power => power.Amount > 0m
                 && power is BurstPower or DuplicationPower or EchoFormPower or OneTwoPunchPower
                     or SignalBoostPower or TagTeamPower or JugglingPower or ImitationLearningPower
-                    or NightmarePower))
+                    or NightmarePower or KiVersePower))
         {
             reason = "built_in:active_replay_or_copy_power";
             return true;

@@ -67,7 +67,7 @@ internal static class OrbMirrors
     }
 
     public static decimal ModifyValue(CombatPredictionSimulator simulator, OrbModel orb, decimal baseValue)
-        => Hook.ModifyOrbValue(simulator.State.CombatState, orb, baseValue);
+        => HookMirrors.ModifyOrbValue(simulator, orb, baseValue);
 
     public static decimal GetPassiveValue(CombatPredictionSimulator simulator, OrbModel orb)
         => orb switch

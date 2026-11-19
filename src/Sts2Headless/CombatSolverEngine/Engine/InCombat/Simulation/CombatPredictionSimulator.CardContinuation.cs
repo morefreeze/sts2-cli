@@ -104,15 +104,10 @@ internal sealed partial class CombatPredictionSimulator
         AssertForkable();
         using PredictionForkContext context = new();
         PredictionTrace trace = new();
+        PrepareExecutionCardPlay(source.Card, source.Play, context);
         CombatPredictionState state = State.Fork(context);
         PredictedCard card = context.RequireRemap(source.Card);
-        CardPlay play = new()
-        {
-            Card = card.MutablePreview, Player = source.Play.Player, Target = source.Play.Target,
-            ResultPile = source.Play.ResultPile, Resources = source.Play.Resources,
-            IsAutoPlay = source.Play.IsAutoPlay, PlayIndex = source.Play.PlayIndex, PlayCount = source.Play.PlayCount,
-        };
-        context.Register(source.Play, play);
+        CardPlay play = context.RequireRemap(source.Play);
         PredictionTraceFrame action = new() { Source = source.Trace.Source,
             Invocation = source.Trace.Invocation, Parent = null };
         context.Register(source.Trace, action);
@@ -129,9 +124,14 @@ internal sealed partial class CombatPredictionSimulator
     {
         using (_trace.ResumeManualCardChoice(frame.Trace))
         {
-            if (!frame.Choice.Resolve(this, frame.Card))
-                return false;
-            if (CompleteManualCardPlayTail(frame.Card, frame.Target, frame.Play, frame.OwnerBlockBefore))
+            bool completed;
+            using (BeginCardOrPotionEffect(frame.Play.Player))
+            {
+                if (!frame.Choice.Resolve(this, frame.Card))
+                    return false;
+                completed = CompleteManualCardPlayTail(frame.Card, frame.Target, frame.Play, frame.OwnerBlockBefore);
+            }
+            if (completed)
                 CompleteManualCardResultTail(frame.Card, frame.Play.Player, frame.Result);
         }
         if (History.HasCardPlayStartedSince(frame.HistoryStart, frame.Trace) && !HasPendingChoice)

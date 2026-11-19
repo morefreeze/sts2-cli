@@ -135,5 +135,11 @@
   "VULNERABLE_POTION.description": "Apply [blue]{VulnerablePower}[/blue] [gold]Vulnerable[/gold].",
   "VULNERABLE_POTION.title": "Vulnerable Potion",
   "WEAK_POTION.description": "Apply [blue]{WeakPower}[/blue] [gold]Weak[/gold].",
-  "WEAK_POTION.title": "Weak Potion"
+  "WEAK_POTION.title": "Weak Potion",
+  "BOTTLED_SONG.description": "Add a random “Wah”, “Cho”, and “Ki” card into your [gold]Hand[/gold]. They're free to play this turn.",
+  "BOTTLED_SONG.title": "Bottled Song",
+  "CRYSTALLINE_EUPHORIA.description": "Add [blue]{Cards}[/blue] [gold]Joy[/gold] into your [gold]Hand[/gold].\nFill your [gold]Hand[/gold] with [gold]Sadness[/gold].",
+  "CRYSTALLINE_EUPHORIA.title": "Crystalline Euphoria",
+  "PRECISION_POTION.description": "Gain [blue]{AimPower}[/blue] [gold]Aim[/gold].",
+  "PRECISION_POTION.title": "Precision Potion"
 }

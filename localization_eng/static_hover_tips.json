@@ -94,5 +94,15 @@
   "SUMMON_STATIC.title": "Summon",
   "TRANSFORM.description": "Transformed cards become a random card of any rarity.",
   "TRANSFORM.title": "Transform",
-  "TURN_NUMBER.description": "Turn number for this combat."
+  "TURN_NUMBER.description": "Turn number for this combat.",
+  "ARROW.count": "{Arrows:cond:>0?(You have [blue]{Arrows}[/blue] {Arrows:plural:Arrow|Arrows})|[red](You have no Arrows)[/red]}",
+  "ARROW.description": "Arrows can be shot with cards to [gold]Impale[/gold] a target.{ShowArrowCount:\n{ArrowCount}|}",
+  "ARROW.missing.description": "Currently [gold]Impaled[/gold] in a target. Attack the enemy to [gold]Dislodge[/gold] it.{ShowArrowCount:\n{ArrowCount}|}",
+  "ARROW.title": "Arrow",
+  "CHO_MELODY.description": "Activates if you played a “Cho” card this turn.",
+  "CHO_MELODY.title": "Cho Melody",
+  "KI_MELODY.description": "Activates if you played a “Ki” card this turn.",
+  "KI_MELODY.title": "Ki Melody",
+  "WAH_MELODY.description": "Activates if you played a “Wah” card this turn.",
+  "WAH_MELODY.title": "Wah Melody"
 }

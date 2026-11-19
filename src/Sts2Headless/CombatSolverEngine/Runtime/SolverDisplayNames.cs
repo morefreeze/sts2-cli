@@ -5,8 +5,11 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using CombatSolver.Engine.InCombat.Simulation;
+using Godot;
+using System.Reflection;
 
 namespace CombatSolver;
 
@@ -16,6 +19,7 @@ internal sealed class SolverDisplayNames
     private static Dictionary<(string Id, int Upgrade), string>? _canonicalCardNames;
 
     private readonly Dictionary<(string Id, int Upgrade), string> _cards;
+    private readonly DingyDaggerDisplayNames _daggerNames;
     private readonly Dictionary<string, string> _potions;
     private readonly Dictionary<string, string> _relics;
     private readonly Dictionary<string, string> _powers;
@@ -23,18 +27,26 @@ internal sealed class SolverDisplayNames
     private readonly bool _english;
     private readonly Dictionary<string, string> _monsters;
     private readonly Dictionary<uint, string> _creatures;
+    private readonly Dictionary<string, int> _slotOrder;
+    private readonly bool _positioned;
+    private static readonly PropertyInfo EncounterSlotsProperty = typeof(NCombatRoom).GetProperty(
+        "EncounterSlots", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!;
 
     private SolverDisplayNames(
         Dictionary<(string Id, int Upgrade), string> cards,
+        DingyDaggerDisplayNames daggerNames,
         Dictionary<string, string> potions,
         Dictionary<string, string> relics,
         Dictionary<string, string> powers,
         Dictionary<string, string> orbs,
         Dictionary<string, string> monsters,
         Dictionary<uint, string> creatures,
+        Dictionary<string, int> slotOrder,
+        bool positioned,
         bool english)
     {
         _cards = cards;
+        _daggerNames = daggerNames;
         _potions = potions;
         _relics = relics;
         _powers = powers;
@@ -42,6 +54,8 @@ internal sealed class SolverDisplayNames
         _english = english;
         _monsters = monsters;
         _creatures = creatures;
+        _slotOrder = slotOrder;
+        _positioned = positioned;
     }
 
     public static SolverDisplayNames Capture(CombatState state)
@@ -63,6 +77,20 @@ internal sealed class SolverDisplayNames
         foreach (MonsterModel monster in ModelDb.Monsters)
             monsterNames.TryAdd(monster.Id.Entry, monster.Title.GetFormattedText());
         Dictionary<uint, string> creatureNames = [];
+        NCombatRoom? room = NCombatRoom.Instance;
+        Control? slots = room == null ? null : (Control?)EncounterSlotsProperty.GetValue(room);
+        Dictionary<string, int> slotOrder = [];
+        IReadOnlyList<string> encounterSlots = state.Encounter?.Slots ?? [];
+        // 只声明在原生场景里的槽位（如 GremlinMercNormal 的 merc/sneaky/fat）不在模型
+        // Encounter.Slots 中；没有模型槽位时按场景 Marker 的横坐标冻结顺序。
+        IEnumerable<string> orderedSlots = slots == null ? encounterSlots
+            : encounterSlots.Count > 0
+                ? encounterSlots.OrderBy(slot => slots.GetNode<Marker2D>(slot).GlobalPosition.X)
+                : slots.FindChildren("*", nameof(Marker2D), recursive: true, owned: false)
+                    .OfType<Marker2D>()
+                    .OrderBy(marker => marker.GlobalPosition.X)
+                    .Select(marker => marker.Name.ToString());
+        foreach (string slot in orderedSlots) slotOrder.TryAdd(slot, slotOrder.Count);
         Dictionary<string, int> enemyTypeCounts = state.Enemies
             .GroupBy(creature => CaptureCreatureBaseName(creature, monsterNames), StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
@@ -111,15 +139,17 @@ internal sealed class SolverDisplayNames
             orbNames.TryAdd(orb.Id.Entry, title);
             orbNames.TryAdd(orb.GetType().Name, title);
         }
-        return new SolverDisplayNames(cardNames, potionNames, relicNames, powerNames, orbNames, monsterNames, creatureNames,
+        return new SolverDisplayNames(cardNames, DingyDaggerDisplayNames.Capture(), potionNames, relicNames, powerNames, orbNames, monsterNames, creatureNames,
+            slotOrder, room != null,
             LocManager.Instance.Language is not ("zhs" or "zht"));
     }
 
     public string Card(CardModel card)
-        => _cards.GetValueOrDefault((card.Id.Entry, card.CurrentUpgradeLevel), card.Id.Entry);
+        => Card(card.Id.Entry, card.CurrentUpgradeLevel);
 
     public string Card(string cardId, int upgradeLevel = 0)
-        => _cards.GetValueOrDefault((cardId, upgradeLevel), cardId);
+        => cardId == "DINGY_DAGGER" ? _daggerNames.Format(upgradeLevel)
+            : _cards.GetValueOrDefault((cardId, upgradeLevel), cardId);
 
     private static Dictionary<(string Id, int Upgrade), string> CanonicalCardNames()
     {
@@ -149,7 +179,7 @@ internal sealed class SolverDisplayNames
             (string Id, int Upgrade) key = (card.Id.Entry, card.CurrentUpgradeLevel);
             if (overwrite || !names.ContainsKey(key))
                 names[key] = card.Title;
-            if (!card.IsUpgradable)
+            if (card is DingyDagger || !card.IsUpgradable)
                 return;
             card.UpgradeInternal();
             card.FinalizeUpgradeInternal();
@@ -182,16 +212,34 @@ internal sealed class SolverDisplayNames
             _ => _english ? "Unknown effect" : "未知效果",
         };
 
-    public string Creature(Creature? creature)
+    public string Creature(Creature? creature) => Creature(creature, null);
+
+    public string Creature(Creature? creature, IReadOnlyList<Creature>? knownEnemies)
     {
         if (creature is null)
             return string.Empty;
         string fallback = creature.Monster?.Id.Entry is { } monsterId
             ? Monster(monsterId)
             : creature.Player?.Character?.Id.Entry ?? "玩家";
-        return creature.CombatId is uint combatId
-            ? _creatures.GetValueOrDefault(combatId, fallback)
-            : fallback;
+        if (creature.CombatId is uint id && _creatures.TryGetValue(id, out string? captured))
+            return captured;
+        if (knownEnemies == null || creature.Side != CombatSide.Enemy)
+            return fallback;
+        // Slot ranks are frozen from the native scene. Unslotted encounters use
+        // insertion order, as native PositionEnemies does. KnownEnemies retains
+        // dead participants so the labels stay stable through the route. A predicted
+        // summon may carry a scene-only slot beyond the frozen ranks; it keeps the
+        // roster insertion order after known slots instead of failing the name read.
+        var peers = knownEnemies.Where(enemy => CaptureCreatureBaseName(enemy, _monsters) == fallback)
+            .OrderBy(enemy => enemy.SlotName is { } slot
+                ? _slotOrder.GetValueOrDefault(slot, int.MaxValue)
+                : 0).ToArray();
+        int index = Array.FindIndex(peers, enemy => enemy.CombatId == creature.CombatId);
+        if (index < 0) throw new InvalidOperationException("生成敌人缺少所属预测阵容，无法确定显示位置。");
+        string position = _positioned
+            ? _english ? $"#{index + 1} from left" : $"左起{index + 1}"
+            : $"#{index + 1}";
+        return $"{fallback}（{position}）";
     }
 
     private static string CreatureTypeKey(Creature creature)

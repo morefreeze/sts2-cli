@@ -155,11 +155,17 @@ internal static class PredictionUtils
 
     public static bool NeedsEndOfTurnCleanup(CardModel card)
     {
-        if (card.ExhaustOnNextPlay
+        if (card.ExtraReplayThisTurn != 0 || card.ExhaustOnNextPlay
             || GetSingleTurnRetain(card)
             || GetSingleTurnSly(card))
         {
             return true;
+        }
+
+        foreach (TemporaryCardCost starCost in card._temporaryStarCosts)
+        {
+            if (starCost.ClearsWhenTurnEnds)
+                return true;
         }
 
         CardEnergyCost cost = card.EnergyCost;

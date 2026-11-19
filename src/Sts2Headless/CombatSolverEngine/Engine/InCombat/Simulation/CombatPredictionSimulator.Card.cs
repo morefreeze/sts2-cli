@@ -319,8 +319,14 @@ internal sealed partial class CombatPredictionSimulator
             return;
         }
 
-        ContinueCardPlayExecution(card, target, isAutoPlay, resources, resultLocation, playCount,
-            nestedChoiceSourceId, nestedChoiceContextId, 0);
+        bool completed;
+        using (BeginCardOrPotionEffect(originalOwner))
+            completed = ContinueCardPlayExecution(card, target, isAutoPlay, resources, resultLocation, playCount,
+                nestedChoiceSourceId, nestedChoiceContextId, 0);
+        if (HasPendingChoice)
+            AppendExecutionContinuation(new CardResultExecutionFrame(card, originalOwner, resultLocation, CardResultStage.Transfer));
+        else if (completed)
+            CompleteManualCardResultTail(card, originalOwner, resultLocation);
     }
 
     private bool CompleteManualCardPlayTail(PredictedCard card, Creature? target, CardPlay cardPlay,

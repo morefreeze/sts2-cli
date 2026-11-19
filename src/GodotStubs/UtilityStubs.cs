@@ -336,6 +336,7 @@ public partial class Node
     public void SetName(string name) => Name = name;
     public bool IsNodeReady() => true;
     public bool HasNode(NodePath path) => false;
+    public Godot.Collections.Array<Node> FindChildren(string pattern, string type = "", bool recursive = true, bool owned = true) => new();
     // Like the generic GetNode<T>/GetNodeOrNull<T> above: there is no scene, so hand back a bare node.
     public Node GetNode(NodePath path) => new Node();
     public Node? GetNodeOrNull(NodePath path) => new Node();

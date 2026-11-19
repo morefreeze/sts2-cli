@@ -19,7 +19,8 @@ internal sealed record CardChoiceSpec(
     double ReplacementValue,
     string ContextId = "",
     int? MaxBranches = null,
-    bool IsImplicitAllSelection = false);
+    bool IsImplicitAllSelection = false,
+    bool PreserveOrderedRoutingResidues = false);
 
 internal static partial class CardChoiceSupport
 {
@@ -72,6 +73,34 @@ internal static partial class CardChoiceSupport
         };
     }
 
+    // Inspect native choice shape before playing. Execution-time specs may sample
+    // RNG (Seeker Strike) or consume history produced by OnPlay (Recall).
+    public static PlanChoiceEffect? GetPotentialEffect(CombatPredictionSimulator simulator, PredictedCard card)
+    {
+        if (CardChoiceMirrors.TryGetSpec(simulator, card, out CardChoiceSpec registered))
+            return registered.Effect;
+        return card.Preview switch
+        {
+            Abundance or Discovery or Quasar or Splash => PlanChoiceEffect.GenerateToHand,
+            SeekerStrike or KiChant or LockedIn or ArrowStab or Hologram or Graveblast
+                or SecretWeapon or SecretTechnique or Wish or Dredge or NeowsFury => PlanChoiceEffect.MoveToHand,
+            Recall or Headbutt or CosmicIndifference or ThinkingAhead or Glimmer or PhotonCut => PlanChoiceEffect.MoveToDrawTop,
+            TheHermit or Survivor or Acrobatics or DaggerThrow or Prepared or HiddenDaggers => PlanChoiceEffect.Discard,
+            TrueGrit when card.Preview.IsUpgraded => PlanChoiceEffect.Exhaust,
+            BurningPact or Scavenge or Purity or Brand or Cleanse => PlanChoiceEffect.Exhaust,
+            Armaments when !card.Preview.IsUpgraded => PlanChoiceEffect.Upgrade,
+            Begone or Charge or Guards or Seance => PlanChoiceEffect.Transform,
+            DualWield or HeirloomHammer => PlanChoiceEffect.Duplicate,
+            Transfigure => PlanChoiceEffect.Modify,
+            Nightmare => PlanChoiceEffect.Nightmare,
+            HandTrick => PlanChoiceEffect.ApplySly,
+            SculptingStrike => PlanChoiceEffect.ApplyEthereal,
+            Snap => PlanChoiceEffect.ApplyRetain,
+            DecisionsDecisions => PlanChoiceEffect.AutoPlayRepeated,
+            _ => null,
+        };
+    }
+
     public static CardChoiceSpec? GetSpec(CombatPredictionSimulator simulator, PredictedCard playedCard)
     {
         // 第三方登记优先。登记表为空时这里只是一次计数比较，原版一条也走不进来。
@@ -99,6 +128,17 @@ internal static partial class CardChoiceSupport
         return card switch
         {
             SeekerStrike => BuildSeekerSpec(simulator, playedCard, owner),
+            KiChant => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Draw, 1,
+                owner.DrawPile.Cards.Take(card.DynamicVars.Cards.IntValue)),
+            Recall => Spec(owner, PlanChoiceEffect.MoveToDrawTop, PileType.Discard, 1,
+                simulator.History.OfType<CombatPredictionCardsSelectedEntry>()
+                    .Last(entry => playedCard.References(entry.Trace?.Source)).Cards.Count > 0 ? discardBeforeResolution : []),
+            TheHermit => Spec(owner, PlanChoiceEffect.Discard, PileType.Hand, 1, owner.Hand.Cards),
+            LockedIn => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Draw, 1,
+                owner.DrawPile.Cards.Where(item => item.Preview.Tags.Contains(CardTag.Shoot))),
+            ArrowStab when simulator.AvailableArrows(card.Owner) > 0 && owner.Hand.Cards.Count < simulator.GetMaxHandSize(card.Owner)
+                => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Discard, 1,
+                    discardBeforeResolution.Where(item => item.Preview.Tags.Contains(CardTag.Shoot))),
             TrueGrit when card.IsUpgraded => Spec(owner, PlanChoiceEffect.Exhaust, PileType.Hand, 1, owner.Hand.Cards),
             Hologram => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Discard, 1, discardBeforeResolution),
             Graveblast => Spec(owner, PlanChoiceEffect.MoveToHand, PileType.Discard, 1, discardBeforeResolution),
@@ -154,7 +194,7 @@ internal static partial class CardChoiceSupport
                 owner.Hand.Cards.Where(item => !item.Preview.GetKeywordsWithSources(KeywordSources.Local)
                     .Contains(CardKeyword.Ethereal))),
             Snap => Spec(owner, PlanChoiceEffect.ApplyRetain, PileType.Hand, 1,
-                owner.Hand.Cards.Where(item => !item.Preview.Keywords.Contains(CardKeyword.Retain))),
+                owner.Hand.Cards.Where(item => !item.HasKeyword(simulator.State, CardKeyword.Retain))),
             DecisionsDecisions => Spec(owner, PlanChoiceEffect.AutoPlayRepeated, PileType.Hand, 1,
                 owner.Hand.Cards.Where(item => item.Preview.Type == CardType.Skill
                     && !item.Preview.Keywords.Contains(CardKeyword.Unplayable))),
@@ -208,7 +248,7 @@ internal static partial class CardChoiceSupport
             .FirstOrDefault()
             ?? throw new InvalidOperationException(
                 $"嵌套选牌检查找不到 {token.CardId}+{token.UpgradeLevel}#{token.OptionOccurrence}。");
-        return GetSpec(simulator, selected) != null
+        return GetPotentialEffect(simulator, selected) != null
             || BuildRequiredEmptyChoice(selected.Preview) != null
             || selected.Preview is Abundance or Discovery or Quasar or Splash;
     }
@@ -256,10 +296,31 @@ internal static partial class CardChoiceSupport
         string[] orderedSemanticKeys = ordered
             .Select(ChoiceCardKey)
             .ToArray();
+        // Removing equal cards from separate runs changes the remaining ordered pile.
+        // Adjacent equal copies still produce the same routing result and can share a branch.
+        Dictionary<PredictedCard, int>? routingRuns = null;
+        if (spec.PreserveOrderedRoutingResidues && exactSingleCardRouting
+            && spec.Effect is PlanChoiceEffect.MoveToHand or PlanChoiceEffect.MoveToDrawTop
+                or PlanChoiceEffect.MoveToHandFreeThisTurn
+            && spec.SourcePile is PileType.Draw or PileType.Discard or PileType.Exhaust)
+        {
+            routingRuns = new(ReferenceEqualityComparer.Instance);
+            string? previousKey = null;
+            int run = -1;
+            foreach (PredictedCard card in spec.SourceCards)
+            {
+                string key = ChoiceCardKey(card);
+                if (key != previousKey) run++;
+                // Repeated references in diagnostic specs resolve to their first source position.
+                routingRuns.TryAdd(card, run);
+                previousKey = key;
+            }
+        }
         // The nearest equal semantic key answers the recursion's original [start, i)
         // duplicate test without rescanning that range at every combination depth.
         Span<int> previousEqualIndex = ordered.Count <= 128
             ? stackalloc int[ordered.Count] : new int[ordered.Count];
+        bool hasRepeatedOptions = false;
         for (int index = 0; index < ordered.Count; index++)
         {
             previousEqualIndex[index] = -1;
@@ -267,7 +328,10 @@ internal static partial class CardChoiceSupport
             {
                 if (!string.Equals(orderedSemanticKeys[prior], orderedSemanticKeys[index], StringComparison.Ordinal))
                     continue;
+                if (routingRuns != null && routingRuns[ordered[prior]] != routingRuns[ordered[index]])
+                    continue;
                 previousEqualIndex[index] = prior;
+                hasRepeatedOptions = true;
                 break;
             }
         }
@@ -305,7 +369,11 @@ internal static partial class CardChoiceSupport
                 .Take(effectiveBranchLimit - retained.Count));
         }
 
-        if (IsIdentityChangingPersistentChoiceEffect(spec.Effect))
+        // With unique option keys, every combination already has a unique semantic
+        // identity. No alternate physical representative can exist for any selection.
+        bool needsOccurrenceRepresentatives = hasRepeatedOptions
+            && IsIdentityChangingPersistentChoiceEffect(spec.Effect);
+        if (needsOccurrenceRepresentatives)
         {
             ReserveIdentityOccurrenceRepresentatives(
                 spec,
@@ -316,15 +384,20 @@ internal static partial class CardChoiceSupport
 
         IEnumerable<IReadOnlyList<PredictedCard>> orderedRetained = retained
             .OrderByDescending(selection => ChoicePriority(spec, selection));
-        if (IsIdentityChangingPersistentChoiceEffect(spec.Effect))
+        if (needsOccurrenceRepresentatives)
             orderedRetained = OrderSemanticSelectionsBeforeOccurrenceSupplements(orderedRetained);
 
+        // A physical card's token is immutable while this choice set is built. Multi-card
+        // branches often select it repeatedly; preserve its exact source/option occurrence
+        // while sharing only the resulting value, never a cache across calls or mutations.
+        Dictionary<PredictedCard, PlanCardToken>? tokensByCard = maxTake > 1 && retained.Count > 1
+            ? new(ReferenceEqualityComparer.Instance) : null;
         return orderedRetained
             .Take(spec.MaxBranches ?? int.MaxValue)
             .Select(selection => new PlanCardChoice(
                 spec.Effect,
                 spec.SourcePile,
-                ToTokens(selection, spec.Options, spec.SourceCards, displayNames.Card),
+                ToTokensWithReuse(selection, spec.Options, spec.SourceCards, displayNames.Card, tokensByCard),
                 ContextId: spec.ContextId))
             .ToList();
     }
@@ -621,6 +694,46 @@ internal static partial class CardChoiceSupport
         IReadOnlyList<PredictedCard> selection,
         IReadOnlyList<PredictedCard> options)
     {
+        // Bound the quadratic selected-key scan for unusually large pile selections.
+        // The grouped path is the original implementation; normal hands use direct lookup.
+        if (selection.Count > 16)
+            return BuildTailOccurrenceRepresentativeGrouped(selection, options);
+        PredictedCard[]? representative = null;
+        for (int index = 0; index < selection.Count; index++)
+        {
+            string key = ChoiceCardKey(selection[index]);
+            // The j-th selected occurrence of a key maps to the j-th item of the
+            // last N options with that key. Count from the right to locate it directly,
+            // preserving order and multiplicity even when option references repeat.
+            int remaining = 0;
+            for (int later = index + 1; later < selection.Count; later++)
+                if (string.Equals(ChoiceCardKey(selection[later]), key, StringComparison.Ordinal))
+                    remaining++;
+            PredictedCard? mapped = null;
+            for (int option = options.Count - 1; option >= 0; option--)
+            {
+                if (!string.Equals(ChoiceCardKey(options[option]), key, StringComparison.Ordinal))
+                    continue;
+                if (remaining-- != 0)
+                    continue;
+                mapped = options[option];
+                break;
+            }
+            if (mapped is null)
+                return null;
+            if (ReferenceEquals(mapped, selection[index]))
+                continue;
+            representative ??= selection.ToArray();
+            representative[index] = mapped;
+        }
+        // No replacement means the existing physical selection is already the tail.
+        return representative;
+    }
+
+    private static IReadOnlyList<PredictedCard>? BuildTailOccurrenceRepresentativeGrouped(
+        IReadOnlyList<PredictedCard> selection,
+        IReadOnlyList<PredictedCard> options)
+    {
         if (selection.Count == 0)
             return null;
 
@@ -662,6 +775,7 @@ internal static partial class CardChoiceSupport
         }
         return representative;
     }
+
 
     private static bool SamePhysicalSelection(
         IReadOnlyList<PredictedCard> left,
@@ -706,7 +820,8 @@ internal static partial class CardChoiceSupport
             .ThenByDescending(selection => ChoicePriority(spec, selection))
             .FirstOrDefault());
         Add(ranked
-            .OrderByDescending(selection => selection.Count(card => card.Preview.ShouldRetainThisTurn))
+            .OrderByDescending(selection => selection.Count(card => card.Preview._hasSingleTurnRetain
+                || card.Preview.LocalKeywords.Contains(CardKeyword.Retain)))
             .ThenByDescending(selection => ChoicePriority(spec, selection))
             .FirstOrDefault());
         Add(ranked
@@ -828,11 +943,12 @@ internal static partial class CardChoiceSupport
         PredictedCard playedCard,
         SimPlayerCombatState owner)
     {
-        List<PredictedCard> options = owner.DrawPile.Cards
+        List<PredictedCard> sampled = owner.DrawPile.Cards
             .ToList()
-            .StableShuffle(simulator.Rng.CombatCardSelection)
+            .StableShuffle(simulator.Rng.CombatCardSelection, simulator)
             .Take(playedCard.Preview.DynamicVars.Cards.IntValue)
             .ToList();
+        List<PredictedCard> options = owner.DrawPile.Cards.Where(sampled.Contains).ToList();
         if (options.Count == 0)
             return null;
         simulator.History.CardsSelected(options);
@@ -919,21 +1035,36 @@ internal static partial class CardChoiceSupport
         IReadOnlyList<PredictedCard> options,
         IReadOnlyList<PredictedCard> source,
         Func<CardModel, string> displayName)
+        => ToTokensWithReuse(selected, options, source, displayName, null);
+
+    private static IReadOnlyList<PlanCardToken> ToTokensWithReuse(
+        IReadOnlyList<PredictedCard> selected,
+        IReadOnlyList<PredictedCard> options,
+        IReadOnlyList<PredictedCard> source,
+        Func<CardModel, string> displayName,
+        Dictionary<PredictedCard, PlanCardToken>? tokensByCard)
     {
-        List<PlanCardToken> tokens = [];
+        List<PlanCardToken> tokens = new(selected.Count);
         foreach (PredictedCard card in selected)
         {
+            if (tokensByCard is not null && tokensByCard.TryGetValue(card, out PlanCardToken? cached))
+            {
+                tokens.Add(cached);
+                continue;
+            }
             string stateKey = ChoiceCardKey(card);
             int sourceOccurrence = CountTokenOccurrence(source, card);
             int optionOccurrence = ReferenceEquals(source, options)
                 ? sourceOccurrence : CountTokenOccurrence(options, card);
-            tokens.Add(new PlanCardToken(
+            PlanCardToken token = new(
                 card.Preview.Id.Entry,
                 card.Preview.CurrentUpgradeLevel,
                 stateKey,
                 sourceOccurrence,
                 optionOccurrence,
-                displayName(card.Preview)));
+                displayName(card.Preview));
+            tokensByCard?.Add(card, token);
+            tokens.Add(token);
         }
         return tokens;
     }
@@ -1109,7 +1240,8 @@ internal static partial class CardChoiceSupport
 
     private static string ChoiceCardKey(
         CardModel card,
-        bool discoverUnregisteredBaseLibModifiers)
+        bool discoverUnregisteredBaseLibModifiers,
+        CardModel? dupeSource = null)
     {
         string vars = string.Join(';', card.DynamicVars
             .OrderBy(item => item.Key)
@@ -1121,10 +1253,10 @@ internal static partial class CardChoiceSupport
             .Append("|energy=").Append(card.EnergyCost.CostsX).Append(':')
             .Append(card.EnergyCost.GetWithModifiers(CostModifiers.Local))
             .Append("|stars=").Append(card.HasStarCostX).Append(':').Append(card.CurrentStarCost)
-            .Append("|replay=").Append(card.BaseReplayCount)
+            .Append("|replay=").Append(card.BaseReplayCount).Append(':').Append(card.ExtraReplayThisTurn)
             .Append("|exhaust=").Append(card.ExhaustOnNextPlay)
             .Append("|sly=").Append(card.IsSlyThisTurn)
-            .Append("|retain=").Append(card.ShouldRetainThisTurn)
+            .Append("|retain=").Append(card._hasSingleTurnRetain)
             .Append("|deck=").Append(card.DeckVersion != null)
             .Append("|keywords=").Append(keywords)
             .Append("|vars=").Append(vars).Append('|')
@@ -1136,6 +1268,8 @@ internal static partial class CardChoiceSupport
                 card,
                 discoverUnregisteredBaseLibModifiers))
             key.Append('-');
+        CardCostStateSupport.Append(key, card);
+        CardInstanceStateSupport.Append(key, card, dupeSource);
         return key.ToString();
     }
 
@@ -1143,7 +1277,7 @@ internal static partial class CardChoiceSupport
     {
         if (card.TryGetCachedChoiceKey(out string key))
             return key;
-        key = ChoiceCardKey(card.Preview, discoverUnregisteredBaseLibModifiers: false);
+        key = ChoiceCardKey(card.Preview, discoverUnregisteredBaseLibModifiers: false, card.DupeSource?.Preview);
         card.SetCachedChoiceKey(key);
         return key;
     }

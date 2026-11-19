@@ -1,5 +1,61 @@
 # Vendored from Combat Solver
 
+## v0.113.1 refresh (2026-11-19)
+
+Source: [Torch1230/CombatSolver](https://github.com/Torch1230/CombatSolver),
+release 0.51.5, commit `3677d4cac2407e332f1419741878e635c1ce2ee3`.
+The installed game is v0.113.1. This replaces the algorithm tree described in
+this file's historical port notes below; the CLI does not load the Workshop mod.
+
+Copied verbatim from that commit: all C# files in `src/Engine/`, `src/Search/`,
+`src/Prediction/`, `src/Strategy/`, plus these `src/Runtime/` files:
+
+```
+BattleDamageTracker.cs                 CardDynamicVarWarmup.cs
+CombatBugReportDescription.cs          CombatBugReportUploadPolicy.cs
+CombatRootSnapshot.cs                 ContinuationStamp.cs
+DingyDaggerDisplayNames.cs             LiveCollectionGuard.cs
+LiveCombatStamp.cs                    ManualProjectionComparison.cs
+PowerDynamicVarWarmup.cs               SearchGcLifecycleMetrics.cs
+SearchMemoryPressureSignal.cs         SimulationNotificationIsolation.cs
+SolverControllerSessions.cs           SolverDiagnostics.cs
+SolverDisplayNames.cs                 SolverProgress.cs
+```
+
+This includes native Fool arrow slots, Aim/Impaled and the Fool card, potion,
+power, history and generation mirrors. A native `plan_combat_turn` captures
+that state and the CLI executes the returned stable identities using the
+existing combat plan driver. There is no heuristic combat fallback in the
+Fool offline collector.
+
+Retained departures from verbatim copying:
+
+- BUG-040's 1000-draw cap in `CombatPredictionSimulator.CardPile.cs` is unchanged.
+- BUG-047's reference comparison for `appliedAdmissionClaims` is reapplied in
+  the upstream split file `CombatBeamSolver.BeamRetentionPolicy.OrderedMutation.cs`.
+- The existing logging, Harmony IL reader/inferrer switch, extracted enum and
+  uninstalled PowerDynamicVar guard adaptations remain. The enum declarations
+  were checked against this source commit and have not changed.
+- `RitsuVanillaShim.cs` exposes only the optional Ritsu surfaces the new source
+  inspects. The CLI has no Ritsu/BaseLib or third-party models: the native hand
+  cap is 10; computed-variable marker types cannot occur; tooltip metadata patch
+  marker methods are never installed. The concurrency audit returns false when
+  the actual optional patch types are absent, preserving the serialized clone
+  path. These shims do not simulate any Fool effect.
+
+A byte comparison against the pinned checkout found exactly the two algorithm
+file differences above. The copied Runtime files are byte-identical. Future
+refreshes must keep the source commit and this list current, preserve both hang
+guards, and run native Solver action execution tests as well as build checks.
+
+The CLI-only `STS2_COLLECTION_BUDGET_MS` profile (1000..30000 ms) lives outside
+this vendor tree in `RunSimulator.cs`, reports the exact budget in each result,
+and leaves the normal `STS2_SOLVER_BUDGET` tiers unchanged. Offline results must
+record the game/library hashes and collection profile. No advisor installation,
+policy, model import path or live save is changed by this refresh.
+
+## Historical port notes (before v0.113.1)
+
 Source: https://github.com/Torch1230/CombatSolver (MIT license)
 Vendored: 2026-09-17, from `main` branch, commit at clone time.
 Scope: Engine/, Search/, Prediction/, Strategy/, and Runtime/ (14 files,

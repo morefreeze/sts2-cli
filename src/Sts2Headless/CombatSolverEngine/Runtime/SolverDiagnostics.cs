@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Text;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
-using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Players;
 
 namespace CombatSolver;
@@ -135,6 +134,19 @@ internal static class SolverDiagnostics
             .Append(result.CycleProbeContinuationsExpanded)
             .Append(" cycle_candidates_protected=").Append(result.CycleCandidatesProtected)
             .Append(" cycle_continuations_stopped=").Append(result.CycleContinuationsStopped)
+            .Append(" CycleReplayAttempts=").Append(result.CycleReplayAttempts)
+            .Append(" CycleReplayActions=").Append(result.CycleReplayActions)
+            .Append(" TotalCycleReplayActions=").Append(result.TotalCycleReplayActions)
+            .Append(" CycleReplayVictories=").Append(result.CycleReplayVictories)
+            .Append(" CycleReplayContinuations=").Append(result.CycleReplayContinuations)
+            .Append(" CycleStoppedUnproductive=").Append(result.CycleStoppedUnproductive)
+            .Append(" CycleStoppedRepetitionBudget=").Append(result.CycleStoppedRepetitionBudget)
+            .Append(" CycleStoppedFamilyBudget=").Append(result.CycleStoppedFamilyBudget)
+            .Append(" CycleStoppedExitBudget=").Append(result.CycleStoppedExitBudget)
+            .Append(" TurnLayerBudgetStops=").Append(result.TurnLayerBudgetStops)
+            .Append(" TurnLayerTimeBudgetStops=").Append(result.TurnLayerTimeBudgetStops)
+            .Append(" TurnLayerNodeBudgetStops=").Append(result.TurnLayerNodeBudgetStops)
+
             .Append(" cycle_regions=").Append(result.CycleRegionsDetected)
             .Append(" cycle_region_considered=")
             .Append(result.CycleRegionCandidatesConsidered)
@@ -159,6 +171,8 @@ internal static class SolverDiagnostics
             .Append(" cross_turn_candidates_protected=").Append(result.CrossTurnCandidatesProtected)
             .Append(" cross_turn_continuations_stopped=").Append(result.CrossTurnContinuationsStopped)
             .Append(" primary_incumbent_pruned=").Append(result.PrimaryIncumbentBranchesPruned)
+            .Append(" primary_incumbent_certified_healing_bound_pruned=")
+            .Append(result.PrimaryIncumbentCertifiedHealingBoundBranchesPruned)
             .Append(" primary_incumbent_updates=").Append(result.PrimaryIncumbentUpdates)
             .Append(" stand_pat_probes=").Append(result.StandPatProbes)
             .Append(" parallel_waves=").Append(result.ParallelExpansionWaves)
@@ -191,6 +205,9 @@ internal static class SolverDiagnostics
             .Append(" frame_recovery_wait_ms=").Append(result.FrameRecoveryWaitDuration.TotalMilliseconds.ToString("F1"))
             .Append(" searched_turns=").Append(result.SearchedTurns)
             .Append(" boundary=").Append(result.BoundaryReason)
+            .Append(" request_budget_boundary=").Append(result.RequestBudget?.LimitReason.ToString() ?? "-")
+            .Append(" request_node_limit=").Append(result.RequestBudget?.NodeLimit)
+            .Append(" request_time_limit_ms=").Append(result.RequestBudget?.TimeLimitMilliseconds)
             .Append(" shuffles_crossed=").Append(result.Snapshot.ShufflesCrossed)
             .Append(" unavoidable_hp_lost=").Append(result.UnavoidableHpLost)
             .Append(" sold_hp=").Append(result.SoldHp)
@@ -374,6 +391,8 @@ internal static class SolverDiagnostics
             .Append(" parallel_round_choice_max_concurrency=").Append(result.MaxParallelRoundChoiceReplayConcurrency)
             .Append(" node_limit_snapshots_released=").Append(result.NodeLimitSnapshotsReleased)
             .Append(" primary_incumbent_pruned=").Append(result.PrimaryIncumbentBranchesPruned)
+            .Append(" primary_incumbent_certified_healing_bound_pruned=")
+            .Append(result.PrimaryIncumbentCertifiedHealingBoundBranchesPruned)
             .Append(" primary_incumbent_updates=").Append(result.PrimaryIncumbentUpdates)
             .Append(" elapsed_ms=").Append(result.Elapsed.TotalMilliseconds.ToString("F1"))
             .Append(" allocated_bytes=").Append(result.WorkerAllocatedBytes)
@@ -404,6 +423,12 @@ internal static class SolverDiagnostics
             .Append(" combat_fingerprint=").Append(Metric(result.CombatFingerprintMetric))
             .Append(" prune=").Append(Metric(result.PruneMetric))
             .Append(" final=").Append(Metric(result.FinalSelectionMetric))
+            .Append(" transpositions=").Append(result.TranspositionCount)
+            .Append(" expanded_transpositions=").Append(result.ExpandedTranspositionCount)
+            .Append(" transposition_limit_bypass=").Append(result.TranspositionLimitBypasses)
+            .Append(" stand_pat_cache=").Append(result.StandPatCacheCount)
+            .Append(" threat_cache=").Append(result.ThreatProjectionCacheCount)
+            .Append(" coverage_cache=").Append(result.CoverageCacheCount)
             .ToString();
     }
 

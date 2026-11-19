@@ -44,7 +44,7 @@ internal sealed partial class CombatPredictionHistory
         if ((_prefix?.Count ?? 0) != start || _tail is null)
             throw new InvalidOperationException("Manual card continuation history suffix changed.");
         var fork = new CombatPredictionHistory(trace, _prefix, _riskSignatureFirst, _riskSignatureSecond,
-            _riskEntryCount, _cardDrawnEntryCount, _orbChanneledEntryCount, _tailCapacityHint);
+            _riskEntryCount, _cardDrawnEntryCount, _orbChanneledEntryCount, _tailCapacityHint, _counterOwner, _counters);
         fork._tail = new(_tail.Count + 4);
         PredictionTraceFrame RemapTrace(PredictionTraceFrame source)
         {
@@ -59,6 +59,8 @@ internal sealed partial class CombatPredictionHistory
             if (context.TryRemap(source, out DamageResult? found)) return found!;
             var copy = new DamageResult(source.Receiver, source.Props)
             {
+                IntendedHpLoss = source.IntendedHpLoss,
+                OriginalTarget = source.OriginalTarget,
                 BlockedDamage = source.BlockedDamage, UnblockedDamage = source.UnblockedDamage,
                 OverkillDamage = source.OverkillDamage, WasBlockBroken = source.WasBlockBroken,
                 WasFullyBlocked = source.WasFullyBlocked, WasTargetKilled = source.WasTargetKilled,
@@ -104,6 +106,7 @@ internal sealed partial class CombatPredictionHistory
             foreach (var (original, resolved) in _tailCompletions)
                 fork._tailCompletions.Add(context.RequireRemap(original), context.RequireRemap(resolved));
         }
+        fork.VerifyCounters();
         return fork;
     }
 }

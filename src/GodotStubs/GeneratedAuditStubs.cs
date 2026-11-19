@@ -544,7 +544,7 @@ namespace Godot
     public partial class Label
     {
         public global::Godot.TextServer.AutowrapMode AutowrapMode { get; set; }
-        public global::Godot.HorizontalAlignment HorizontalAlignment { set { } }
+        public global::Godot.HorizontalAlignment HorizontalAlignment { get; set; }
         public global::Godot.VerticalAlignment VerticalAlignment { set { } }
         public new partial class MethodName : global::Godot.Control.MethodName
         {
@@ -812,7 +812,7 @@ namespace Godot
         public bool BbcodeEnabled { get; set; }
         public global::Godot.Collections.Array CustomEffects { get; set; } = new();
         public bool FitContent { get; set; }
-        public global::Godot.HorizontalAlignment HorizontalAlignment { set { } }
+        public global::Godot.HorizontalAlignment HorizontalAlignment { get; set; }
         public global::Godot.VerticalAlignment VerticalAlignment { set { } }
         public float VisibleRatio { set { } }
         public new partial class MethodName : global::Godot.Control.MethodName
@@ -944,7 +944,7 @@ namespace Godot
         public void SetFlipV(bool enable) { }
         public void SetTexture(global::Godot.Texture2D texture) { }
         public global::Godot.TextureRect.ExpandModeEnum ExpandMode { set { } }
-        public bool FlipH { set { } }
+        public bool FlipH { get; set; }
         public global::Godot.TextureRect.StretchModeEnum StretchMode { set { } }
         public enum ExpandModeEnum : long { KeepSize = 0, IgnoreSize = 1, FitWidth = 2, FitWidthProportional = 3, FitHeight = 4, FitHeightProportional = 5 }
         public enum StretchModeEnum : long { Scale = 0, Tile = 1, Keep = 2, KeepCentered = 3, KeepAspect = 4, KeepAspectCentered = 5, KeepAspectCovered = 6 }

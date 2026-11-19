@@ -84,11 +84,12 @@ internal static class EnchantmentOnPlayMirrors
             : context.CardPlay.Target is { } selectedTarget ? [selectedTarget] : [];
         foreach (Creature target in targets)
         {
-            effects.ApplyPower(
+            effects.ApplyPowerFromSource(
                 typeof(WeakPower),
                 target,
                 enchantment.DynamicVars.Weak.IntValue,
-                context.PreviewCard.Owner.Creature);
+                context.PreviewCard.Owner.Creature,
+                context.PreviewCard);
         }
     }
 
@@ -104,7 +105,6 @@ internal static class EnchantmentOnPlayMirrors
             return;
         }
 
-        enchantment._status = EnchantmentStatus.Disabled;
         context.Simulator.GainEnergy(context.PreviewCard.Owner, enchantment.Amount);
     }
 
@@ -115,7 +115,6 @@ internal static class EnchantmentOnPlayMirrors
             return;
         }
 
-        enchantment._status = EnchantmentStatus.Disabled;
         context.Simulator.Draw(context.PreviewCard.Owner, enchantment.Amount);
     }
 }

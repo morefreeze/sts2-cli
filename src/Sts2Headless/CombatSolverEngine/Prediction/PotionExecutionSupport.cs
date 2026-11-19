@@ -13,14 +13,17 @@ internal static class PotionExecutionSupport
     {
         combat.ConsumePotion(potion.Owner, slot);
         combat.BeforePotionUsed(simulator, potion, target);
-        return !combat.HasPendingChoice && PotionOnUseSupport.Use(simulator, combat, potion, target);
+        if (combat.HasPendingChoice) return false;
+        using (simulator.BeginCardOrPotionEffect(potion.Owner))
+            return PotionOnUseSupport.Use(simulator, combat, potion, target);
     }
 
     internal static bool Complete(CombatPredictionSimulator simulator, SimulatedCombatState combat,
         PotionModel potion, Creature? target, PlanCardChoice? choice, int historyStart,
         ISet<uint> processedEnemyDeaths)
     {
-        if (choice != null && !PotionChoiceSupport.Apply(simulator, potion, choice)) return false;
+        using (simulator.BeginCardOrPotionEffect(potion.Owner))
+            if (choice != null && !PotionChoiceSupport.Apply(simulator, potion, choice)) return false;
         if (combat.HasPendingChoice) return false;
         if (simulator.State.GetCreature(potion.Owner.Creature).IsAlive)
             combat.AfterPotionUsed(simulator, potion, target);

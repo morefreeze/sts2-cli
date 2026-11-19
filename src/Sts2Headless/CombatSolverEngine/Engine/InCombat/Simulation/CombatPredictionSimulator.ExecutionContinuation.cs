@@ -1,5 +1,6 @@
 using CombatSolver.Engine.Common;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 
 namespace CombatSolver.Engine.InCombat.Simulation;
@@ -31,7 +32,7 @@ internal interface ICombatPredictionExecutionScopes
 }
 
 internal sealed record PredictionExecutionStep(PredictionTraceFrame? Trace, int DrawDepth,
-    ICombatPredictionExecutionScopes? Scopes, ICombatPredictionExecutionFrame Frame);
+    IReadOnlyList<Player> EffectOwners, ICombatPredictionExecutionScopes? Scopes, ICombatPredictionExecutionFrame Frame);
 internal sealed record PredictionExecutionContinuation(int HistoryStart, IReadOnlyList<PredictionExecutionStep> Steps);
 
 internal sealed partial class CombatPredictionSimulator
@@ -116,7 +117,7 @@ internal sealed partial class CombatPredictionSimulator
     {
         if (State.CombatState is ICombatPredictionExecutionContinuationState state
             && state.TryCaptureExecutionScopes(this, out var scopes))
-            return new(CurrentFrame, _activeDrawDepth, scopes, frame);
+            return new(CurrentFrame, _activeDrawDepth, _activeCardOrPotionEffects?.ToArray() ?? [], scopes, frame);
         RejectExecutionContinuation();
         return null;
     }
@@ -190,7 +191,8 @@ internal sealed partial class CombatPredictionSimulator
         if (!ReferenceEquals(source, _ownedExecutionContinuation))
             throw new InvalidOperationException("Execution continuation fork does not own this seed.");
         using var pending = ((ICombatPredictionExecutionContinuationState)State.CombatState).DetachPendingExecutionChoice();
-        if (CurrentFrame != null || _damageSource != null || _activeDrawDepth != 0 || ActionRelicTriggers != null)
+        if (CurrentFrame != null || _damageSource != null || _activeDrawDepth != 0
+            || _activeCardOrPotionEffects is { Count: > 0 } || ActionRelicTriggers != null)
             throw new InvalidOperationException("Execution continuation still owns active CLR scopes.");
         PredictionTrace trace = new();
         CombatPredictionState state = State.Fork(context);
@@ -216,7 +218,8 @@ internal sealed partial class CombatPredictionSimulator
         PredictionStateStore store = StateStore.Fork(context);
         CombatPredictionHistory history = History.ForkExecutionContinuation(trace, context, source.HistoryStart);
         var steps = source.Steps.Select(step => new PredictionExecutionStep(
-            ForkExecutionTrace(step.Trace, context), step.DrawDepth, step.Scopes?.Fork(context), step.Frame.Fork(context))).ToArray();
+            ForkExecutionTrace(step.Trace, context), step.DrawDepth, step.EffectOwners,
+            step.Scopes?.Fork(context), step.Frame.Fork(context))).ToArray();
         continuation = new(source.HistoryStart, steps);
         var child = new CombatPredictionSimulator(trace, state, Rng.Fork(), store, history,
             IsInProgress, IsAboutToLose, TerminalStamp, ShuffleEventCount, null);
@@ -242,12 +245,19 @@ internal sealed partial class CombatPredictionSimulator
                 PredictionExecutionStep step = continuation.Steps[index];
                 bool completed;
                 _activeDrawDepth = step.DrawDepth;
+                _activeCardOrPotionEffects = step.EffectOwners.ToList();
                 try
                 {
                     using var scopes = step.Scopes?.Enter(this);
                     using (_trace.ResumeExecution(step.Trace)) completed = step.Frame.Resume(this);
                 }
-                finally { _activeDrawDepth = 0; }
+                finally
+                {
+                    _activeDrawDepth = 0;
+                    if (!_activeCardOrPotionEffects.SequenceEqual(step.EffectOwners))
+                        throw new InvalidOperationException("Execution continuation effect scopes did not unwind.");
+                    _activeCardOrPotionEffects = null;
+                }
                 if (completed && !HasPendingChoice) continue;
                 if (HasCapturedExecutionContinuation)
                     for (int tail = index + 1; tail < continuation.Steps.Count; tail++)

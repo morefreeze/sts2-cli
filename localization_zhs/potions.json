@@ -134,5 +134,11 @@
   "VULNERABLE_POTION.description": "给予[blue]{VulnerablePower}[/blue]层[gold]易伤[/gold]。",
   "VULNERABLE_POTION.title": "易伤药水",
   "WEAK_POTION.description": "给予[blue]{WeakPower}[/blue]层[gold]虚弱[/gold]。",
-  "WEAK_POTION.title": "虚弱药水"
+  "WEAK_POTION.title": "虚弱药水",
+  "BOTTLED_SONG.description": "将随机“哇”牌、“啾”牌和“叽”牌各一张加入你的[gold]手牌[/gold]。这些牌在本回合可以免费打出。",
+  "BOTTLED_SONG.title": "瓶装歌曲",
+  "CRYSTALLINE_EUPHORIA.description": "将[blue]{Cards}[/blue]张[gold]喜悦[/gold]加入你的[gold]手牌[/gold]。\n用[gold]悲伤[/gold]填满你的[gold]手牌[/gold]。",
+  "CRYSTALLINE_EUPHORIA.title": "幸福结晶",
+  "PRECISION_POTION.description": "获得[blue]{AimPower}[/blue]点[gold]瞄准[/gold]。",
+  "PRECISION_POTION.title": "精密药水"
 }

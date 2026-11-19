@@ -7,24 +7,6 @@ internal sealed record CompleteProjectionBaseline(
     int ProjectedBattleHpLost,
     string StateDifference);
 
-internal sealed record ManualProjectionBaseline(
-    int StartTurnNumber,
-    int ProjectedBattleHpLost,
-    string StateDifference,
-    string? OriginalCheckpointId = null);
-
-internal sealed record ManualProjectionComparison(
-    int OriginalTurnNumber,
-    int CurrentTurnNumber,
-    int PreviousProjectedBattleHpLost,
-    int CurrentProjectedBattleHpLost,
-    string StateDifference,
-    string? OriginalCheckpointId = null,
-    string? CurrentCheckpointId = null)
-{
-    public int Difference => CurrentProjectedBattleHpLost - PreviousProjectedBattleHpLost;
-}
-
 internal readonly record struct SearchMemoryUsageSnapshot(
     long ProcessWorkingSetBytes,
     long PhysicalMemoryUsedBytes,
@@ -37,45 +19,43 @@ internal readonly record struct SearchMemoryUsageSnapshot(
     bool Reclaiming,
     bool BackgroundReclaiming)
 {
+    public long PhysicalMemoryTotalBytes { get; init; }
+    public DateTimeOffset SampledAtUtc { get; init; }
+    public long SampleDurationMilliseconds { get; init; }
+    public bool IsServerGc { get; init; }
+    public long GcMemoryInfoIndex { get; init; }
+    public long GcHighMemoryLoadThresholdBytes { get; init; }
+    public long GcTotalAvailableMemoryBytes { get; init; }
+    public bool HasPhysicalMemorySample => PhysicalMemoryTotalBytes > 0;
+    public long? PhysicalMemoryAvailableBytes => HasPhysicalMemorySample
+        ? Math.Clamp(PhysicalMemoryTotalBytes - PhysicalMemoryUsedBytes, 0, PhysicalMemoryTotalBytes)
+        : null;
     public bool HasGcWall => SearchAllocationLimitBytes != long.MaxValue;
     public double AllocationPressureRatio => HasGcWall
         ? Math.Clamp(SearchAllocatedBytes / (double)Math.Max(1, SearchAllocationLimitBytes), 0d, 1d)
         : 0d;
     public double SystemPressureRatio => SystemMemoryLimitBytes != long.MaxValue
         ? Math.Clamp(
-            ProjectedSystemMemoryLoadBytes / (double)Math.Max(1, SystemMemoryLimitBytes),
+            Math.Max(PhysicalMemoryUsedBytes, ProjectedSystemMemoryLoadBytes) / (double)Math.Max(1, SystemMemoryLimitBytes),
             0d,
             1d)
         : 0d;
     public bool SystemPressureDominates => SystemPressureRatio > AllocationPressureRatio;
-    public long EffectiveSystemMemoryLimitBytes
-        => SystemMemoryLimitBytes == long.MaxValue
-            ? Math.Max(1, PhysicalMemoryUsedBytes)
-            : Math.Max(1, SystemMemoryLimitBytes);
     public long SystemOccupiedBytes
         => Math.Clamp(
             PhysicalMemoryUsedBytes - ProcessWorkingSetBytes,
             0,
-            EffectiveSystemMemoryLimitBytes);
-    public long ProcessMemoryLimitBytes
-        => Math.Max(1, EffectiveSystemMemoryLimitBytes - SystemOccupiedBytes);
-    public double ProcessMemoryPressureRatio
-        => Math.Clamp(
-            ProcessWorkingSetBytes / (double)ProcessMemoryLimitBytes,
-            0d,
-            1d);
+            PhysicalMemoryTotalBytes);
+    public double CleanupPressureRatio => Math.Max(AllocationPressureRatio, SystemPressureRatio);
     public double SystemSegmentRatio
-        => Math.Clamp(
-            SystemOccupiedBytes / (double)EffectiveSystemMemoryLimitBytes,
-            0d,
-            1d);
+        => HasPhysicalMemorySample ? SystemOccupiedBytes / (double)PhysicalMemoryTotalBytes : 0d;
     public double ProcessSegmentRatio
-        => Math.Min(
+        => HasPhysicalMemorySample ? Math.Min(
             1d - SystemSegmentRatio,
             Math.Clamp(
-                ProcessWorkingSetBytes / (double)EffectiveSystemMemoryLimitBytes,
+                Math.Min(ProcessWorkingSetBytes, PhysicalMemoryUsedBytes) / (double)PhysicalMemoryTotalBytes,
                 0d,
-                1d));
+                1d)) : 0d;
 }
 
 internal sealed class SearchProgressDisplayState(long startedAtTick)
@@ -123,12 +103,47 @@ internal sealed class SearchProgressDisplayState(long startedAtTick)
 
 internal sealed class SolverCombatSession
 {
+    private string? _primaryIncumbentScope;
+    private PrimaryIncumbentTable _primaryIncumbents = new();
+
+    internal PrimaryIncumbentTable AcquirePrimaryIncumbents(
+        CombatRootSnapshot root, SearchPolicySnapshot policy, BattleDamageSnapshot damage)
+        => AcquirePrimaryIncumbents(root.ContinuationStamp.StateText + "\n" +
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                damage, policy.PotionPolicy, policy.PotionStrategy, policy.TheftPolicy,
+                policy.ActTransitionBossHpStrategy, policy.FinalBossHpStrategy,
+                policy.IgnoreLongTermRewards, policy.GrowthBudgets,
+                policy.GrowthOpportunityTargets, policy.RelicTargets,
+                policy.BrightestFlameMaxHpLossLimit, policy.PredictPotionReward,
+                policy.IncludeTurnSetup,
+            }));
+
+    internal PrimaryIncumbentTable AcquirePrimaryIncumbents(string scope)
+    {
+        PrimaryIncumbentTable previous = _primaryIncumbents;
+        _primaryIncumbents = new();
+        if (string.Equals(_primaryIncumbentScope, scope, StringComparison.Ordinal)
+            && previous.PotionFreeWitness is { } witness
+            && previous.TryGet(ResourceIncumbentPolicy.CompletedBucket(witness.Snapshot, 0), out var bound))
+        {
+            _primaryIncumbents.PotionFreeWitness = witness;
+            _primaryIncumbents.Tighten(ResourceIncumbentPolicy.CompletedBucket(witness.Snapshot, 0), bound);
+        }
+        _primaryIncumbentScope = scope;
+        return _primaryIncumbents;
+    }
+
     public CombatState? State { get; set; }
     public SolverResult? LatestResult { get; set; }
     public LiveCombatStamp? LatestStamp { get; set; }
     public SolverResult? ContinuationSource { get; set; }
     public SearchInteractionState? StoppedSearch { get; set; }
     public bool FullAutoEnabled { get; set; }
+    public bool RouteFrozen { get; set; }
+    public int? RetainedRouteCheckedTurn { get; set; }
+    public long NextRetainedValidityCheckAt { get; set; }
+    public bool? RetainedRouteWasCurrent { get; set; }
     public SolverTheftPolicy? TheftPolicy { get; set; }
     public CompleteProjectionBaseline? PendingCompleteProjectionBaseline { get; set; }
     public ManualProjectionBaseline? PendingManualProjectionBaseline { get; set; }
@@ -150,6 +165,7 @@ internal sealed class SolverCombatSession
     public bool ManualControlObserved { get; set; }
     public bool ShowcaseMode { get; set; }
     public CombatBugReportIssueLedger BugReportIssues { get; } = new();
+    public CombatBugReportUploadPolicy UploadPolicy { get; } = new();
 }
 
 internal sealed class SolverSearchSession(
@@ -164,6 +180,7 @@ internal sealed class SolverSearchSession(
 
     public int Generation { get; } = generation;
     public int StartTurnNumber { get; init; }
+    public PotionRewardOutlook PotionRewardOutlook { get; set; }
     public ReplanCause ReplanCause { get; init; }
     public CombatState State { get; } = state;
     public LiveCombatStamp Stamp { get; } = stamp;
@@ -175,6 +192,11 @@ internal sealed class SolverSearchSession(
     public int ReferenceReleaseState;
     public int CancellationDisposeState;
     public bool DeployWhenReady { get; set; } = deployWhenReady;
+    public bool PlayerInputObserved { get; private set; }
+    public void ObserveInput(string origin)
+    {
+        if (origin == "player") PlayerInputObserved = true;
+    }
     public int MaxDegreeOfParallelism { get; set; } = 1;
     public SearchMemoryPressureSignal? MemoryPressureSignal { get; set; }
     public SearchInteractionState Interaction { get; } = new();

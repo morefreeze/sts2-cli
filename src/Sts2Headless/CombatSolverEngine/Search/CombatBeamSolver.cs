@@ -1,10 +1,8 @@
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
-using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -23,7 +21,8 @@ namespace CombatSolver;
 
 internal readonly record struct PrimarySearchIncumbent(
     int StrategicHpDeficit,
-    int CombatEndedTurn);
+    int CombatEndedTurn,
+    int? ExplicitPotionStrategicCost = null);
 
 internal sealed partial class CombatBeamSolver(
     CombatRootSnapshot root,
@@ -37,9 +36,32 @@ internal sealed partial class CombatBeamSolver(
     PotionFreePolicyBaseline? potionFreePolicyBaseline = null,
     int? maximumPotionUses = null,
     IReadOnlyList<PlanAction>? fixedPrefixActions = null,
+    bool resetFixedPrefixSchedulingBaseline = false,
     int? minimumPotionUses = null,
-    PrimarySearchIncumbent? primaryIncumbent = null)
+    PrimarySearchIncumbent? primaryIncumbent = null,
+    int? earliestPotionTurn = null,
+    int earlyTurnScoutDepth = 0,
+    Action<int, IReadOnlyList<EarlyTurnFrontierCandidate>>? earlyTurnScoutObserver = null,
+    PlanCommitment? planCommitment = null,
+    ContinuationPurpose? attributionPurpose = null,
+    DirectSearchPurpose? directSearchPurpose = null)
 {
+    private CancellationToken? _routeMaterializationCancellationToken;
+    private CancellationToken ReplayCancellationToken => _routeMaterializationCancellationToken ?? cancellationToken;
+
+    private SolverResult MaterializeAdoptableRoute(Func<SolverResult> materialize)
+    {
+        if (_routeMaterializationCancellationToken.HasValue)
+            throw new InvalidOperationException("Route materialization already owns this solver's replay context.");
+        _routeMaterializationCancellationToken = policy.RouteAdoptionCancellationToken ?? cancellationToken;
+        try
+        {
+            ReplayCancellationToken.ThrowIfCancellationRequested();
+            return materialize();
+        }
+        finally { _routeMaterializationCancellationToken = null; }
+    }
+
     private readonly SolverSearchProfile _profile = searchProfile ?? SolverSearchProfile.Default;
     private readonly SearchRunContext _run = new(
         policy.MeasurePhasePerformance,
@@ -48,7 +70,12 @@ internal sealed partial class CombatBeamSolver(
     private readonly Player _player = root.PlayerIdentity;
     private readonly IntentForecast _forecast = root.Forecast;
     private readonly int _startTurnNumber = root.StartTurnNumber;
+    private readonly int _totalFloor = root.TotalFloor;
     private readonly int _initialEnemyCount = root.Enemies.Count;
+    private readonly bool _hasRegisteredPowerCards = root.PlayerCardIds.Any(
+        PowerCardValuationModels.Registry.ContainsCardId);
+    private readonly SearchRequestWorkTotals _replayWork = policy.RequestWorkTotals ?? new();
+    private readonly CombatHistoryDependencies _historyDependencies = root.HistoryDependencies;
     private readonly bool _isActEndingBoss = root.IsActEndingBoss;
     private readonly BossHpRelief _bossHpRelief = root.BossHpRelief;
     private readonly BossHpRelief _strategicBossHpRelief = ActEndingBossPolicy.ResolveStrategicHpRelief(
@@ -63,10 +90,22 @@ internal sealed partial class CombatBeamSolver(
     private readonly bool _detailedDiagnostics = policy.DetailedDiagnostics;
     private readonly int? _maximumPotionUses = maximumPotionUses;
     private readonly int _minimumPotionUses = minimumPotionUses ?? 0;
+    private readonly int? _earliestPotionTurn = earliestPotionTurn;
     private readonly PotionFreePolicyBaseline? _potionFreePolicyBaseline = potionFreePolicyBaseline;
     private PrimarySearchIncumbent? _primaryIncumbent = primaryIncumbent;
+    private readonly bool _useSharedPrimaryIncumbents = !policy.DisableSharedPrimaryIncumbentsForTesting
+        && PrimaryIncumbentTable.CanShareRoot(root);
+    private readonly PrimaryIncumbentTable _primaryIncumbents = policy.DisableSharedPrimaryIncumbentsForTesting
+        || !PrimaryIncumbentTable.CanShareRoot(root) ? new() : policy.PrimaryIncumbents ?? new();
     private readonly SearchInteractionState? _interaction = policy.Interaction;
+    private readonly DevelopmentSearchStrategy? _developmentStrategy = policy.DevelopmentStrategy;
     private readonly IReadOnlyList<PlanAction> _fixedPrefixActions = fixedPrefixActions ?? [];
+    private readonly PlanCommitment? _planCommitment = planCommitment;
+    private readonly ContinuationPurpose? _attributionPurpose = attributionPurpose;
+    private readonly DirectSearchPurpose? _directSearchPurpose = directSearchPurpose;
+    private readonly bool _resetFixedPrefixSchedulingBaseline = resetFixedPrefixSchedulingBaseline;
+    private readonly int _earlyTurnScoutDepth = earlyTurnScoutDepth;
+    private readonly Action<int, IReadOnlyList<EarlyTurnFrontierCandidate>>? _earlyTurnScoutObserver = earlyTurnScoutObserver;
     private readonly string? _progressPhaseOverride = DescribePotionProgressPhase(
         displayNames,
         potionPolicyOverride,
@@ -98,16 +137,18 @@ internal sealed partial class CombatBeamSolver(
         _potionPolicy,
         _potionStrategy,
         _enforcePotionDirectives,
-        root.HasRenewablePotionShapedRock,
+        root.PotionRewardOutlook.ReplacementHpCredit,
         _run,
         EvaluateStandPat,
-        PrepareStandPatProbes);
+        PrepareStandPatProbes,
+        _developmentStrategy,
+        _planCommitment);
     private FinalPlanOrdering? _finalOrdering;
     private FinalPlanOrdering FinalOrdering => _finalOrdering ??= new FinalPlanOrdering(
         _potionPolicy,
         _potionStrategy,
         _enforcePotionDirectives,
-        root.HasRenewablePotionShapedRock,
+        root.PotionRewardOutlook.ReplacementHpCredit,
         _theftPolicy,
         _strategicBossHpRelief,
         root.PostCombatRelicHeal,
@@ -116,8 +157,7 @@ internal sealed partial class CombatBeamSolver(
         _minimumPotionUses,
         policy.Diagnostics,
         _detailedDiagnostics,
-        battleDamage,
-        _run.PotionStrategicCosts);
+        battleDamage);
 
     private bool AllowsPotionUse(int slot, string potionId)
         => _potionStrategy.AllowsExplicitUse(

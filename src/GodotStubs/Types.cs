@@ -222,39 +222,8 @@ public partial class ScriptPathAttribute : Attribute
 [AttributeUsage(AttributeTargets.Class)]
 public partial class GlobalClassAttribute : Attribute { }
 
-// PropertyInfo for Godot bridge methods
-public partial struct PropertyInfo
-{
-    public Variant.Type Type;
-    public StringName Name;
-    public PropertyHint Hint;
-    public string HintString;
-    public PropertyUsageFlags Usage;
-    public bool Exported;
-
-    public PropertyInfo(Variant.Type type, StringName name, PropertyHint hint = PropertyHint.None,
-        string hintString = "", PropertyUsageFlags usage = PropertyUsageFlags.Default, bool exported = false)
-    {
-        Type = type; Name = name; Hint = hint; HintString = hintString; Usage = usage; Exported = exported;
-    }
-}
-
-// MethodInfo for Godot bridge methods
-public partial struct MethodInfo
-{
-    public StringName Name;
-    public PropertyInfo ReturnVal;
-    public MethodFlags Flags;
-    public List<PropertyInfo>? DefaultArguments;
-    public List<PropertyInfo>? Arguments;
-
-    public MethodInfo(StringName name, PropertyInfo returnVal, MethodFlags flags,
-        List<PropertyInfo>? arguments, List<PropertyInfo>? defaultArguments)
-    {
-        Name = name; ReturnVal = returnVal; Flags = flags;
-        Arguments = arguments; DefaultArguments = defaultArguments;
-    }
-}
+// Godot.Bridge.PropertyInfo/MethodInfo are emitted in GeneratedAuditStubs.cs.
+// The real GodotSharp assembly has no Godot.PropertyInfo or Godot.MethodInfo.
 
 // GodotSerializationInfo
 public partial class GodotSerializationInfo

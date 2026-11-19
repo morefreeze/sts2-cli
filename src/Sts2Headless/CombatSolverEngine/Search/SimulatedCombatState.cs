@@ -7,16 +7,12 @@ using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Afflictions;
 using MegaCrit.Sts2.Core.Models.Cards;
-using MegaCrit.Sts2.Core.Models.Enchantments;
 using MegaCrit.Sts2.Core.Models.Monsters;
 using MegaCrit.Sts2.Core.Models.Powers;
-using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
-using MegaCrit.Sts2.Core.Models.Singleton;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves.Runs;
 using MegaCrit.Sts2.Core.Rooms;
-using MegaCrit.Sts2.Core.ValueProps;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Platform;
@@ -24,7 +20,6 @@ using MegaCrit.Sts2.Core.Nodes;
 using CombatSolver.Engine.Common;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Card;
 using CombatSolver.Engine.InCombat.Mirrors.Hooks.Damage;
-using CombatSolver.Engine.InCombat.Mirrors.Hooks;
 using CombatSolver.Engine.InCombat.Simulation;
 using System.Reflection;
 using System.Collections.Concurrent;
@@ -44,35 +39,52 @@ internal sealed partial class SimulatedCombatState
       ICombatPredictionRootMaterializable, IPredictionForkBoundary
 {
     private readonly IRunState _runState;
+    internal CombatRulesSnapshot Rules { get; }
     private readonly IReadOnlyList<Creature> _playerCreatures;
     private readonly IReadOnlyList<Player> _players;
     private readonly IReadOnlyList<ModifierModel> _modifiers;
-    private readonly MultiplayerScalingModel? _multiplayerScalingModel;
+    private readonly IReadOnlyList<RunModel> _runModels;
     private readonly EncounterModel? _encounter;
     private readonly IReadOnlyList<string> _encounterSlots;
     private readonly RootCombatHistorySnapshot _rootHistory;
     private readonly IReadOnlySet<Creature> _rootCreatures;
     private readonly AbstractModel[] _rootHookListeners;
     private readonly AbstractModel[] _rootRunHookListeners;
+    private readonly GoldRunHookSnapshot _goldRunHookSnapshot;
     private readonly IReadOnlyDictionary<Player, RelicModel[]> _rootRelics;
     private IReadOnlyDictionary<RelicModel, RelicModel>? _rootRelicSources;
     private IReadOnlyList<ModifierModel>? _rootModifierSources;
     private readonly IReadOnlyDictionary<Player, int> _rootPotionSlotCounts;
     private readonly IReadOnlyDictionary<Player, int> _rootPlayerTurnNumbers;
+    private readonly IReadOnlyDictionary<Player, int> _rootMaxEnergies;
     private readonly IReadOnlyDictionary<(Creature Owner, Type Type), int> _rootPowerAmounts;
     private readonly IReadOnlySet<PowerModel> _rootMultiInstancePowers;
     private readonly IReadOnlyDictionary<Player, string> _playerNames;
     private readonly IReadOnlySet<CardModel> _rootFloatingCards;
     private readonly IReadOnlySet<Creature> _rootDeadCreatures;
     private readonly SerializableRunRngSet _runRngSnapshot;
+    private readonly IReadOnlyDictionary<Player, PredictionRngState> _playerNonCombatRngSnapshots;
     private readonly int _currentActIndex;
+    internal int CapturedTotalFloor { get; }
+    internal IReadOnlyList<CardModel> TarotPool { get; }
+    private readonly IReadOnlyDictionary<Player, CardModel[]> _otherCharacterCards;
+    private readonly IReadOnlyDictionary<Player, CardModel[]> _unlockedCharacterCards;
+    internal IReadOnlyList<CardModel> UnlockedCharacterCards(Player player) => _unlockedCharacterCards[player];
+    internal IReadOnlyList<CardModel> OtherCharacterCards(Player player) => _otherCharacterCards[player];
     private readonly RoomType? _currentRoomType;
     private readonly MapCoord? _currentMapCoord;
     private readonly CardMultiplayerConstraint _cardMultiplayerConstraint;
     private readonly PredictionModHookSubscriberCapture _modHookSubscribers;
     internal AdaptedOnPlaySnapshot? AdaptedOnPlay => _modHookSubscribers.AdaptedOnPlay;
+    internal bool HasInactiveLoadoutSummonPowers => _modHookSubscribers.HasInactiveLoadoutSummonPowers;
+    internal bool RootHasOnlyNonHealingLoadoutSubscribers
+        => _modHookSubscribers.HasOnlyNonHealingLoadoutSubscribers;
+    internal bool RootHasCertifiedNonHealingSubscribers => _modHookSubscribers.HasCertifiedNonHealingSubscribers;
+    internal bool IsCertifiedNonHealingSubscriberSource(AbstractModel source)
+        => _modHookSubscribers.IsCertifiedNonHealingSubscriberSource(source);
     private readonly IReadOnlyDictionary<Player, int> _rootMaxHandSizes;
     private readonly RootCombatCardGenerationPoolSnapshot _rootCardGenerationPools;
+    private readonly RootCombatTransformationPoolSnapshot _rootTransformationPools;
 
     private sealed class CombinedRosterView(
         IReadOnlyList<Creature> first,
@@ -120,6 +132,9 @@ internal sealed partial class SimulatedCombatState
         int amount,
         Creature? applier);
 
+    private delegate void ApplyClonedPowerDelegate(SimulatedCombatState combat, PowerModel prototype,
+        Creature target, int amount, Creature? applier);
+
     private delegate void ApplyTemporaryStrengthLossDelegate(
         SimulatedCombatState combat,
         Creature target,
@@ -136,6 +151,9 @@ internal sealed partial class SimulatedCombatState
         .GetMethods(BindingFlags.Instance | BindingFlags.Public)
         .Single(method => method.Name == nameof(Apply) && method.IsGenericMethodDefinition);
     private static readonly ConcurrentDictionary<Type, ApplyPowerDelegate> ApplyPowerDelegates = new();
+    private static readonly MethodInfo GenericApplyClonedPowerMethod = typeof(SimulatedCombatState)
+        .GetMethod(nameof(ApplyClonedPowerCore), BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static readonly ConcurrentDictionary<Type, ApplyClonedPowerDelegate> ApplyClonedPowerDelegates = new();
     private static readonly MethodInfo GenericTemporaryStrengthLossMethod = typeof(SimulatedCombatState)
         .GetMethods(BindingFlags.Instance | BindingFlags.Public)
         .Single(method => method.Name == nameof(ApplyTemporaryStrengthLoss)
@@ -165,12 +183,12 @@ internal sealed partial class SimulatedCombatState
             nameof(Creature.MonsterMaxHpBeforeModification),
             BindingFlags.Instance | BindingFlags.Public)
         ?? throw new MissingMemberException(typeof(Creature).FullName, nameof(Creature.MonsterMaxHpBeforeModification));
-    private static readonly FieldInfo MultiplayerScalingRunStateField =
-        typeof(MultiplayerScalingModel).GetField("_runState", BindingFlags.Instance | BindingFlags.NonPublic)
-        ?? throw new MissingFieldException(typeof(MultiplayerScalingModel).FullName, "_runState");
-    private static readonly FieldInfo MultiplayerScalingCombatStateField =
-        typeof(MultiplayerScalingModel).GetField("_combatState", BindingFlags.Instance | BindingFlags.NonPublic)
-        ?? throw new MissingFieldException(typeof(MultiplayerScalingModel).FullName, "_combatState");
+    private static readonly FieldInfo RunModelRunStateField =
+        typeof(RunModel).GetField("_runState", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(typeof(RunModel).FullName, "_runState");
+    private static readonly FieldInfo RunModelCombatStateField =
+        typeof(RunModel).GetField("_combatState", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new MissingFieldException(typeof(RunModel).FullName, "_combatState");
 
     private enum SteamEruptionPhase
     {
@@ -224,8 +242,6 @@ internal sealed partial class SimulatedCombatState
     private ForkableDictionary<Creature, int>? _attackPlayStartsThisTurn;
     private ForkableDictionary<Creature, int>? _cardPlayStartsThisTurn;
     private ForkableDictionary<Creature, int>? _attackSkillStartsThisTurn;
-    private ForkableSet<Creature>? _enemiesIntendingAttack;
-    private bool _hasPredictedEnemyIntents;
     private ForkableDictionary<Player, int>? _playerTurnNumbers;
     private ForkableList<Creature> _allies;
     private ForkableList<Creature> _enemies;
@@ -246,19 +262,43 @@ internal sealed partial class SimulatedCombatState
         if (!NGame.IsMainThread())
             throw new InvalidOperationException("Live combat state can only be captured on the main thread.");
         _runState = inner.RunState;
+        Rules = CombatRulesSnapshot.Capture(inner);
         _runRngSnapshot = inner.RunState.Rng.ToSerializable();
+        _playerNonCombatRngSnapshots = inner.Players.ToDictionary(player => player,
+            player => player.PlayerRng.NonCombatGeneration.CaptureState());
         _currentActIndex = inner.RunState.CurrentActIndex;
+        CapturedTotalFloor = inner.RunState.TotalFloor;
+        TarotPool = TarotCards.All.Where(card => card.IsAllowedInRun(inner.RunState)).ToArray();
+        _unlockedCharacterCards = inner.Players.ToDictionary(player => player, player =>
+            player.UnlockState.CharacterCardPools.SelectMany(pool =>
+                pool.GetUnlockedCards(player.UnlockState, inner.RunState.CardMultiplayerConstraint)).ToArray());
+        _otherCharacterCards = inner.Players.ToDictionary(player => player, player =>
+        {
+            var pools = player.UnlockState.CharacterCardPools.ToList();
+            if (pools.Count > 1) pools.Remove(player.Character.CardPool);
+            return pools.SelectMany(pool => pool.GetUnlockedCards(player.UnlockState, inner.RunState.CardMultiplayerConstraint)).ToArray();
+        });
         _currentRoomType = inner.RunState.CurrentRoom?.RoomType;
         _currentMapCoord = inner.RunState.CurrentMapCoord;
         _cardMultiplayerConstraint = inner.RunState.CardMultiplayerConstraint;
         _playerCreatures = inner.PlayerCreatures.ToArray();
         _players = inner.Players.ToArray();
+        // 实机卡牌集合在根捕获窗口内必须保持不动：#182/T021 的裸 Collection was modified
+        // 来自写者在枚举 _allCards 期间改写该列表，导致搜索初始化无法归因地失败。
+        List<CardModel> liveCombatCards = (List<CardModel>)AllCombatCardsField.GetValue(inner)!;
+        LiveCollectionGuard.Window rootLiveCollectionWindow = LiveCollectionGuard.BeginWindow(
+            ("CombatState._allCards", liveCombatCards));
+        _madScienceUpgradeCapacity = MadScienceGrowth.CaptureRemainingCapacity(inner);
         _rootCardGenerationPools = RootCombatCardGenerationPoolSnapshot.Capture(
+            _players,
+            _cardMultiplayerConstraint, Rules);
+        _rootTransformationPools = RootCombatTransformationPoolSnapshot.Capture(
             _players,
             _cardMultiplayerConstraint);
         _encounter = inner.Encounter;
         _encounterSlots = inner.Encounter?.Slots.ToArray() ?? [];
         _rootHistory = RootCombatHistorySnapshot.Capture();
+        CaptureMelodies(inner);
         _brightestFlameMaxHpSpent = CaptureBrightestFlameMaxHpSpent(_rootHistory.CardPlaysStarted);
         _rootCreatures = inner.Creatures
             .Concat(inner.Players.Select(player => player.Osty).OfType<Creature>())
@@ -267,19 +307,23 @@ internal sealed partial class SimulatedCombatState
         Dictionary<AbstractModel, AbstractModel> rootModelClones = [];
         foreach (BadgeModel badge in inner.BadgeModels)
             rootModelClones.Add(badge, PredictionUtils.CloneModelForSimulation(badge));
-        if (inner.MultiplayerScalingModel is { } liveMultiplayerScaling)
+        RunModel[] runModels = new RunModel[inner.RunModels.Count];
+        for (int index = 0; index < runModels.Length; index++)
         {
-            MultiplayerScalingModel detachedMultiplayerScaling =
-                PredictionUtils.CloneModelForSimulation(liveMultiplayerScaling);
-            MultiplayerScalingRunStateField.SetValue(detachedMultiplayerScaling, null);
-            MultiplayerScalingCombatStateField.SetValue(detachedMultiplayerScaling, null);
-            _multiplayerScalingModel = detachedMultiplayerScaling;
-            rootModelClones.Add(liveMultiplayerScaling, detachedMultiplayerScaling);
+            RunModel live = inner.RunModels[index];
+            if (live is not MultiplayerScalingModel
+                and not MegaCrit.Sts2.Core.Models.Dread.DreadRunModel
+                and not MegaCrit.Sts2.Core.Models.Blitz.BlitzRunModel)
+                throw new NotSupportedException($"Run model {live.GetType().FullName} requires prediction semantics.");
+            RunModel detached = PredictionUtils.CloneModelForSimulation(live);
+            RunModelRunStateField.SetValue(detached, null);
+            RunModelCombatStateField.SetValue(detached, null);
+            runModels[index] = detached;
+            rootModelClones.Add(live, detached);
         }
-        else
-        {
-            _multiplayerScalingModel = null;
-        }
+        _runModels = runModels;
+        if (inner.Dominion is { } dominion)
+            rootModelClones.Add(dominion, DominionPredictionSupport.Capture(dominion));
         ModifierModel[] modifiers = inner.Modifiers
             .Select(PredictionUtils.CloneModelForSimulation)
             .ToArray();
@@ -310,6 +354,7 @@ internal sealed partial class SimulatedCombatState
             player => player.PlayerCombatState is { } state
                 ? state.TurnNumber
                 : throw new InvalidOperationException($"Player {player.NetId} has no combat state to capture."));
+        _rootMaxEnergies = inner.Players.ToDictionary(player => player, player => player.MaxEnergy);
         PowerModel[] rootPowers = _rootCreatures
             .SelectMany(creature => creature.Powers)
             .ToArray();
@@ -330,7 +375,8 @@ internal sealed partial class SimulatedCombatState
             .Where(player => player.PlayerCombatState != null)
             .SelectMany(player => player.PlayerCombatState!.AllCards)
             .ToHashSet();
-        _rootFloatingCards = ((List<CardModel>)AllCombatCardsField.GetValue(inner)!)
+        _rootFloatingCards = LiveCollectionGuard
+            .SnapshotStable(liveCombatCards, "CombatState._allCards")
             .Where(card => !piledCards.Contains(card))
             .ToHashSet();
         _potionSlots = [];
@@ -405,6 +451,8 @@ internal sealed partial class SimulatedCombatState
             }
         }
         _rootRunHookListeners = rootRunHookListeners.ToArray();
+        _goldRunHookSnapshot = GoldRunHookSnapshot.Capture(
+            concreteRunState, rootModelClones, _modHookSubscribers.RunSubscribers);
         _allies = new ForkableList<Creature>(inner.Allies);
         _enemies = new ForkableList<Creature>(inner.Enemies);
         _knownEnemies = new ForkableList<Creature>(inner.Enemies);
@@ -422,6 +470,7 @@ internal sealed partial class SimulatedCombatState
             _playerTurnNumbers.Add(player, playerState.TurnNumber);
             _simulatedPlayerGold.Add(player, player.Gold);
         }
+        rootLiveCollectionWindow.Verify();
     }
 
     private SimulatedCombatState(
@@ -432,29 +481,39 @@ internal sealed partial class SimulatedCombatState
         ForkableList<Creature> escapedCreatures)
     {
         _runState = source._runState;
+        Rules = source.Rules;
         _runRngSnapshot = source._runRngSnapshot;
+        _playerNonCombatRngSnapshots = source._playerNonCombatRngSnapshots;
         _currentActIndex = source._currentActIndex;
+        CapturedTotalFloor = source.CapturedTotalFloor;
+        TarotPool = source.TarotPool;
+        _otherCharacterCards = source._otherCharacterCards;
+        _unlockedCharacterCards = source._unlockedCharacterCards;
         _currentRoomType = source._currentRoomType;
         _currentMapCoord = source._currentMapCoord;
         _cardMultiplayerConstraint = source._cardMultiplayerConstraint;
         _modHookSubscribers = source._modHookSubscribers;
         _rootMaxHandSizes = source._rootMaxHandSizes;
         _rootCardGenerationPools = source._rootCardGenerationPools;
+        _rootTransformationPools = source._rootTransformationPools;
         _playerCreatures = source._playerCreatures;
         _players = source._players;
+        _madScienceUpgradeCapacity = source._madScienceUpgradeCapacity;
         _modifiers = source._modifiers;
-        _multiplayerScalingModel = source._multiplayerScalingModel;
+        _runModels = source._runModels;
         _encounter = source._encounter;
         _encounterSlots = source._encounterSlots;
         _rootHistory = source._rootHistory;
         _rootCreatures = source._rootCreatures;
         _rootHookListeners = source._rootHookListeners;
         _rootRunHookListeners = source._rootRunHookListeners;
+        _goldRunHookSnapshot = source._goldRunHookSnapshot;
         _rootRelics = source._rootRelics;
         _rootRelicSources = source._rootRelicSources;
         _rootModifierSources = source._rootModifierSources;
         _rootPotionSlotCounts = source._rootPotionSlotCounts;
         _rootPlayerTurnNumbers = source._rootPlayerTurnNumbers;
+        _rootMaxEnergies = source._rootMaxEnergies;
         _rootPowerAmounts = source._rootPowerAmounts;
         _rootMultiInstancePowers = source._rootMultiInstancePowers;
         _playerNames = source._playerNames;
@@ -494,6 +553,14 @@ internal sealed partial class SimulatedCombatState
             multiplayerConstraint,
             out cards);
 
+    bool ICombatPredictionCardGenerationPoolSnapshot.TryGetRootEligibleAllCharacterCards(
+        Player player,
+        CardPoolModel cardPool,
+        CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<CardModel> cards)
+        => _rootCardGenerationPools.TryGetEligibleAllCharacterCards(
+            player, cardPool, multiplayerConstraint, out cards);
+
     bool ICombatPredictionCardGenerationPoolSnapshot.TryGetRootEligibleCharacterCards(
         Player player,
         CardPoolModel cardPool,
@@ -503,6 +570,17 @@ internal sealed partial class SimulatedCombatState
         => _rootCardGenerationPools.TryGetEligibleCharacterCards(
             player, cardPool, multiplayerConstraint, selection, out cards);
 
+    bool ICombatPredictionCardGenerationPoolSnapshot.TryGetRootUnlockedTransformationCards(
+        Player player,
+        CardPoolModel cardPool,
+        CardMultiplayerConstraint multiplayerConstraint,
+        out IReadOnlyList<CardModel> cards)
+        => _rootTransformationPools.TryGetUnlockedTransformationCards(
+            player,
+            cardPool,
+            multiplayerConstraint,
+            out cards);
+
     public IReadOnlyList<Creature> Allies => _allies;
     public IReadOnlyList<Creature> Enemies => _enemies;
     public IReadOnlyList<Creature> KnownEnemies => _knownEnemies;
@@ -510,7 +588,7 @@ internal sealed partial class SimulatedCombatState
     public IReadOnlyList<Creature> PlayerCreatures => _playerCreatures;
     public IReadOnlyList<Player> Players => _players;
     public IReadOnlyList<ModifierModel> Modifiers => _modifiers;
-    public MultiplayerScalingModel? MultiplayerScalingModel => _multiplayerScalingModel;
+    public IReadOnlyList<RunModel> RunModels => _runModels;
     public int RoundNumber
     {
         get => _roundNumber;
@@ -558,19 +636,9 @@ internal sealed partial class SimulatedCombatState
     }
 
     public bool IsEnemyIntendingToAttack(Creature enemy)
-    {
-        if (_hasPredictedEnemyIntents)
-            return _enemiesIntendingAttack?.Contains(enemy) == true;
-        if (_rootMaterialized && _rootCreatures.Contains(enemy))
-            throw new InvalidOperationException($"Root intent state was not captured for {enemy.Name}.");
-        return enemy.Monster?.IntendsToAttack == true;
-    }
-
-    public void SetPredictedEnemyIntents(IEnumerable<Creature> attackingEnemies)
-    {
-        _enemiesIntendingAttack = [.. attackingEnemies];
-        _hasPredictedEnemyIntents = true;
-    }
+        => enemy.Monster != null && GetMonsterAiState(enemy).Current.Intents.Any(intent =>
+            intent.IntentType is MegaCrit.Sts2.Core.MonsterMoves.Intents.IntentType.Attack
+                or MegaCrit.Sts2.Core.MonsterMoves.Intents.IntentType.DeathBlow);
 
     public void MarkBattlewornDummyTimedOut()
         => _battlewornDummyTimedOut = true;
@@ -586,6 +654,8 @@ internal sealed partial class SimulatedCombatState
         => _rootPlayerTurnNumbers.TryGetValue(player, out int turn)
             ? turn
             : throw new InvalidOperationException($"Player {player.NetId} is outside the captured root turn state.");
+
+    public int GetBaseMaxEnergy(Player player) => _rootMaxEnergies[player];
 
     public void AdvancePlayerTurn(Player player)
     {
@@ -611,12 +681,12 @@ internal sealed partial class SimulatedCombatState
         => ApplyWithBeforeApplied<T>(target, amount, applier, null);
 
     private int ApplyWithBeforeApplied<T>(Creature target, int amount, Creature? applier, Action<int>? beforeApplied,
-        Action<int, PowerModel>? afterAmountChanged = null)
+        Action<int, PowerModel>? afterAmountChanged = null, T? prototype = null)
         where T : PowerModel
     {
         if (amount == 0 || !CanReceivePredictedPowers(target))
             return 0;
-        T incoming = CreatePowerForApplication<T>(target, null, applier);
+        T incoming = CreatePowerForApplication<T>(target, prototype?.Target, applier, prototype);
         amount = ModifyPowerAmountForRelics(incoming, target, amount, applier);
         if (incoming.GetTypeForAmount(amount) == MegaCrit.Sts2.Core.Entities.Powers.PowerType.Debuff
             && ConsumeArtifact(target))
@@ -624,6 +694,14 @@ internal sealed partial class SimulatedCombatState
             return 0;
         }
         bool instanced = incoming.InstanceType == MegaCrit.Sts2.Core.Entities.Powers.PowerInstanceType.Instanced;
+        if (incoming is TemporaryThornsPower)
+        {
+            beforeApplied += value => Apply<ThornsPower>(target, value, applier);
+            afterAmountChanged += (offset, power) =>
+            {
+                if (offset != power.Amount) Apply<ThornsPower>(target, offset, applier);
+            };
+        }
         if (instanced || GetAmount<T>(target) == 0)
             beforeApplied?.Invoke(amount);
         PowerModel simulated;
@@ -640,7 +718,7 @@ internal sealed partial class SimulatedCombatState
         int previousAmount = simulated._amount;
         simulated._amount = Math.Clamp(simulated._amount + amount, -999_999_999, 999_999_999);
         // A newly applied player duration skips its first tick; stacking never renews it.
-        if (previousAmount == 0 && simulated._amount != 0 && target.Side == CombatSide.Player
+        if (previousAmount == 0 && simulated._amount != 0 && target.Side == CombatSide.Player && CurrentSide == CombatSide.Enemy
             && PowerLifecycleSupport.UsesNativeDurationSkip(typeof(T)))
             simulated.SkipNextDurationTick = true;
         UpdatePowerListenerOrder(simulated, previousAmount, simulated._amount);
@@ -648,12 +726,18 @@ internal sealed partial class SimulatedCombatState
         int applied = simulated._amount - previousAmount;
         RecordPowerAmountChange(simulated, applied, applier);
         RecordPossessedStatChange(simulated, applied, applier);
+        if (simulated is LullabyPower lullaby && previousAmount <= 0)
+            lullaby._proccdThisTurn = MelodyCount(target.Player!) == 3;
+        if (simulated is EncorePower encore && previousAmount <= 0)
+            encore.DynamicVars["PlaysRemaining"].BaseValue = encore.Amount;
+        if (simulated is InsatiableDominionPower && previousAmount <= 0)
+            simulated.DynamicVars.Damage.BaseValue = 2 + (target.Player is { } ownerPlayer ? GetPlayerTurnNumber(ownerPlayer) : 0);
         if (simulated is DoomPower && applied > 0 && applier != null)
             (_doomAppliersThisTurn ??= []).Add(applier);
         if (simulated is RitualPower ritual
             && previousAmount <= 0
             && simulated._amount > 0
-            && target.IsEnemy)
+            && target.IsEnemy && CurrentSide == CombatSide.Enemy)
         {
             ritual._wasJustAppliedByEnemy = true;
         }
@@ -666,9 +750,6 @@ internal sealed partial class SimulatedCombatState
             ((StringVar)knockdown.DynamicVars["Applier"]).StringValue = _playerNames[applyingPlayer];
         }
         afterAmountChanged?.Invoke(amount, simulated);
-        if (previousAmount == 0 && simulated._amount != 0 && simulated is PhantomBladesPower phantom)
-            PhantomBladesPowerMirrors.AfterApplied(phantom, _predictionState
-                ?? throw new InvalidOperationException("Phantom blades requires attached branch card state."));
         return applied;
     }
 
@@ -681,6 +762,17 @@ internal sealed partial class SimulatedCombatState
         apply(this, target, amount, applier);
     }
 
+    internal void ApplyClonedPower(PowerModel prototype, Creature target, int amount, Creature? applier)
+    {
+        ApplyClonedPowerDelegate apply = ApplyClonedPowerDelegates.GetOrAdd(prototype.GetType(), static type =>
+            GenericApplyClonedPowerMethod.MakeGenericMethod(type).CreateDelegate<ApplyClonedPowerDelegate>());
+        apply(this, prototype, target, amount, applier);
+    }
+
+    private void ApplyClonedPowerCore<T>(PowerModel prototype, Creature target, int amount, Creature? applier)
+        where T : PowerModel
+        => ApplyWithBeforeApplied(target, amount, applier, null, prototype: (T)prototype);
+
     public void ApplyPowerSkippingNextDurationTick(
         Type powerType,
         Creature target,
@@ -690,7 +782,13 @@ internal sealed partial class SimulatedCombatState
         bool alreadyPresent = EffectivePowers().Any(power =>
             power.GetType() == powerType && ReferenceEquals(power.Owner, target) && power.Amount > 0);
         ApplyPower(powerType, target, amount, applier);
-        if (!PowerLifecycleSupport.UsesNativeDurationSkip(powerType) && !alreadyPresent && amount > 0)
+        if (alreadyPresent || amount <= 0) return;
+        PowerModel? applied = EffectivePowers().FirstOrDefault(power =>
+            power.GetType() == powerType && ReferenceEquals(power.Owner, target) && power.Amount > 0);
+        if (applied == null) return;
+        if (PowerLifecycleSupport.UsesNativeDurationSkip(powerType))
+            GetMutablePowerInstance(applied).SkipNextDurationTick = true;
+        else
             (_skipNextDurationTick ??= []).Add((target, powerType));
     }
 
@@ -800,6 +898,7 @@ internal sealed partial class SimulatedCombatState
         PowerModel mutable = GetMutablePowerInstance(power);
         int previousAmount = mutable._amount;
         mutable._amount = Math.Clamp(amount, -999_999_999, 999_999_999);
+        if (mutable is ShowOffPower showOff && mutable._amount == 0) _showOffSources?.Remove(showOff);
         UpdatePowerListenerOrder(mutable, previousAmount, mutable._amount);
         InvalidateHookListenersForAmountTransition(previousAmount, mutable._amount);
     }
@@ -924,10 +1023,10 @@ internal sealed partial class SimulatedCombatState
     public void ResetTenderCardsPlayed(Creature owner)
         => (_tenderCardsPlayed ??= [])[owner] = 0;
 
-    private T CreatePowerForApplication<T>(Creature owner, Creature? target, Creature? applier)
+    private T CreatePowerForApplication<T>(Creature owner, Creature? target, Creature? applier, T? prototype = null)
         where T : PowerModel
     {
-        T incoming = PredictionUtils.CloneModelForSimulation(CanonicalModels.Power<T>());
+        T incoming = PredictionUtils.CloneModelForSimulation(prototype ?? CanonicalModels.Power<T>());
         incoming._owner = owner;
         incoming._applier = applier;
         incoming._target = target;
@@ -1061,19 +1160,44 @@ internal sealed partial class SimulatedCombatState
         Apply<DexterityPower>(creature, applied, applier);
     }
 
+    /// <summary>
+    /// 原版 <c>TemporaryStrengthPower</c> / <c>TemporaryDexterityPower</c> / <c>TemporaryFocusPower</c> 的
+    /// AfterSideTurnEnd：移除该能力，并按 <c>-Sign * Amount</c> 反向回收对应的永久属性。
+    /// 原版在 <c>Hook.AfterSideTurnEnd</c> 里逐个监听器分发，回收必须发生在该能力自己的监听位置，
+    /// 而不是集中提前执行——否则排在它后面的监听器（例如 ConsumingShadowPower 的末球激发）会读到
+    /// 已经被回收的 Focus。
+    /// </summary>
+    public void RetireTemporaryStat(PowerModel power)
+    {
+        int delta = power.TypeForCurrentAmount == PowerType.Buff ? -power.Amount : power.Amount;
+        SetPowerAmount(power, 0);
+        if (delta == 0)
+            return;
+        switch (power)
+        {
+            case TemporaryThornsPower:
+                Apply<ThornsPower>(power.Owner, delta, power.Owner);
+                break;
+            case TemporaryFocusPower:
+                Apply<FocusPower>(power.Owner, delta, power.Owner);
+                break;
+            case TemporaryDexterityPower:
+                Apply<DexterityPower>(power.Owner, delta, power.Owner);
+                break;
+            default:
+                Apply<StrengthPower>(power.Owner, delta, power.Owner);
+                break;
+        }
+    }
+
     public void RestoreTemporaryDexterity()
     {
-        foreach (IGrouping<Creature, TemporaryDexterityPower> group in EffectivePowers()
+        foreach (TemporaryDexterityPower power in EffectivePowers()
                      .OfType<TemporaryDexterityPower>()
                      .Where(static power => power.Amount > 0)
-                     .GroupBy(static power => power.Owner)
                      .ToArray())
         {
-            Creature creature = group.Key;
-            int amount = group.Sum(static power => power.Amount);
-            Apply<DexterityPower>(creature, -amount);
-            foreach (TemporaryDexterityPower power in group)
-                SetPowerAmount(power, 0);
+            RetireTemporaryStat(power);
         }
     }
 
@@ -1085,34 +1209,18 @@ internal sealed partial class SimulatedCombatState
                      .Where(power => participantSet.Contains(power.Owner) && power.Amount > 0)
                      .ToArray())
         {
-            int strengthDelta = power.TypeForCurrentAmount == PowerType.Buff
-                ? -power.Amount
-                : power.Amount;
-            SetPowerAmount(power, 0);
-            Apply<StrengthPower>(power.Owner, strengthDelta, power.Owner);
+            RetireTemporaryStat(power);
         }
     }
 
     public void RestoreTemporaryFocus()
     {
-        foreach (Creature creature in Creatures)
+        foreach (TemporaryFocusPower power in EffectivePowers()
+                     .OfType<TemporaryFocusPower>()
+                     .Where(static power => power.Amount > 0)
+                     .ToArray())
         {
-            int amount = GetAmount<HotfixPower>(creature)
-                + GetAmount<SynchronizePower>(creature)
-                + GetAmount<FocusedStrikePower>(creature);
-            if (amount > 0)
-            {
-                Apply<FocusPower>(creature, -amount);
-                SetAmount<HotfixPower>(creature, 0);
-                SetAmount<SynchronizePower>(creature, 0);
-                SetAmount<FocusedStrikePower>(creature, 0);
-            }
-            int focusLoss = GetAmount<HyperbeamFocusDownPower>(creature);
-            if (focusLoss > 0)
-            {
-                Apply<FocusPower>(creature, focusLoss);
-                SetAmount<HyperbeamFocusDownPower>(creature, 0);
-            }
+            RetireTemporaryStat(power);
         }
     }
 
@@ -1152,6 +1260,12 @@ internal sealed partial class SimulatedCombatState
     {
         Player player = owner.Player
             ?? throw new InvalidOperationException("玩家回合开始钩子的持有者没有 Player。");
+        return !Engine.InCombat.Mirrors.HookMirrors.AfterPlayerTurnStart(simulator, player, choices);
+    }
+
+    internal bool TriggerAfterPlayerTurnStartVanilla(
+        CombatPredictionSimulator simulator, Player player, TurnStartChoiceCursor choices)
+    {
         if (TurnStartPowerSupport.TriggerAfterPlayerTurnStart(simulator, this, player, choices))
         {
             simulator.AppendExecutionContinuation(new AfterPlayerTurnStartFrame(player));
@@ -1199,6 +1313,8 @@ internal sealed partial class SimulatedCombatState
     public void BeginSideTurn(Creature owner)
     {
         ResetCardLifecycleTurn(owner);
+        if (owner.Player is { } melodyPlayer)
+            _melodies?.Remove(melodyPlayer);
         ResetTurnCounter(ref _attacksPlayedThisTurn, owner);
         ResetTurnCounter(ref _shivsPlayedThisTurn, owner);
         ResetTurnCounter(ref _blockCardsPlayedThisTurn, owner);
@@ -1244,8 +1360,6 @@ internal sealed partial class SimulatedCombatState
         bool decrementPlating)
     {
         TickDuration<BlurPower>(owner);
-        if (GetAmount<DrawCardsNextTurnPower>(owner) > 0)
-            SetAmount<DrawCardsNextTurnPower>(owner, 0);
         if (decrementPlating)
         {
             PlatingPower? plating = GetPower<PlatingPower>(owner);
@@ -1341,7 +1455,6 @@ internal sealed partial class SimulatedCombatState
         creature.HpDisplay = HpDisplay.InfiniteWithoutNumbers;
         ForceMonsterMove(owner, "ABOUT_TO_BLOW_MOVE");
         (_steamEruptionPhases ??= [])[owner] = SteamEruptionPhase.AboutToBlow;
-        RemovePowersAfterDeath(owner);
         return true;
     }
 
@@ -1580,7 +1693,7 @@ internal sealed partial class SimulatedCombatState
     }
 
     CombatPredictionRngSet ICombatPredictionRunSnapshot.CreatePredictionRngSet()
-        => CombatPredictionRngSet.From(RunRngSet.FromSave(_runRngSnapshot));
+        => CombatPredictionRngSet.From(RunRngSet.FromSave(_runRngSnapshot), _playerNonCombatRngSnapshots);
 
     private MirroredHookListenerLayout? _mirroredHookLayout;
     private MirroredHookListenerLayout? _mirroredRunHookLayout;
@@ -1735,7 +1848,7 @@ internal sealed partial class SimulatedCombatState
                 if (power.Amount != 0
                     && !ContainsPowerReference(listeners, power))
                 {
-                    int insertionIndex = FindPowerInsertionIndex(listeners, power);
+                    int insertionIndex = FindPowerInsertionIndex(listeners, power, requirePrefixAnchor);
                     // With no prefix anchor the original may insert at a card or at the
                     // end of the full sequence. Keep that original complete-list path.
                     if (insertionIndex < 0 && requirePrefixAnchor)
@@ -1759,7 +1872,8 @@ internal sealed partial class SimulatedCombatState
         return false;
     }
 
-    private int FindPowerInsertionIndex(IReadOnlyList<AbstractModel> listeners, PowerModel power)
+    private int FindPowerInsertionIndex(
+        IReadOnlyList<AbstractModel> listeners, PowerModel power, bool requirePrefixAnchor)
     {
         int insertionIndex = -1;
         for (int index = 0; index < listeners.Count; index++)
@@ -1776,7 +1890,36 @@ internal sealed partial class SimulatedCombatState
                 break;
             }
         }
+        if (requirePrefixAnchor)
+            return insertionIndex;
+
+        // Native listeners visit each creature's powers before moving to the next
+        // creature. An empty player bucket has no relic/potion/card anchor, but its
+        // newly acquired power must still precede Osty and enemy listeners.
+        int ownerIndex = CreatureListenerIndex(power.Owner);
+        if (ownerIndex < 0)
+            return insertionIndex;
+        for (int index = 0; index < listeners.Count; index++)
+        {
+            Creature? listenerOwner = listeners[index] switch
+            {
+                PowerModel existing => existing.Owner,
+                MonsterModel monster => monster.Creature,
+                _ => null,
+            };
+            if (listenerOwner is not null && CreatureListenerIndex(listenerOwner) > ownerIndex)
+                return insertionIndex < 0 ? index : Math.Min(insertionIndex, index);
+        }
         return insertionIndex;
+    }
+
+    private int CreatureListenerIndex(Creature owner)
+    {
+        IReadOnlyList<Creature> roster = Creatures;
+        for (int index = 0; index < roster.Count; index++)
+            if (ReferenceEquals(roster[index], owner))
+                return index;
+        return -1;
     }
 
     private bool IsOwnerHookAnchor(AbstractModel listener, Creature owner)
@@ -1785,6 +1928,7 @@ internal sealed partial class SimulatedCombatState
         {
             return listener is RelicModel relic && RelicsOf(player).Contains(relic)
                 || listener is PotionModel potion && ReferenceEquals(potion.Owner, player)
+                || listener is OrbModel orb && ReferenceEquals(orb.Owner, player)
                 || listener is CardModel card && ReferenceEquals(card.Owner, player);
         }
         return listener is MonsterModel monster && ReferenceEquals(monster.Creature, owner);
@@ -1848,9 +1992,11 @@ internal sealed partial class SimulatedCombatState
             List<CardModel>? cardAttachedListenerOwners =
                 _modHookSubscribers.HasBaseLibCardModifiers
                     ? new(_registeredCombatCards.Count) : null;
-            for (int cardIndex = 0; cardIndex < _registeredCombatCards.Count; cardIndex++)
+            // Native card listeners follow Hand, Draw, Discard, Exhaust and Play pile order.
+            // Registration order identifies combat cards; moves change listener order.
+            for (int playerIndex = 0; playerIndex < players.Count; playerIndex++)
+            foreach (PredictedCard card in predictionState.GetPlayerCombatState(players[playerIndex]).AllCards)
             {
-                PredictedCard card = _registeredCombatCards[cardIndex];
                 if (card.Preview.HasBeenRemovedFromState)
                     continue;
                 CardModel preview = card.Preview;
@@ -2003,6 +2149,29 @@ internal sealed partial class SimulatedCombatState
         {
             PowerModel mutable = GetMutablePowerInstance(power);
             PowerPredictionStateSupport.CaptureRootState(simulator, mutable, power);
+            if (power is ShowOffPower showOff && showOff.ShowOffInstance is { } showOffCard)
+            {
+                var source = simulator.State.FindCard(showOffCard)
+                    ?? new PredictedCard(showOffCard, PredictionUtils.CloneCardStateForSimulation(showOffCard));
+                ((ShowOffPower)mutable).ShowOffInstance = (ShowOff)source.MutablePreview;
+                (_showOffSources ??= []).Add((ShowOffPower)mutable, source);
+            }
+            if (power is EncorePower encore)
+            {
+                var data = ((EncorePower)mutable).GetInternalData<EncorePower.Data>();
+                data.numberOfCardsPlayedSinceApplied = encore.GetInternalData<EncorePower.Data>().numberOfCardsPlayedSinceApplied;
+                foreach (CardModel playing in encore.GetInternalData<EncorePower.Data>().cardsBeingPlayed)
+                    data.cardsBeingPlayed.Add(simulator.State.FindCard(playing)!.MutablePreview);
+            }
+            if (power is YahPower yah)
+                ((YahPower)mutable).GetInternalData<YahPower.Data>().triggeredThisTurn = yah.GetInternalData<YahPower.Data>().triggeredThisTurn;
+            if (power is ImpaledPower impaled)
+            {
+                var copy = (ImpaledPower)mutable;
+                copy.HitCounter = impaled.HitCounter;
+                copy.GetInternalData<ImpaledPower.Data>().arrowSources = impaled.Arrows.Select(arrow =>
+                    simulator.State.GetPlayerCombatState(arrow.owner).CaptureArrowReference(arrow)).ToList();
+            }
             if (power is NightmarePower nightmare)
                 CaptureNightmareRootState((NightmarePower)mutable, nightmare);
             if (power is OrbitPower orbit)
@@ -2080,8 +2249,6 @@ internal sealed partial class SimulatedCombatState
         }
         _ = GetFetchCardsPlayedThisTurn();
         NormalizeSwordSageReplays(simulator);
-        _enemiesIntendingAttack = [.. Enemies.Where(enemy => enemy.Monster?.IntendsToAttack == true)];
-        _hasPredictedEnemyIntents = true;
         if (ModelPredictionStateMirrors.HasAny)
         {
             // Capture after the built-in root is materialized. Adapter factories may resolve
@@ -2108,12 +2275,22 @@ internal sealed partial class SimulatedCombatState
     internal HookListenerSegmentStatistics HookListenerSegmentStatistics
         => _modHookSubscribers.MirroredHookFilter.ListenerSegmentStatistics;
     internal int RootRunHookListenerCount => _rootRunHookListeners.Length;
+    // Root-owned cloned listeners only. Called during main-thread certificate capture.
+    internal string? FirstRejectedHealingRootSource(Func<AbstractModel, bool> accepts)
+    {
+        foreach (AbstractModel source in _rootHookListeners.Concat(_rootRunHookListeners)
+                     .Concat(_goldRunHookSnapshot.Globals))
+            if (!accepts(source))
+                return source.GetType().FullName;
+        return null;
+    }
+
     internal int RootRunModSubscriberCount => _modHookSubscribers.RunSubscribers.Length;
     internal int RootCombatModSubscriberCount => _modHookSubscribers.CombatSubscribers.Length;
     internal bool RootHasBaseLibCardModifiers => _modHookSubscribers.HasBaseLibCardModifiers;
-    internal bool RootMultiplayerScalingIsDetached => _multiplayerScalingModel is null
-        || (MultiplayerScalingRunStateField.GetValue(_multiplayerScalingModel) is null
-            && MultiplayerScalingCombatStateField.GetValue(_multiplayerScalingModel) is null);
+    internal bool RootRunModelsAreDetached => _runModels.All(model =>
+        RunModelRunStateField.GetValue(model) is null
+        && RunModelCombatStateField.GetValue(model) is null);
 
     internal IReadOnlyList<RelicModel> RelicsOf(Player player)
         => _rootRelics.TryGetValue(player, out RelicModel[]? relics)
@@ -2194,6 +2371,21 @@ internal sealed partial class SimulatedCombatState
         ref StateFingerprintBuilder fingerprint,
         CombatPredictionSimulator simulator)
     {
+        fingerprint.Add((int)Rules.GameMode);
+        fingerprint.Add(Rules.AscensionLevel);
+        fingerprint.Add(Rules.Ascensions);
+        fingerprint.Add(Rules.DominionId ?? string.Empty);
+        fingerprint.Add("max_hand_sizes");
+        // Player order is frozen at capture and shared unchanged by forks.
+        for (int index = 0; index < _players.Count; index++)
+        {
+            Player player = _players[index];
+            fingerprint.Add(player.NetId);
+            fingerprint.Add(GetMaxHandSize(player));
+        }
+        fingerprint.Add("player_hooks");
+        foreach (Player player in simulator.State.Players)
+            fingerprint.Add(simulator.State.GetPlayerCombatState(player).HooksActive);
         if (AdaptedOnPlay is { } adaptedOnPlay)
         {
             fingerprint.Add("onplay_configuration");
@@ -2243,8 +2435,6 @@ internal sealed partial class SimulatedCombatState
         AddCreatureIntMap(ref fingerprint, 'J', _cardPlayStartsThisTurn);
         AddCreatureIntMap(ref fingerprint, 'N', _attackSkillStartsThisTurn);
         AddCreatureIntMap(ref fingerprint, 'k', _knowledgeDemonCurseCounters);
-        AddCreatureSet(ref fingerprint, 'i', _enemiesIntendingAttack);
-        fingerprint.Add(_hasPredictedEnemyIntents);
         fingerprint.Add(HasPendingChoice);
         fingerprint.Add(_battlewornDummyTimedOut);
         fingerprint.Add('g');
@@ -2297,8 +2487,8 @@ internal sealed partial class SimulatedCombatState
         ulong dynamicFirst = 0;
         ulong dynamicSecond = 0;
         int dynamicCount = 0;
-        // DynamicVarSet.GetEnumerator 会装箱内部字典的枚举器；直接枚举已 publicize 的 _vars。
-        foreach (var dynamicVar in power.DynamicVars._vars)
+        // DynamicVarSet 的公开 GetEnumerator 会装箱内部字典枚举器；经访问桥读取 _vars。
+        foreach (var dynamicVar in new DynamicVarSetAccess.EntryEnumerable(power.DynamicVars))
         {
             if (!SemanticStateFieldPolicy.IsSemantic(power, dynamicVar.Key, dynamicVar.Value))
                 continue;
@@ -2708,6 +2898,7 @@ internal sealed partial class SimulatedCombatState
         CombatSide side,
         string? slot)
     {
+        using NativeCombatRulesScope rules = new(Rules);
         Creature creature = CreateCreature(monster, side, slot);
         if (side == CombatSide.Enemy)
         {
@@ -2722,13 +2913,17 @@ internal sealed partial class SimulatedCombatState
             MonsterMaxHpBeforeModificationProperty.SetValue(creature, baseHp);
             creature.SetMaxHpInternal(baseHp);
             creature.SetCurrentHpInternal(baseHp);
-            creature.ScaleMonsterHpForMultiplayer(Encounter, Players.Count, _currentActIndex);
+            // 单人下原版多人生命缩放是空操作，但搜索 worker 上调用它仍会执行第三方
+            // Harmony postfix（报告中的本地化格式池并发）；单人不进入这条路径。
+            if (Players.Count != 1)
+                creature.ScaleMonsterHpForMultiplayer(Encounter, Players.Count, _currentActIndex);
         }
         _ = simulator.State.GetCreature(creature);
         return creature;
     }
     public void AddPredictedMonster(Creature creature)
     {
+        using NativeCombatRulesScope rules = new(Rules);
         MonsterModel monster = creature.Monster
             ?? throw new InvalidOperationException("Only monsters can be added through the predicted monster path.");
         monster.SetUpForCombat();
@@ -2740,6 +2935,7 @@ internal sealed partial class SimulatedCombatState
         CombatPredictionSimulator simulator,
         Creature creature)
     {
+        using NativeCombatRulesScope rules = new(Rules);
         MonsterModel monster = creature.Monster
             ?? throw new InvalidOperationException("Only monsters can be prepared through the predicted monster path.");
         if (CurrentSide == CombatSide.Player)
@@ -2810,6 +3006,11 @@ internal sealed partial class SimulatedCombatState
 
         foreach (AbstractModel listener in GetEffectiveHookListeners())
         {
+            if (listener is WuppysLoyaltyPower)
+            {
+                if (_predictionState!.GetCreature(creature).IsDead) return false;
+                continue;
+            }
             if (listener is ReattachPower or IllusionPower or AdaptablePower or DieForYouPower)
                 continue;
             if (!listener.ShouldAllowHitting(creature))
@@ -2819,6 +3020,7 @@ internal sealed partial class SimulatedCombatState
     }
     bool ICombatPredictionCreatureSemantics.ShouldRemoveAfterDeath(Creature creature)
         => GetAmount<AdaptablePower>(creature) <= 0
+            && GetAmount<WuppysLoyaltyPower>(creature) <= 0
             && GetAmount<IllusionPower>(creature) <= 0
             && GetAmount<ReattachPower>(creature) <= 0
             && GetAmount<SteamEruptionPower>(creature) <= 0;

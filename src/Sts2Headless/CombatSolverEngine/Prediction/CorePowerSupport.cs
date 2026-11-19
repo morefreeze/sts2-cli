@@ -55,21 +55,11 @@ internal static class CorePowerSupport
         }
         combat.ResolveMonologues(owner, pendingMonologues);
         combat.SynchronizePanacheState(simulator, owner);
-        if (card is Armaments or IronWave or Taunt)
+        if (card is Armaments && card.IsUpgraded)
         {
-            SimCreatureState ownerState = simulator.State.GetCreature(owner);
-            if (ownerState.Block <= ownerBlockBefore)
-            {
-                simulator.GainBlock(owner, card.DynamicVars.Block, playedCard, cardPlay);
-                if (simulator.HasPendingChoice)
-                    return false;
-            }
-            if (card is Armaments && card.IsUpgraded)
-            {
-                SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(card.Owner);
-                foreach (PredictedCard handCard in playerState.Hand.Cards.Where(item => item.Preview.IsUpgradable))
-                    handCard.Upgrade();
-            }
+            SimPlayerCombatState playerState = simulator.State.GetPlayerCombatState(card.Owner);
+            foreach (PredictedCard handCard in playerState.Hand.Cards.Where(item => item.Preview.IsUpgradable))
+                handCard.Upgrade();
         }
         switch (card)
         {
@@ -137,9 +127,7 @@ internal static class CorePowerSupport
                 historyEntryStart):
             {
                 int maxHpGain = card.DynamicVars.MaxHp.IntValue;
-                SimCreatureState ownerState = simulator.State.GetCreature(owner);
-                ownerState.SetMaxHp(ownerState.MaxHp + maxHpGain);
-                simulator.Heal(owner, maxHpGain);
+                simulator.GainMaxHp(owner, maxHpGain);
                 combat.RecordGrowthReward(GrowthSource.Feed);
                 break;
             }
@@ -151,8 +139,9 @@ internal static class CorePowerSupport
                 historyEntryStart):
             {
                 int gold = card.DynamicVars["Gold"].IntValue;
-                combat.GainPlayerGold(card.Owner, gold);
-                combat.RecordLongTermResource(gold);
+                int gainedGold = combat.GainPlayerGold(simulator, card.Owner, gold);
+                if (gainedGold > 0)
+                    combat.RecordLongTermResource(gainedGold);
                 combat.RecordGrowthReward(GrowthSource.HandOfGreed);
                 break;
             }
@@ -370,15 +359,18 @@ internal static class CorePowerSupport
                 combat.Apply<VulnerablePower>(target, card.DynamicVars.Vulnerable.IntValue, owner);
                 break;
             case Thunderclap or HighFive:
-                ApplyAll<VulnerablePower>(combat, card, card.DynamicVars.Vulnerable.IntValue);
+                if (!ApplyAll<VulnerablePower>(simulator, combat, card, card.DynamicVars.Vulnerable.IntValue))
+                    return false;
                 break;
             case Shockwave:
-                ApplyAll<WeakPower>(combat, card, card.DynamicVars["Power"].IntValue);
-                ApplyAll<VulnerablePower>(combat, card, card.DynamicVars["Power"].IntValue);
+                if (!ApplyAll<WeakPower>(simulator, combat, card, card.DynamicVars["Power"].IntValue)
+                    || !ApplyAll<VulnerablePower>(simulator, combat, card, card.DynamicVars["Power"].IntValue))
+                    return false;
                 break;
             case MeteorShower:
-                ApplyAll<WeakPower>(combat, card, card.DynamicVars.Weak.IntValue);
-                ApplyAll<VulnerablePower>(combat, card, card.DynamicVars.Vulnerable.IntValue);
+                if (!ApplyAll<WeakPower>(simulator, combat, card, card.DynamicVars.Weak.IntValue)
+                    || !ApplyAll<VulnerablePower>(simulator, combat, card, card.DynamicVars.Vulnerable.IntValue))
+                    return false;
                 break;
             case PiercingWail:
                 foreach (Creature enemy in combat.HittableEnemies)
@@ -484,9 +476,8 @@ internal static class CorePowerSupport
         IReadOnlyList<Creature> players,
         int etherealExhaustCount = 0)
     {
-        combat.RestoreTemporaryStrength(players);
-        combat.RestoreTemporaryDexterity();
-        combat.RestoreTemporaryFocus();
+        // 临时 Strength/Dexterity/Focus 的回收跟随 EndTurnPowerSupport.TriggerRegular 的监听器顺序执行，
+        // 与其它 Power 的 AfterSideTurnEnd 保持原版的逐监听器分发。
         foreach (Creature player in players)
         {
             int constrict = combat.GetAmount<ConstrictPower>(player);
@@ -499,7 +490,6 @@ internal static class CorePowerSupport
             if (combat.GetAmount<RingingPower>(player) > 0)
                 combat.SetAmount<RingingPower>(player, 0);
             Tick<DoubleDamagePower>(combat, player);
-            PersistentPowerSupport.TriggerRitual(combat, player);
         }
         if (!EndTurnPowerSupport.TriggerRegular(
                 simulator,
@@ -535,9 +525,6 @@ internal static class CorePowerSupport
         IReadOnlyList<Creature> enemies)
     {
         EndTurnPowerSupport.TriggerVeryEarly(combat, enemies);
-        EndTurnPowerSupport.TriggerEnemyDoom(simulator, combat, enemies);
-        if (simulator.HasPendingChoice)
-            return false;
         foreach (Creature enemy in enemies)
         {
             if (simulator.State.GetCreature(enemy).IsAlive)
@@ -552,18 +539,20 @@ internal static class CorePowerSupport
                 if (plating > 0)
                     simulator.GainBlock(enemy, plating, ValueProp.Unpowered);
             }
-            Tick<DoubleDamagePower>(combat, enemy);
-            PersistentPowerSupport.TriggerRitual(combat, enemy);
             if (simulator.HasPendingChoice)
                 return false;
         }
+        EndTurnPowerSupport.TriggerEnemyDoom(simulator, combat, enemies);
+        if (simulator.HasPendingChoice)
+            return false;
+        foreach (Creature enemy in enemies)
+            Tick<DoubleDamagePower>(combat, enemy);
         if (!EndTurnPowerSupport.TriggerRegular(simulator, combat, CombatSide.Enemy, enemies))
             return false;
         PowerLifecycleSupport.ResolvePowerAmountChanges(simulator, combat);
         if (simulator.HasPendingChoice)
             return false;
         TriggerTransientSideTurnEndPowers(simulator, combat, CombatSide.Enemy, enemies);
-        combat.RestoreTemporaryStrength(enemies);
         TickDurations(combat);
         return HookMirrors.AfterSideTurnEndLate(simulator, CombatSide.Enemy, enemies);
     }
@@ -631,11 +620,6 @@ internal static class CorePowerSupport
                 processedDeaths.Add(combatId);
                 continue;
             }
-            bool steamEruptionTriggered = combat.TryTriggerSteamEruptionDeath(simulator, enemy);
-            if (simulator.HasPendingChoice)
-                return false;
-            if (steamEruptionTriggered)
-                continue;
             (newlyDead ??= []).Add(enemy);
         }
         if (newlyDead != null)
@@ -697,7 +681,7 @@ internal static class CorePowerSupport
         {
             foreach (PredictedCard card in playerState.Hand)
             {
-                if (!card.Preview.ShouldRetainThisTurn)
+                if (!card.ShouldRetainThisTurn(simulator.State))
                     (toFlush ??= []).Add(card);
             }
         }
@@ -744,11 +728,18 @@ internal static class CorePowerSupport
         return Math.Max(0, (int)Math.Floor(damage));
     }
 
-    private static void ApplyAll<T>(SimulatedCombatState combat, CardModel card, int amount)
+    private static bool ApplyAll<T>(CombatPredictionSimulator simulator, SimulatedCombatState combat, CardModel card, int amount)
         where T : PowerModel
     {
-        foreach (Creature enemy in combat.HittableEnemies)
+        Creature[] targets = combat.HittableEnemies.ToArray();
+        foreach (Creature enemy in targets)
+        {
             combat.Apply<T>(enemy, amount, card.Owner.Creature);
+            PowerLifecycleSupport.ResolvePowerAmountChanges(simulator, combat);
+            if (simulator.HasPendingChoice)
+                return false;
+        }
+        return true;
     }
 
     private static void Tick<T>(SimulatedCombatState combat, Creature creature) where T : PowerModel
