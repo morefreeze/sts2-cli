@@ -120,6 +120,9 @@ public class RunSimulator
 
     private bool _eventOptionChosen;
     private int _lastEventOptionCount;
+    // An event option can remain suspended across a card/bundle prompt. Keep the
+    // outer task so resolving that prompt cannot publish a half-finished event.
+    private Task? _eventChoiceTask;
 
     // Pending rewards for card selection (populated after combat, before proceeding)
     private List<Reward>? _pendingRewards;
@@ -2086,24 +2089,16 @@ public class RunSimulator
                         _eventOptionChosen = true;
                         _lastEventOptionCount = options.Count;
                         // Run on thread pool so GetSelectedCards/GetSelectedCardReward can block
-                        var task = Task.Run(() => options[optionIndex].Chosen());
-                        for (int i = 0; i < 100; i++)
-                        {
-                            _syncCtx.Pump();
-                            if (_cardSelector.HasPending || _cardSelector.HasPendingReward) break;
-                            if (_pendingBundles != null) break;
-                            if (task.IsCompleted) break;
-                            Thread.Sleep(10);
-                        }
+                        _eventChoiceTask = Task.Run(() => options[optionIndex].Chosen());
+                        SettleEventChoiceTask();
                         if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
                         {
                             WaitForActionExecutor();
                             return DetectDecisionPoint();
                         }
-                        if (!task.IsCompleted) task.Wait(2000);
                         _syncCtx.Pump();
                     }
-                    catch (Exception ex) { Log($"Event choose: {ex.Message}"); }
+                    catch (Exception ex) { return ErrorWithTrace("Event choose failed", ex); }
                 }
 
                 // Note: do NOT force-finish on `optCountAfter == optCountBefore`. Events can
@@ -2203,10 +2198,33 @@ public class RunSimulator
 
     #region Decision Point Detection
 
+    private void SettleEventChoiceTask()
+    {
+        var task = _eventChoiceTask;
+        if (task == null) return;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (!task.IsCompleted)
+        {
+            _syncCtx.Pump();
+            if (HasSurfaceablePrompt) return;
+            if (clock.ElapsedMilliseconds >= 30_000)
+                throw new TimeoutException("Event choice did not settle at an input boundary within 30 seconds");
+            Thread.Sleep(1);
+        }
+        _eventChoiceTask = null;
+        task.GetAwaiter().GetResult();
+        _syncCtx.Pump();
+    }
+
     private Dictionary<string, object?> DetectDecisionPoint()
     {
         if (_runState == null)
             return Error("No run in progress");
+
+        // A selector TCS may schedule its event continuation on the thread pool.
+        // ActionExecutor can already be idle while the upgrade/relic/event page is
+        // still changing. Wait for the owning event task, not a guessed delay.
+        SettleEventChoiceTask();
 
         var player = _runState.Players[0];
 
