@@ -102,7 +102,7 @@ def combat_identity(state):
 
 
 def reuse_cached_result(old,expected,retry_errors=False):
-    keys=('case_id','option_index','repeat','budget_ms','engine_dll_sha256','engine_cli_sha256','continuation_id')
+    keys=('case_id','option_index','repeat','budget_ms','engine_dll_sha256','engine_cli_sha256','engine_stubs_sha256','engine_localization_sha256','continuation_id')
     if any(old.get(k)!=expected.get(k) for k in keys):
         raise ValueError('cached result identity drift')
     return old.get('status')=='completed' or not retry_errors
@@ -231,7 +231,12 @@ def engine_identity(args):
     install_hash=hashlib.sha256((args.game_dir/'sts2.dll').read_bytes()).hexdigest()
     if raw_hash!=install_hash:raise RuntimeError('CLI original DLL does not match installed game')
     if release['version']!='v0.113.1':raise RuntimeError('collector needs audited v0.113.1')
+    localization={str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
+                  for folder in ('localization_eng','localization_zhs')
+                  for p in sorted((ROOT/folder).glob('*.json'))}
+    stubs_hash=hashlib.sha256((args.engine.parent/'GodotSharp.dll').read_bytes()).hexdigest()
     return {'game_version':release['version'],'dll_sha256':hashlib.sha256(dll.read_bytes()).hexdigest(),
+            'stubs_sha256':stubs_hash,'localization_sha256':canonical_hash(localization),
             'original_dll_sha256':raw_hash,'cli_sha256':hashlib.sha256(args.engine.read_bytes()).hexdigest(),'policy_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()}
 
 
@@ -337,7 +342,7 @@ def verify_cases(args):
     for path in selected_cases(args):
         case=json.loads(path.read_text())
         if (case['engine']['dll_sha256']!=identity['dll_sha256']
-                or case['engine']['cli_sha256']!=identity['cli_sha256']):raise RuntimeError('engine changed since discovery')
+                or any(case['engine'].get(k)!=identity.get(k) for k in ('cli_sha256','stubs_sha256','localization_sha256'))):raise RuntimeError('engine changed since discovery')
         checks=[];future=[]
         for repeat in range(args.repetitions):
             with Client(args,f'verify-{case["case_id"]}-{repeat}') as cli:
@@ -367,7 +372,8 @@ def branch(args,case_path,case,option,repeat):
     dest=case_path.parent/(name+'.json')
     row={'schema_version':1,'case_id':case['case_id'],'seed':case['seed'],'option_id':option['id'],'option_index':option['index'],
          'repeat':repeat,'budget_ms':args.budget_ms,'solver_threads':1,'horizon':case['horizon'],
-         'engine_dll_sha256':identity['dll_sha256'],'engine_cli_sha256':identity['cli_sha256'],'continuation_id':case['continuation_id'],
+         'engine_dll_sha256':identity['dll_sha256'],'engine_cli_sha256':identity['cli_sha256'],
+         'engine_stubs_sha256':identity['stubs_sha256'],'engine_localization_sha256':identity['localization_sha256'],'continuation_id':case['continuation_id'],
          'restore_verified':False,'plans':0,'solver_actions':0,'status':'technical_error'}
     if dest.exists():
         old=json.loads(dest.read_text())
@@ -379,7 +385,7 @@ def branch(args,case_path,case,option,repeat):
     start=time.monotonic()
     try:
         if (identity['dll_sha256']!=case['engine']['dll_sha256']
-                or identity['cli_sha256']!=case['engine']['cli_sha256']):raise RuntimeError('branch engine drift')
+                or any(case['engine'].get(k)!=identity.get(k) for k in ('cli_sha256','stubs_sha256','localization_sha256'))):raise RuntimeError('branch engine drift')
         with Client(args,case['case_id']+'-'+name) as cli, dest.with_suffix('.jsonl').open('w',buffering=1) as log:
             state=restore(cli,case_path.parent,case)
             row['restore_verified']=True;row['restore_sha256']=canonical_hash(state)
