@@ -2033,7 +2033,7 @@ if __name__ == "__main__":
     parser.add_argument("--auto", action="store_true", help="Auto-play with simple AI")
     parser.add_argument("--seed", type=str, default=None, help="Random seed")
     parser.add_argument("--character", type=str, default="Ironclad",
-                       choices=["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"],
+                       choices=["Ironclad", "Silent", "Defect", "Regent", "Necrobinder", "Fool"],
                        help="Character to play")
     parser.add_argument("--ascension", type=int, default=0,
                        choices=range(0, 11), metavar="0-10",

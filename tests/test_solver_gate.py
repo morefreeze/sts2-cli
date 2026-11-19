@@ -953,3 +953,14 @@ def test_main_rejects_a_negative_game_index_offset_before_any_game(monkeypatch, 
         _main_calls(monkeypatch, ["2", "Silent", "--batch-id", "b-9",
                                   "--game-index-offset", "-1"])
     assert "--game-index-offset must be >= 0" in capsys.readouterr().err
+
+
+def test_collection_profile_reports_actual_millisecond_budget():
+    assert play_full_run.solver_budget_seconds({'STS2_COLLECTION_BUDGET_MS':'3500'})==3.5
+    assert play_full_run.solver_budget_seconds({'STS2_SOLVER_BUDGET':'30','STS2_COLLECTION_BUDGET_MS':'12000'})==12
+
+
+@pytest.mark.parametrize('bad',['999','30001','0','-1','3.5','abc'])
+def test_invalid_collection_profile_cannot_be_mislabeled_as_default(bad):
+    with pytest.raises(ValueError,match='STS2_COLLECTION_BUDGET_MS'):
+        play_full_run.solver_budget_seconds({'STS2_COLLECTION_BUDGET_MS':bad})

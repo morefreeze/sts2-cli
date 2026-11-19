@@ -1336,3 +1336,11 @@ def test_resume_of_a_complete_batch_says_so_and_writes_nothing(env, capsys):
         out = capsys.readouterr().out
         assert "already complete" in out and "nothing to resume" in out
     assert _fake_lane_files(env) == []
+
+
+def test_fool_native_cli_lane_is_available_and_uses_solver():
+    import play_full_run
+    args=run_batch.parse_args(['--name','fool-a9','--games','5','--chars','Fool','--ascension','9'])
+    assert args.chars==['Fool']
+    assert 'Fool' in play_full_run.solver_characters({})
+    assert 'Fool' in run_batch.parse_args(['--name','full','--games','5','--chars','all']).chars

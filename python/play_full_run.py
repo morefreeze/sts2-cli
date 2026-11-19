@@ -36,7 +36,7 @@ from combat_plan_driver import (
     _execute_combat_plan_actions,
 )
 
-VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
+VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder", "Fool"]
 
 # Which characters route their combat_play decisions through the ported
 # Combat Solver (plan_combat_turn) instead of the simple one-card-at-a-time
@@ -105,7 +105,7 @@ SOLVER_STALE_REFUSALS_PER_TURN = 3
 ENGINE_REPLY_TIMEOUT_S = 120
 
 
-def solver_budget_seconds(env=None) -> int:
+def solver_budget_seconds(env=None) -> int | float:
     """Resolve STS2_SOLVER_BUDGET to one of SOLVER_BUDGET_TIERS_S.
 
     Unset/blank means the validated default. Anything else must be a tier
@@ -114,6 +114,11 @@ def solver_budget_seconds(env=None) -> int:
     different budget than the one it is labelled with.
     """
     env = os.environ if env is None else env
+    collection = (env.get("STS2_COLLECTION_BUDGET_MS") or "").strip()
+    if collection:
+        if not collection.isdigit() or not 1000 <= int(collection) <= 30000:
+            raise ValueError("STS2_COLLECTION_BUDGET_MS must be between 1000 and 30000")
+        return int(collection) / 1000
     raw = (env.get("STS2_SOLVER_BUDGET") or "").strip()
     if not raw:
         return SOLVER_BUDGET_DEFAULT_S

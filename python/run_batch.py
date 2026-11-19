@@ -68,7 +68,7 @@ BATCHES_DIR = ROOT / "logs" / "batches"
 
 # Same list as play_full_run.VALID_CHARACTERS (a test pins the two together);
 # importing play_full_run here would pull in the engine plumbing for nothing.
-CHARACTERS = ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder")
+CHARACTERS = ("Ironclad", "Silent", "Defect", "Regent", "Necrobinder", "Fool")
 KINDS = ("regression", "ab", "smoke")
 
 # The macOS/Steam default every other entry point (play_full_run, combat_env,
