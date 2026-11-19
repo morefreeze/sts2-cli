@@ -18,12 +18,18 @@ def make_case(seed="seed-0", number=0, damage=9):
              "player": {"hp": 45, "max_hp": 70, "gold": 80,
                         "deck": [{"id": "CARD.STRIKE_FOOL", "cost": 1, "type": "Attack", "stats": {"damage": 6}}] * 5,
                         "relics": [], "potions": []}}
+    future_state = {"decision": "combat_play", "context": {"act": 1, "floor": number + 3, "room_type": "Monster"},
+                    "enemies": [{"id": "TEST_ENEMY", "hp": 20}], "hand": [{"id": "CARD.TEST_ATTACK"}]}
+    future_hash = ranker.state_digest(future_state)
+    combat_identity = {"act": 1, "floor": number + 3, "room_type": "Monster", "enemyIds": ["TEST_ENEMY"]}
     case = {"schema_version": 1, "case_id": f"{seed}-{number}", "seed": seed,
             "character": "Fool", "ascension": 9, "horizon": "next_combat",
             "state": state, "state_sha256": ranker.state_digest(state), "restore_verified": True,
             "engine": {"game_version": "v0.113.1", "dll_sha256": "a" * 64, "cli_sha256": "b" * 64, "policy_commit": "test-only"},
-            "future_control_verified": True, "future_control_initial_sha256": "c" * 64,
-            "future_control_checks": ["c" * 64] * 3, "restore_checks": [ranker.state_digest(state)] * 3,
+            "future_control_verified": True, "future_control_initial_sha256": future_hash,
+            "future_control_initial_state": future_state, "future_control_combat_identity": combat_identity,
+            "future_control_option_index": 0, "continuation_commands": [],
+            "future_control_checks": [future_hash] * 3, "restore_checks": [ranker.state_digest(state)] * 3,
             "continuation_id": "fixed-next-room", "heuristic_option_index": 0,
             "heuristic_option_id": cards[0]["id"], "options": [], "results": []}
     for c in cards:
@@ -38,11 +44,11 @@ def make_case(seed="seed-0", number=0, damage=9):
                 "continuation_id": case["continuation_id"], "budget_ms": 3500,
                 "restore_verified": True, "restore_sha256": case["state_sha256"],
                 "engine_dll_sha256": case["engine"]["dll_sha256"], "engine_cli_sha256": case["engine"]["cli_sha256"],
-                "combat_initial_sha256": "d" * 64, "status": "completed",
+                "combat_initial_sha256": future_hash if opt["index"] == 0 else "d" * 64, "status": "completed",
                 "survived": True, "hp_start": 45, "max_hp_start": 70,
                 "hp_end": {0: 38, 1: 30, -1: 20}[opt["index"]], "max_hp_end": 70,
                 "plans": 2, "solver_actions": 4, "rounds": 2,
-                "combat_identity": {"act": 1, "floor": number + 3, "enemyIds": ["TEST_ENEMY"]}})
+                "combat_identity": deepcopy(combat_identity)})
     return case
 
 
@@ -268,3 +274,70 @@ def test_same_option_must_reveal_identical_initial_combat_in_every_repeat():
     case = make_case()
     case["results"][0]["combat_initial_sha256"] = "e" * 64
     assert not ranker.prepare_cases([case])[0]
+
+
+def test_three_identical_wrong_future_controls_do_not_prove_original_state():
+    case = make_case()
+    case["future_control_initial_sha256"] = "e" * 64
+    case["future_control_checks"] = ["e" * 64] * 3
+    for result in case["results"]:
+        if result["option_index"] == 0:
+            result["combat_initial_sha256"] = "e" * 64
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_original_full_combat_hash_detects_changed_hand():
+    case = make_case()
+    case["future_control_initial_state"]["hand"] = [{"id": "CARD.OTHER_DRAW"}]
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_original_control_identity_must_match_its_full_state():
+    case = make_case()
+    case["future_control_combat_identity"]["enemyIds"] = ["OTHER_ENEMY"]
+    for result in case["results"]:
+        result["combat_identity"]["enemyIds"] = ["OTHER_ENEMY"]
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_identical_branch_encounters_must_match_original_process_control():
+    case = make_case()
+    for result in case["results"]:
+        result["combat_identity"]["floor"] += 1
+    assert not ranker.prepare_cases([case])[0]
+
+
+@pytest.mark.parametrize("field,value", [("future_control_initial_state", None),
+    ("future_control_option_index", -1), ("continuation_commands", None)])
+def test_original_control_evidence_must_be_complete(field, value):
+    case = make_case()
+    case[field] = value
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_original_anchor_must_be_a_combat_not_a_matching_noncombat_hash():
+    case = make_case()
+    case["future_control_initial_state"]["decision"] = "map_select"
+    future_hash = ranker.state_digest(case["future_control_initial_state"])
+    case["future_control_initial_sha256"] = future_hash
+    case["future_control_checks"] = [future_hash] * 3
+    for result in case["results"]:
+        if result["option_index"] == 0:
+            result["combat_initial_sha256"] = future_hash
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_control_branch_initial_observation_must_match_original_full_state():
+    case = make_case()
+    for result in case["results"]:
+        if result["option_index"] == 0:
+            result["combat_initial_sha256"] = "f" * 64
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_frozen_original_control_can_be_skip():
+    case = make_case()
+    case.update(heuristic_option_index=-1, heuristic_option_id="SKIP", future_control_option_index=-1)
+    for result in case["results"]:
+        result["combat_initial_sha256"] = case["future_control_initial_sha256"] if result["option_index"] == -1 else "d" * 64
+    assert len(ranker.prepare_cases([case])[0]) == 1

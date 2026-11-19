@@ -7,7 +7,9 @@ logs/experiments/fool-a9-offline/ and have no online loading path.
 Schema 1 uses one record per card reward: full ``state`` + SHA256, engine
 fingerprint, legal ``options`` (index identifies duplicate card IDs), the frozen
 heuristic choice, and ``results`` for repeated next-combat branches. See the
-collector's dataset.jsonl. Technical errors and unverified branches are never
+collector's dataset.jsonl. The original process's full control-combat state
+anchors the repeated replay hashes and every branch's encounter identity.
+Technical errors and unverified branches are never
 losses. All options need three independent, stable repetitions at ONE common
 budget and the same continuation and next combat. Labels compare survival
 first, then remaining HP; overlapping observed HP ranges are left unordered.
@@ -180,6 +182,23 @@ def _validate_case(case: dict):
             or len(case.get("restore_checks") or []) < 3
             or any(h != case["state_sha256"] for h in case["restore_checks"])):
         raise ValueError("unverified_future_control")
+    original = case.get("future_control_initial_state")
+    if (not isinstance(original, dict) or original.get("decision") != "combat_play"
+            or state_digest(original) != future_hash):
+        raise ValueError("original_control_state_mismatch")
+    ctx, enemies = original.get("context"), original.get("enemies")
+    if (not isinstance(ctx, dict) or not isinstance(enemies, list) or not enemies
+            or any(not isinstance(enemy, dict) for enemy in enemies)
+            or any(type(ctx.get(k)) is not int or ctx[k] < 1 for k in ("act", "floor"))):
+        raise ValueError("invalid_original_control_identity")
+    original_identity = {"act": ctx["act"], "floor": ctx["floor"], "room_type": ctx.get("room_type"),
+                         "enemyIds": [enemy.get("id", enemy.get("name")) for enemy in enemies]}
+    if case.get("future_control_combat_identity") != original_identity:
+        raise ValueError("original_control_identity_mismatch")
+    continuation = case.get("continuation_commands")
+    if (not isinstance(continuation, list)
+            or any(not isinstance(cmd, dict) or not isinstance(cmd.get("cmd"), str) for cmd in continuation)):
+        raise ValueError("missing_frozen_continuation_commands")
     engine = case.get("engine") or {}
     if (engine.get("game_version") != "v0.113.1"
             or not _is_sha256(engine.get("dll_sha256")) or not engine.get("policy_commit")
@@ -207,6 +226,9 @@ def _validate_case(case: dict):
     heuristic = next((o for o in options if o["index"] == case.get("heuristic_option_index")), None)
     if heuristic is None or heuristic["id"] != case.get("heuristic_option_id"):
         raise ValueError("missing_heuristic_baseline")
+    if (type(case.get("future_control_option_index")) is not int
+            or case["future_control_option_index"] != heuristic["index"]):
+        raise ValueError("original_control_option_mismatch")
 
 
 def _branch_error(case: dict, row: dict) -> str | None:
@@ -228,6 +250,9 @@ def _branch_error(case: dict, row: dict) -> str | None:
             return "branch_" + field + "_mismatch"
     if not any(o["index"] == row.get("option_index") and o["id"] == row.get("option_id") for o in case["options"]):
         return "unknown_option"
+    if (row["option_index"] == case["future_control_option_index"]
+            and row["combat_initial_sha256"] != case["future_control_initial_sha256"]):
+        return "control_branch_initial_observation_mismatch"
     if type(row.get("repeat")) is not int or type(row.get("budget_ms")) is not int or row["budget_ms"] <= 0:
         return "missing_repeat_or_budget"
     if (any(type(row.get(k)) is not int or row[k] <= 0 for k in ("plans", "solver_actions"))
@@ -238,6 +263,8 @@ def _branch_error(case: dict, row: dict) -> str | None:
             or any(type(combat.get(k)) is not int or combat[k] < 1 for k in ("act", "floor"))
             or not (combat.get("encounter") or combat.get("enemyIds"))):
         return "missing_combat_outcome"
+    if combat != case["future_control_combat_identity"]:
+        return "branch_original_control_combat_mismatch"
     for hp, max_hp in (("hp_start", "max_hp_start"), ("hp_end", "max_hp_end")):
         if (type(row.get(hp)) not in (int, float) or type(row.get(max_hp)) not in (int, float)
                 or not math.isfinite(row[hp]) or not math.isfinite(row[max_hp])
