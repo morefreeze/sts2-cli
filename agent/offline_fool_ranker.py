@@ -16,8 +16,9 @@ first, then remaining HP; overlapping observed HP ranges are left unordered.
 
 Features are pre-choice facts and explicit candidate/context interactions.
 There are no seed, option-index, raw card-ID, future-result or run-outcome
-features. Fool effect semantics reuse the checked metadata helper (e.g. Cards
-is not always draw); those estimates are features, never outcome labels.
+features. Official Fool trigger/effect facts resolve checked metadata upgrades
+and observed DynamicVars (e.g. Cards is not always draw). No heuristic card
+values, guessed uptime or effect conversion rates enter this feature version.
 """
 from __future__ import annotations
 
@@ -31,30 +32,142 @@ import json
 import math
 from pathlib import Path
 from typing import Callable, Iterable
+import unicodedata
 
 import numpy as np
 
 from agent import fool_scoring
 
 SCHEMA_VERSION = 1
-FEATURE_VERSION = 1
+FEATURE_VERSION = 2
 HORIZON = "next_combat"
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "logs/experiments/fool-a9-offline"
 _ENERGY_RELICS = {"LANTERN", "VERY_HOT_COCOA", "VENERABLE_TEA_SET", "PHILOSOPHERS_STONE",
                   "PUMPKIN_CANDLE", "SOZU", "SPIKED_GAUNTLETS", "VELVET_CHOKER",
                   "WHISPERING_EARRING", "BLESSED_ANTLER", "BLOOD_SOAKED_ROSE", "BREAD"}
+# Exact official titles, not substring matches. Real CLI relic observations can
+# contain only bilingual names. These aliases were checked in eng/zhs relics.json.
+_ENERGY_RELIC_TITLES = ("Lantern", "灯笼", "Very Hot Cocoa", "烫嘴可可", "Venerable Tea Set", "古茶具套装",
+    "Philosopher's Stone", "贤者之石", "Pumpkin Candle", "南瓜蜡烛", "Sozu", "添水", "Spiked Gauntlets", "带刺手甲",
+    "Velvet Choker", "天鹅绒颈圈", "Whispering Earring", "低语耳环", "Blessed Antler", "赐福鹿角",
+    "Blood-Soaked Rose", "血染玫瑰", "Bread", "面包")
+
+# A semantic compilation of the installed v0.113.1 PCK's card templates, checked
+# against the corresponding smartDescription where present. Strings below name
+# metadata/runtime DynamicVars; numeric literals are counts printed in the card
+# text (e.g. one random Tarot), never hand-assigned card values. Columns describe
+# amounts AND triggers separately: no guessed uptime, conversion rates or value
+# weights. "requires_*" means a component has that condition, not that every
+# effect or the card itself is unusable without it. Card IDs only resolve facts.
+_MECHANISM_PROVENANCE = {
+    "game_version": "v0.113.1", "source": "official game PCK eng/cards.json + eng/powers.json; Fool keys only",
+    "card_description_count": 90,
+    "card_descriptions_sha256": "3d05cb76c3f7f13f832bd3fb7b8e75856550b338c5923b386541119ce339d17d",
+    "power_description_count": 25,
+    "power_descriptions_sha256": "f048f37d8b53ecf5d3abd4b2506a23851c0a8806042acefe0ac87c9f173ac31d",
+    "amount_source": "data/fool_card_metadata.json upgrade deltas, overridden by observed numeric DynamicVars",
+    "interpretation": "effect quantities and trigger requirements, not expected per-play values or score priors"}
+_CARD_FACTS = {
+    "ALL_IS_WELL": {"on_sadness_block": "alliswellpower"},
+    "ANGUISH": {"damage_per_sadness_created": "extradamage"},
+    "ARCHERY": {"start_turn_aim": "aimpower"},
+    "ARROW_STAB": {"shot_discard_hand": 1, "requires_arrow": 1},
+    "BLOSSOM_SHOT": {"stretch_equals_damage": 1},
+    "BLOT_OUT_THE_SKY": {"random_shot_hand": 1, "created_shot_free": 1},
+    "BOUNCE": {"stretch": "stretchpower", "next_turn_self_return": 1},
+    "BOW_SMACK": {"energy_if_impaled": "energy", "requires_impaled": 1},
+    "BRACE": {"aim": "aimpower", "aim_times_x": 1},
+    "BRIGHTEN_UP": {"sadness": "sadness", "joy_hand": "joy"},
+    "CHO_BARBS": {"thorns_this_turn": "chobarbspower"},
+    "CHO_CHORUS": {"play_wah_ki_in_hand": 1},
+    "CHO_FIRM": {"block_if_arrow": "block", "requires_arrow": 1},
+    "CHO_KI": {"regain_spent_stretch": 1},
+    "CHO_LIMBS": {"block_repeat": 2, "cost_reduction_conditional": "melodycostreduction", "requires_wah": 1, "requires_ki": 1, "requires_any_melody": 1},
+    "CHO_READY": {"aim": "aimpower"},
+    "CODA": {"cost_reduction_per_melody": "costreductionpermelody"},
+    "COMPOST": {"on_enemy_death_energy": "energy"},
+    "COVERING_FIRE": {"on_shot_ally_block": "coveringfirepower"},
+    "DEEP_STRETCH": {"stretch": "stretchpower", "draw": "cards"},
+    "DISLIKE_YOU": {"shot_bonus_pct_this_turn": "dislikeyoupower"},
+    "ECSTASY": {"start_turn_sadness_to_joy": "cards"},
+    "ENCORE": {"energy": "energy", "draw": "cards", "remaining_play_limit": "encorepower"},
+    "ENNUI": {"start_turn_sadness": 1, "start_turn_draw": "ennuipower"},
+    "ENRAPTURE": {"ally_vigor": "vigorpower", "ally_stretch": "stretchpower"},
+    "ENSEMBLE": {"ally_free_plays": "cards"},
+    "EPIC_RETRIEVAL": {"energy_on_dislodge": "energy", "requires_impaled": 1},
+    "EXPLOSIVE_ARROWS": {"on_impale_aoe_damage": "explosivearrowspower"},
+    "FLORESCENCE": {"exhaust_all_shots": 1, "create_the_shot": 1},
+    "GROWTH": {"stretch_per_sadness_exhausted": "calculationextra", "exhaust_all_sadness": 1},
+    "HARMONIC_SHIELD": {"block_per_melody": "calculationextra"},
+    "HEAVY_SHOT": {"shot_aim_multiplier": "aimmultiplier"},
+    "HIDDEN_ROOTS": {"start_turn_stretch": "hiddenrootspower"},
+    "HONING": {"arrow_damage_bonus_pct": "honingpower"},
+    "JEST": {"sadness": "cards"},
+    "KI_CHANT": {"look_at_top": "cards", "select_to_hand": 1},
+    "KI_HOP": {"draw_if_impaled": "cards", "requires_impaled": 1},
+    "KI_REST": {"energy_next_turn": "energy", "retain_hand_conditional": 1, "requires_wah": 1, "requires_cho": 1, "requires_any_melody": 1},
+    "KI_VERSE": {"repeat_named_cards": "kiversepower"},
+    "KI_WHIP": {"energy_next_turn": "energy"},
+    "LOCKED_IN": {"shot_draw_hand": 1},
+    "LOST_LUTE": {"on_melody_autoplay": "lostlutepower"},
+    "LULLABY": {"on_all_melodies_block": "lullabypower", "requires_wah": 1, "requires_cho": 1, "requires_ki": 1, "requires_all_melodies": 1},
+    "MELODIC_SHOT": {"extra_hits_per_melody": "calculationextra"},
+    "MOTIF": {"on_melody_draw": "motifpower"},
+    "MOURNING_BLOW": {"sadness": 1, "self_to_sadness": 1},
+    "MYTHIC_FORM": {"start_turn_tarot": 1},
+    "NAIL": {"requires_impaled": 1},
+    "NOCK": {"aim": "aimpower"},
+    "PUNCH_OF_JOY": {"sadness_to_joy": 1},
+    "QUIETUS": {"next_shot_multiplier": "quietuspower", "next_shot_destroys_arrow": 1},
+    "QUIVER": {"arrow_capacity": "repeat"},
+    "RAIN_SHOT": {"shot_damage_to_other_enemies": 1},
+    "RECALL": {"discard_to_draw_top": 1, "requires_impaled": 1},
+    "REPEAT_SHOT": {"hits_x": 1},
+    "RHYTHM_STRIKE": {"extra_hits_per_melody": "calculationextra"},
+    "RUMMAGE": {"draw": "cards", "sadness": 1},
+    "SELF_DEPRECATE": {"sadness": "sadness", "ally_joy_hand": "joy"},
+    "SERRATED_ARROWS": {"impaled_damage_bonus_pct": "serratedarrowspower", "requires_impaled": 1},
+    "SHOW_OFF": {"aim": "aimpower", "permanent_aim_on_kill": "showoffpower"},
+    "SIMPLETON": {"end_turn_autoplay": "simpletonpower"},
+    "SONG_PATH": {"on_cho_block": "songpathpower", "requires_cho": 1},
+    "SORROWFUL_STRIKE": {"sadness": "cards"},
+    "STEADY_CADENCE": {"draw_per_melody": "calculationextra"},
+    "TIMBER": {"on_kill_aoe_damage": "onkilldamage"},
+    "TRICK_SHOT": {"self_return_after_play": 1},
+    "TUNE": {"end_turn_free_plays": 1, "requires_ki": 1},
+    "UPROOT": {"requires_impaled": 1, "dislodges_arrow": 1},
+    "VIOLENT_CHORD": {"on_wah_damage": "violentchordpower", "requires_wah": 1},
+    "VITRIOL": {"sadness": 1},
+    "WAH_BLAST": {"conditional_extra_hits": 1, "requires_cho": 1, "requires_ki": 1, "requires_any_melody": 1},
+    "WAH_CHO_KI": {"draw": "cards"},
+    "WAH_HAMMER": {"impaled_damage_multiplier": 2, "requires_impaled": 1},
+    "WAH_KI": {"energy_next_turn": "energy", "draw_next_turn": "cards"},
+    "WAH_SYMPHONY": {"damage_per_named_card": "extradamage"},
+    "WHISTLING_ARROWS": {"on_shot_self_return": 1},
+    "WREST": {"draw_if_impaled": "cards", "requires_impaled": 1, "dislodges_arrow": 1},
+    "YAH": {"on_first_dislodge_energy": "energy"},
+    "YOGA": {"stretch": "stretchpower"}}
+_CORE_EFFECTS = {"aim", "draw", "energy", "sadness"}
+_MECHANISMS = tuple(sorted({k for facts in _CARD_FACTS.values() for k in facts} - _CORE_EFFECTS
+                         | {"damage_per_hit", "shot_aim_multiplier"}))
+_DECK_MECHANISMS = ("start_turn_stretch", "start_turn_aim", "start_turn_draw", "arrow_capacity",
+                   "on_sadness_block", "start_turn_sadness", "on_cho_block", "on_wah_damage", "on_melody_draw")
 _CANDIDATE = ("skip", "cost", "x_cost", "attack_type", "skill_type", "power_type", "status_type",
               "upgraded", "attack", "defense", "draw", "energy", "aim", "hits", "sadness",
               "weak", "vulnerable", "aoe", "shot", "exhaust", "retain", "wah", "cho", "ki",
-              "duplicate_count", "new_melodies")
+              "duplicate_count", "new_melodies") + _MECHANISMS
 _CONTEXT = ("hp_ratio", "hp_missing", "act", "floor", "deck_size", "deck_attack", "deck_defense",
             "deck_draw", "deck_energy", "deck_aim", "deck_sadness", "deck_cost", "deck_attack_fraction",
             "deck_skill_fraction", "deck_power_fraction", "deck_upgraded_fraction", "deck_shot_fraction",
-            "deck_wah", "deck_cho", "deck_ki", "relic_count", "energy_relic", "potion_count", "gold")
+            "deck_wah", "deck_cho", "deck_ki", "relic_count", "energy_relic", "potion_count", "gold") + tuple(
+                f"deck_{k}" for k in _DECK_MECHANISMS)
 _CROSSES = tuple((a, b) for a in ("skip", "attack", "defense", "draw", "energy", "cost")
                  for b in ("hp_missing", "deck_size", "act", "relic_count"))
 _SPECIAL = ("attack_need", "defense_need", "draw_need", "energy_support", "aim_shots", "shot_aim",
-            "sadness_support", "melody_support")
+            "sadness_support", "melody_support", "required_cho_missing", "required_wah_missing", "required_ki_missing",
+            "cho_trigger_support", "wah_trigger_support", "melody_draw_support", "all_melodies_missing",
+            "cho_supports_existing_block", "named_supports_existing_draw", "arrow_capacity_support", "shot_capacity_support",
+            "sadness_block_support", "sadness_supports_existing_block", "sadness_damage_support", "sadness_conversion_support")
 FEATURE_NAMES = tuple([f"candidate.{k}" for k in _CANDIDATE] + [f"context.{k}" for k in _CONTEXT]
                       + [f"interaction.{a}_x_{b}" for a, b in _CROSSES]
                       + [f"interaction.{k}" for k in _SPECIAL])
@@ -81,21 +194,40 @@ def _id(value) -> str:
     return str(value).upper().removeprefix("CARD.").removeprefix("RELIC.")
 
 
+def _normalized_name(value: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKC", value).casefold() if c.isalnum())
+
+
+def _energy_relic(value) -> bool:
+    if isinstance(value, dict):
+        return any(_energy_relic(value[k]) for k in ("id", "name", "en", "zh") if k in value)
+    if not isinstance(value, str):
+        return False
+    aliases = {_normalized_name(s) for s in (*_ENERGY_RELICS, *_ENERGY_RELIC_TITLES)}
+    return _normalized_name(_id(value)) in aliases
+
+
 def _card_values(card: dict, deck: list[dict]) -> dict[str, float]:
     meta = fool_scoring.METADATA.get(_id(card), {})
-    stats = {str(k).lower(): _number(v) for k, v in (card.get("stats") or {}).items()}
-    cost = _number(card.get("cost"), meta.get("cost", 0))
-    if meta:
-        effect = fool_scoring.effects(card, deck)
-    else:
-        # Unknown cards use only explicit numeric facts. Never treat a generic
-        # `cards` DynamicVar as actual draw without a semantic annotation.
-        effect = {"attack": stats.get("damage", 0) * max(1., stats.get("hitcount", 1)),
-                  "defense": stats.get("block", 0), "draw": stats.get("draw", 0),
-                  "energy": stats.get("energy", 0), "aim": stats.get("aimpower", 0),
-                  "hits": max(1., stats.get("hitcount", 1)), "sadness": stats.get("sadness", 0),
-                  "weak": stats.get("weakpower", stats.get("weak", 0)),
-                  "vulnerable": stats.get("vulnerablepower", stats.get("vulnerable", 0))}
+    stats = fool_scoring._stats(card) if meta else {str(k).lower(): _number(v) for k, v in (card.get("stats") or {}).items()}
+    fallback_cost = (meta.get("upgrade", {}).get("cost", meta.get("cost", 0))
+                     if card.get("upgraded") else meta.get("cost", 0))
+    cost = _number(card.get("cost"), fallback_cost)
+    facts = {key: _number(stats.get(source)) if isinstance(source, str) else float(source)
+             for key, source in _CARD_FACTS.get(_id(card), {}).items()}
+    mechanisms = {key: facts.get(key, 0.) for key in _MECHANISMS}
+    damage = stats.get("damage", stats.get("calculationbase", stats.get("calculateddamage", 0)))
+    hits = 0. if facts.get("hits_x") else max(1., _number(stats.get("hitcount"), 1.))
+    mechanisms["damage_per_hit"] = _number(damage)
+    if meta.get("shot"):
+        mechanisms["shot_aim_multiplier"] = facts.get("shot_aim_multiplier", 1.)
+    # Amounts are not expected values: next-turn energy, conditional draw, and
+    # persistent effects occupy their own columns. Stretch never becomes Block
+    # via a guessed conversion coefficient, nor does a generic Cards mean draw.
+    effect = {"attack": damage * hits, "defense": stats.get("block", 0) * facts.get("block_repeat", 1.),
+              **{key: facts.get(key, 0.) if meta else stats.get(key, 0.) for key in _CORE_EFFECTS},
+              "hits": hits, "weak": stats.get("weakpower", stats.get("weak", stats.get("power", 0))) if meta.get("weak") else stats.get("weak", 0),
+              "vulnerable": stats.get("vulnerablepower", stats.get("vulnerable", stats.get("power", 0))) if meta.get("vulnerable") else stats.get("vulnerable", 0)}
     kind = str(card.get("type") or meta.get("type", "")).lower()
     keywords = {str(k).lower() for k in card.get("keywords") or []}
     melodies = fool_scoring.melody_types(card) if meta else set()
@@ -107,7 +239,7 @@ def _card_values(card: dict, deck: list[dict]) -> dict[str, float]:
             "aoe": float(bool(meta.get("aoe") or card.get("target_type") == "AllEnemies")),
             "shot": float(bool(meta.get("shot"))), "exhaust": float("exhaust" in keywords),
             "retain": float("retain" in keywords),
-            **{v.lower(): float(v in melodies) for v in ("WAH", "CHO", "KI")}}
+            **{v.lower(): float(v in melodies) for v in ("WAH", "CHO", "KI")}, **mechanisms}
 
 
 def option_features(state: dict, option: dict) -> dict[str, float]:
@@ -122,10 +254,11 @@ def option_features(state: dict, option: dict) -> dict[str, float]:
                "floor": _number((state.get("context") or {}).get("floor")),
                "deck_size": float(len(deck)), "gold": _number(player.get("gold")),
                **{f"deck_{k}": avg(k) for k in ("attack", "defense", "draw", "energy", "aim", "sadness", "cost", "wah", "cho", "ki")},
+               **{f"deck_{k}": avg(k) for k in _DECK_MECHANISMS},
                **{f"deck_{a}_fraction": avg(b) for a, b in (("attack", "attack_type"), ("skill", "skill_type"),
                   ("power", "power_type"), ("upgraded", "upgraded"), ("shot", "shot"))},
                "relic_count": float(len(player.get("relics") or [])),
-               "energy_relic": float(bool({_id(r) for r in player.get("relics") or []} & _ENERGY_RELICS)),
+               "energy_relic": float(any(_energy_relic(r) for r in player.get("relics") or [])),
                "potion_count": float(sum(bool(p) for p in player.get("potions") or []))}
     context["hp_missing"] = 1. - context["hp_ratio"]
     skip = option.get("index") == -1 and option.get("id") == "SKIP"
@@ -146,7 +279,21 @@ def option_features(state: dict, option: dict) -> dict[str, float]:
                    "interaction.aim_shots": candidate["aim"] * context["deck_shot_fraction"],
                    "interaction.shot_aim": candidate["shot"] * candidate["hits"] * context["deck_aim"],
                    "interaction.sadness_support": candidate["sadness"] * context["deck_sadness"],
-                   "interaction.melody_support": sum(candidate[k] * context[f"deck_{k}"] for k in ("wah", "cho", "ki"))})
+                   "interaction.melody_support": sum(candidate[k] * context[f"deck_{k}"] for k in ("wah", "cho", "ki")),
+                   **{f"interaction.required_{k}_missing": candidate[f"requires_{k}"] * (context[f"deck_{k}"] == 0)
+                      for k in ("wah", "cho", "ki")},
+                   "interaction.cho_trigger_support": candidate["on_cho_block"] * context["deck_cho"],
+                   "interaction.wah_trigger_support": candidate["on_wah_damage"] * context["deck_wah"],
+                   "interaction.melody_draw_support": candidate["on_melody_draw"] * sum(context[f"deck_{k}"] for k in ("wah", "cho", "ki")),
+                   "interaction.all_melodies_missing": candidate["requires_all_melodies"] * sum(context[f"deck_{k}"] == 0 for k in ("wah", "cho", "ki")),
+                   "interaction.cho_supports_existing_block": candidate["cho"] * context["deck_on_cho_block"],
+                   "interaction.named_supports_existing_draw": sum(candidate[k] for k in ("wah", "cho", "ki")) * context["deck_on_melody_draw"],
+                   "interaction.arrow_capacity_support": candidate["arrow_capacity"] * context["deck_shot_fraction"],
+                   "interaction.shot_capacity_support": candidate["shot"] * context["deck_arrow_capacity"],
+                   "interaction.sadness_block_support": candidate["on_sadness_block"] * (context["deck_sadness"] + context["deck_start_turn_sadness"]),
+                   "interaction.sadness_supports_existing_block": candidate["sadness"] * context["deck_on_sadness_block"],
+                   "interaction.sadness_damage_support": candidate["damage_per_sadness_created"] * (context["deck_sadness"] + context["deck_start_turn_sadness"]),
+                   "interaction.sadness_conversion_support": (candidate["sadness_to_joy"] + candidate["start_turn_sadness_to_joy"]) * (context["deck_sadness"] + context["deck_start_turn_sadness"])})
     return {key: float(values[key]) for key in FEATURE_NAMES}
 
 
@@ -202,7 +349,8 @@ def _validate_case(case: dict):
     engine = case.get("engine") or {}
     if (engine.get("game_version") != "v0.113.1"
             or not _is_sha256(engine.get("dll_sha256")) or not engine.get("policy_commit")
-            or ("cli_sha256" in engine and not _is_sha256(engine["cli_sha256"])) or not case.get("continuation_id")):
+            or any(k in engine and not _is_sha256(engine[k]) for k in ("cli_sha256", "stubs_sha256", "localization_sha256"))
+            or not case.get("continuation_id")):
         raise ValueError("missing_engine_or_continuation")
     options = case.get("options") or []
     indices = [o.get("index") for o in options]
@@ -240,9 +388,10 @@ def _branch_error(case: dict, row: dict) -> str | None:
         return "unverified_branch_restore"
     if row.get("engine_dll_sha256") != case["engine"]["dll_sha256"]:
         return "branch_engine_mismatch"
-    if (case["engine"].get("cli_sha256") is not None
-            and row.get("engine_cli_sha256") != case["engine"]["cli_sha256"]):
-        return "branch_cli_mismatch"
+    for companion in ("cli", "stubs", "localization"):
+        key = f"{companion}_sha256"
+        if key in case["engine"] and row.get(f"engine_{key}") != case["engine"][key]:
+            return f"branch_{companion}_mismatch"
     if not _is_sha256(row.get("combat_initial_sha256")):
         return "missing_initial_combat_fingerprint"
     for field in ("seed", "case_id", "horizon", "continuation_id"):
@@ -421,6 +570,30 @@ def score_options(record: dict, artifact: dict) -> dict[int, float]:
             for o in record["options"]}
 
 
+def feature_collisions(cases: list[LabeledCase]) -> dict:
+    """Audit representation limits separately from fitting, including on ties."""
+    within = []
+    for case in cases:
+        groups = defaultdict(list)
+        for option, vector in case.vectors.items():
+            groups[tuple(vector)].append(option)
+        for indices in groups.values():
+            if len(indices) > 1:
+                options = [o for o in case.record["options"] if o["index"] in indices]
+                within.append({"case_id": case.case_id, "option_indices": sorted(indices),
+                    "card_ids": [o["id"] for o in options], "distinct_card_ids": len({o["id"] for o in options}),
+                    "confident_label_conflict": any(a in indices and b in indices for a, b, _ in case.pairs)})
+    neutral = {"context": {"act": 1, "floor": 1}, "player": {"deck": [], "hp": 1, "max_hp": 1}}
+    catalog = defaultdict(list)
+    for cid in sorted(fool_scoring.METADATA):
+        option = {"id": "CARD." + cid, "index": 0, "card": {"id": "CARD." + cid}}
+        catalog[tuple(option_features(neutral, option).values())].append(cid)
+    return {"within_decision": within, "within_decision_colliding_groups": len(within),
+            "catalog_card_count": len(fool_scoring.METADATA), "catalog_unique_vectors": len(catalog),
+            "catalog_neutral_deck_collisions": [ids for ids in catalog.values() if len(ids) > 1],
+            "interpretation": "identical vectors cannot learn different option preferences; neutral catalog collisions may separate with deck context"}
+
+
 def _fit(cases: list[LabeledCase], regularization: float) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
@@ -441,6 +614,9 @@ def _fit(cases: list[LabeledCase], regularization: float) -> dict:
 def train_records(records: list[dict]) -> tuple[dict | None, dict]:
     cases, diagnostics = prepare_cases(records)
     report = {"schema_version": SCHEMA_VERSION, "scope": "next_combat_only",
+              "feature_version": FEATURE_VERSION, "feature_count": len(FEATURE_NAMES),
+              "mechanism_provenance": {**_MECHANISM_PROVENANCE, "fact_table_sha256": state_digest(_CARD_FACTS)},
+              "feature_collisions": feature_collisions(cases),
               "validation_status": "insufficient_data", "full_run_win_rate_validated": False,
               "filtering": diagnostics, "accepted_seeds": sorted({c.seed for c in cases}),
               "label_definition": "stable survival first, then separated observed remaining-HP ranges",
@@ -478,6 +654,7 @@ def train_records(records: list[dict]) -> tuple[dict | None, dict]:
     model["validation_seeds"] = report["splits"]["validation"]["seeds"]
     model["test_seeds"] = report["splits"]["test"]["seeds"]
     model["engine"] = cases[0].record["engine"]
+    model["mechanism_provenance"] = report["mechanism_provenance"]
     model["feature_source_sha256"] = state_digest({"learner": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "fool_scoring": hashlib.sha256(Path(fool_scoring.__file__).read_bytes()).hexdigest(), "metadata": fool_scoring.METADATA})
     return model, report

@@ -341,3 +341,124 @@ def test_frozen_original_control_can_be_skip():
     for result in case["results"]:
         result["combat_initial_sha256"] = case["future_control_initial_sha256"] if result["option_index"] == -1 else "d" * 64
     assert len(ranker.prepare_cases([case])[0]) == 1
+
+
+def factual_option(cid, **overrides):
+    card = {"id": "CARD." + cid, **overrides}
+    return {"id": card["id"], "index": 0, "card": card}
+
+
+def test_real_powers_have_factual_timing_and_cho_requirement():
+    state = make_case()["state"]
+    roots = ranker.option_features(state, factual_option("HIDDEN_ROOTS"))
+    song = ranker.option_features(state, factual_option("SONG_PATH"))
+    assert roots != song
+    assert roots["candidate.start_turn_stretch"] == 3
+    assert roots["candidate.defense"] == 0  # Stretch is not Block already gained.
+    assert song["candidate.on_cho_block"] == 5
+    assert song["candidate.requires_cho"] == 1
+    assert song["interaction.required_cho_missing"] == 1
+    state["player"]["deck"].append({"id": "CARD.CHO_READY"})
+    supported = ranker.option_features(state, factual_option("SONG_PATH"))
+    assert supported["candidate.on_cho_block"] == 5
+    assert supported["interaction.required_cho_missing"] == 0
+    assert supported["interaction.cho_trigger_support"] > 0
+
+
+def test_factual_vars_apply_upgrades_and_runtime_override_without_value_helpers(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("heuristic value helper was used")
+    for name in ("effects", "base_score", "score_in_deck"):
+        monkeypatch.setattr(ranker.fool_scoring, name, forbidden)
+    state = make_case()["state"]
+    assert ranker.option_features(state, factual_option("SONG_PATH", upgraded=True))["candidate.on_cho_block"] == 7
+    assert ranker.option_features(state, factual_option("SONG_PATH", upgraded=True, stats={"songpathpower": 9}))["candidate.on_cho_block"] == 9
+    archery = ranker.option_features(state, factual_option("ARCHERY"))
+    assert archery["candidate.start_turn_aim"] == 4
+    assert archery["candidate.aim"] == 0
+    motif = ranker.option_features(state, factual_option("MOTIF"))
+    assert motif["candidate.on_melody_draw"] == 1
+    assert motif["candidate.draw"] == 0
+
+
+def test_factual_arrow_and_sadness_mechanisms_have_amounts_not_scores():
+    state = make_case()["state"]
+    assert ranker.option_features(state, factual_option("QUIVER", upgraded=True))["candidate.arrow_capacity"] == 2
+    assert ranker.option_features(state, factual_option("QUIETUS"))["candidate.next_shot_multiplier"] == 2
+    assert ranker.option_features(state, factual_option("HONING"))["candidate.arrow_damage_bonus_pct"] == 50
+    assert ranker.option_features(state, factual_option("ALL_IS_WELL"))["candidate.on_sadness_block"] == 4
+    assert ranker.option_features(state, factual_option("GROWTH"))["candidate.stretch_per_sadness_exhausted"] == 4
+    assert ranker.option_features(state, factual_option("ANGUISH"))["candidate.damage_per_sadness_created"] == 6
+    later = ranker.option_features(state, factual_option("KI_REST"))
+    assert later["candidate.energy_next_turn"] == 5
+    assert later["candidate.energy"] == 0
+    inspected = ranker.option_features(state, factual_option("KI_CHANT"))
+    assert inspected["candidate.look_at_top"] == 3
+    assert inspected["candidate.draw"] == 0
+
+
+def test_key_persistent_powers_no_longer_collapse_to_identical_effect_vectors():
+    state = make_case()["state"]
+    powers = ("HIDDEN_ROOTS", "SONG_PATH", "MOTIF", "LULLABY", "ARCHERY", "LOST_LUTE", "MYTHIC_FORM",
+              "QUIVER", "COMPOST", "COVERING_FIRE", "ALL_IS_WELL", "ECSTASY", "ENNUI", "SIMPLETON",
+              "HONING", "SERRATED_ARROWS", "EXPLOSIVE_ARROWS", "YAH", "TUNE")
+    vectors = [tuple(ranker.option_features(state, factual_option(cid)).values()) for cid in powers]
+    assert len(set(vectors)) == len(powers)
+
+
+@pytest.mark.parametrize("relic", ["RELIC.LANTERN", "Lantern", "lantern", "灯笼", "Philosopher’s Stone",
+    {"id": "RELIC.LANTERN"}, {"name": "Lantern"}, {"name": {"en": "Lantern", "zh": "灯笼"}},
+    {"en": "Lantern", "zh": "灯笼"}, {"en": "Philosopher's Stone", "zh": "贤者之石"}])
+def test_energy_relic_supports_real_name_only_observations(relic):
+    case = make_case()
+    case["state"]["player"]["relics"] = [relic]
+    assert ranker.option_features(case["state"], case["options"][0])["context.energy_relic"] == 1
+
+
+@pytest.mark.parametrize("relic", ["Not a Lantern", "my_LANTERN_mod", "Stone", "random",
+    {"en": "Lantern-like object", "zh": "未知物品"}, {"id": "RELIC.UNKNOWN"}])
+def test_unknown_relic_names_do_not_create_energy_false_positives(relic):
+    case = make_case()
+    case["state"]["player"]["relics"] = [relic]
+    assert ranker.option_features(case["state"], case["options"][0])["context.energy_relic"] == 0
+
+
+def test_feature_collision_diagnostics_expose_conflicting_distinct_options():
+    case = make_case()
+    other = dict(case["state"]["cards"][0], index=1, id="CARD.OTHER_ATTACK")
+    case["state"]["cards"][1] = other
+    case["options"][1].update(id=other["id"], card=other)
+    case["state_sha256"] = ranker.state_digest(case["state"])
+    case["restore_checks"] = [case["state_sha256"]] * 3
+    for result in case["results"]:
+        result["restore_sha256"] = case["state_sha256"]
+        if result["option_index"] == 1:
+            result["option_id"] = other["id"]
+    model, report = ranker.train_records([case])
+    assert model is None
+    collisions = report["feature_collisions"]["within_decision"]
+    assert collisions[0]["option_indices"] == [0, 1]
+    assert collisions[0]["confident_label_conflict"] is True
+    assert report["feature_version"] == 2
+    assert report["mechanism_provenance"]["game_version"] == "v0.113.1"
+
+
+@pytest.mark.parametrize("kind", ["stubs", "localization"])
+def test_optional_companion_engine_hashes_must_match(kind):
+    case = make_case()
+    case["engine"][f"{kind}_sha256"] = "e" * 64
+    for result in case["results"]:
+        result[f"engine_{kind}_sha256"] = "e" * 64
+    assert len(ranker.prepare_cases([case])[0]) == 1
+    case["results"][0][f"engine_{kind}_sha256"] = "f" * 64
+    assert not ranker.prepare_cases([case])[0]
+
+
+def test_mechanism_parameter_references_exist_in_checked_metadata():
+    for cid, facts in ranker._CARD_FACTS.items():
+        for source in facts.values():
+            if isinstance(source, str):
+                assert source in ranker.fool_scoring.METADATA[cid]["stats"], (cid, source)
+            else:
+                assert source in (1, 2)  # Direct text counts/multipliers, no assigned value priors.
+    assert len(ranker.FEATURE_NAMES) == len(set(ranker.FEATURE_NAMES))
