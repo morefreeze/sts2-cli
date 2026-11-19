@@ -89,6 +89,10 @@ python3 python/play.py --no-log    # disable logging
 | Defect | Fully playable |
 | Necrobinder | Fully playable |
 | Regent | Fully playable |
+| Fool | Native v0.113.1 CLI and Solver support |
+
+For isolated Fool A9 reward replay, Solver branch collection, and offline ranking,
+see [the collection guide](docs/fool-a9-offline-ranking.md).
 
 ## Architecture
 
@@ -235,6 +239,9 @@ python3 python/play.py --character Silent      # 选择静默猎手
 | 故障机器人 (Defect) | 完全可玩 |
 | 亡灵契约师 (Necrobinder) | 完全可玩 |
 | 储君 (Regent) | 完全可玩 |
+| 愚者 (Fool) | 原生 v0.113.1 CLI 与 Solver 支持 |
+
+愚者 A9 的选牌点恢复、Solver 分叉采数和离线排序训练，见[采数指南](docs/fool-a9-offline-ranking.md)。
 
 ## JSON 协议
 
