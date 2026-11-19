@@ -94,7 +94,7 @@ GREEDY_DATA_FILES = (
     "data/card_empirical.json", "data/card_metadata.json",
     "data/card_q_values.json", "data/card_synergies.py",
     "data/deck_predictor_v2.pkl", "data/ironclad_card_tags.json",
-    "data/ironclad_cards.json",
+    "data/ironclad_cards.json", "data/fool_card_metadata.json",
 )
 
 

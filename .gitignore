@@ -44,6 +44,7 @@ data/*
 !data/ironclad_card_tags.json
 !data/ironclad_cards.json
 !data/relics.json
+!data/fool_card_metadata.json
 # Fitted route models (Phase 3b) are small and committed. A file cannot be
 # re-included while its parent directory is excluded, so re-include agent/data/
 # first and ignore everything in it except the models.

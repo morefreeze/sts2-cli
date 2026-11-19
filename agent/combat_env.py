@@ -718,7 +718,11 @@ def greedy_action(state: dict, trace=None, *, map_policy=None) -> dict:
             trace_kwargs = {"trace": trace} if trace is not None else {}
             if "rest" in room_type.lower():
                 # SMITH upgrade: always single-card selection, pick best
-                best = pick_best_card(cards, threshold=0.0, **trace_kwargs)
+                from agent.fool_scoring import best_upgrade, is_fool_deck
+                deck = state.get("player", {}).get("deck") or []
+                best = best_upgrade(cards, deck, trace=trace) if (is_fool_deck(deck) or is_fool_deck(cards)) else None
+                if best is None:
+                    best = pick_best_card(cards, threshold=0.0, **trace_kwargs)
                 idx = best if best is not None else 0
                 if trace is not None:
                     trace.rule("card_select.rest_best", "fired", picked=[idx],
