@@ -439,7 +439,7 @@ def test_feature_collision_diagnostics_expose_conflicting_distinct_options():
     collisions = report["feature_collisions"]["within_decision"]
     assert collisions[0]["option_indices"] == [0, 1]
     assert collisions[0]["confident_label_conflict"] is True
-    assert report["feature_version"] == 2
+    assert report["feature_version"] == 3
     assert report["mechanism_provenance"]["game_version"] == "v0.113.1"
 
 
@@ -462,3 +462,27 @@ def test_mechanism_parameter_references_exist_in_checked_metadata():
             else:
                 assert source in (1, 2)  # Direct text counts/multipliers, no assigned value priors.
     assert len(ranker.FEATURE_NAMES) == len(set(ranker.FEATURE_NAMES))
+
+
+@pytest.mark.parametrize("cid,mechanism,interaction,with_one_named_card,with_two_named_cards", [
+    ("CODA", "cost_reduction_per_melody", "cost_reduction_per_melody_x_available_types", 6, 6),
+    ("HARMONIC_SHIELD", "block_per_melody", "block_per_melody_x_available_types", 15, 15),
+    ("MELODIC_SHOT", "extra_hits_per_melody", "extra_hits_per_melody_x_available_types", 3, 3),
+    ("WAH_SYMPHONY", "damage_per_named_card", "damage_per_named_card_x_named_card_count", 4, 8),
+])
+def test_per_melody_effects_have_candidate_relative_available_support(
+        cid, mechanism, interaction, with_one_named_card, with_two_named_cards):
+    state = make_case()["state"]
+    option = factual_option(cid)
+    bare = ranker.option_features(state, option)
+    state["player"]["deck"].append({"id": "CARD.WAH_CHO_KI"})
+    # One card offers all three named types; this is available deck support,
+    # not a claim that three Melodies will be active in the next combat.
+    supported = ranker.option_features(state, option)
+    assert supported[f"candidate.{mechanism}"] == bare[f"candidate.{mechanism}"]
+    assert bare[f"interaction.{interaction}"] == 0
+    assert supported[f"interaction.{interaction}"] == with_one_named_card
+    state["player"]["deck"].append({"id": "CARD.WAH_TOUCH"})
+    more = ranker.option_features(state, option)
+    assert more[f"candidate.{mechanism}"] == bare[f"candidate.{mechanism}"]
+    assert more[f"interaction.{interaction}"] == with_two_named_cards

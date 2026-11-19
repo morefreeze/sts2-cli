@@ -39,7 +39,7 @@ import numpy as np
 from agent import fool_scoring
 
 SCHEMA_VERSION = 1
-FEATURE_VERSION = 2
+FEATURE_VERSION = 3
 HORIZON = "next_combat"
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "logs/experiments/fool-a9-offline"
 _ENERGY_RELICS = {"LANTERN", "VERY_HOT_COCOA", "VENERABLE_TEA_SET", "PHILOSOPHERS_STONE",
@@ -167,7 +167,9 @@ _SPECIAL = ("attack_need", "defense_need", "draw_need", "energy_support", "aim_s
             "sadness_support", "melody_support", "required_cho_missing", "required_wah_missing", "required_ki_missing",
             "cho_trigger_support", "wah_trigger_support", "melody_draw_support", "all_melodies_missing",
             "cho_supports_existing_block", "named_supports_existing_draw", "arrow_capacity_support", "shot_capacity_support",
-            "sadness_block_support", "sadness_supports_existing_block", "sadness_damage_support", "sadness_conversion_support")
+            "sadness_block_support", "sadness_supports_existing_block", "sadness_damage_support", "sadness_conversion_support",
+            "extra_hits_per_melody_x_available_types", "block_per_melody_x_available_types",
+            "cost_reduction_per_melody_x_available_types", "damage_per_named_card_x_named_card_count")
 FEATURE_NAMES = tuple([f"candidate.{k}" for k in _CANDIDATE] + [f"context.{k}" for k in _CONTEXT]
                       + [f"interaction.{a}_x_{b}" for a, b in _CROSSES]
                       + [f"interaction.{k}" for k in _SPECIAL])
@@ -269,6 +271,11 @@ def option_features(state: dict, option: dict) -> dict[str, float]:
         candidate.update(_card_values(card, deck))
         candidate["duplicate_count"] = float(sum(_id(c) == _id(card) for c in deck))
         candidate["new_melodies"] = sum(candidate[k] * (context[f"deck_{k}"] == 0) for k in ("wah", "cho", "ki"))
+    # Available support only: named cards in the deck can provide these types,
+    # but none is assumed active in combat. A multi-name card counts once in
+    # Wah Symphony's card count while offering each of its distinct types.
+    available_melody_types = sum(context[f"deck_{k}"] > 0 for k in ("wah", "cho", "ki"))
+    named_card_count = sum(any(c[k] for k in ("wah", "cho", "ki")) for c in deck_values)
     values = {**{f"candidate.{k}": candidate[k] for k in _CANDIDATE},
               **{f"context.{k}": context[k] for k in _CONTEXT},
               **{f"interaction.{a}_x_{b}": candidate[a] * context[b] for a, b in _CROSSES}}
@@ -293,7 +300,11 @@ def option_features(state: dict, option: dict) -> dict[str, float]:
                    "interaction.sadness_block_support": candidate["on_sadness_block"] * (context["deck_sadness"] + context["deck_start_turn_sadness"]),
                    "interaction.sadness_supports_existing_block": candidate["sadness"] * context["deck_on_sadness_block"],
                    "interaction.sadness_damage_support": candidate["damage_per_sadness_created"] * (context["deck_sadness"] + context["deck_start_turn_sadness"]),
-                   "interaction.sadness_conversion_support": (candidate["sadness_to_joy"] + candidate["start_turn_sadness_to_joy"]) * (context["deck_sadness"] + context["deck_start_turn_sadness"])})
+                   "interaction.sadness_conversion_support": (candidate["sadness_to_joy"] + candidate["start_turn_sadness_to_joy"]) * (context["deck_sadness"] + context["deck_start_turn_sadness"]),
+                   "interaction.extra_hits_per_melody_x_available_types": candidate["extra_hits_per_melody"] * available_melody_types,
+                   "interaction.block_per_melody_x_available_types": candidate["block_per_melody"] * available_melody_types,
+                   "interaction.cost_reduction_per_melody_x_available_types": candidate["cost_reduction_per_melody"] * available_melody_types,
+                   "interaction.damage_per_named_card_x_named_card_count": candidate["damage_per_named_card"] * named_card_count})
     return {key: float(values[key]) for key in FEATURE_NAMES}
 
 
