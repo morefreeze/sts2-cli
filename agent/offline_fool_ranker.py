@@ -329,6 +329,8 @@ def _validate_case(case: dict):
         raise ValueError("wrong_schema_or_character")
     if not case.get("case_id") or not case.get("seed") or case.get("horizon") != HORIZON:
         raise ValueError("missing_identity_or_wrong_horizon")
+    if not _valid_solver_provenance(case.get("solver_only_provenance")):
+        raise ValueError("unverified_command_provenance")
     state = case.get("state") or {}
     if (case.get("restore_verified") is not True or state.get("decision") != "card_reward"
             or state_digest(state) != case.get("state_sha256")):
@@ -390,11 +392,20 @@ def _validate_case(case: dict):
         raise ValueError("original_control_option_mismatch")
 
 
+def _valid_solver_provenance(proof) -> bool:
+    return (isinstance(proof, dict) and type(proof.get("manual_combat_choices")) is int
+            and proof["manual_combat_choices"] == 0
+            and type(proof.get("records")) is int and proof["records"] > 0
+            and _is_sha256(proof.get("sha256")))
+
+
 def _branch_error(case: dict, row: dict) -> str | None:
     if row.get("technical_failure_kind"):
         return "technical_failure"
     if row.get("status") != "completed":
         return "status_" + str(row.get("status"))
+    if row.get("combat_provenance_verified") is not True or not _valid_solver_provenance(row.get("solver_only_provenance")):
+        return "unverified_combat_provenance"
     if row.get("restore_verified") is not True or row.get("restore_sha256") != case["state_sha256"]:
         return "unverified_branch_restore"
     if row.get("engine_dll_sha256") != case["engine"]["dll_sha256"]:

@@ -60,7 +60,7 @@ def test_skip_must_preserve_deck():
                                 {'continuation_id':'other'},{'combat_identity':{'floor':3}}])
 def test_unverified_or_unsolved_results_are_not_labels(change):
     case={'state_sha256':'abc','future_control_verified':True,'engine':{'dll_sha256':'game','cli_sha256':'cli'},'continuation_id':'path','future_control_combat_identity':{'floor':2}}
-    row={'restore_verified':True,'restore_sha256':'abc','status':'completed','plans':1,'solver_actions':2,'engine_dll_sha256':'game','engine_cli_sha256':'cli','continuation_id':'path','combat_identity':{'floor':2}}
+    row={'restore_verified':True,'combat_provenance_verified':True,'restore_sha256':'abc','status':'completed','plans':1,'solver_actions':2,'engine_dll_sha256':'game','engine_cli_sha256':'cli','continuation_id':'path','combat_identity':{'floor':2}}
     assert result_is_training_label(case,row)
     assert not result_is_training_label(case,{**row,**change})
 
@@ -96,3 +96,91 @@ def test_three_identically_wrong_future_restores_fail_original_anchor():
     from tools.collect_fool_a9 import verify_future_controls
     with pytest.raises(ValueError,match='future RNG/control drift'):
         verify_future_controls(['wrong']*3,original='actual')
+
+
+def phase_state(kind, room='Monster', floor=3, **extra):
+    return {'type':'decision','decision':kind,'context':{'act':1,'floor':floor,'room_type':room},**extra}
+
+
+def phase_step(guard, command, observation, origin='ooc'):
+    guard.before(command, origin)
+    before=guard.snapshot()
+    guard.after(command, origin, observation)
+    return {'command':command,'observation':observation,'origin':origin,
+            'phase_before':before,'phase_after':guard.snapshot()}
+
+
+@pytest.mark.parametrize('kind,extra',[('card_select',{}),('bundle_select',{}),('card_reward',{'from_event':True})])
+def test_start_of_combat_prompt_cannot_be_hand_picked_or_frozen(kind,extra):
+    from tools.collect_fool_a9 import PhaseGuard,action
+    guard=PhaseGuard()
+    phase_step(guard,{'cmd':'start_run'},phase_state('map_select','Map'))
+    phase_step(guard,action('select_map_node',row=2,col=0),phase_state(kind,**extra))
+    with pytest.raises(ValueError,match='unproven combat prompt'):
+        guard.require_ooc(guard.last_observation)
+    with pytest.raises(ValueError,match='unproven combat prompt'):
+        guard.before(action('select_cards',indices='0'),'ooc')
+
+
+@pytest.mark.parametrize('kind,extra',[('card_select',{}),('bundle_select',{}),('card_reward',{'from_event':True})])
+def test_unresolved_solver_prompt_is_never_a_survived_label(kind,extra):
+    from tools.collect_fool_a9 import PhaseGuard,action
+    guard=PhaseGuard()
+    phase_step(guard,{'cmd':'start_run'},phase_state('combat_play'))
+    result=phase_state(kind,**extra)
+    phase_step(guard,action('end_turn'),result,'solver')
+    with pytest.raises(ValueError,match='unresolved Solver combat prompt'):
+        guard.solver_boundary(result)
+
+
+def test_postcombat_certificate_allows_reward_and_kifuda_but_not_next_fight():
+    from tools.collect_fool_a9 import PhaseGuard,action,audit_records
+    guard=PhaseGuard();rows=[]
+    rows.append(phase_step(guard,{'cmd':'start_run'},phase_state('combat_play')))
+    reward=phase_state('card_reward',can_skip=True)
+    rows.append(phase_step(guard,action('play_card',card_index=0),reward,'solver'))
+    guard.solver_boundary(reward);guard.require_ooc(reward)
+    kifuda=phase_state('card_select')
+    rows.append(phase_step(guard,action('select_card_reward',card_index=0),kifuda))
+    guard.require_ooc(kifuda)
+    rows.append(phase_step(guard,action('select_cards',indices='0'),phase_state('map_select','Map')))
+    proof=audit_records(rows)
+    assert proof['manual_combat_choices']==0 and proof['solver_commands']==1
+    phase_step(guard,action('select_map_node',row=3,col=0),phase_state('card_select',floor=4))
+    with pytest.raises(ValueError,match='unproven combat prompt'):
+        guard.require_ooc(guard.last_observation)
+
+
+def test_same_floor_event_subcombat_resets_postcombat_certificate():
+    from tools.collect_fool_a9 import PhaseGuard,action
+    guard=PhaseGuard()
+    phase_step(guard,{'cmd':'start_run'},phase_state('combat_play'))
+    event=phase_state('event_choice','Event')
+    phase_step(guard,action('end_turn'),event,'solver');guard.solver_boundary(event)
+    phase_step(guard,action('choose_option',option_index=0),phase_state('card_reward',from_event=True))
+    with pytest.raises(ValueError,match='unproven combat prompt'):
+        guard.require_ooc(guard.last_observation)
+
+
+def test_neow_event_selection_is_ooc_and_unknown_prompt_fails_closed():
+    from tools.collect_fool_a9 import PhaseGuard,action
+    guard=PhaseGuard()
+    phase_step(guard,{'cmd':'start_run'},phase_state('event_choice','Event',floor=1))
+    phase_step(guard,action('choose_option',option_index=0),phase_state('card_select','Event',floor=1))
+    guard.require_ooc(guard.last_observation)
+    with pytest.raises(ValueError,match='unknown prompt room'):
+        guard.require_ooc({'decision':'card_select','context':{}})
+
+
+def test_provenance_audit_rejects_manual_combat_actions_and_forged_phase():
+    from tools.collect_fool_a9 import PhaseGuard,action,audit_records
+    guard=PhaseGuard()
+    row=phase_step(guard,{'cmd':'start_run'},phase_state('combat_play'))
+    with pytest.raises(ValueError,match='outside Solver'):
+        guard.before(action('play_card',card_index=0),'ooc')
+    broken=copy.deepcopy(row);broken['phase_after']['postcombat_room']=[1,3,'Monster']
+    with pytest.raises(ValueError,match='phase provenance mismatch'):
+        audit_records([broken])
+    broken=copy.deepcopy(row);broken.pop('origin')
+    with pytest.raises(ValueError,match='missing command provenance'):
+        audit_records([broken])

@@ -30,6 +30,7 @@ def make_case(seed="seed-0", number=0, damage=9):
             "future_control_initial_state": future_state, "future_control_combat_identity": combat_identity,
             "future_control_option_index": 0, "continuation_commands": [],
             "future_control_checks": [future_hash] * 3, "restore_checks": [ranker.state_digest(state)] * 3,
+            "solver_only_provenance": {"manual_combat_choices": 0, "records": 5, "sha256": "e" * 64},
             "continuation_id": "fixed-next-room", "heuristic_option_index": 0,
             "heuristic_option_id": cards[0]["id"], "options": [], "results": []}
     for c in cards:
@@ -48,6 +49,8 @@ def make_case(seed="seed-0", number=0, damage=9):
                 "survived": True, "hp_start": 45, "max_hp_start": 70,
                 "hp_end": {0: 38, 1: 30, -1: 20}[opt["index"]], "max_hp_end": 70,
                 "plans": 2, "solver_actions": 4, "rounds": 2,
+                "combat_provenance_verified": True,
+                "solver_only_provenance": {"manual_combat_choices": 0, "records": 12, "sha256": "f" * 64},
                 "combat_identity": deepcopy(combat_identity)})
     return case
 
@@ -101,7 +104,8 @@ def test_exact_verified_repetitions_form_only_within_state_pairs():
 
 @pytest.mark.parametrize("field,value", [("restore_verified", False), ("restore_sha256", "wrong"),
     ("engine_dll_sha256", "wrong"), ("horizon", "next_boss"), ("continuation_id", "different"),
-    ("status", "technical_error"), ("plans", 0), ("solver_actions", 0), ("seed", "another")])
+    ("status", "technical_error"), ("plans", 0), ("solver_actions", 0), ("seed", "another"),
+    ("combat_provenance_verified", False), ("solver_only_provenance", {})])
 def test_bad_branch_never_becomes_loss_or_label(field, value):
     case = make_case()
     case["results"][0][field] = value
@@ -486,3 +490,11 @@ def test_per_melody_effects_have_candidate_relative_available_support(
     more = ranker.option_features(state, option)
     assert more[f"candidate.{mechanism}"] == bare[f"candidate.{mechanism}"]
     assert more[f"interaction.{interaction}"] == with_two_named_cards
+
+
+def test_legacy_or_manual_combat_provenance_cannot_train():
+    for proof in (None,{}, {'manual_combat_choices':1,'records':5,'sha256':'e'*64}):
+        case=make_case();case['solver_only_provenance']=proof
+        accepted,diagnostics=ranker.prepare_cases([case])
+        assert not accepted
+        assert 'unverified_command_provenance' in diagnostics['rejected_cases'].values()

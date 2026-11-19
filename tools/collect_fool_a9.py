@@ -80,6 +80,7 @@ def verify_reward_transition(before,after,option):
 
 def result_is_training_label(case,row):
     return (case.get('future_control_verified') is True
+            and row.get('combat_provenance_verified') is True
             and row.get('restore_verified') is True and row.get('status')=='completed'
             and row.get('restore_sha256')==case.get('state_sha256')
             and row.get('engine_dll_sha256')==case.get('engine',{}).get('dll_sha256')
@@ -114,6 +115,100 @@ def player_summary(state):
     return {k:p.get(k) for k in ('hp','max_hp','gold','deck_size')}
 
 
+class PhaseGuard:
+    """Fail closed on opening/chained combat prompts; retain command provenance."""
+    COMBAT_ROOMS={'Monster','Elite','Boss'}
+    OOC_ROOMS={'Event','Ancient','RestSite','Merchant','Treasure','Map'}
+    PROMPTS={'card_select','card_reward','bundle_select'}
+    OOC_DECISIONS={'map_select','event_choice','rest_site','shop','treasure','rewards'}
+
+    def __init__(self):
+        self.last_observation=None
+        self.room=None
+        self.postcombat_room=None
+        self.combat_active=False
+
+    @staticmethod
+    def room_key(state):
+        ctx=state.get('context') or {}
+        return (ctx.get('act'),ctx.get('floor'),ctx.get('room_type'))
+
+    def snapshot(self):
+        return {'room':list(self.room) if self.room else None,
+                'postcombat_room':list(self.postcombat_room) if self.postcombat_room else None,
+                'combat_active':self.combat_active,
+                'decision':(self.last_observation or {}).get('decision')}
+
+    def require_ooc(self,state):
+        kind=state.get('decision')
+        if self.combat_active or kind=='combat_play':
+            raise ValueError('combat action outside Solver')
+        if kind not in self.PROMPTS:return
+        key=self.room_key(state);room=key[2]
+        if room in self.OOC_ROOMS:return
+        if room in self.COMBAT_ROOMS:
+            if self.postcombat_room==key:return
+            raise ValueError('unproven combat prompt: no Solver postcombat certificate')
+        raise ValueError(f'unknown prompt room: {room}')
+
+    def before(self,cmd,origin):
+        if origin not in {'solver','ooc'}:raise ValueError('missing command provenance')
+        name=cmd.get('action');kind=cmd.get('cmd')
+        if origin=='ooc' and kind=='action':
+            if name in {'play_card','use_potion','end_turn','plan_combat_turn'}:
+                raise ValueError('combat action outside Solver')
+            if name!='get_map' and self.last_observation:
+                self.require_ooc(self.last_observation)
+        previous=self.last_observation or {}
+        event_choice=(name=='choose_option' and (previous.get('decision')=='event_choice'
+                      or self.room_key(previous)[2] in {'Event','Ancient'}))
+        if kind in {'start_run','load_save','enter_room'} or name=='select_map_node' or event_choice:
+            self.postcombat_room=None
+            self.combat_active=False
+
+    @classmethod
+    def clear_combat_end(cls,state):
+        kind=state.get('decision')
+        if kind=='game_over':
+            terminal_outcome(state)
+            return True
+        return (kind in cls.OOC_DECISIONS
+                or (kind=='card_reward' and state.get('from_event') is not True))
+
+    def after(self,cmd,origin,state):
+        if not state.get('decision'):return
+        was_active=self.combat_active
+        key=self.room_key(state)
+        if key!=self.room:self.postcombat_room=None
+        self.room=key
+        self.last_observation=state
+        if state.get('decision')=='combat_play':
+            self.combat_active=True;self.postcombat_room=None
+        elif origin=='solver' and was_active and self.clear_combat_end(state):
+            self.combat_active=False;self.postcombat_room=key
+
+    def solver_boundary(self,state):
+        if state.get('decision')=='combat_play':return
+        if not self.clear_combat_end(state):
+            raise ValueError('unresolved Solver combat prompt')
+        if self.combat_active or self.postcombat_room!=self.room_key(state):
+            raise ValueError('unproven Solver combat end')
+
+
+def audit_records(records):
+    guard=PhaseGuard();counts=Counter()
+    for row in records:
+        if any(k not in row for k in ('origin','phase_before','phase_after')):
+            raise ValueError('missing command provenance')
+        origin=row['origin'];cmd=row['command'];state=row['observation']
+        guard.before(cmd,origin)
+        if guard.snapshot()!=row['phase_before']:raise ValueError('phase provenance mismatch before command')
+        guard.after(cmd,origin,state)
+        if guard.snapshot()!=row['phase_after']:raise ValueError('phase provenance mismatch after command')
+        counts[origin+'_commands']+=1
+    return {**counts,'manual_combat_choices':0,'records':len(records),'sha256':canonical_hash(records)}
+
+
 class Client:
     def __init__(self,args,tag):
         from engine_process import EngineProcess
@@ -126,17 +221,23 @@ class Client:
         argv=['/usr/bin/env',*[f'{k}={v}' for k,v in env.items()],str(args.dotnet),str(args.engine)]
         self.engine=EngineProcess(argv,stderr=self.stderr)
         self.timeout=max(45,args.budget_ms/1000+30)
+        self.phase=PhaseGuard()
+        self.last_transition=None
         try:
             ready=self.engine.read_json(60)
             if ready.get('type')!='ready':raise RuntimeError(f'CLI not ready: {ready}')
         except BaseException:
             self.close();raise
 
-    def send(self,cmd):
+    def send(self,cmd,origin='ooc'):
+        self.phase.before(cmd,origin)
+        before=self.phase.snapshot()
         self.engine.write(cmd)
         result=self.engine.read_json(self.timeout)
         terminal_outcome(result)
         if result.get('type')=='error':raise RuntimeError(f'CLI refused {cmd}: {result.get("message")}')
+        self.phase.after(cmd,origin,result)
+        self.last_transition={'origin':origin,'phase_before':before,'phase_after':self.phase.snapshot()}
         return result
 
     def close(self):
@@ -189,9 +290,9 @@ def _fixed_ooc(state):
     raise RuntimeError(f'unsupported continuation decision: {kind}')
 
 
-def execute_solver(send,state,budget_ms,metrics):
+def execute_solver(send,state,budget_ms,metrics,phase):
     from combat_plan_driver import _execute_combat_plan_actions
-    plan=send(action('plan_combat_turn'))
+    plan=send(action('plan_combat_turn'),origin='solver')
     search=plan.get('search') or {}
     if plan.get('type')!='combat_plan' or not plan.get('actions'):
         raise RuntimeError('Solver returned no usable plan')
@@ -208,14 +309,14 @@ def execute_solver(send,state,budget_ms,metrics):
             hand=cursor.get('hand') or [];index=a.get('card_index')
             if isinstance(index,int) and 0<=index<len(hand):
                 cid=hand[index].get('id','UNKNOWN');played[cid]=played.get(cid,0)+1
-        result=send(cmd)
+        result=send(cmd,origin='solver')
         if name not in {'get_map'}:metrics['solver_actions']=metrics.get('solver_actions',0)+1
         cursor=result
         return result
     stats={}
     result,ok=_execute_combat_plan_actions(execute,state,plan['actions'],stats=stats)
     if not ok:raise RuntimeError('Solver plan failed actual execution')
-    if result.get('decision')=='card_select':raise RuntimeError('unresolved Solver combat card_select')
+    phase.solver_boundary(result)
     if stats.get('stale_no_progress'):raise RuntimeError('Solver plan made no progress')
     metrics['replans']=metrics.get('replans',0)+stats.get('stale_unresolved',0)+stats.get('stale_refusals',0)
     return result
@@ -250,17 +351,18 @@ def discover(args):
         if list((args.output/'cases').glob(f'{seed}-*/decision.json')):continue
         prefix=[];taken=0;last_floor=-100;metrics={'plans':0,'solver_actions':0}
         with Client(args,f'discover-{seed}') as cli:
-            def interact(cmd):
-                result=cli.send(cmd)
+            def interact(cmd,origin='ooc'):
+                result=cli.send(cmd,origin=origin)
                 if cmd.get('action')!='plan_combat_turn':
-                    prefix.append({'command':cmd,'observation':result,'sha256':canonical_hash(result)})
+                    prefix.append({'command':cmd,'observation':result,'sha256':canonical_hash(result),**cli.last_transition})
                 return result
             state=interact({'cmd':'start_run','character':'Fool','ascension':9,'seed':seed,'lang':'en'})
             for step in range(args.max_steps):
                 kind=state.get('decision');ctx=state.get('context') or {};floor=ctx.get('floor',0)
                 if kind=='game_over':break
                 if kind=='combat_play':
-                    state=execute_solver(interact,state,args.budget_ms,metrics);continue
+                    state=execute_solver(interact,state,args.budget_ms,metrics,cli.phase);continue
+                cli.phase.require_ooc(state)
                 if kind=='card_reward' and len(state.get('cards') or [])>=2 and floor>=args.min_floor and floor-last_floor>=args.spacing:
                     case_id=f'{seed}-d{taken+1:02d}'
                     target=args.output/'cases'/case_id
@@ -280,7 +382,9 @@ def discover(args):
                           'continuation_id':canonical_hash({'policy':'fixed-ooc-v2','commands':tail,'cli_sha256':identity['cli_sha256']}),
                           'continuation_commands':tail,'future_control_option_index':heuristic['index'],
                           'future_control_initial_state':anchor,'future_control_initial_sha256':canonical_hash(anchor),
-                          'future_control_combat_identity':combat_identity(anchor),'prefix_steps':len(frozen_prefix)}
+                          'future_control_combat_identity':combat_identity(anchor),'prefix_steps':len(frozen_prefix),
+                          'solver_only_provenance':audit_records(frozen_prefix),
+                          'future_control_provenance':audit_records(prefix)}
                     save(target/'prefix.json',frozen_prefix);save(target/'decision.json',case)
                     count+=1;taken+=1;last_floor=floor;selected.append(case_id);state=anchor
                     print(json.dumps({'discovered':case_id,'act':ctx.get('act'),'floor':floor,'total':count}),flush=True)
@@ -299,7 +403,9 @@ def discover(args):
 def restore(cli,case_dir,case):
     state=None
     for step,row in enumerate(json.loads((case_dir/'prefix.json').read_text()),1):
-        state=cli.send(row['command'])
+        state=cli.send(row['command'],origin=row.get('origin'))
+        if any(row.get(k)!=cli.last_transition[k] for k in ('origin','phase_before','phase_after')):
+            raise ValueError(f'prefix step {step}: phase provenance mismatch')
         try:verify_observation(row['observation'],state)
         except ValueError as exc:
             tag=cli.stderr_path.stem if hasattr(cli,'stderr_path') else str(time.time_ns())
@@ -390,9 +496,9 @@ def branch(args,case_path,case,option,repeat):
             state=restore(cli,case_path.parent,case)
             row['restore_verified']=True;row['restore_sha256']=canonical_hash(state)
             row['hp_start']=state['player']['hp'];row['max_hp_start']=state['player']['max_hp']
-            def interact(cmd):
-                result=cli.send(cmd)
-                log.write(json.dumps({'command':cmd,'observation':result},ensure_ascii=False)+'\n')
+            def interact(cmd,origin='ooc'):
+                result=cli.send(cmd,origin=origin)
+                log.write(json.dumps({'command':cmd,'observation':result,**cli.last_transition},ensure_ascii=False)+'\n')
                 return result
             after=interact(option['command']);verify_reward_transition(state,after,option)
             state=follow_continuation(interact,after,case)
@@ -406,7 +512,7 @@ def branch(args,case_path,case,option,repeat):
                         row['combat_identity']=combat_identity(state)
                     rounds.add((ctx.get('act'),ctx.get('floor'),state.get('round')))
                     if len(rounds)>args.max_rounds:row['status']='censored';break
-                    state=execute_solver(interact,state,args.budget_ms,row)
+                    state=execute_solver(interact,state,args.budget_ms,row,cli.phase)
                     continue
                 if kind=='game_over':
                     row['survived']=terminal_outcome(state);row['status']='completed' if combat_started else 'censored';break
@@ -418,6 +524,11 @@ def branch(args,case_path,case,option,repeat):
             row['rounds']=len(rounds);row['hp_end']=(state.get('player') or {}).get('hp',0)
             row['max_hp_end']=(state.get('player') or {}).get('max_hp',row['max_hp_start'])
             row['finish']=player_summary(state)
+        if row['status']=='completed':
+            records=json.loads((case_path.parent/'prefix.json').read_text())
+            records += [json.loads(s) for s in dest.with_suffix('.jsonl').read_text().splitlines() if s.strip()]
+            row['solver_only_provenance']=audit_records(records)
+            row['combat_provenance_verified']=True
     except Exception as exc:
         row['status']='technical_error';row['error']=str(exc)
     row['elapsed_s']=round(time.monotonic()-start,3);save(dest,row)
@@ -440,13 +551,23 @@ def export(args):
     rows=[]
     for path in selected_cases(args):
         case=json.loads(path.read_text());case['results']=[]
+        prefix=json.loads((path.parent/'prefix.json').read_text())
+        case['solver_only_provenance']=audit_records(prefix)
         for item in sorted(path.parent.glob('b*-o*-r*.json')):
-            case['results'].append(json.loads(item.read_text()))
+            row=json.loads(item.read_text())
+            if row.get('status')=='completed':
+                trace=[json.loads(s) for s in item.with_suffix('.jsonl').read_text().splitlines() if s.strip()]
+                proof=audit_records(prefix+trace)
+                if row.get('solver_only_provenance')!=proof:raise ValueError('cached Solver provenance changed')
+                row['combat_provenance_verified']=True
+            case['results'].append(row)
         rows.append(case)
     args.output.mkdir(parents=True,exist_ok=True)
     (args.output/'dataset.jsonl').write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in rows))
     report={'cases':len(rows),'results':sum(len(r['results']) for r in rows),
             'verified_solver_results':sum(result_is_training_label(c,r) for c in rows for r in c['results']),
+            'provenance_verified_results':sum(r.get('combat_provenance_verified') is True for c in rows for r in c['results']),
+            'manual_combat_choices':0,
             'statuses':dict(Counter(r['status'] for c in rows for r in c['results']))}
     save(args.output/'collection-report.json',report);print(json.dumps(report),flush=True)
 
