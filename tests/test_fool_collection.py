@@ -184,3 +184,40 @@ def test_provenance_audit_rejects_manual_combat_actions_and_forged_phase():
     broken=copy.deepcopy(row);broken.pop('origin')
     with pytest.raises(ValueError,match='missing command provenance'):
         audit_records([broken])
+
+
+def test_out_of_combat_fruit_juice_use_retains_auditable_ooc_provenance():
+    from tools.collect_fool_a9 import PhaseGuard,action,audit_records
+    guard=PhaseGuard()
+    before=phase_state('map_select','Map',player={
+        'hp':55,'max_hp':77,'potions':[{'index':0,'id':'POTION.FRUIT_JUICE'}]})
+    after=phase_state('map_select','Map',player={'hp':60,'max_hp':82,'potions':[]})
+    rows=[phase_step(guard,{'cmd':'start_run'},before)]
+    rows.append(phase_step(guard,action('use_potion',potion_index=0),after))
+    proof=audit_records(rows)
+    assert proof['ooc_commands']==2
+    assert proof['manual_combat_choices']==0
+    assert guard.combat_active is False
+
+
+def test_postcombat_fruit_juice_use_preserves_reward_certificate():
+    from tools.collect_fool_a9 import PhaseGuard,action,audit_records
+    guard=PhaseGuard()
+    rows=[phase_step(guard,{'cmd':'start_run'},phase_state('combat_play'))]
+    reward=phase_state('card_reward',can_skip=True)
+    rows.append(phase_step(guard,action('end_turn'),reward,'solver'))
+    rows.append(phase_step(guard,action('use_potion',potion_index=0),reward))
+    guard.require_ooc(reward)
+    assert guard.postcombat_room==guard.room_key(reward)
+    assert audit_records(rows)['manual_combat_choices']==0
+
+
+@pytest.mark.parametrize('kind,extra',[
+    ('combat_play',{}),('card_select',{}),('card_reward',{'from_event':True})])
+def test_ooc_potion_use_cannot_answer_combat_or_unproven_opening_prompts(kind,extra):
+    from tools.collect_fool_a9 import PhaseGuard,action
+    guard=PhaseGuard()
+    phase_step(guard,{'cmd':'start_run'},phase_state('map_select','Map'))
+    phase_step(guard,action('select_map_node',row=3,col=0),phase_state(kind,**extra))
+    with pytest.raises(ValueError,match='outside Solver|unproven combat prompt'):
+        guard.before(action('use_potion',potion_index=0),'ooc')

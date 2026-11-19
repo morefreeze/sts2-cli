@@ -155,7 +155,7 @@ class PhaseGuard:
         if origin not in {'solver','ooc'}:raise ValueError('missing command provenance')
         name=cmd.get('action');kind=cmd.get('cmd')
         if origin=='ooc' and kind=='action':
-            if name in {'play_card','use_potion','end_turn','plan_combat_turn'}:
+            if name in {'play_card','end_turn','plan_combat_turn'}:
                 raise ValueError('combat action outside Solver')
             if name!='get_map' and self.last_observation:
                 self.require_ooc(self.last_observation)
