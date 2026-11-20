@@ -1,5 +1,8 @@
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.RestSite;
+using MegaCrit.Sts2.Core.Map;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace Sts2Shared;
 
@@ -13,6 +16,15 @@ internal static class ActPlanningContext
             ["potion_slots"] = player.MaxPotionCount,
             ["relic_ids"] = player.Relics.Where(relic => !relic.IsMelted).Select(relic => relic.Id.Entry).ToArray(),
         };
+
+    internal static (MapPoint Point, EncounterModel? Encounter) UpcomingBoss(RunState run)
+    {
+        var first = run.Map.BossMapPoint;
+        if (run.Map.SecondBossMapPoint is { } second && run.CurrentMapCoord is { } here
+            && (here.row > first.coord.row || here.row == first.coord.row && here.col == first.coord.col))
+            return (second, run.Act?.SecondBossEncounter);
+        return (first, run.Act?.BossEncounter);
+    }
 
     internal static int MailboxRefillHpCredit(Player player)
     {

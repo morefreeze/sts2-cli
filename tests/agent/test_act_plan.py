@@ -61,3 +61,24 @@ def test_history_does_not_treat_abandoned_boss_as_loss():
     assert len(only) == 1 and only[0].hp_ratio == 0.375 and not only[0].won
     assert list(boss_observations({**run, "was_abandoned": True})) == []
     assert list(boss_observations({**run, "win": True}))[0].won
+
+
+def test_second_boss_uses_the_map_boss_instead_of_the_act_boss(monkeypatch):
+    from agent import act_plan
+    from agent.greedy_trace import GreedyTrace
+    from agent.strategy import LookaheadMapStrategy
+
+    monkeypatch.setenv("STS2_ACT_PLAN", "1")
+
+    def curve(root, refresh, boss, *args):
+        assert boss == "QUEEN_BOSS"
+        return act_plan.BossCurve(80, (0, 1), 6, 3)
+
+    monkeypatch.setattr(act_plan, "_boss_curve", curve)
+    boss = {"id": "QUEEN_BOSS", "type": "Boss", "col": 3, "row": 17}
+    state = {"player": {"hp": 60, "max_hp": 80}, "ascension": 10,
+             "context": {"act": 3, "boss": {"id": "AEONGLASS_BOSS"}},
+             "map": {"rows": [[{"type": "RestSite", "col": 3, "row": 15}]], "boss": boss}}
+    trace = GreedyTrace()
+    LookaheadMapStrategy().choose(state, [boss], trace=trace)
+    assert next(r for r in trace.rules if r["key"] == "map.boss_plan")["values"]["samples"] == 3

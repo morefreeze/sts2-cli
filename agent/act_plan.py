@@ -145,11 +145,11 @@ def _boss_curve(root, refresh, boss, act, character, ascension, build, max_hp, p
     return fit_curve(samples, lambda hp: prior(hp / prior_hp), max_hp, matching)
 
 
-def boss_curve(state, act, character, ascension, max_hp, prior_hp, prior):
+def boss_curve(state, map_json, act, character, ascension, max_hp, prior_hp, prior):
     if not enabled():
         return None
     boss = (state.get("context") or {}).get("boss") or {}
-    boss_id = entry_id(boss.get("id") if isinstance(boss, dict) else boss)
+    boss_id = entry_id((map_json.get("boss") or {}).get("id") or (boss.get("id") if isinstance(boss, dict) else boss))
     if not boss_id:
         return None
     return _boss_curve(os.environ.get("STS2_BOSS_HISTORY_ROOT"), int(monotonic() // 300),

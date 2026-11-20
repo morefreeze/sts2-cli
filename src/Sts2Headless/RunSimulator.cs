@@ -4644,18 +4644,21 @@ public class RunSimulator
                 rows.Add(rowNodes);
         }
 
-        // Boss node
+        bool actPlanning = Environment.GetEnvironmentVariable("STS2_ACT_PLAN") == "1";
+        var (bossPoint, bossEncounter) = actPlanning
+            ? ActPlanningContext.UpcomingBoss(_runState)
+            : (map.BossMapPoint, _runState.Act?.BossEncounter);
         var bossNode = new Dictionary<string, object?>
         {
-            ["col"] = (int)map.BossMapPoint.coord.col,
-            ["row"] = (int)map.BossMapPoint.coord.row,
-            ["type"] = map.BossMapPoint.PointType.ToString(),
+            ["col"] = (int)bossPoint.coord.col,
+            ["row"] = (int)bossPoint.coord.row,
+            ["type"] = bossPoint.PointType.ToString(),
         };
 
         // Add boss name/id — use BossEncounter?.Id?.Entry
         try
         {
-            var bossIdEntry = _runState.Act?.BossEncounter?.Id?.Entry;
+            var bossIdEntry = bossEncounter?.Id?.Entry;
             if (!string.IsNullOrEmpty(bossIdEntry))
             {
                 var monsterKey = bossIdEntry.EndsWith("_BOSS") ? bossIdEntry[..^5] : bossIdEntry;
@@ -4678,7 +4681,7 @@ public class RunSimulator
                 ["row"] = (int)currentCoord.Value.row,
             } : null,
         };
-        if (Environment.GetEnvironmentVariable("STS2_ACT_PLAN") == "1")
+        if (actPlanning)
             result["act_planning"] = ActPlanningContext.Capture(_runState.Players[0]);
         return result;
     }

@@ -152,13 +152,14 @@ internal static class DecisionCapture
             if (rowNodes.Count > 0)
                 rows.Add(rowNodes);
         }
+        var (bossPoint, bossEncounter) = ActPlanningContext.UpcomingBoss(rs);
         var boss = new Dictionary<string, object?>
         {
-            ["col"] = (int)map.BossMapPoint.coord.col,
-            ["row"] = (int)map.BossMapPoint.coord.row,
-            ["type"] = map.BossMapPoint.PointType.ToString(),
+            ["col"] = (int)bossPoint.coord.col,
+            ["row"] = (int)bossPoint.coord.row,
+            ["type"] = bossPoint.PointType.ToString(),
         };
-        var bossId = rs.Act?.BossEncounter?.Id?.Entry;
+        var bossId = bossEncounter?.Id?.Entry;
         if (!string.IsNullOrEmpty(bossId))
             boss["id"] = bossId;
         return new Dictionary<string, object?>

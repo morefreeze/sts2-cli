@@ -473,7 +473,7 @@ class LookaheadMapStrategy:
     def _act_plan(self, state, map_json, act, max_hp, model, character, ascension):
         _, boss_cost = self._health_costs(act, ascension, model, character)
         planning = map_json.get("act_planning") or {}
-        curve = act_plan.boss_curve(state, act, planning.get("character") or self.state_character(state), ascension,
+        curve = act_plan.boss_curve(state, map_json, act, planning.get("character") or self.state_character(state), ascension,
                                    max_hp, boss_cost, self._prior_boss_win)
         if curve is None:
             return None
