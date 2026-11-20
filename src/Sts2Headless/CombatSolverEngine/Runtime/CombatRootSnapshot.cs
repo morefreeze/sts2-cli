@@ -171,7 +171,8 @@ internal sealed class CombatRootSnapshot
         PotionRewardOutlook = potionRewardOutlook;
     }
 
-    public static CombatRootSnapshot Capture(CombatState state, bool predictPotionReward = false)
+    public static CombatRootSnapshot Capture(CombatState state, bool predictPotionReward = false,
+        int mailboxRefillHpCredit = 0)
     {
         if (!NGame.IsMainThread())
             throw new InvalidOperationException("Combat root snapshot must be captured on the main thread.");
@@ -227,6 +228,8 @@ internal sealed class CombatRootSnapshot
         PotionRewardOutlook potionRewardOutlook = predictPotionReward
             ? PotionRewardOutlook.Capture(player, state, simulatedCombat.RelicsOf(player))
             : PotionRewardOutlook.None;
+        if (mailboxRefillHpCredit > 0)
+            potionRewardOutlook = potionRewardOutlook with { MailboxRefillHpCredit = mailboxRefillHpCredit };
         SearchablePotionSlotSnapshot[] searchablePotions = player.PotionSlots
             .Select((potion, slot) => (Potion: potion, Slot: slot))
             .Where(item => item.Potion != null && PotionOnUseSupport.CanSearch(item.Potion))

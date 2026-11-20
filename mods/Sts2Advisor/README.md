@@ -70,8 +70,13 @@
 | `instant_mode` | `false` | 游戏启动后把游戏速度设为 Instant |
 | `panel_language` | `"auto"` | 面板语言：`auto`（跟游戏）、`zh`、`en` |
 | `map_policy` | `"lookahead"` | 路线策略：`lookahead`（默认，规划到 Boss 的整条路径）或 `hpaware`（只看下一步） |
+| `boss_win_target` | `0.8` | `lookahead` 路线的 Boss 目标胜率，填 0 至 1 之间的数字 |
 
 两个热键设成同一个键会禁用全托管热键（面板上的按钮仍然可用）。`map_policy` 是服务启动时读的，换了以后要结束旧的服务进程（见下）再重启游戏。
+
+`lookahead` 会根据本机历史存档估计 Boss 进场胜率，并从 Boss 房倒推整幕各火堆的血量门槛。面板显示预计胜率和相近样本数量。样本稀少时，估计会参考同幕战斗和原有风险曲线。
+
+拿到小邮箱后，如果建议路线在接下来两场战斗内计划休息，药水腰带最多只剩一个空位，兼容的 CombatSolver 会将补给计入当前战斗的药水成本。当前版本通过 CombatSolver 的药水奖励预测接口接入，连接状态见 `Sts2Advisor.log` 的 `mailbox potion planning` 日志。
 
 战役模式（无人值守连续打多局）用同目录下的 `campaign.json` 配置，格式见仓库 `CLAUDE.md` 的 Sts2Advisor 一节。
 

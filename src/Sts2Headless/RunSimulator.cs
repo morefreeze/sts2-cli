@@ -1129,11 +1129,6 @@ public class RunSimulator
     /// against the real live combat state and returns its best multi-turn action sequence, instead of
     /// only ever recommending one card at a time like DoPlayCard.
     /// </summary>
-    /// <remarks>
-    /// <paramref name="args"/> is currently unused; the parameter is kept (matching the
-    /// DoPlayCard/DoMapSelect signature pattern in this file) as a reserved slot for a future
-    /// per-call override, e.g. SearchPolicySnapshot's BudgetOverrideMilliseconds/IncludeTurnSetup.
-    /// </remarks>
     private Dictionary<string, object?> DoPlanCombatTurn(Player player, Dictionary<string, object?>? args)
     {
         var pcs = player.PlayerCombatState;
@@ -1149,7 +1144,10 @@ public class RunSimulator
         CombatRootSnapshot snapshot;
         try
         {
-            snapshot = CombatRootSnapshot.Capture(combatState);
+            int refillCredit = args?.GetValueOrDefault("mailbox_restock") is true
+                && combatState.Encounter?.RoomType is RoomType.Monster or RoomType.Elite
+                ? ActPlanningContext.MailboxRefillHpCredit(player) : 0;
+            snapshot = CombatRootSnapshot.Capture(combatState, mailboxRefillHpCredit: refillCredit);
         }
         catch (Exception ex)
         {
@@ -1260,7 +1258,7 @@ public class RunSimulator
         }
         solveClock.Stop();
 
-        return new Dictionary<string, object?>
+        var reply = new Dictionary<string, object?>
         {
             ["type"] = "combat_plan",
             ["only_death_routes_found"] = result.OnlyDeathRoutesFound,
@@ -1285,6 +1283,9 @@ public class RunSimulator
                 ["inferrer"] = SolverInferrerMode,
             },
         };
+        if (args?.GetValueOrDefault("mailbox_restock") is true)
+            reply["mailbox_refill_hp_credit"] = snapshot.PotionRewardOutlook.MailboxRefillHpCredit;
+        return reply;
     }
 
     /// <summary>
@@ -4665,7 +4666,7 @@ public class RunSimulator
         }
         catch { }
 
-        return new Dictionary<string, object?>
+        var result = new Dictionary<string, object?>
         {
             ["type"] = "map",
             ["context"] = RunContext(),
@@ -4677,6 +4678,9 @@ public class RunSimulator
                 ["row"] = (int)currentCoord.Value.row,
             } : null,
         };
+        if (Environment.GetEnvironmentVariable("STS2_ACT_PLAN") == "1")
+            result["act_planning"] = ActPlanningContext.Capture(_runState.Players[0]);
+        return result;
     }
 
     public void CleanUp()

@@ -101,7 +101,10 @@ public static class PanelText
             lines.Add(new PanelLine(T(zh, "按选项英文描述的关键词打分", "Scored by keywords in the option's English text"), LineStyle.Muted));
         if (h.Decision == "shop")
             lines.Add(new PanelLine(T(zh, "买完会重新评估下一步", "Re-evaluated after every purchase"), LineStyle.Muted));
-        lines.Add(new PanelLine(IsLookaheadMapAdvice(reply)
+        bool bossPlan = reply.Rules.Any(r => r.Key is "map.boss_plan" or "map.boss_plan_unreachable" or "rest.boss_plan");
+        lines.Add(new PanelLine(bossPlan
+            ? T(zh, "Boss 胜率按历史战斗和路线预计血量估算", "Boss win estimate uses past fights and projected HP")
+            : IsLookaheadMapAdvice(reply)
             ? T(zh, "整条路线前瞻（A/B：a5 100 局 +3.0 层）", "whole-path lookahead (A/B: a5, 100 pairs, +3.0 floors)")
             : reply.Unverified
             ? T(zh, "启发式，只看下一步，未经 A/B 验证", "Heuristic, next step only, not A/B tested")

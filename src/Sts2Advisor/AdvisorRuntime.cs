@@ -104,7 +104,7 @@ internal static class AdvisorRuntime
             return;
         }
         var advisor = _advisor;
-        _ = Task.Run(() => SidecarProcess.EnsureStartedAsync(config, advisor));
+        _ = Task.Run(() => SidecarProcess.EnsureStartedAsync(config, advisor, gameUserDir));
     }
 
     public static void Tick()
@@ -149,6 +149,7 @@ internal static class AdvisorRuntime
         double now = Clock.Elapsed.TotalSeconds;
         PollHotkey();
         InstantMode.Tick(now);
+        MailboxPotionPlanning.TryInstall(now);
         RunSnapshot.Refresh();  // before the campaign's run_end line, which is written by CampaignControl.Tick
         // While the autopilot runs a late advice reply must not paint over its panel: drop them.
         DrainResults(now, discard: AutoPilotControl.IsRunning);
@@ -319,6 +320,8 @@ internal static class AdvisorRuntime
                 Show(PanelText.Status(_current.Header, StatusKind.BadReply, null, Zh));
                 continue;
             }
+            if (_current.Header.Decision == "map_select")
+                MailboxPotionPlanning.RecordMapAdvice(result.Reply!);
             Show(PanelText.Render(_current.Header, result.Reply!, _current.Labels, Zh));
         }
     }

@@ -152,7 +152,7 @@ TRACE_KEYS = frozenset({
     "card.archetype", "card.q_adjust",
     "card.score", "card.in_deck_score",
     # rest_site rules, in rest_site_action's order
-    "rest.critical_heal", "rest.vantom_mid_boss", "rest.pre_boss_heal",
+    "rest.boss_plan", "rest.critical_heal", "rest.vantom_mid_boss", "rest.pre_boss_heal",
     "rest.must_upgrade", "rest.heal_threshold", "rest.default_smith",
     "rest.fallback", "rest.no_choice",
     # event_choice
@@ -173,7 +173,7 @@ TRACE_KEYS = frozenset({
     "map.elite_pre_boss", "map.elite_act2_boss_zone",
     # map_select under STS2_MAP_POLICY=lookahead (LookaheadMapStrategy): its rules
     # and the cost components of a route (the option score is their sum)
-    "map.la_best_path", "map.la_fallback", "map.la_room_reward", "map.la_elite_reward",
+    "map.boss_plan", "map.boss_plan_unreachable", "map.la_best_path", "map.la_fallback", "map.la_room_reward", "map.la_elite_reward",
     "map.la_elite_danger", "map.la_fight_danger", "map.la_boss_danger", "map.la_hp_end",
     # STS2_LOOKAHEAD_MODEL=v2 only: gold spent at shops on the route, gold left at the boss
     "map.la_shop", "map.la_gold_left",

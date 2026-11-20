@@ -30,6 +30,17 @@ public class AdvisorConfigTests
         Assert.Equal("/p/python", c.ResolvedPython);
     }
 
+    [Theory]
+    [InlineData("0.9", 0.9)]
+    [InlineData("1", 0.8)]
+    [InlineData("0", 0.8)]
+    [InlineData("null", 0.8)]
+    public void ReadsBossWinTarget(string jsonValue, double expected)
+    {
+        var config = AdvisorConfig.Load(Write("{\"boss_win_target\":" + jsonValue + "}"));
+        Assert.Equal(expected, config.BossWinTarget);
+    }
+
     [Fact]
     public void PythonDefaultsToTheRepoVenv()
     {

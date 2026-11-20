@@ -33,6 +33,7 @@ internal sealed class MapHandler(IAutoPilotHost host) : IHandler
         RunManager.Instance.RoomEntered += OnEntered;
         try
         {
+            MailboxPotionPlanning.RecordMapAdvice(advice.Reply);
             host.StepTaken(advice);
             await UiHelper.Click(point);
             await WaitHelper.ForTask(entered.Task, ct, AutoSlayConfig.mapScreenTimeout, "Room not entered after map click");

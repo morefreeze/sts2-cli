@@ -10,7 +10,8 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                                    double StepPauseSeconds = AdvisorConfig.DefaultStepPauseSeconds,
                                    bool InstantMode = false,
                                    PanelLanguage PanelLanguage = PanelLanguage.Auto,
-                                   string MapPolicy = AdvisorConfig.DefaultMapPolicy)
+                                   string MapPolicy = AdvisorConfig.DefaultMapPolicy,
+                                   double BossWinTarget = 0.8)
 {
     public const string DefaultMapPolicy = "lookahead";
     public const string LookaheadMapPolicy = "lookahead";
@@ -76,7 +77,10 @@ public sealed record AdvisorConfig(string RepoPath, string Python, int Port, boo
                 ReadStepPause(root),
                 ReadBool(root, "instant_mode", false),
                 PanelLanguageRules.Parse(Str(root, "panel_language")),
-                ParseMapPolicy(Str(root, "map_policy")));
+                ParseMapPolicy(Str(root, "map_policy")),
+                root.TryGetProperty("boss_win_target", out var goal) && goal.ValueKind == JsonValueKind.Number
+                    && goal.TryGetDouble(out var probability) && probability is > 0 and < 1
+                    ? probability : Defaults.BossWinTarget);
         }
         catch (Exception e)
         {

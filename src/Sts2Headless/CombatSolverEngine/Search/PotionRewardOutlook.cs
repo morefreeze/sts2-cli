@@ -74,9 +74,10 @@ internal readonly record struct PotionRewardOutlook(
     /// A confirmed drop is valued at the tier of the potion it will give. The credit is a route-level amount:
     /// one freed slot receives at most one reward, so it is applied once per route rather than once per potion.
     /// </remarks>
-    public int ReplacementHpCredit => BeltFull && !ProcureBlocked && Forecast == PotionRewardForecast.Drop
-        ? ForecastPotionStrategicHpCost
-        : 0;
+    public int MailboxRefillHpCredit { get; init; }
+
+    public int ReplacementHpCredit => Math.Max(MailboxRefillHpCredit,
+        BeltFull && !ProcureBlocked && Forecast == PotionRewardForecast.Drop ? ForecastPotionStrategicHpCost : 0);
 
     /// <summary>
     /// Reads the outlook from the live run on the main thread as part of root capture.

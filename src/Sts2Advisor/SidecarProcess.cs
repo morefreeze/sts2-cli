@@ -11,7 +11,7 @@ internal static class SidecarProcess
     private static Process? _process;
     private static volatile bool _stopping;
 
-    public static async Task EnsureStartedAsync(AdvisorConfig config, IAdvisor advisor)
+    public static async Task EnsureStartedAsync(AdvisorConfig config, IAdvisor advisor, string gameUserDir)
     {
         try
         {
@@ -54,6 +54,9 @@ internal static class SidecarProcess
             // The advisor's routing policy: the env var greedy_action reads per call. Always set (also for the
             // default), so a STS2_MAP_POLICY left in the game's own environment cannot override the config.
             info.Environment["STS2_MAP_POLICY"] = config.MapPolicy;
+            info.Environment["STS2_ACT_PLAN"] = config.MapPolicy == AdvisorConfig.LookaheadMapPolicy ? "1" : "0";
+            info.Environment["STS2_BOSS_WIN_TARGET"] = config.BossWinTarget.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            info.Environment["STS2_BOSS_HISTORY_ROOT"] = gameUserDir;
             info.ArgumentList.Add(script);
             info.ArgumentList.Add("--port");
             info.ArgumentList.Add(config.Port.ToString());

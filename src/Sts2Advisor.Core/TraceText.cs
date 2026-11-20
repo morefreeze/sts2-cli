@@ -35,6 +35,7 @@ public static class TraceText
         ["card.score"] = ("卡牌分（不含牌组）", "Card score (deck-free)"),
         ["card.in_deck_score"] = ("卡牌分（含牌组协同）", "Card score (with deck synergy)"),
 
+        ["rest.boss_plan"] = ("火堆血量门槛 {threshold}，当前 {hp}。按此路线估计 Boss 胜率 {probability:%}（目标 {target:%}）", "Rest-site HP threshold {threshold}, current HP {hp}. Estimated Boss win rate {probability:%} (target {target:%})"),
         ["rest.critical_heal"] = ("生命值 {hp_ratio:%}，必须休息线 {threshold:%}", "HP {hp_ratio:%}, must-rest line {threshold:%}"),
         ["rest.vantom_mid_boss"] = ("墨影幻灵规则：楼层 11–13 且生命值 < 70% 时休息（现为楼层 {floor}，生命值 {hp_ratio:%}）", "Vantom rule: rest on floors 11-13 when HP < 70% (now floor {floor}, HP {hp_ratio:%})"),
         ["rest.pre_boss_heal"] = ("楼层 14 起（Boss 前）：生命值 {hp_ratio:%}，休息阈值 {threshold:%}", "Floor 14+ (pre-boss): HP {hp_ratio:%}, rest threshold {threshold:%}"),
@@ -109,6 +110,8 @@ public static class TraceText
         ["map.elite_strong_midgame"] = ("生命值 ≥ 85% 且楼层 7–12", "HP >= 85%, floors 7-12"),
         ["map.elite_pre_boss"] = ("楼层 13 起（Boss 前）", "Floor 13+ (pre-boss)"),
         ["map.elite_act2_boss_zone"] = ("阶段2起，楼层 13 起", "Act 2+, floor 13+"),
+        ["map.boss_plan_unreachable"] = ("此路线进 Boss 预计胜率 {probability:%}。满血估计 {max_probability:%}，低于目标 {target:%}（相近样本 {samples} 场）", "Projected Boss win rate {probability:%}. Full HP estimate {max_probability:%} is below the {target:%} target ({samples} similar fights)"),
+        ["map.boss_plan"] = ("Boss 进场目标血量 {hp_goal}，预计胜率 {probability:%}（目标 {target:%}，相近样本 {samples} 场）", "Target Boss entry HP {hp_goal}, projected win rate {probability:%} (target {target:%}, {samples} similar fights)"),
         ["map.la_best_path"] = ("整条路线评估（共 {n_paths} 条路线）：{path}，{elites} 个精英，到 Boss 时生命值 {hp_boss_ratio:%}；差别主要在{decider}", "Whole-path lookahead ({n_paths} routes): {path}, {elites} elites, HP at the boss {hp_boss_ratio:%}; decided by {decider}"),
         ["map.la_fallback"] = ("无法按整条路线评估（{reason}），改用优先级规则", "Cannot look ahead ({reason}); using the priority rules"),
         ["map.la_room_reward"] = ("房间收益", "Room rewards"),

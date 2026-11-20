@@ -725,6 +725,8 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
         stale_turn_fallback_counted = False
         # Phase 3a: out-of-combat decisions go to agent.combat_env.greedy_action
         # when STS2_OOC_POLICY=greedy (see OOC_GREEDY_DECISIONS). None = naive.
+        act_planning = os.environ.get("STS2_ACT_PLAN") == "1"
+        mailbox_restock = False
         greedy = _load_greedy_action() if stats["ooc_policy"] == "greedy" else None
         # Phase 3b: the route model under STS2_ROUTE_POLICY=value; None = seeded random.
         route_model = (_load_route_model(route_model_path())
@@ -855,6 +857,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 }
 
             elif decision == "map_select":
+                mailbox_restock = False
                 choices = state.get("choices", [])
                 if not choices:
                     print("  No map choices available!")
@@ -862,7 +865,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                 if route_model is None and route_greedy is None:
                     # Random selection
                     choice = rng.choice(choices)
-                elif len(choices) == 1:
+                elif len(choices) == 1 and not (act_planning and stats["route_policy"] == "lookahead"):
                     # A forced move (about two thirds of all map_selects): nothing
                     # to plan, so no get_map and not counted as a planned decision.
                     stats["route_forced"] += 1
@@ -887,6 +890,7 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                             why = f"greedy_action picked a node not offered: {cmd}"
                         else:
                             pick = {"col": args["col"], "row": args["row"]}
+                            mailbox_restock = cmd.get("mailbox_restock", False)
                             fired = {r["key"]: r["values"] for r in route_trace.rules
                                      if r["outcome"] == "fired"}
                             engaged = (route_mode == "hpaware"
@@ -1001,7 +1005,8 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                           f"{stale_turn_unresolved} unresolved-card plans, "
                           f"{stale_turn_no_progress} made no progress)")
                 if character in solver_chars and not stale_guard:
-                    plan = send({"cmd": "action", "action": "plan_combat_turn"})
+                    plan = send({"cmd": "action", "action": "plan_combat_turn",
+                                 **({"args": {"mailbox_restock": True}} if mailbox_restock else {})})
                     if plan.get("type") == "error":
                         solver_errors += 1
                         # Print the engine's message only the FIRST time this
@@ -1170,7 +1175,12 @@ def _play_run(seed: str, character: str, verbose: bool, log: bool, ascension: in
                     state = ooc_fallback(state, "shop_cap")
                 else:
                     try:
-                        cmd = greedy(state)
+                        advice_state = state
+                        if act_planning and decision == "rest_site":
+                            reply = send({"cmd": "get_map"})
+                            advice_state = {**state, "map": reply, "ascension": ascension,
+                                            "game_version": (run_context or {}).get("game_version")}
+                        cmd = greedy(advice_state)
                         raised = False
                     except Exception as exc:
                         raised = True

@@ -114,6 +114,7 @@ internal static class DecisionCapture
             try
             {
                 decision["map"] = FullMap(rs, loc);
+                decision["game_version"] = MegaCrit.Sts2.Core.Debug.ReleaseInfoManager.Instance.ReleaseInfo?.Version;
             }
             catch (Exception e)
             {
@@ -165,6 +166,7 @@ internal static class DecisionCapture
             ["type"] = "map",
             ["context"] = DecisionSerializer.RunContext(rs, loc),
             ["rows"] = rows,
+            ["act_planning"] = ActPlanningContext.Capture(rs.Players[0]),
             ["boss"] = boss,
             ["current_coord"] = current.HasValue
                 ? new Dictionary<string, object?> { ["col"] = (int)current.Value.col, ["row"] = (int)current.Value.row }
@@ -308,7 +310,8 @@ internal static class DecisionCapture
             Labels = labels,
             Fingerprint = Fingerprint.Of("rest_site",
                 new object?[] { Common(rs, player) }.Concat(options.Select(o => $"{o.OptionId}#{o.IsEnabled}"))),
-            Build = WithPotionSlots(rs, player, () => DecisionSerializer.RestSite(options, rs, loc)),
+            Build = WithFullMap(rs, loc, WithPotionSlots(rs, player,
+                () => DecisionSerializer.RestSite(options, rs, loc))),
             Choices = options.Cast<object>().ToList(),
         };
     }
